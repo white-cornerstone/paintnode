@@ -5,10 +5,14 @@ const TOOL_KEYS: Record<string, string> = {
   v: 'move',
   m: 'marquee',
   l: 'lasso',
+  w: 'magicwand',
+  c: 'crop',
   b: 'brush',
   e: 'eraser',
+  s: 'clone',
   g: 'fill',
   r: 'gradient',
+  o: 'dodge',
   u: 'shape',
   t: 'text',
   i: 'eyedropper',
@@ -114,6 +118,15 @@ export function installKeyboard(): () => void {
       case 'Backspace':
         e.preventDefault();
         editor.clearActive();
+        return;
+      case 'Enter':
+        if (editor.activeToolId === 'crop' && editor.selection) {
+          e.preventDefault();
+          editor.cropToSelection();
+        }
+        return;
+      case 'Escape':
+        if (editor.selection) editor.deselect();
         return;
       case '[':
         editor.brushSize = Math.max(1, Math.round(editor.brushSize - Math.max(1, editor.brushSize * 0.1)));
