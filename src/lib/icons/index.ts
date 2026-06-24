@@ -23,6 +23,7 @@ export { default as Eye } from '@fluentui/svg-icons/icons/eye_24_regular.svg?raw
 export { default as EyeOff } from '@fluentui/svg-icons/icons/eye_off_24_regular.svg?raw';
 
 export { default as Add } from '@fluentui/svg-icons/icons/add_24_regular.svg?raw';
+export { default as Checkmark } from '@fluentui/svg-icons/icons/checkmark_24_regular.svg?raw';
 export { default as SquareMultiple } from '@fluentui/svg-icons/icons/square_multiple_24_regular.svg?raw';
 export { default as Merge } from '@fluentui/svg-icons/icons/merge_24_regular.svg?raw';
 export { default as ArrowUp } from '@fluentui/svg-icons/icons/arrow_up_24_regular.svg?raw';

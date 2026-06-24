@@ -5,6 +5,7 @@
   import { tooltip } from '../actions/tooltip';
   import {
     ArrowMove,
+    Checkmark,
     MarqueeRect,
     MarqueeEllipse,
     LineH,
@@ -194,7 +195,11 @@
             <div class="flyout" role="menu">
               {#each marqueeItems as m (m.shape)}
                 <button class="flyout-item" role="menuitem" onclick={() => chooseShape(m.shape)}>
-                  <span class="mark">{editor.marqueeShape === m.shape ? '■' : ''}</span>
+                  <span class="mark">
+                    {#if editor.marqueeShape === m.shape}
+                      <Icon svg={Checkmark} size={12} />
+                    {/if}
+                  </span>
                   <Icon svg={m.icon} rotate={m.rotate ?? 0} size={18} />
                   <span class="lbl">{m.label}</span>
                   <span class="sc">M</span>
@@ -228,7 +233,11 @@
             <div class="flyout" role="menu">
               {#each slot.members as m (m.id)}
                 <button class="flyout-item" role="menuitem" onclick={() => chooseMember(slot, m)}>
-                  <span class="mark">{editor.activeToolId === m.id ? '■' : ''}</span>
+                  <span class="mark">
+                    {#if editor.activeToolId === m.id}
+                      <Icon svg={Checkmark} size={12} />
+                    {/if}
+                  </span>
                   <Icon svg={m.icon} size={18} />
                   <span class="lbl">{m.label}</span>
                   <span class="sc">{m.key ?? ''}</span>
@@ -382,9 +391,11 @@
     color: #fff;
   }
   .flyout-item .mark {
-    width: 10px;
+    width: 12px;
+    height: 12px;
+    display: grid;
+    place-items: center;
     color: var(--text-dim);
-    font-size: 9px;
   }
   .flyout-item .lbl {
     flex: 1;
