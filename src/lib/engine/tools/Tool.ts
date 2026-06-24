@@ -25,6 +25,14 @@ export interface ToolHost {
   shapeStrokeWidth: number;
   gradientType: 'fg-bg' | 'fg-transparent';
   zoomMode: 'in' | 'out';
+  /** Magic Wand: flood only the connected region (vs. every matching pixel). */
+  magicContiguous: boolean;
+  /** Clone Stamp: keep the source→destination offset fixed across separate strokes. */
+  cloneAligned: boolean;
+  /** Dodge/Burn: which tonal range the exposure targets. */
+  toneRange: 'shadows' | 'midtones' | 'highlights';
+  /** Sponge: increase or decrease saturation. */
+  spongeMode: 'saturate' | 'desaturate';
   setActiveStroke(stroke: ActiveStroke | null): void;
   setSelection(sel: Selection | null): void;
   setForeground(rgb: RGB): void;

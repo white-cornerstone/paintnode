@@ -28,9 +28,15 @@ import { EyedropperTool } from '../engine/tools/EyedropperTool';
 import { MoveTool } from '../engine/tools/MoveTool';
 import { MarqueeTool } from '../engine/tools/MarqueeTool';
 import { LassoTool } from '../engine/tools/LassoTool';
+import { MagicWandTool } from '../engine/tools/MagicWandTool';
+import { CropTool } from '../engine/tools/CropTool';
 import { ShapeTool } from '../engine/tools/ShapeTool';
 import { GradientTool } from '../engine/tools/GradientTool';
 import { TextTool } from '../engine/tools/TextTool';
+import { CloneStampTool } from '../engine/tools/CloneStampTool';
+import { SmudgeTool } from '../engine/tools/SmudgeTool';
+import { FocusTool } from '../engine/tools/FocusTool';
+import { ToningTool } from '../engine/tools/ToningTool';
 import { HandTool, ZoomTool } from '../engine/tools/NavTools';
 
 export interface PlacedImageResult {
@@ -81,6 +87,11 @@ export class EditorStore implements ToolHost {
   gradientType = $state<'fg-bg' | 'fg-transparent'>('fg-bg');
   // Zoom tool mode (click zooms in or out); Alt inverts momentarily.
   zoomMode = $state<'in' | 'out'>('in');
+  // Selection / retouch options shared with tool implementations.
+  magicContiguous = $state(true);
+  cloneAligned = $state(true);
+  toneRange = $state<'shadows' | 'midtones' | 'highlights'>('midtones');
+  spongeMode = $state<'saturate' | 'desaturate'>('saturate');
   /** Whether Alt/Option is currently held — drives the live zoom-mode preview. */
   altDown = $state(false);
   // Text tool: pending insertion point (drives the text dialog)
@@ -101,10 +112,19 @@ export class EditorStore implements ToolHost {
       new MoveTool(this),
       new MarqueeTool(this),
       new LassoTool(this),
+      new MagicWandTool(this),
+      new CropTool(this),
       new PaintTool(this, 'brush'),
       new PaintTool(this, 'eraser'),
+      new CloneStampTool(this),
       new FillTool(this),
       new GradientTool(this),
+      new SmudgeTool(this),
+      new FocusTool(this, 'blur'),
+      new FocusTool(this, 'sharpen'),
+      new ToningTool(this, 'dodge'),
+      new ToningTool(this, 'burn'),
+      new ToningTool(this, 'sponge'),
       new ShapeTool(this),
       new TextTool(this),
       new EyedropperTool(this),

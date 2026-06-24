@@ -59,6 +59,15 @@ export { default as Lasso } from '@fluentui/svg-icons/icons/lasso_24_regular.svg
 export { default as Shapes } from '@fluentui/svg-icons/icons/shapes_24_regular.svg?raw';
 export { default as TextT } from '@fluentui/svg-icons/icons/text_t_24_regular.svg?raw';
 export { default as Gradient } from '@fluentui/svg-icons/icons/circle_half_fill_24_regular.svg?raw';
+export { default as Wand } from '@fluentui/svg-icons/icons/wand_24_regular.svg?raw';
+// Retouch brushes (Clone / Smudge / Blur / Sharpen / Dodge / Burn / Sponge)
+export { default as CloneStamp } from '@fluentui/svg-icons/icons/copy_select_24_regular.svg?raw';
+export { default as Smudge } from '@fluentui/svg-icons/icons/hand_draw_24_regular.svg?raw';
+export { default as Blur } from '@fluentui/svg-icons/icons/blur_24_regular.svg?raw';
+export { default as Sharpen } from '@fluentui/svg-icons/icons/triangle_24_regular.svg?raw';
+export { default as Dodge } from '@fluentui/svg-icons/icons/weather_sunny_24_regular.svg?raw';
+export { default as Burn } from '@fluentui/svg-icons/icons/dark_theme_24_regular.svg?raw';
+export { default as Sponge } from '@fluentui/svg-icons/icons/drop_24_regular.svg?raw';
 
 // Image menu
 export { default as Crop } from '@fluentui/svg-icons/icons/crop_24_regular.svg?raw';
