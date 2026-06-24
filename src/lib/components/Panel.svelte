@@ -7,14 +7,27 @@
     title,
     grow = false,
     collapsed = $bindable(false),
+    onToggle,
     children,
-  }: { title: string; grow?: boolean; collapsed?: boolean; children: Snippet } = $props();
+  }: {
+    title: string;
+    grow?: boolean;
+    collapsed?: boolean;
+    onToggle?: (collapsed: boolean) => void;
+    children: Snippet;
+  } = $props();
+
+  function toggle() {
+    const next = !collapsed;
+    if (onToggle) onToggle(next);
+    else collapsed = next;
+  }
 </script>
 
 <section class="panel" class:grow class:collapsed>
   <button
     class="panel-h"
-    onclick={() => (collapsed = !collapsed)}
+    onclick={toggle}
     aria-expanded={!collapsed}
     title={collapsed ? `Expand ${title}` : `Collapse ${title}`}
   >

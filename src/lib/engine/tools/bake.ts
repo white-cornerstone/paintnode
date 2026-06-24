@@ -16,15 +16,16 @@ export function bakeBuffer(
 ): void {
   const layer = host.doc?.layers.find((l) => l.id === layerId);
   if (!layer) return;
+  const localBox = bbox ? { x: bbox.x - layer.x, y: bbox.y - layer.y, w: bbox.w, h: bbox.h } : null;
   const region =
-    (bbox && clampRect(bbox, layer.width, layer.height)) ||
+    (localBox && clampRect(localBox, layer.width, layer.height)) ||
     { x: 0, y: 0, w: layer.width, h: layer.height };
   const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
   const buf = host.selection ? intersectMask(buffer, host.selection.mask) : buffer;
   layer.ctx.save();
   layer.ctx.globalCompositeOperation = op;
   layer.ctx.globalAlpha = opacity;
-  layer.ctx.drawImage(buf, 0, 0);
+  layer.ctx.drawImage(buf, -layer.x, -layer.y);
   layer.ctx.restore();
   layer.touch();
   const after = snapshotRegion(layer, region) ?? snapshotLayer(layer);

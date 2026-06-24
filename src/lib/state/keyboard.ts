@@ -1,5 +1,5 @@
 import { editor } from './editor.svelte';
-import { openCommand, saveOraCommand, exportPngCommand } from './commands';
+import { openCommand, saveCopyOraCommand, saveOraCommand, exportPngCommand } from './commands';
 
 const TOOL_KEYS: Record<string, string> = {
   v: 'move',
@@ -72,7 +72,8 @@ export function installKeyboard(): () => void {
           return;
         case 's':
           e.preventDefault();
-          void saveOraCommand();
+          if (e.shiftKey) void saveCopyOraCommand();
+          else void saveOraCommand();
           return;
         case 'o':
           e.preventDefault();

@@ -78,16 +78,17 @@ export class PaintTool implements Tool {
     const bbox = this.buffer.bbox();
 
     if (layer && bbox) {
-      const before = snapshotRegion(layer, bbox);
+      const localBox = { x: bbox.x - layer.x, y: bbox.y - layer.y, w: bbox.w, h: bbox.h };
+      const before = snapshotRegion(layer, localBox);
       const sel = this.host.selection;
       const buf = sel ? intersectMask(this.buffer.canvas, sel.mask) : this.buffer.canvas;
       layer.ctx.save();
       layer.ctx.globalCompositeOperation = this.op;
       layer.ctx.globalAlpha = this.host.brushOpacity;
-      layer.ctx.drawImage(buf, 0, 0);
+      layer.ctx.drawImage(buf, -layer.x, -layer.y);
       layer.ctx.restore();
       layer.touch();
-      const after = snapshotRegion(layer, bbox);
+      const after = snapshotRegion(layer, localBox);
       if (before && after) {
         this.host.history.push(pixelCommand(layer, before, after, this.name));
       }

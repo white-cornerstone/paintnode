@@ -300,9 +300,10 @@
 
   .colors {
     position: relative;
-    width: 42px;
-    height: 52px;
-    margin-bottom: 4px;
+    width: 38px;
+    height: 50px;
+    /* centered in the dock with breathing room above/below (Photoshop-style) */
+    margin: 12px auto 12px;
   }
   .swatch {
     position: absolute;
@@ -315,7 +316,7 @@
     cursor: pointer;
   }
   .swatch.fg {
-    top: 13px;
+    top: 11px;
     left: 1px;
     z-index: 2;
   }

@@ -33,10 +33,34 @@ import { GradientTool } from '../engine/tools/GradientTool';
 import { TextTool } from '../engine/tools/TextTool';
 import { HandTool, ZoomTool } from '../engine/tools/NavTools';
 
+export interface PlacedImageResult {
+  oversized: boolean;
+  layerId: string | null;
+}
+
+export interface LayerSourceMeta {
+  assetId?: string | null;
+  path?: string | null;
+}
+
+export interface DocumentSession {
+  id: string;
+  doc: PaintDocument;
+  history: History;
+  selection: Selection | null;
+  revision: number;
+  savedRevision: number;
+  autosavedRevision: number;
+  savedPath: string | null;
+  autosavePath: string | null;
+}
+
 export class EditorStore implements ToolHost {
   doc = $state<PaintDocument | null>(null);
+  documents = $state<DocumentSession[]>([]);
+  activeDocumentId = $state<string | null>(null);
   viewport: Viewport | null = null;
-  readonly history = new History(60);
+  history = new History(60);
 
   foreground = $state<RGB>({ r: 0, g: 0, b: 0 });
   background = $state<RGB>({ r: 255, g: 255, b: 255 });
@@ -72,10 +96,7 @@ export class EditorStore implements ToolHost {
   readonly tools: Record<string, Tool> = {};
 
   constructor() {
-    this.history.onChange = () => {
-      this.bump();
-      this.viewport?.invalidate();
-    };
+    this.attachHistory(this.history);
     for (const t of [
       new MoveTool(this),
       new MarqueeTool(this),
@@ -92,7 +113,7 @@ export class EditorStore implements ToolHost {
     ]) {
       this.tools[t.id] = t;
     }
-    this.doc = PaintDocument.blank(1280, 800, 'Untitled');
+    this.openDocument(PaintDocument.blank(1280, 800, 'Untitled'), false);
   }
 
   // --- Derived state ---
@@ -129,6 +150,45 @@ export class EditorStore implements ToolHost {
     return this.history.redoLabel;
   }
 
+  get activeDocument(): DocumentSession | null {
+    return this.documents.find((d) => d.id === this.activeDocumentId) ?? null;
+  }
+
+  get documentTabs(): DocumentSession[] {
+    this.rev;
+    return this.documents;
+  }
+
+  private attachHistory(history: History): void {
+    this.history = history;
+    this.history.onChange = () => {
+      this.bump();
+      this.viewport?.invalidate();
+    };
+  }
+
+  private makeSession(doc: PaintDocument): DocumentSession {
+    return {
+      id: doc.id,
+      doc,
+      history: new History(60),
+      selection: null,
+      revision: 0,
+      savedRevision: 0,
+      autosavedRevision: 0,
+      savedPath: null,
+      autosavePath: null,
+    };
+  }
+
+  private notify(markDocumentChanged = false): void {
+    this.rev++;
+    if (markDocumentChanged) {
+      const session = this.activeDocument;
+      if (session) session.revision++;
+    }
+  }
+
   // --- ToolHost impl ---
   setActiveStroke(stroke: ActiveStroke | null): void {
     this.activeStroke = stroke;
@@ -139,6 +199,8 @@ export class EditorStore implements ToolHost {
   }
   setSelection(sel: Selection | null): void {
     this.selection = sel;
+    const session = this.activeDocument;
+    if (session) session.selection = sel;
     this.viewport?.invalidate();
   }
   getSelection(): Selection | null {
@@ -151,7 +213,7 @@ export class EditorStore implements ToolHost {
     this.pendingText = { x, y };
   }
   bump(): void {
-    this.rev++;
+    this.notify(true);
   }
   invalidate(): void {
     this.viewport?.invalidateComposite();
@@ -191,10 +253,22 @@ export class EditorStore implements ToolHost {
       this.setSelection(invertSelectionMask(this.selection, doc.width, doc.height));
     }
   }
+  private docRectToLayerRect(rect: Rect, layer: Layer): Rect | null {
+    return clampRect({ x: rect.x - layer.x, y: rect.y - layer.y, w: rect.w, h: rect.h }, layer.width, layer.height);
+  }
+
+  private selectionMaskForLayer(layer: Layer): HTMLCanvasElement | null {
+    const sel = this.selection;
+    if (!sel) return null;
+    const mask = createCanvas(layer.width, layer.height);
+    ctx2d(mask).drawImage(sel.mask, -layer.x, -layer.y);
+    return mask;
+  }
+
   private editRegion(layer: Layer): Rect {
     const sel = this.selection;
     if (sel) {
-      return clampRect(sel.bounds, layer.width, layer.height) ?? { x: 0, y: 0, w: layer.width, h: layer.height };
+      return this.docRectToLayerRect(sel.bounds, layer) ?? { x: 0, y: 0, w: layer.width, h: layer.height };
     }
     return { x: 0, y: 0, w: layer.width, h: layer.height };
   }
@@ -204,18 +278,21 @@ export class EditorStore implements ToolHost {
     const layer = this.activeLayer;
     if (!layer) return;
     const sel = this.selection;
-    const bounds = sel
-      ? clampRect(sel.bounds, layer.width, layer.height)
-      : { x: 0, y: 0, w: layer.width, h: layer.height };
+    if (!sel) {
+      const buf = createCanvas(layer.width, layer.height);
+      ctx2d(buf).drawImage(layer.canvas, 0, 0);
+      this.clipboard = { canvas: buf, x: layer.x, y: layer.y };
+      this.flash('Copied');
+      return;
+    }
+    const bounds = clampRect(sel.bounds, this.doc!.width, this.doc!.height);
     if (!bounds) return;
     const buf = createCanvas(bounds.w, bounds.h);
     const c = ctx2d(buf);
-    c.drawImage(layer.canvas, -bounds.x, -bounds.y);
-    if (sel) {
-      c.globalCompositeOperation = 'destination-in';
-      c.drawImage(sel.mask, -bounds.x, -bounds.y);
-      c.globalCompositeOperation = 'source-over';
-    }
+    c.drawImage(layer.canvas, layer.x - bounds.x, layer.y - bounds.y);
+    c.globalCompositeOperation = 'destination-in';
+    c.drawImage(sel.mask, -bounds.x, -bounds.y);
+    c.globalCompositeOperation = 'source-over';
     this.clipboard = { canvas: buf, x: bounds.x, y: bounds.y };
     this.flash('Copied');
   }
@@ -230,8 +307,8 @@ export class EditorStore implements ToolHost {
     const clip = this.clipboard;
     if (!doc || !clip) return;
     this.structural('Paste', () => {
-      const layer = new Layer(doc.width, doc.height, 'Pasted');
-      layer.ctx.drawImage(clip.canvas, clip.x, clip.y);
+      const layer = new Layer(clip.canvas.width, clip.canvas.height, 'Pasted', undefined, clip.x, clip.y);
+      layer.ctx.drawImage(clip.canvas, 0, 0);
       layer.touch();
       doc.insertAboveActive(layer);
     });
@@ -247,20 +324,109 @@ export class EditorStore implements ToolHost {
   }
 
   // --- Documents ---
+  openDocument(doc: PaintDocument, focus = true): void {
+    const session = this.makeSession(doc);
+    this.documents = [...this.documents, session];
+    if (focus) this.switchDocument(session.id);
+    else if (!this.activeDocumentId) this.switchDocument(session.id);
+  }
+
   setDocument(doc: PaintDocument): void {
+    const session = this.makeSession(doc);
+    const currentId = this.activeDocumentId;
+    const idx = currentId ? this.documents.findIndex((d) => d.id === currentId) : -1;
+    if (idx >= 0) {
+      const next = this.documents.slice();
+      next[idx] = session;
+      this.documents = next;
+    } else {
+      this.documents = [...this.documents, session];
+    }
     this.doc = doc;
     this.activeStroke = null;
-    this.history.clear();
-    this.bump();
+    this.activeDocumentId = session.id;
+    this.selection = session.selection;
+    this.attachHistory(session.history);
+    this.notify();
     requestAnimationFrame(() => {
       this.viewport?.fitToView();
       this.viewport?.invalidate();
     });
   }
+
+  switchDocument(id: string): void {
+    const session = this.documents.find((d) => d.id === id);
+    if (!session || session.id === this.activeDocumentId) return;
+    const current = this.activeDocument;
+    if (current) current.selection = this.selection;
+    this.activeDocumentId = session.id;
+    this.doc = session.doc;
+    this.selection = session.selection;
+    this.activeStroke = null;
+    this.attachHistory(session.history);
+    this.notify();
+    requestAnimationFrame(() => {
+      this.viewport?.fitToView();
+      this.viewport?.invalidate();
+    });
+  }
+
+  closeDocument(id: string): void {
+    if (this.documents.length <= 1) {
+      this.flash('Keep at least one document open');
+      return;
+    }
+    const idx = this.documents.findIndex((d) => d.id === id);
+    if (idx < 0) return;
+    const wasActive = this.activeDocumentId === id;
+    const next = this.documents.slice();
+    next.splice(idx, 1);
+    this.documents = next;
+    if (wasActive) {
+      const fallback = next[Math.min(idx, next.length - 1)];
+      this.activeDocumentId = null;
+      if (fallback) this.switchDocument(fallback.id);
+    } else {
+      this.notify();
+    }
+  }
+
+  markSaved(relativePath: string | null): void {
+    const session = this.activeDocument;
+    if (!session) return;
+    session.savedPath = relativePath;
+    session.savedRevision = session.revision;
+    this.notify();
+  }
+
+  renameActiveDocument(name: string): void {
+    const session = this.activeDocument;
+    const next = name.trim();
+    if (!session || !next) return;
+    session.doc.name = next;
+    this.notify();
+  }
+
+  markAutosaved(docId: string, relativePath: string | null): void {
+    const session = this.documents.find((d) => d.id === docId);
+    if (!session) return;
+    session.autosavePath = relativePath;
+    session.autosavedRevision = session.revision;
+    this.notify();
+  }
+
+  hasUnsavedChanges(session: DocumentSession): boolean {
+    return session.revision !== session.savedRevision;
+  }
+
+  needsAutosave(session: DocumentSession): boolean {
+    return session.revision !== session.autosavedRevision;
+  }
+
   newDocument(width: number, height: number, name: string, fillWhite: boolean): void {
     const doc = PaintDocument.blank(width, height, name);
     if (fillWhite && doc.activeLayer) doc.activeLayer.fill('#ffffff');
-    this.setDocument(doc);
+    this.openDocument(doc);
   }
 
   // --- Layer structural ops (undoable) ---
@@ -328,7 +494,7 @@ export class EditorStore implements ToolHost {
     this.structural(
       'Crop',
       () => this.commitLayers(
-        this.remapLayers(rect.w, rect.h, (c, l) => c.drawImage(l.canvas, -rect.x, -rect.y)),
+        this.remapLayers(rect.w, rect.h, (c, l) => c.drawImage(l.canvas, l.x - rect.x, l.y - rect.y)),
         rect.w,
         rect.h,
       ),
@@ -343,17 +509,59 @@ export class EditorStore implements ToolHost {
     w = Math.max(1, Math.round(w));
     h = Math.max(1, Math.round(h));
     if (w === doc.width && h === doc.height) return;
+    const sx = w / doc.width;
+    const sy = h / doc.height;
     this.structural(
       'Image Size',
-      () => this.commitLayers(
-        this.remapLayers(w, h, (c, l) => {
-          c.imageSmoothingEnabled = true;
-          c.imageSmoothingQuality = 'high';
-          c.drawImage(l.canvas, 0, 0, l.width, l.height, 0, 0, w, h);
-        }),
-        w,
-        h,
-      ),
+      () => {
+        const layers = doc.layers.map((l) => {
+          const nw = Math.max(1, Math.round(l.width * sx));
+          const nh = Math.max(1, Math.round(l.height * sy));
+          const nl = new Layer(nw, nh, l.name);
+          nl.x = Math.round(l.x * sx);
+          nl.y = Math.round(l.y * sy);
+          nl.opacity = l.opacity;
+          nl.visible = l.visible;
+          nl.blendMode = l.blendMode;
+          nl.ctx.imageSmoothingEnabled = true;
+          nl.ctx.imageSmoothingQuality = 'high';
+          nl.ctx.drawImage(l.canvas, 0, 0, l.width, l.height, 0, 0, nw, nh);
+          nl.touch();
+          return nl;
+        });
+        this.commitLayers(layers, w, h);
+      },
+      true,
+    );
+    this.setSelection(null);
+  }
+
+  revealAll(): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const visible = doc.layers.filter((l) => l.visible);
+    if (!visible.length) return;
+    const minX = Math.min(0, ...visible.map((l) => l.x));
+    const minY = Math.min(0, ...visible.map((l) => l.y));
+    const maxX = Math.max(doc.width, ...visible.map((l) => l.x + l.width));
+    const maxY = Math.max(doc.height, ...visible.map((l) => l.y + l.height));
+    const nw = Math.max(1, maxX - minX);
+    const nh = Math.max(1, maxY - minY);
+    if (nw === doc.width && nh === doc.height && minX === 0 && minY === 0) {
+      this.flash('Nothing outside the canvas');
+      return;
+    }
+    this.structural(
+      'Reveal All',
+      () => {
+        const layers = doc.layers.map((l) => {
+          const nl = l.clone(l.name);
+          nl.x = l.x - minX;
+          nl.y = l.y - minY;
+          return nl;
+        });
+        this.commitLayers(layers, nw, nh);
+      },
       true,
     );
     this.setSelection(null);
@@ -379,7 +587,7 @@ export class EditorStore implements ToolHost {
             c.translate(0, nh);
             c.rotate(-Math.PI / 2);
           }
-          c.drawImage(l.canvas, 0, 0);
+          c.drawImage(l.canvas, l.x, l.y);
         }),
         nw,
         nh,
@@ -396,13 +604,13 @@ export class EditorStore implements ToolHost {
       this.commitLayers(
         this.remapLayers(doc.width, doc.height, (c, l) => {
           if (axis === 'h') {
-            c.translate(l.width, 0);
+            c.translate(doc.width, 0);
             c.scale(-1, 1);
           } else {
-            c.translate(0, l.height);
+            c.translate(0, doc.height);
             c.scale(1, -1);
           }
-          c.drawImage(l.canvas, 0, 0);
+          c.drawImage(l.canvas, l.x, l.y);
         }),
         doc.width,
         doc.height,
@@ -443,15 +651,19 @@ export class EditorStore implements ToolHost {
     this.structural('Merge Down', () => {
       const above = doc.layers[idx];
       const below = doc.layers[idx - 1];
-      const merged = new Layer(doc.width, doc.height, below.name);
+      const minX = Math.min(below.x, above.x);
+      const minY = Math.min(below.y, above.y);
+      const maxX = Math.max(below.x + below.width, above.x + above.width);
+      const maxY = Math.max(below.y + below.height, above.y + above.height);
+      const merged = new Layer(maxX - minX, maxY - minY, below.name, undefined, minX, minY);
       merged.blendMode = below.blendMode;
       merged.opacity = below.opacity;
       merged.visible = below.visible;
       const c = merged.ctx;
-      c.drawImage(below.canvas, 0, 0);
+      c.drawImage(below.canvas, below.x - minX, below.y - minY);
       c.globalAlpha = above.opacity;
       c.globalCompositeOperation = above.blendMode;
-      c.drawImage(above.canvas, 0, 0);
+      c.drawImage(above.canvas, above.x - minX, above.y - minY);
       c.globalAlpha = 1;
       c.globalCompositeOperation = 'source-over';
       merged.touch();
@@ -486,8 +698,8 @@ export class EditorStore implements ToolHost {
     const img = layer.ctx.getImageData(0, 0, layer.width, layer.height);
     const d = img.data;
     const w = layer.width;
-    const sel = this.selection;
-    const md = sel ? ctx2d(sel.mask).getImageData(0, 0, w, layer.height).data : null;
+    const mask = this.selectionMaskForLayer(layer);
+    const md = mask ? ctx2d(mask).getImageData(0, 0, w, layer.height).data : null;
     for (let y = 0; y < layer.height; y++) {
       for (let x = 0; x < w; x++) {
         const i = (y * w + x) * 4;
@@ -526,12 +738,12 @@ export class EditorStore implements ToolHost {
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const filtered = fn(layer.canvas);
-    const sel = this.selection;
+    const mask = this.selectionMaskForLayer(layer);
     layer.ctx.save();
-    if (sel) {
-      const masked = intersectMask(filtered, sel.mask);
+    if (mask) {
+      const masked = intersectMask(filtered, mask);
       layer.ctx.globalCompositeOperation = 'destination-out';
-      layer.ctx.drawImage(sel.mask, 0, 0);
+      layer.ctx.drawImage(mask, 0, 0);
       layer.ctx.globalCompositeOperation = 'source-over';
       layer.ctx.drawImage(masked, 0, 0);
     } else {
@@ -558,11 +770,11 @@ export class EditorStore implements ToolHost {
     if (!layer) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
-    const sel = this.selection;
-    if (sel) {
+    const mask = this.selectionMaskForLayer(layer);
+    if (mask) {
       layer.ctx.save();
       layer.ctx.globalCompositeOperation = 'destination-out';
-      layer.ctx.drawImage(sel.mask, 0, 0);
+      layer.ctx.drawImage(mask, 0, 0);
       layer.ctx.restore();
     } else {
       layer.ctx.clearRect(0, 0, layer.width, layer.height);
@@ -581,15 +793,15 @@ export class EditorStore implements ToolHost {
     }
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
-    const sel = this.selection;
+    const mask = this.selectionMaskForLayer(layer);
     layer.ctx.save();
     layer.ctx.globalCompositeOperation = 'source-over';
-    if (sel) {
+    if (mask) {
       const tmp = createCanvas(layer.width, layer.height);
       const tc = ctx2d(tmp);
       tc.fillStyle = rgbToCss(rgb);
       tc.fillRect(0, 0, layer.width, layer.height);
-      layer.ctx.drawImage(intersectMask(tmp, sel.mask), 0, 0);
+      layer.ctx.drawImage(intersectMask(tmp, mask), 0, 0);
     } else {
       layer.ctx.fillStyle = rgbToCss(rgb);
       layer.ctx.fillRect(0, 0, layer.width, layer.height);
@@ -623,17 +835,29 @@ export class EditorStore implements ToolHost {
   }
 
   /** Insert an external image as a new, centered layer (undoable). */
-  placeImage(source: CanvasImageSource, sw: number, sh: number, name: string): void {
+  placeImage(
+    source: CanvasImageSource,
+    sw: number,
+    sh: number,
+    name: string,
+    sourceMeta: LayerSourceMeta = {},
+  ): PlacedImageResult {
     const doc = this.doc;
-    if (!doc) return;
+    if (!doc) return { oversized: false, layerId: null };
+    const isOversized = sw > doc.width || sh > doc.height;
+    let placedId: string | null = null;
     this.structural('Place Image', () => {
-      const layer = new Layer(doc.width, doc.height, name);
       const x = Math.round((doc.width - sw) / 2);
       const y = Math.round((doc.height - sh) / 2);
-      layer.ctx.drawImage(source, x, y);
+      const layer = new Layer(sw, sh, name, undefined, x, y);
+      layer.sourceAssetId = sourceMeta.assetId ?? null;
+      layer.sourcePath = sourceMeta.path ?? null;
+      layer.ctx.drawImage(source, 0, 0);
       layer.touch();
       doc.insertAboveActive(layer);
+      placedId = layer.id;
     });
+    return { oversized: isOversized, layerId: placedId };
   }
 }
 

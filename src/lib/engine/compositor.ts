@@ -19,7 +19,7 @@ export interface ActiveStroke {
 function drawLayer(target: CanvasRenderingContext2D, layer: Layer, src: CanvasImageSource): void {
   target.globalCompositeOperation = layer.blendMode;
   target.globalAlpha = layer.opacity;
-  target.drawImage(src, 0, 0);
+  target.drawImage(src, layer.x, layer.y);
 }
 
 /**
@@ -40,6 +40,10 @@ export function compositeLayers(
 
     if (stroke && stroke.layerId === layer.id) {
       const sc = scratch ?? createCanvas(layer.width, layer.height);
+      if (sc.width !== layer.width || sc.height !== layer.height) {
+        sc.width = layer.width;
+        sc.height = layer.height;
+      }
       const sctx = ctx2d(sc);
       sctx.globalCompositeOperation = 'source-over';
       sctx.globalAlpha = 1;
@@ -48,7 +52,7 @@ export function compositeLayers(
       const buf = selection ? intersectMask(stroke.buffer, selection.mask) : stroke.buffer;
       sctx.globalCompositeOperation = stroke.op;
       sctx.globalAlpha = stroke.opacity;
-      sctx.drawImage(buf, 0, 0);
+      sctx.drawImage(buf, -layer.x, -layer.y);
       sctx.globalCompositeOperation = 'source-over';
       sctx.globalAlpha = 1;
       drawLayer(target, layer, sc);

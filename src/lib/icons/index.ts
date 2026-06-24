@@ -32,6 +32,15 @@ export { default as Delete } from '@fluentui/svg-icons/icons/delete_24_regular.s
 export { default as Dismiss } from '@fluentui/svg-icons/icons/dismiss_24_regular.svg?raw';
 export { default as ArrowSwap } from '@fluentui/svg-icons/icons/arrow_swap_24_regular.svg?raw';
 export { default as Image } from '@fluentui/svg-icons/icons/image_24_regular.svg?raw';
+export { default as Copy } from '@fluentui/svg-icons/icons/copy_24_regular.svg?raw';
+export { default as ArchiveClock } from '@fluentui/svg-icons/icons/archive_clock_24_regular.svg?raw';
+export { default as Document } from '@fluentui/svg-icons/icons/document_24_regular.svg?raw';
+export { default as Folder } from '@fluentui/svg-icons/icons/folder_24_regular.svg?raw';
+export { default as FolderOpen } from '@fluentui/svg-icons/icons/folder_open_24_regular.svg?raw';
+export { default as OpenFolder } from '@fluentui/svg-icons/icons/open_folder_24_regular.svg?raw';
+export { default as Open } from '@fluentui/svg-icons/icons/open_24_regular.svg?raw';
+export { default as ArrowSync } from '@fluentui/svg-icons/icons/arrow_sync_24_regular.svg?raw';
+export { default as Link } from '@fluentui/svg-icons/icons/link_24_regular.svg?raw';
 export { default as ChevronDoubleLeft } from '@fluentui/svg-icons/icons/chevron_double_left_20_regular.svg?raw';
 export { default as ChevronDoubleRight } from '@fluentui/svg-icons/icons/chevron_double_right_20_regular.svg?raw';
 export { default as ChevronDown } from '@fluentui/svg-icons/icons/chevron_down_24_regular.svg?raw';

@@ -4,6 +4,7 @@
   import {
     openCommand,
     saveOraCommand,
+    saveCopyOraCommand,
     exportPngCommand,
     importImageCommand,
   } from '../state/commands';
@@ -34,7 +35,8 @@
         { label: 'Open…', shortcut: '⌘O', action: () => void openCommand() },
         { label: 'Place Image…', action: () => void importImageCommand() },
         { sep: true },
-        { label: 'Save as .ora', shortcut: '⌘S', action: () => void saveOraCommand() },
+        { label: 'Save', shortcut: '⌘S', action: () => void saveOraCommand() },
+        { label: 'Save a Copy…', shortcut: '⇧⌘S', action: () => void saveCopyOraCommand() },
         { label: 'Export PNG…', shortcut: '⌘E', action: () => void exportPngCommand() },
       ],
     },
@@ -57,6 +59,7 @@
       label: 'Image',
       items: [
         { label: 'Image Size…', action: () => ui.open('imageSize') },
+        { label: 'Reveal All', action: () => editor.revealAll() },
         { label: 'Crop to Selection', action: () => editor.cropToSelection(), disabled: () => !hasSel() },
         { sep: true },
         { label: 'Rotate 90° CW', action: () => editor.rotate(90) },

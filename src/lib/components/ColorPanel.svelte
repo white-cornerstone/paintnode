@@ -5,9 +5,14 @@
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
   import { ArrowSwap } from '../icons';
+
+  let {
+    collapsed = $bindable(false),
+    onToggle,
+  }: { collapsed?: boolean; onToggle?: (collapsed: boolean) => void } = $props();
 </script>
 
-<Panel title="Color">
+<Panel title="Color" bind:collapsed {onToggle}>
   <div class="content">
     <div class="row">
       <div class="swatches">

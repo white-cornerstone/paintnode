@@ -1,7 +1,7 @@
 import type { Tool, ToolHost, PointerInfo } from './Tool';
 import { floodFill } from '../floodfill';
 import { pixelCommand, snapshotRegion } from '../history';
-import { clampRect, ctx2d } from '../types';
+import { clampRect, createCanvas, ctx2d } from '../types';
 
 /** Bucket fill — flood the contiguous region under the cursor with the foreground color. */
 export class FillTool implements Tool {
@@ -21,15 +21,21 @@ export class FillTool implements Tool {
       this.host.flash('Active layer is hidden');
       return;
     }
+    const lx = Math.round(e.x - layer.x);
+    const ly = Math.round(e.y - layer.y);
+    if (lx < 0 || ly < 0 || lx >= layer.width || ly >= layer.height) return;
+
     const img = layer.ctx.getImageData(0, 0, layer.width, layer.height);
     const sel = this.host.selection;
     let inSel: ((x: number, y: number) => boolean) | undefined;
     if (sel) {
       const w = layer.width;
-      const md = ctx2d(sel.mask).getImageData(0, 0, w, layer.height).data;
+      const mask = createCanvas(layer.width, layer.height);
+      ctx2d(mask).drawImage(sel.mask, -layer.x, -layer.y);
+      const md = ctx2d(mask).getImageData(0, 0, w, layer.height).data;
       inSel = (x, y) => md[(y * w + x) * 4 + 3] > 127;
     }
-    const rect = floodFill(img, e.x, e.y, this.host.foreground, this.host.tolerance, inSel);
+    const rect = floodFill(img, lx, ly, this.host.foreground, this.host.tolerance, inSel);
     if (!rect) return;
     const cr = clampRect(rect, layer.width, layer.height);
     if (!cr) return;

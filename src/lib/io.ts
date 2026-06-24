@@ -35,21 +35,27 @@ export function downloadBlob(blob: Blob, filename: string): void {
 
 /** Open a native file picker and resolve with the chosen file (or null if cancelled). */
 export function openFile(accept: string): Promise<File | null> {
+  return openFiles(accept, false).then((files) => files[0] ?? null);
+}
+
+/** Open a native file picker and resolve with all selected files. */
+export function openFiles(accept: string, multiple = true): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = accept;
+    input.multiple = multiple;
     let settled = false;
-    const done = (f: File | null) => {
+    const done = (files: File[]) => {
       if (settled) return;
       settled = true;
-      resolve(f);
+      resolve(files);
     };
-    input.onchange = () => done(input.files?.[0] ?? null);
+    input.onchange = () => done(Array.from(input.files ?? []));
     // Resolve null if the dialog is dismissed (best-effort across browsers).
     window.addEventListener(
       'focus',
-      () => setTimeout(() => done(null), 500),
+      () => setTimeout(() => done([]), 500),
       { once: true },
     );
     input.click();

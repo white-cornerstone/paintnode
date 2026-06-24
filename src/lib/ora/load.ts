@@ -43,16 +43,30 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     const x = parseFloat(el.getAttribute('x') || '0') || 0;
     const y = parseFloat(el.getAttribute('y') || '0') || 0;
     const opacityRaw = parseFloat(el.getAttribute('opacity') || '1');
+    const sourceAssetId = el.getAttribute('cx-source-asset-id');
+    const sourcePath = el.getAttribute('cx-source-path');
     const layer = new Layer(w, h, name);
+    layer.x = x;
+    layer.y = y;
+    layer.sourceAssetId = sourceAssetId;
+    layer.sourcePath = sourcePath;
     layer.opacity = clamp(Number.isNaN(opacityRaw) ? 1 : opacityRaw, 0, 1);
     layer.visible = (el.getAttribute('visibility') || 'visible') !== 'hidden';
     layer.blendMode = oraToBlend(el.getAttribute('composite-op'));
 
     if (src && files[src]) {
       const bmp = await bytesToBitmap(files[src]);
-      layer.ctx.drawImage(bmp, x, y);
+      const loaded = new Layer(bmp.width, bmp.height, name, undefined, x, y);
+      loaded.sourceAssetId = sourceAssetId;
+      loaded.sourcePath = sourcePath;
+      loaded.opacity = layer.opacity;
+      loaded.visible = layer.visible;
+      loaded.blendMode = layer.blendMode;
+      loaded.ctx.drawImage(bmp, 0, 0);
       bmp.close();
-      layer.touch();
+      loaded.touch();
+      layers.push(loaded);
+      continue;
     }
     layers.push(layer);
   }

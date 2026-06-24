@@ -1,12 +1,18 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
+  import { project } from '../state/project.svelte';
   import { BLEND_MODES } from '../engine/types';
   import type { Layer } from '../engine/Layer.svelte';
   import LayerThumb from './LayerThumb.svelte';
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link } from '../icons';
+
+  let {
+    collapsed = $bindable(false),
+    onToggle,
+  }: { collapsed?: boolean; onToggle?: (collapsed: boolean) => void } = $props();
 
   let editingId = $state<string | null>(null);
   let dragFrom = $state<number | null>(null);
@@ -16,6 +22,11 @@
   const rows = $derived(editor.doc ? [...editor.doc.layers].reverse() : []);
   const active = $derived(editor.activeLayer);
   const count = $derived(editor.doc?.layers.length ?? 0);
+  const activeSourceAsset = $derived(
+    active?.sourceAssetId
+      ? (project.current?.assets.find((asset) => asset.id === active.sourceAssetId) ?? null)
+      : null,
+  );
 
   function arrayIndex(displayIndex: number): number {
     return count - 1 - displayIndex;
@@ -58,7 +69,7 @@
   }
 </script>
 
-<Panel title="Layers" grow>
+<Panel title="Layers" grow bind:collapsed {onToggle}>
   <div class="props">
     <select
       class="blend"
@@ -162,6 +173,12 @@
       aria-label="Merge down"
       onclick={() => active && editor.mergeDown(active.id)}
       disabled={!active}><Icon svg={Merge} size={17} /></button
+    >
+    <button
+      use:tooltip={{ text: 'Reveal source asset', placement: 'top' }}
+      aria-label="Reveal source asset"
+      onclick={() => activeSourceAsset && void project.reveal(activeSourceAsset)}
+      disabled={!activeSourceAsset}><Icon svg={Link} size={15} /></button
     >
     <span class="spacer"></span>
     <button

@@ -10,9 +10,13 @@
   let vp: Viewport | undefined;
 
   let spaceDown = $state(false);
+  let scrollW = $state(1);
+  let scrollH = $state(1);
   let panning = false;
   let interacting = false;
+  let syncingScroll = false;
   let last = { x: 0, y: 0 };
+  const SCROLL_PAD = 80;
 
   function pos(e: PointerEvent) {
     const r = canvasEl.getBoundingClientRect();
@@ -120,6 +124,39 @@
     );
   }
 
+  function updateScrollSpace() {
+    if (!vp || !containerEl) return;
+    const doc = editor.doc;
+    const docW = doc ? doc.width * vp.scale : 1;
+    const docH = doc ? doc.height * vp.scale : 1;
+    scrollW = Math.max(containerEl.clientWidth, Math.ceil(docW + SCROLL_PAD * 2));
+    scrollH = Math.max(containerEl.clientHeight, Math.ceil(docH + SCROLL_PAD * 2));
+  }
+
+  function syncScrollToViewport() {
+    if (!vp || !containerEl) return;
+    updateScrollSpace();
+    const maxLeft = Math.max(0, scrollW - containerEl.clientWidth);
+    const maxTop = Math.max(0, scrollH - containerEl.clientHeight);
+    const nextLeft = Math.max(0, Math.min(maxLeft, SCROLL_PAD - vp.offsetX));
+    const nextTop = Math.max(0, Math.min(maxTop, SCROLL_PAD - vp.offsetY));
+    syncingScroll = true;
+    containerEl.scrollLeft = nextLeft;
+    containerEl.scrollTop = nextTop;
+    requestAnimationFrame(() => (syncingScroll = false));
+  }
+
+  function syncViewportToScroll() {
+    if (!vp || !containerEl || syncingScroll) return;
+    const doc = editor.doc;
+    if (!doc) return;
+    const docW = doc.width * vp.scale;
+    const docH = doc.height * vp.scale;
+    vp.offsetX = scrollW > containerEl.clientWidth ? SCROLL_PAD - containerEl.scrollLeft : (containerEl.clientWidth - docW) / 2;
+    vp.offsetY = scrollH > containerEl.clientHeight ? SCROLL_PAD - containerEl.scrollTop : (containerEl.clientHeight - docH) / 2;
+    vp.invalidate();
+  }
+
   onMount(() => {
     vp = new Viewport(
       canvasEl,
@@ -127,22 +164,32 @@
       () => editor.getActiveStroke(),
       () => editor.getSelection(),
     );
-    vp.onAfterRender = () => (ui.zoom = vp!.scale);
+    vp.onAfterRender = () => {
+      ui.zoom = vp!.scale;
+      syncScrollToViewport();
+    };
     editor.viewport = vp;
     vp.resize();
     requestAnimationFrame(() => vp!.fitToView());
 
-    const ro = new ResizeObserver(() => vp!.resize());
+    const ro = new ResizeObserver(() => {
+      vp!.resize();
+      syncScrollToViewport();
+    });
     ro.observe(containerEl);
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const r = canvasEl.getBoundingClientRect();
-      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      vp!.zoomBy(factor, e.clientX - r.left, e.clientY - r.top);
-      ui.zoom = vp!.scale;
+      if (e.ctrlKey || e.metaKey) {
+        const r = canvasEl.getBoundingClientRect();
+        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        vp!.zoomBy(factor, e.clientX - r.left, e.clientY - r.top);
+        ui.zoom = vp!.scale;
+      } else {
+        vp!.panBy(-e.deltaX, -e.deltaY);
+      }
     };
-    canvasEl.addEventListener('wheel', onWheel, { passive: false });
+    containerEl.addEventListener('wheel', onWheel, { passive: false });
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && !isTyping(e.target) && !spaceDown) {
@@ -158,7 +205,7 @@
 
     return () => {
       ro.disconnect();
-      canvasEl.removeEventListener('wheel', onWheel);
+      containerEl.removeEventListener('wheel', onWheel);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       vp!.destroy();
@@ -181,6 +228,7 @@
       }
     }
     vp?.invalidateComposite();
+    requestAnimationFrame(syncScrollToViewport);
   });
 
   // Animate the selection marching ants while a selection exists.
@@ -213,7 +261,7 @@
   );
 </script>
 
-<div class="viewport" bind:this={containerEl}>
+<div class="viewport" bind:this={containerEl} onscroll={syncViewportToScroll}>
   <canvas
     bind:this={canvasEl}
     style="cursor:{cursorStyle}"
@@ -223,6 +271,7 @@
     onpointerleave={onPointerLeave}
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
+  <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
 </div>
 
 <style>
@@ -230,13 +279,22 @@
     position: relative;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow: auto;
     background: var(--bg-canvas);
   }
   canvas {
+    position: sticky;
+    top: 0;
+    left: 0;
+    z-index: 1;
     display: block;
     width: 100%;
     height: 100%;
     touch-action: none;
+  }
+  .scroll-space {
+    position: relative;
+    z-index: 0;
+    pointer-events: none;
   }
 </style>

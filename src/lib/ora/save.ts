@@ -27,10 +27,16 @@ function buildStackXml(doc: PaintDocument, srcMap: Map<string, string>): string 
   for (let i = doc.layers.length - 1; i >= 0; i--) {
     const l = doc.layers[i];
     const src = srcMap.get(l.id)!;
+    const sourceAttrs = [
+      l.sourceAssetId ? `cx-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
+      l.sourcePath ? `cx-source-path="${escapeXml(l.sourcePath)}"` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
     lines.push(
-      `  <layer name="${escapeXml(l.name)}" src="${src}" x="0" y="0" ` +
+      `  <layer name="${escapeXml(l.name)}" src="${src}" x="${l.x}" y="${l.y}" ` +
         `opacity="${l.opacity}" visibility="${l.visible ? 'visible' : 'hidden'}" ` +
-        `composite-op="${BLEND_TO_ORA[l.blendMode]}"/>`,
+        `composite-op="${BLEND_TO_ORA[l.blendMode]}"${sourceAttrs ? ` ${sourceAttrs}` : ''}/>`,
     );
   }
   return (
