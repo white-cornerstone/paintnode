@@ -9,10 +9,19 @@
     MarqueeEllipse,
     LineH,
     Lasso,
+    Wand,
+    Crop,
     PaintBrush,
     Eraser,
+    CloneStamp,
     PaintBucket,
     Gradient,
+    Smudge,
+    Blur,
+    Sharpen,
+    Dodge,
+    Burn,
+    Sponge,
     Eyedropper,
     Shapes,
     TextT,
@@ -22,25 +31,61 @@
     ArrowSwap,
   } from '../icons';
 
-  interface ToolDef {
+  // A dock slot is a single tool, the marquee shape-group, or a flyout group of tools.
+  interface ToolSlot {
+    kind: 'tool';
     id: string;
     key: string;
     icon: string;
   }
+  interface GroupMember {
+    id: string;
+    icon: string;
+    label: string;
+    key?: string;
+  }
+  interface GroupSlot {
+    kind: 'group';
+    name: string;
+    members: GroupMember[];
+  }
+  type MarqueeSlot = { kind: 'marquee' };
+  type Slot = ToolSlot | GroupSlot | MarqueeSlot;
 
-  const tools: ToolDef[] = [
-    { id: 'move', key: 'V', icon: ArrowMove },
-    { id: 'marquee', key: 'M', icon: MarqueeRect }, // rendered as a group (see below)
-    { id: 'lasso', key: 'L', icon: Lasso },
-    { id: 'brush', key: 'B', icon: PaintBrush },
-    { id: 'eraser', key: 'E', icon: Eraser },
-    { id: 'fill', key: 'G', icon: PaintBucket },
-    { id: 'gradient', key: 'R', icon: Gradient },
-    { id: 'shape', key: 'U', icon: Shapes },
-    { id: 'text', key: 'T', icon: TextT },
-    { id: 'eyedropper', key: 'I', icon: Eyedropper },
-    { id: 'hand', key: 'H', icon: Hand },
-    { id: 'zoom', key: 'Z', icon: Search }, // always a plain magnifier; mode shows on the cursor
+  const slots: Slot[] = [
+    { kind: 'tool', id: 'move', key: 'V', icon: ArrowMove },
+    { kind: 'marquee' },
+    { kind: 'tool', id: 'lasso', key: 'L', icon: Lasso },
+    { kind: 'tool', id: 'magicwand', key: 'W', icon: Wand },
+    { kind: 'tool', id: 'crop', key: 'C', icon: Crop },
+    { kind: 'tool', id: 'eyedropper', key: 'I', icon: Eyedropper },
+    { kind: 'tool', id: 'brush', key: 'B', icon: PaintBrush },
+    { kind: 'tool', id: 'clone', key: 'S', icon: CloneStamp },
+    { kind: 'tool', id: 'eraser', key: 'E', icon: Eraser },
+    { kind: 'tool', id: 'fill', key: 'G', icon: PaintBucket },
+    { kind: 'tool', id: 'gradient', key: 'R', icon: Gradient },
+    {
+      kind: 'group',
+      name: 'focus',
+      members: [
+        { id: 'blur', icon: Blur, label: 'Blur' },
+        { id: 'sharpen', icon: Sharpen, label: 'Sharpen' },
+        { id: 'smudge', icon: Smudge, label: 'Smudge' },
+      ],
+    },
+    {
+      kind: 'group',
+      name: 'toning',
+      members: [
+        { id: 'dodge', icon: Dodge, label: 'Dodge', key: 'O' },
+        { id: 'burn', icon: Burn, label: 'Burn' },
+        { id: 'sponge', icon: Sponge, label: 'Sponge' },
+      ],
+    },
+    { kind: 'tool', id: 'shape', key: 'U', icon: Shapes },
+    { kind: 'tool', id: 'text', key: 'T', icon: TextT },
+    { kind: 'tool', id: 'hand', key: 'H', icon: Hand },
+    { kind: 'tool', id: 'zoom', key: 'Z', icon: Search }, // mode shows on the cursor
   ];
 
   type MarqueeShape = 'rect' | 'ellipse' | 'row' | 'column';
@@ -62,61 +107,82 @@
 
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
-  // Long-press flyout for the marquee tool group.
-  let flyoutOpen = $state(false);
+  // Remembered active member per flyout group (Photoshop shows the last-used tool of a group).
+  let lastMember = $state<Record<string, string>>({ focus: 'blur', toning: 'dodge' });
+  const shownMember = (slot: GroupSlot): GroupMember => {
+    const active = slot.members.find((m) => m.id === editor.activeToolId);
+    return active ?? slot.members.find((m) => m.id === lastMember[slot.name]) ?? slot.members[0];
+  };
+  const groupActive = (slot: GroupSlot): boolean =>
+    slot.members.some((m) => m.id === editor.activeToolId);
+
+  // One shared long-press flyout, keyed by slot name ('marquee' | group name).
+  let openGroup = $state<string | null>(null);
   let pressTimer = 0;
   let longFired = false;
 
-  function marqueeDown(e: PointerEvent) {
+  function groupDown(e: PointerEvent, name: string) {
     if (e.button !== 0) return;
     longFired = false;
     pressTimer = window.setTimeout(() => {
       longFired = true;
-      flyoutOpen = true;
+      openGroup = name;
     }, 350);
   }
-  function marqueeUp() {
+  function groupUp() {
     clearTimeout(pressTimer);
   }
-  function marqueeLeave() {
-    clearTimeout(pressTimer);
-  }
+
   function marqueeClick() {
     if (longFired) {
       longFired = false;
       return; // long-press already opened the flyout
     }
-    flyoutOpen = false;
+    openGroup = null;
     editor.setTool('marquee');
   }
   function chooseShape(shape: MarqueeShape) {
     editor.marqueeShape = shape;
     editor.setTool('marquee');
-    flyoutOpen = false;
+    openGroup = null;
+  }
+
+  function groupClick(slot: GroupSlot) {
+    if (longFired) {
+      longFired = false;
+      return;
+    }
+    openGroup = null;
+    editor.setTool(shownMember(slot).id);
+  }
+  function chooseMember(slot: GroupSlot, m: GroupMember) {
+    lastMember[slot.name] = m.id;
+    editor.setTool(m.id);
+    openGroup = null;
   }
 </script>
 
 <svelte:window
-  onpointerdown={() => (flyoutOpen = false)}
-  onkeydown={(e) => (e.key === 'Escape' ? (flyoutOpen = false) : null)}
+  onpointerdown={() => (openGroup = null)}
+  onkeydown={(e) => (e.key === 'Escape' ? (openGroup = null) : null)}
 />
 
 <div class="toolbar">
   <div class="tools">
-    {#each tools as t (t.id)}
-      {#if t.id === 'marquee'}
+    {#each slots as slot, i (i)}
+      {#if slot.kind === 'marquee'}
         <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
           <button
             class="tool"
             class:active={editor.activeToolId === 'marquee'}
             use:tooltip={{ text: 'Marquee (M) — hold for shapes', placement: 'right' }}
             onclick={marqueeClick}
-            onpointerdown={marqueeDown}
-            onpointerup={marqueeUp}
-            onpointerleave={marqueeLeave}
+            onpointerdown={(e) => groupDown(e, 'marquee')}
+            onpointerup={groupUp}
+            onpointerleave={groupUp}
             oncontextmenu={(e) => {
               e.preventDefault();
-              flyoutOpen = true;
+              openGroup = 'marquee';
             }}
             aria-label="Marquee"
             aria-haspopup="menu"
@@ -124,7 +190,7 @@
             <Icon svg={currentMarquee.icon} rotate={currentMarquee.rotate ?? 0} size={20} />
             <span class="tri"></span>
           </button>
-          {#if flyoutOpen}
+          {#if openGroup === 'marquee'}
             <div class="flyout" role="menu">
               {#each marqueeItems as m (m.shape)}
                 <button class="flyout-item" role="menuitem" onclick={() => chooseShape(m.shape)}>
@@ -137,15 +203,49 @@
             </div>
           {/if}
         </div>
+      {:else if slot.kind === 'group'}
+        {@const shown = shownMember(slot)}
+        <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
+          <button
+            class="tool"
+            class:active={groupActive(slot)}
+            use:tooltip={{ text: `${shown.label} — hold for tools`, placement: 'right' }}
+            onclick={() => groupClick(slot)}
+            onpointerdown={(e) => groupDown(e, slot.name)}
+            onpointerup={groupUp}
+            onpointerleave={groupUp}
+            oncontextmenu={(e) => {
+              e.preventDefault();
+              openGroup = slot.name;
+            }}
+            aria-label={shown.label}
+            aria-haspopup="menu"
+          >
+            <Icon svg={shown.icon} size={20} />
+            <span class="tri"></span>
+          </button>
+          {#if openGroup === slot.name}
+            <div class="flyout" role="menu">
+              {#each slot.members as m (m.id)}
+                <button class="flyout-item" role="menuitem" onclick={() => chooseMember(slot, m)}>
+                  <span class="mark">{editor.activeToolId === m.id ? '■' : ''}</span>
+                  <Icon svg={m.icon} size={18} />
+                  <span class="lbl">{m.label}</span>
+                  <span class="sc">{m.key ?? ''}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
       {:else}
         <button
           class="tool"
-          class:active={editor.activeToolId === t.id}
-          use:tooltip={{ text: `${nameOf(t.id)} (${t.key})`, placement: 'right' }}
-          onclick={() => editor.setTool(t.id)}
-          aria-label={nameOf(t.id)}
+          class:active={editor.activeToolId === slot.id}
+          use:tooltip={{ text: `${nameOf(slot.id)} (${slot.key})`, placement: 'right' }}
+          onclick={() => editor.setTool(slot.id)}
+          aria-label={nameOf(slot.id)}
         >
-          <Icon svg={t.icon} size={20} />
+          <Icon svg={slot.icon} size={20} />
         </button>
       {/if}
     {/each}

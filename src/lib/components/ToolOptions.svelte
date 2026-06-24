@@ -2,14 +2,25 @@
   import { editor } from '../state/editor.svelte';
 
   const tool = $derived(editor.activeToolId);
-  const isPaint = $derived(tool === 'brush' || tool === 'eraser');
+  // Tools that share the round-brush controls (size / hardness / strength).
+  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge'];
+  const usesBrush = $derived(brushTools.includes(tool));
+  const strengthLabel = $derived(
+    tool === 'brush' || tool === 'eraser' || tool === 'clone'
+      ? 'Opacity'
+      : tool === 'dodge' || tool === 'burn'
+        ? 'Exposure'
+        : tool === 'sponge'
+          ? 'Flow'
+          : 'Strength',
+  );
 </script>
 
 <div class="options">
   <span class="tool-name">{editor.activeTool.name}</span>
   <span class="divider"></span>
 
-  {#if isPaint}
+  {#if usesBrush}
     <label class="opt">
       Size
       <input type="range" min="1" max="500" bind:value={editor.brushSize} />
@@ -22,10 +33,37 @@
       <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
     </label>
     <label class="opt">
-      Opacity
+      {strengthLabel}
       <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
       <span class="val">{Math.round(editor.brushOpacity * 100)}%</span>
     </label>
+    {#if tool === 'clone'}
+      <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
+      <span class="hint">Alt-click to set the source, then paint.</span>
+    {:else if tool === 'dodge' || tool === 'burn'}
+      <label class="opt">
+        Range
+        <select bind:value={editor.toneRange}>
+          <option value="shadows">Shadows</option>
+          <option value="midtones">Midtones</option>
+          <option value="highlights">Highlights</option>
+        </select>
+      </label>
+      <span class="hint">Drag to {tool === 'dodge' ? 'lighten' : 'darken'} the {editor.toneRange}.</span>
+    {:else if tool === 'sponge'}
+      <label class="opt">
+        Mode
+        <select bind:value={editor.spongeMode}>
+          <option value="saturate">Saturate</option>
+          <option value="desaturate">Desaturate</option>
+        </select>
+      </label>
+      <span class="hint">Drag to {editor.spongeMode === 'saturate' ? 'boost' : 'reduce'} saturation.</span>
+    {:else if tool === 'smudge'}
+      <span class="hint">Drag to push pixels along the stroke.</span>
+    {:else if tool === 'blur' || tool === 'sharpen'}
+      <span class="hint">Drag to {tool} pixels under the brush.</span>
+    {/if}
   {:else if tool === 'marquee'}
     <label class="opt">
       Shape
@@ -45,6 +83,20 @@
     <button onclick={() => editor.deselect()} disabled={!editor.selection}>Deselect</button>
     <button onclick={() => editor.invertSelection()} disabled={!editor.selection}>Invert</button>
     <span class="hint">Drag to draw a freeform selection</span>
+  {:else if tool === 'magicwand'}
+    <label class="opt">
+      Tolerance
+      <input type="range" min="0" max="255" bind:value={editor.tolerance} />
+      <input type="number" min="0" max="255" bind:value={editor.tolerance} class="num" />
+    </label>
+    <label class="opt"><input type="checkbox" bind:checked={editor.magicContiguous} /> Contiguous</label>
+    <button onclick={() => editor.deselect()} disabled={!editor.selection}>Deselect</button>
+    <button onclick={() => editor.invertSelection()} disabled={!editor.selection}>Invert</button>
+    <span class="hint">Click to select by color · Shift adds · Alt subtracts</span>
+  {:else if tool === 'crop'}
+    <button onclick={() => editor.cropToSelection()} disabled={!editor.selection}>Apply (↵)</button>
+    <button onclick={() => editor.deselect()} disabled={!editor.selection}>Reset</button>
+    <span class="hint">Drag to set the crop box, then Apply or press Enter.</span>
   {:else if tool === 'fill'}
     <label class="opt">
       Tolerance
