@@ -1,0 +1,30 @@
+{
+  "name": "cx-paint",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A backend-free, Photoshop-like raster image editor for the web using the OpenRaster (.ora) format.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri",
+    "tauri:dev": "node scripts/tauri-dev.mjs",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.1.2",
+    "@tauri-apps/cli": "^2.11.3",
+    "svelte": "5.56.3",
+    "svelte-check": "4.6.0",
+    "tslib": "2.8.1",
+    "typescript": "6.0.3",
+    "vite": "8.1.0"
+  },
+  "dependencies": {
+    "@fluentui/svg-icons": "^1.1.330",
+    "@tauri-apps/api": "^2.11.1",
+    "fflate": "0.8.3"
+  }
+}

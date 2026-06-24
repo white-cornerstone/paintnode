@@ -1,0 +1,181 @@
+:root {
+  /* Photoshop-like dark theme palette */
+  --bg-app: #1e1e1e;
+  --bg-panel: #2b2b2b;
+  --bg-panel-2: #323232;
+  --bg-elevated: #383838;
+  --bg-input: #1a1a1a;
+  --bg-canvas: #4a4a4a;
+  --border: #1a1a1a;
+  --border-soft: #404040;
+  --text: #d4d4d4;
+  --text-dim: #9a9a9a;
+  --text-bright: #f0f0f0;
+  --accent: #2d8ceb;
+  --accent-dim: #2563ad;
+  --danger: #e0533d;
+  --toolbar-w: 44px;
+  --rightpanel-w: 268px;
+  --menubar-h: 28px;
+  --options-h: 38px;
+  --statusbar-h: 24px;
+
+  color-scheme: dark;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  color: var(--text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  height: 100vh;
+  width: 100vw;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+button:hover {
+  background: var(--bg-panel-2);
+}
+button:active {
+  background: var(--accent-dim);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+input[type='number'],
+input[type='text'],
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  padding: 3px 5px;
+}
+
+select {
+  cursor: pointer;
+}
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-panel);
+}
+::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 6px;
+  border: 3px solid var(--bg-panel);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}
+
+/* Custom tooltip (rendered to <body> by use:tooltip) */
+.cx-tooltip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  max-width: 280px;
+  padding: 4px 8px;
+  background: #0d0d0d;
+  color: var(--text-bright);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 90ms ease,
+    transform 90ms ease;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.cx-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Shared dialog form layout */
+.dlg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dlg-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.dlg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-dim);
+}
+.dlg-field input,
+.dlg-field select,
+.dlg-field textarea {
+  width: 100%;
+}
+.dlg-slider {
+  display: grid;
+  grid-template-columns: 84px 1fr 48px;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+}
+.dlg-slider .val {
+  text-align: right;
+  color: var(--text);
+}
+.dlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dlg-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.dlg-primary:hover {
+  background: var(--accent-dim);
+}
