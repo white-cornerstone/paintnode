@@ -67,6 +67,11 @@ class WorkflowStore {
     this.active = false;
   }
 
+  setName(name: string): void {
+    this.name = cleanWorkflowName(name);
+    this.bump();
+  }
+
   addAsset(asset: ProjectAsset): void {
     const index = this.nodes.length;
     this.nodes = [

@@ -74,6 +74,7 @@
 
   function iconFor(file: ProjectFile): string {
     if (file.kind === 'autosave') return ArchiveClock;
+    if (isWorkflow(file)) return Sparkle;
     if (isOra(file) || file.kind === 'document') return Document;
     if (isImage(file)) return Image;
     return Folder;

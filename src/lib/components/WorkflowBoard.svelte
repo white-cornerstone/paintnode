@@ -179,14 +179,12 @@
       <input
         aria-label="Workflow name"
         value={workflow.name}
-        oninput={(event) => {
-          workflow.name = event.currentTarget.value;
-          workflow.rev++;
-        }}
+        oninput={(event) => workflow.setName(event.currentTarget.value)}
       />
       {#if workflow.dirty}<span class="dirty">Unsaved</span>{/if}
     </div>
     <div class="actions">
+      <button onclick={() => workflow.close()}>Canvas</button>
       <button onclick={() => workflow.newBoard()}>New</button>
       <button onclick={() => void save()} disabled={!project.path}>Save</button>
       <button onclick={() => void saveAs()} disabled={!project.path}>Save As</button>
