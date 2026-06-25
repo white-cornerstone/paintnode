@@ -8,6 +8,7 @@ export class GradientTool implements Tool {
   readonly id = 'gradient';
   readonly name = 'Gradient';
   readonly cursor = 'crosshair';
+  readonly editsPixels = true;
 
   private buffer: HTMLCanvasElement | null = null;
   private bctx: CanvasRenderingContext2D | null = null;

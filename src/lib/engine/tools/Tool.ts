@@ -70,6 +70,8 @@ export interface Tool {
   readonly cursor: string;
   /** Whether the viewport should draw the brush-size ring for this tool. */
   readonly usesBrushCursor?: boolean;
+  /** True if the tool mutates the active layer's pixels (used to guard text layers). */
+  readonly editsPixels?: boolean;
   pointerDown(e: PointerInfo): void;
   pointerMove(e: PointerInfo): void;
   pointerUp(e: PointerInfo): void;

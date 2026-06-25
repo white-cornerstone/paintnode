@@ -9,6 +9,7 @@ export class ShapeTool implements Tool {
   readonly id = 'shape';
   readonly name = 'Shape';
   readonly cursor = 'crosshair';
+  readonly editsPixels = true;
 
   private buffer: HTMLCanvasElement | null = null;
   private bctx: CanvasRenderingContext2D | null = null;

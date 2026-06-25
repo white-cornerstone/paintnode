@@ -75,6 +75,11 @@
       editor.commitActiveText();
       return;
     }
+    // A pixel tool can't paint on a text layer — offer to rasterize it first.
+    if (e.button === 0 && !spaceDown && editor.activeTool.editsPixels && editor.activeLayer?.kind === 'text') {
+      editor.promptRasterize(editor.activeLayer);
+      return;
+    }
     try {
       canvasEl.setPointerCapture(e.pointerId);
     } catch {

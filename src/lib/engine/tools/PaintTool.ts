@@ -10,6 +10,7 @@ export class PaintTool implements Tool {
   readonly name: string;
   readonly cursor = 'none';
   readonly usesBrushCursor = true;
+  readonly editsPixels = true;
 
   private host: ToolHost;
   private mode: 'brush' | 'eraser';

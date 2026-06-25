@@ -18,6 +18,7 @@
   import GaussianBlurDialog from './lib/components/GaussianBlurDialog.svelte';
   import AiGenerateDialog from './lib/components/AiGenerateDialog.svelte';
   import FontEmbedDialog from './lib/components/FontEmbedDialog.svelte';
+  import RasterizeTypeDialog from './lib/components/RasterizeTypeDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -430,6 +431,10 @@
 
 {#if ui.fontEmbed}
   <FontEmbedDialog />
+{/if}
+
+{#if editor.rasterizePrompt}
+  <RasterizeTypeDialog />
 {/if}
 
 <style>

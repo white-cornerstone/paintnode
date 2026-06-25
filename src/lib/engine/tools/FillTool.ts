@@ -8,6 +8,7 @@ export class FillTool implements Tool {
   readonly id = 'fill';
   readonly name = 'Bucket Fill';
   readonly cursor = 'crosshair';
+  readonly editsPixels = true;
 
   constructor(private host: ToolHost) {}
 

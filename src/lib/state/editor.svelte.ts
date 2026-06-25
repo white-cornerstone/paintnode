@@ -119,6 +119,8 @@ export class EditorStore implements ToolHost {
   altDown = $state(false);
   // Type tool: the active on-canvas text edit session (null = not editing).
   textEdit = $state<TextEditSession | null>(null);
+  // Set when a pixel tool is used on a text layer — drives the "rasterize first?" prompt.
+  rasterizePrompt = $state<{ layerId: string; name: string } | null>(null);
   // Remembered Type-tool defaults for the next new text layer.
   lastFontFamily = $state('sans-serif');
   lastFontSize = $state(72);
@@ -1061,6 +1063,19 @@ export class EditorStore implements ToolHost {
         h: doc.height,
       }
     );
+  }
+
+  /** A pixel tool was aimed at a text layer — ask whether to rasterize it first. */
+  promptRasterize(layer: Layer): void {
+    this.rasterizePrompt = { layerId: layer.id, name: layer.name };
+  }
+  confirmRasterize(): void {
+    const p = this.rasterizePrompt;
+    this.rasterizePrompt = null;
+    if (p) this.rasterizeType(p.layerId);
+  }
+  dismissRasterize(): void {
+    this.rasterizePrompt = null;
   }
 
   /** Rasterize the active text layer's model into a new raster layer (undoable). */
