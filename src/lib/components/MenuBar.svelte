@@ -1,6 +1,7 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { workflow } from '../state/workflow.svelte';
   import {
     openCommand,
     saveOraCommand,
@@ -109,7 +110,16 @@
     },
     {
       label: 'AI',
-      items: [{ label: 'Generate Image…', action: () => ui.open('aiGenerate') }],
+      items: [
+        { label: 'Generate Image…', action: () => ui.open('aiGenerate') },
+        {
+          label: 'Extract Assets…',
+          action: () => ui.open('aiDecouple'),
+          disabled: () => !editor.activeLayer,
+        },
+        { sep: true },
+        { label: 'New Workflow Board', action: () => workflow.newBoard() },
+      ],
     },
     {
       label: 'View',

@@ -45,6 +45,7 @@ export interface ProjectFile {
   kind: 'document' | 'autosave' | 'generated' | 'imported' | string;
   name: string;
   relativePath: string;
+  createdAt: number;
   modifiedAt: number;
   size: number;
   mime?: string | null;
@@ -63,6 +64,28 @@ export interface ProjectState {
 export interface GeneratedImageResult {
   dataUrl: string;
   asset?: ProjectAsset | null;
+}
+
+export interface WorkflowSourceImage {
+  name: string;
+  bytes: Uint8Array;
+}
+
+export interface DecoupledLayerResult {
+  name: string;
+  dataUrl: string;
+  keyColor?: string | null;
+  x?: number | null;
+  y?: number | null;
+  opacity?: number | null;
+  visible?: boolean | null;
+  asset?: ProjectAsset | null;
+}
+
+export interface DecoupleImageResult {
+  layers: DecoupledLayerResult[];
+  threadId?: string | null;
+  notes?: string | null;
 }
 
 export interface StoredAssetResult {
@@ -101,6 +124,51 @@ export async function generateCodexImage(
   const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
   const runId = config.runId?.trim() ? config.runId.trim() : `codex-${Date.now()}`;
   return invoke<GeneratedImageResult>('generate_codex_image', { bin, prompt, projectPath, runId });
+}
+
+export async function decoupleCodexImage(
+  config: CodexGeneratorConfig,
+  sourcePng: Uint8Array,
+  prompt: string,
+  storeAssets = true,
+): Promise<DecoupleImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex image decoupling is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `decouple-${Date.now()}`;
+  return invoke<DecoupleImageResult>('decouple_codex_image', {
+    bin,
+    prompt,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    runId,
+    storeAssets,
+  });
+}
+
+export async function composeCodexWorkflow(
+  config: CodexGeneratorConfig,
+  prompt: string,
+  sources: WorkflowSourceImage[],
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex workflow composition is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `workflow-${Date.now()}`;
+  return invoke<GeneratedImageResult>('compose_codex_workflow', {
+    bin,
+    prompt,
+    projectPath,
+    sources: sources.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
+  });
 }
 
 export async function openProjectFolder(): Promise<ProjectState | null> {

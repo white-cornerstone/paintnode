@@ -6,7 +6,8 @@ export type DialogId =
   | 'brightnessContrast'
   | 'hueSaturation'
   | 'gaussianBlur'
-  | 'aiGenerate';
+  | 'aiGenerate'
+  | 'aiDecouple';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 

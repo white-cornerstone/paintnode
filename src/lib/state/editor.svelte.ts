@@ -59,6 +59,18 @@ export interface LayerSourceMeta {
   path?: string | null;
 }
 
+export interface DecoupledLayerImport {
+  name: string;
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  x?: number | null;
+  y?: number | null;
+  opacity?: number | null;
+  visible?: boolean | null;
+  sourceMeta?: LayerSourceMeta;
+}
+
 /** An in-progress text edit driven by the on-canvas TextEditorOverlay. */
 export interface TextEditSession {
   /** Layer being edited, or null when creating a new text layer. */
@@ -1133,6 +1145,46 @@ export class EditorStore implements ToolHost {
       placedId = layer.id;
     });
     return { oversized: isOversized, layerId: placedId };
+  }
+
+  /** Insert a stack of AI-decoupled layers above the source layer as one undoable edit. */
+  insertDecoupledLayers(
+    sourceLayerId: string,
+    layers: DecoupledLayerImport[],
+    options: { hideSource?: boolean } = {},
+  ): number {
+    const doc = this.doc;
+    if (!doc || layers.length === 0) return 0;
+    const sourceIdx = doc.indexOf(sourceLayerId);
+    if (sourceIdx < 0) return 0;
+    const sourceLayer = doc.layers[sourceIdx];
+    let inserted = 0;
+    this.structural('Extract Assets', () => {
+      const next = doc.layers.slice();
+      const built = layers.map((item) => {
+        const layer = new Layer(
+          item.width,
+          item.height,
+          item.name || `Decoupled ${inserted + 1}`,
+          undefined,
+          sourceLayer.x + Math.round(item.x ?? 0),
+          sourceLayer.y + Math.round(item.y ?? 0),
+        );
+        layer.opacity = Math.max(0, Math.min(1, item.opacity ?? 1));
+        layer.visible = item.visible ?? true;
+        layer.sourceAssetId = item.sourceMeta?.assetId ?? null;
+        layer.sourcePath = item.sourceMeta?.path ?? null;
+        layer.ctx.drawImage(item.source, 0, 0);
+        layer.touch();
+        inserted++;
+        return layer;
+      });
+      if (options.hideSource) sourceLayer.visible = false;
+      next.splice(sourceIdx + 1, 0, ...built);
+      doc.layers = next;
+      doc.activeLayerId = built.at(-1)?.id ?? sourceLayerId;
+    });
+    return inserted;
   }
 }
 
