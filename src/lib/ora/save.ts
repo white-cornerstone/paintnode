@@ -2,6 +2,7 @@ import { zipSync, type Zippable } from 'fflate';
 import type { PaintDocument } from '../engine/Document.svelte';
 import { BLEND_TO_ORA } from '../engine/types';
 import { compositeToCanvas, makeThumbnail } from '../engine/compositor';
+import { serializeModel } from '../engine/text/model';
 import { canvasToPngBytes } from '../io';
 
 function escapeXml(s: string): string {
@@ -21,22 +22,30 @@ function escapeXml(s: string): string {
   });
 }
 
-function buildStackXml(doc: PaintDocument, srcMap: Map<string, string>): string {
+function buildStackXml(
+  doc: PaintDocument,
+  srcMap: Map<string, string>,
+  textMap: Map<string, string>,
+): string {
   const lines: string[] = [];
   // OpenRaster lists layers top-to-bottom; our array is bottom-to-top.
   for (let i = doc.layers.length - 1; i >= 0; i--) {
     const l = doc.layers[i];
     const src = srcMap.get(l.id)!;
-    const sourceAttrs = [
+    const textPath = textMap.get(l.id);
+    // Custom cx-* attributes; other ORA readers ignore them and use the rasterized PNG.
+    const extraAttrs = [
       l.sourceAssetId ? `cx-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
       l.sourcePath ? `cx-source-path="${escapeXml(l.sourcePath)}"` : '',
+      l.kind === 'text' ? `cx-layer-kind="text"` : '',
+      textPath ? `cx-text-data="${textPath}"` : '',
     ]
       .filter(Boolean)
       .join(' ');
     lines.push(
       `  <layer name="${escapeXml(l.name)}" src="${src}" x="${l.x}" y="${l.y}" ` +
         `opacity="${l.opacity}" visibility="${l.visible ? 'visible' : 'hidden'}" ` +
-        `composite-op="${BLEND_TO_ORA[l.blendMode]}"${sourceAttrs ? ` ${sourceAttrs}` : ''}/>`,
+        `composite-op="${BLEND_TO_ORA[l.blendMode]}"${extraAttrs ? ` ${extraAttrs}` : ''}/>`,
     );
   }
   return (
@@ -47,8 +56,19 @@ function buildStackXml(doc: PaintDocument, srcMap: Map<string, string>): string 
   );
 }
 
-/** Serialize a document to an OpenRaster (.ora) Blob. */
-export async function saveOra(doc: PaintDocument): Promise<Blob> {
+/** A font to embed in the .ora so its text layers stay editable with the right font. */
+export interface EmbeddedFont {
+  family: string;
+  bytes: Uint8Array;
+  ext: string;
+}
+
+function safeFileName(s: string): string {
+  return s.replace(/[^a-z0-9._-]+/gi, '_').slice(0, 48) || 'font';
+}
+
+/** Serialize a document to an OpenRaster (.ora) Blob, optionally embedding fonts. */
+export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = []): Promise<Blob> {
   const enc = new TextEncoder();
   const files: Zippable = {};
 
@@ -56,11 +76,18 @@ export async function saveOra(doc: PaintDocument): Promise<Blob> {
   files['mimetype'] = [enc.encode('image/openraster'), { level: 0 }];
 
   const srcMap = new Map<string, string>();
+  const textMap = new Map<string, string>();
   for (let i = 0; i < doc.layers.length; i++) {
     const layer = doc.layers[i];
     const src = `data/layer${i}.png`;
     srcMap.set(layer.id, src);
     files[src] = await canvasToPngBytes(layer.canvas);
+    // Editable text layers also store their model as a sidecar JSON.
+    if (layer.kind === 'text' && layer.text) {
+      const textPath = `data/layer${i}.text.json`;
+      textMap.set(layer.id, textPath);
+      files[textPath] = enc.encode(serializeModel(layer.text));
+    }
   }
 
   const merged = compositeToCanvas(doc);
@@ -69,7 +96,17 @@ export async function saveOra(doc: PaintDocument): Promise<Blob> {
   const thumb = makeThumbnail(merged, doc.width, doc.height, 256, 256);
   files['Thumbnails/thumbnail.png'] = await canvasToPngBytes(thumb);
 
-  files['stack.xml'] = enc.encode(buildStackXml(doc, srcMap));
+  files['stack.xml'] = enc.encode(buildStackXml(doc, srcMap, textMap));
+
+  // Optional embedded fonts: extra files other ORA readers ignore.
+  if (embedFonts.length) {
+    const manifest = embedFonts.map((f, i) => {
+      const file = `fonts/${safeFileName(f.family)}-${i}.${f.ext}`;
+      files[file] = f.bytes;
+      return { family: f.family, file };
+    });
+    files['fonts/manifest.json'] = enc.encode(JSON.stringify(manifest));
+  }
 
   const zipped = zipSync(files, { level: 6 });
   return new Blob([zipped], { type: 'image/openraster' });

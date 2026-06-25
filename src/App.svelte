@@ -6,6 +6,7 @@
   import ToolOptions from './lib/components/ToolOptions.svelte';
   import DocumentTabs from './lib/components/DocumentTabs.svelte';
   import CanvasView from './lib/components/CanvasView.svelte';
+  import WorkflowBoard from './lib/components/WorkflowBoard.svelte';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import ColorPanel from './lib/components/ColorPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
@@ -16,8 +17,10 @@
   import BrightnessContrastDialog from './lib/components/BrightnessContrastDialog.svelte';
   import HueSaturationDialog from './lib/components/HueSaturationDialog.svelte';
   import GaussianBlurDialog from './lib/components/GaussianBlurDialog.svelte';
-  import TextDialog from './lib/components/TextDialog.svelte';
   import AiGenerateDialog from './lib/components/AiGenerateDialog.svelte';
+  import AiDecoupleDialog from './lib/components/AiDecoupleDialog.svelte';
+  import FontEmbedDialog from './lib/components/FontEmbedDialog.svelte';
+  import RasterizeTypeDialog from './lib/components/RasterizeTypeDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -35,6 +38,7 @@
   import { isDesktop } from './lib/integrations/desktop';
   import { project } from './lib/state/project.svelte';
   import { ui } from './lib/state/ui.svelte';
+  import { workflow } from './lib/state/workflow.svelte';
 
   const desktop = isDesktop();
   let rightCollapsed = $state(false);
@@ -281,6 +285,12 @@
       case 'app:ai-generate':
         ui.open('aiGenerate');
         break;
+      case 'app:ai-decouple':
+        ui.open('aiDecouple');
+        break;
+      case 'app:workflow-board':
+        workflow.newBoard();
+        break;
       case 'app:zoom-in':
         editor.viewport?.zoomBy(1.25);
         break;
@@ -342,8 +352,12 @@
       <ToolOptions />
       <div class="content-row">
         <section class="center">
-          <DocumentTabs />
-          <CanvasView />
+          {#if workflow.active}
+            <WorkflowBoard />
+          {:else}
+            <DocumentTabs />
+            <CanvasView />
+          {/if}
         </section>
         <aside class="project-side" class:collapsed={projectCollapsed}>
           {#if projectCollapsed}
@@ -426,10 +440,16 @@
   <GaussianBlurDialog onClose={() => ui.close()} />
 {:else if ui.dialog === 'aiGenerate'}
   <AiGenerateDialog onClose={() => ui.close()} />
+{:else if ui.dialog === 'aiDecouple'}
+  <AiDecoupleDialog onClose={() => ui.close()} />
 {/if}
 
-{#if editor.pendingText}
-  <TextDialog onClose={() => (editor.pendingText = null)} />
+{#if ui.fontEmbed}
+  <FontEmbedDialog />
+{/if}
+
+{#if editor.rasterizePrompt}
+  <RasterizeTypeDialog />
 {/if}
 
 <style>

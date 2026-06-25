@@ -70,6 +70,7 @@ struct ProjectFileView {
     kind: String,
     name: String,
     relative_path: String,
+    created_at: u128,
     modified_at: u128,
     size: u64,
     mime: Option<String>,
@@ -82,6 +83,53 @@ struct ProjectFileView {
 struct GeneratedImageResult {
     data_url: String,
     asset: Option<ProjectAssetView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecoupledLayerResult {
+    name: String,
+    data_url: String,
+    key_color: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    opacity: Option<f32>,
+    visible: Option<bool>,
+    asset: Option<ProjectAssetView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecoupleImageResult {
+    layers: Vec<DecoupledLayerResult>,
+    thread_id: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DecoupleManifest {
+    layers: Vec<DecoupleManifestLayer>,
+    notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DecoupleManifestLayer {
+    name: String,
+    file: String,
+    key_color: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    opacity: Option<f32>,
+    visible: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowSourceImage {
+    name: String,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -283,9 +331,57 @@ fn data_url_for_file(path: &Path, mime: Option<&str>) -> Option<String> {
     Some(format!("data:{mime};base64,{b64}"))
 }
 
+fn is_openraster_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ora"))
+}
+
+fn is_workflow_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".cxflow.json"))
+}
+
+fn ora_thumbnail_data_url(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+
+    for entry_name in ["Thumbnails/thumbnail.png", "mergedimage.png"] {
+        let Ok(mut entry) = archive.by_name(entry_name) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).ok()?;
+        if !is_png(&bytes) {
+            continue;
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        return Some(format!("data:image/png;base64,{b64}"));
+    }
+
+    None
+}
+
+fn preview_data_url_for_project_file(path: &Path, mime: Option<&str>) -> Option<String> {
+    if is_openraster_path(path) || mime == Some("image/openraster") {
+        return ora_thumbnail_data_url(path);
+    }
+    data_url_for_file(path, mime)
+}
+
 fn modified_millis(path: &Path) -> u128 {
     fs::metadata(path)
         .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn created_millis(path: &Path) -> u128 {
+    fs::metadata(path)
+        .and_then(|m| m.created().or_else(|_| m.modified()))
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis())
@@ -334,19 +430,24 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
                 .unwrap_or("file")
                 .to_string();
             let relative = relative_dir.join(&name);
-            let mime = mime_for_path(&path).or_else(|| {
-                path.extension()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("ora"))
-                    .then(|| "image/openraster".to_string())
-            });
+            let is_workflow = is_workflow_path(&path);
+            let mime = mime_for_path(&path)
+                .or_else(|| is_openraster_path(&path).then(|| "image/openraster".to_string()))
+                .or_else(|| {
+                    is_workflow.then(|| "application/vnd.cxpaint.workflow+json".to_string())
+                });
             files.push(ProjectFileView {
-                kind: kind.to_string(),
+                kind: if is_workflow {
+                    "workflow".into()
+                } else {
+                    kind.to_string()
+                },
                 name,
                 relative_path: relative.to_string_lossy().replace('\\', "/"),
+                created_at: created_millis(&path),
                 modified_at: modified_millis(&path),
                 size: path_size(&path),
-                preview_data_url: data_url_for_file(&path, mime.as_deref()),
+                preview_data_url: preview_data_url_for_project_file(&path, mime.as_deref()),
                 mime,
                 exists: true,
             });
@@ -450,6 +551,19 @@ fn write_asset_file_with_file_name(
 
 fn safe_document_file_name(name: &str) -> String {
     let path = Path::new(name.trim());
+    if path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|file_name| file_name.to_ascii_lowercase().ends_with(".cxflow.json"))
+    {
+        let stem = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("workflow.cxflow.json")
+            .trim_end_matches(".json")
+            .trim_end_matches(".cxflow");
+        return format!("{}.cxflow.json", safe_stem(stem));
+    }
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -866,6 +980,19 @@ fn read_png_data_url(path: &Path) -> Result<String, String> {
     let bytes =
         fs::read(path).map_err(|e| format!("No output image found at {}: {e}", path.display()))?;
     png_data_url(&bytes)
+}
+
+fn safe_job_child_path(job_path: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(file_name.trim());
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return Err(format!("Manifest layer file path is invalid: {file_name}"));
+    }
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(format!("Manifest layer file path is invalid: {file_name}"));
+        }
+    }
+    Ok(job_path.join(relative))
 }
 
 fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
@@ -1336,6 +1463,161 @@ fn build_codex_command(
     command
 }
 
+fn decouple_codex_prompt(user_prompt: &str) -> String {
+    format!(
+        r##"Use the attached `source.png` to create a CX Paint recomposition asset pack.
+
+User guidance:
+{user_prompt}
+
+Goal:
+- Extract or regenerate useful standalone visual assets from the source image for later AI compositing workflows.
+- Think of the result as reusable ingredients for a node/workflow composition, not as layers that must perfectly reassemble over the source photo.
+- Prefer assets such as people/characters, held objects, vehicles, product/prop objects, architectural landmarks, environment plates, plants, and useful shadows/reflections when helpful.
+- Preserve the subject identity, pose, style, lighting direction, and broad perspective, but prioritize clean reusable assets over exact original occlusion geometry.
+
+Required AI-image workflow:
+- Use Codex image generation / the `$imagegen` image skill for the visual reconstruction steps, not text-only reasoning.
+- First identify and label the main objects in `source.png`.
+- Generate a clean environment/background asset when useful.
+- For each major editable object, generate an isolated standalone asset from the source image.
+- When transparent output is not practical, generate that object on a perfectly flat single-color matte background and record the exact matte color in `keyColor`.
+- After each generated image is available, copy or save the resulting PNG into the current working directory using the filename you list in `manifest.json`.
+- You may use scripts only for deterministic processing: locating generated PNGs, copying files, chroma-keying a matte, cropping transparent bounds, inspecting dimensions, and validating output.
+
+Required files in the current working directory:
+- `manifest.json`
+- One PNG file for each layer listed in `manifest.json`
+
+Manifest schema:
+{{
+  "layers": [
+    {{
+      "name": "Girl",
+      "file": "girl-asset.png",
+      "keyColor": null,
+      "x": 0,
+      "y": 0,
+      "opacity": 1,
+      "visible": true
+    }}
+  ],
+  "notes": "Optional short notes about rough edges or generated/inpainted regions."
+}}
+
+Layer file requirements:
+- PNG only.
+- Prefer transparent-background PNGs for object/character/prop assets.
+- If you generate an object on a plain matte/green-screen background, set `keyColor` to the exact matte color such as "#00ff00"; CX Paint will remove that color into alpha.
+- Choose a matte color that does not appear in the object. It does not need to be green.
+- For reusable assets, prefer tight crops with transparent or keyed backgrounds. Set `x` and `y` to 0 unless the image is intentionally a full-size environment plate.
+- Use manifest order from broad environment assets to foreground subject/prop assets.
+- Keep filenames simple ASCII with `.png`.
+- Do not ask follow-up questions.
+- Do not edit files outside the current working directory.
+
+Final response:
+- One short sentence that says the asset pack was created.
+- Do not embed base64 in the final response."##
+    )
+}
+
+fn build_decouple_codex_command(
+    codex_bin: &str,
+    job_path: &Path,
+    prompt: &str,
+    json_progress: bool,
+) -> Command {
+    let mut command = Command::new(codex_bin);
+    command
+        .current_dir(job_path)
+        .arg("-s")
+        .arg("workspace-write")
+        .arg("-a")
+        .arg("never")
+        .arg("-C")
+        .arg(job_path)
+        .arg("exec")
+        .arg("--skip-git-repo-check");
+    if json_progress {
+        command.arg("--json");
+    }
+    command
+        .arg("-i")
+        .arg(job_path.join("source.png"))
+        .arg("--")
+        .arg(decouple_codex_prompt(prompt.trim()))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY");
+    command
+}
+
+fn workflow_compose_prompt(prompt: &str, source_names: &[String]) -> String {
+    let sources = source_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| format!("{}. {}", i + 1, name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"Use $imagegen to compose one new raster PNG for CX Paint from the attached workflow asset images.
+
+Workflow assets:
+{sources}
+
+Composition prompt:
+{prompt}
+
+Requirements:
+- Use the attached images as visual references/assets for identity, subject appearance, object design, and scene ingredients.
+- Create one coherent new image from the composition prompt.
+- Match perspective, lighting, scale, and contact shadows plausibly.
+- Do not make a collage or contact sheet.
+- Save or copy the final composed PNG to `result.png` in the current working directory.
+- Do not create, edit, or delete files outside the current working directory.
+- Do not ask follow-up questions.
+- If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
+
+Final response should be one short sentence confirming the composed image was generated."#
+    )
+}
+
+fn build_workflow_compose_codex_command(
+    codex_bin: &str,
+    job_path: &Path,
+    image_paths: &[PathBuf],
+    prompt: &str,
+    source_names: &[String],
+    json_progress: bool,
+) -> Command {
+    let mut command = Command::new(codex_bin);
+    command
+        .current_dir(job_path)
+        .arg("-s")
+        .arg("workspace-write")
+        .arg("-a")
+        .arg("never")
+        .arg("-C")
+        .arg(job_path)
+        .arg("exec")
+        .arg("--skip-git-repo-check");
+    if json_progress {
+        command.arg("--json");
+    }
+    if !image_paths.is_empty() {
+        command.arg("-i");
+        for path in image_paths {
+            command.arg(path);
+        }
+    }
+    command
+        .arg("--")
+        .arg(workflow_compose_prompt(prompt.trim(), source_names))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY");
+    command
+}
+
 fn output_mentions_unsupported_json(output: &Output) -> bool {
     let combined = format!(
         "{}\n{}",
@@ -1550,6 +1832,380 @@ async fn generate_codex_image(
                 created_at: now_id(),
                 prompt: Some(prompt.trim().into()),
                 source_file_name: source_file_name.map(str::to_string),
+                width: None,
+                height: None,
+                mime: Some("image/png".into()),
+            };
+            Some(add_asset(&project_dir, asset)?)
+        } else {
+            None
+        };
+
+        if cleanup_project_job {
+            let _ = fs::remove_dir_all(&job_path);
+        }
+
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(GeneratedImageResult { data_url, asset })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+/// Ask local Codex to turn one source PNG into a manifest plus multiple layer PNGs.
+///
+/// The app owns the deterministic import step; Codex only needs to satisfy the file contract.
+#[tauri::command]
+async fn decouple_codex_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    source_png: Vec<u8>,
+    run_id: String,
+    store_assets: Option<bool>,
+) -> Result<DecoupleImageResult, String> {
+    if !is_png(&source_png) {
+        return Err("Decouple source must be a PNG image.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
+        let codex_bin = configured_or_default_codex_bin(bin)?;
+        let run_id = if run_id.trim().is_empty() {
+            format!("decouple-{}", now_id())
+        } else {
+            run_id
+        };
+        let project_dir = project_path
+            .as_ref()
+            .map(|p| PathBuf::from(p.trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+        let store_assets = store_assets.unwrap_or(true);
+        let temp_job;
+        let job_path = if let Some(project_dir) = &project_dir {
+            ensure_project_dirs(project_dir)?;
+            let run_dir = project_dir
+                .join(".cxpaint")
+                .join("codex-runs")
+                .join(format!("decouple-{}", now_id()));
+            fs::create_dir_all(&run_dir)
+                .map_err(|e| format!("Failed to create Codex decouple folder: {e}"))?;
+            run_dir
+        } else {
+            temp_job = TempJobDir::new("cxpaint-decouple")?;
+            temp_job.path().to_path_buf()
+        };
+
+        let source_path = job_path.join("source.png");
+        fs::write(&source_path, &source_png)
+            .map_err(|e| format!("Failed to write decouple source image: {e}"))?;
+
+        emit_codex_progress(&app, &run_id, "Starting local Codex asset extraction");
+        let codex_started_at = SystemTime::now();
+        let user_prompt = if prompt.trim().is_empty() {
+            "Identify the main reusable elements and create a useful recomposition asset pack."
+        } else {
+            prompt.trim()
+        };
+        let mut command = build_decouple_codex_command(&codex_bin, &job_path, user_prompt, true);
+        let mut run = run_codex_with_progress(
+            &mut command,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+            job_path.clone(),
+            None,
+            codex_started_at,
+        )
+        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+
+        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Codex progress stream unavailable; retrying asset extraction",
+            );
+            let mut fallback =
+                build_decouple_codex_command(&codex_bin, &job_path, user_prompt, false);
+            run = run_codex_with_progress(
+                &mut fallback,
+                GENERATION_TIMEOUT,
+                app.clone(),
+                run_id.clone(),
+                job_path.clone(),
+                None,
+                codex_started_at,
+            )
+            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+        }
+
+        if !run.output.status.success() {
+            if let Some(message) = final_codex_agent_message(&run.output) {
+                return Err(format!("Codex did not create an asset pack.\n\n{message}"));
+            }
+            return Err(command_failure("Codex asset extraction", &run.output));
+        }
+
+        let manifest_path = job_path.join("manifest.json");
+        emit_codex_progress(&app, &run_id, "Reading asset manifest");
+        let manifest_text = fs::read_to_string(&manifest_path).map_err(|e| {
+            format!(
+                "Codex did not create manifest.json at {}: {e}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
+            .map_err(|e| format!("Decouple manifest is invalid JSON: {e}"))?;
+        if manifest.layers.is_empty() {
+            return Err("Asset manifest did not contain any assets.".into());
+        }
+
+        let mut layers = Vec::new();
+        for (index, layer) in manifest.layers.into_iter().enumerate() {
+            let name = layer.name.trim();
+            let name = if name.is_empty() {
+                format!("Extracted Asset {}", index + 1)
+            } else {
+                name.chars().take(80).collect::<String>()
+            };
+            let layer_path = safe_job_child_path(&job_path, &layer.file)?;
+            let bytes = fs::read(&layer_path).map_err(|e| {
+                format!(
+                    "Asset '{}' was listed but could not be read at {}: {e}",
+                    name,
+                    layer_path.display()
+                )
+            })?;
+            if !is_png(&bytes) {
+                return Err(format!("Asset '{}' is not a valid PNG.", name));
+            }
+
+            let data_url = png_data_url(&bytes)?;
+            let asset = match (store_assets, project_dir.as_ref()) {
+                (true, Some(project_dir)) => {
+                    let (id, relative_path) =
+                        write_asset_file(project_dir, "generated", &name, "png", &bytes)?;
+                    Some(add_asset(
+                        project_dir,
+                        ProjectAsset {
+                            id,
+                            kind: "generated".into(),
+                            name: name.clone(),
+                            relative_path,
+                            created_at: now_id(),
+                            prompt: Some(format!("Decoupled from source: {user_prompt}")),
+                            source_file_name: Path::new(&layer.file)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .map(str::to_string),
+                            width: None,
+                            height: None,
+                            mime: Some("image/png".into()),
+                        },
+                    )?)
+                }
+                _ => None,
+            };
+
+            layers.push(DecoupledLayerResult {
+                name,
+                data_url,
+                key_color: layer.key_color,
+                x: layer.x,
+                y: layer.y,
+                opacity: layer.opacity,
+                visible: layer.visible,
+                asset,
+            });
+        }
+
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(DecoupleImageResult {
+            layers,
+            thread_id: run.thread_id,
+            notes: manifest.notes,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+async fn compose_codex_workflow(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    sources: Vec<WorkflowSourceImage>,
+    run_id: String,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter a composition prompt.".into());
+    }
+    if sources.is_empty() {
+        return Err("Add at least one asset node before generating.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let codex_bin = configured_or_default_codex_bin(bin)?;
+        let run_id = if run_id.trim().is_empty() {
+            format!("workflow-{}", now_id())
+        } else {
+            run_id
+        };
+        let project_dir = project_path
+            .as_ref()
+            .map(|p| PathBuf::from(p.trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+        let cleanup_project_job = project_dir.is_some();
+        let temp_job;
+        let job_path = if let Some(project_dir) = &project_dir {
+            ensure_project_dirs(project_dir)?;
+            let run_dir = project_dir
+                .join(".cxpaint")
+                .join("codex-runs")
+                .join(format!("workflow-{}", now_id()));
+            fs::create_dir_all(&run_dir)
+                .map_err(|e| format!("Failed to create Codex workflow folder: {e}"))?;
+            run_dir
+        } else {
+            temp_job = TempJobDir::new("cxpaint-workflow")?;
+            temp_job.path().to_path_buf()
+        };
+
+        let mut source_names = Vec::new();
+        let mut image_paths = Vec::new();
+        for (index, source) in sources.into_iter().enumerate() {
+            if !is_png(&source.bytes) {
+                return Err(format!(
+                    "Workflow asset '{}' is not a PNG image.",
+                    source.name
+                ));
+            }
+            let name = if source.name.trim().is_empty() {
+                format!("asset-{}", index + 1)
+            } else {
+                source.name.chars().take(64).collect::<String>()
+            };
+            let path = job_path.join(format!("{}-{}.png", index + 1, safe_stem(&name)));
+            fs::write(&path, &source.bytes)
+                .map_err(|e| format!("Failed to write workflow source image: {e}"))?;
+            source_names.push(name);
+            image_paths.push(path);
+        }
+
+        let result_path = job_path.join("result.png");
+        emit_codex_progress(&app, &run_id, "Starting local Codex workflow composition");
+        let codex_started_at = SystemTime::now();
+        let mut command = build_workflow_compose_codex_command(
+            &codex_bin,
+            &job_path,
+            &image_paths,
+            prompt.trim(),
+            &source_names,
+            true,
+        );
+        let mut run = run_codex_with_progress(
+            &mut command,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+            job_path.clone(),
+            Some(result_path.clone()),
+            codex_started_at,
+        )
+        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+
+        if !run.completed_from_result_file
+            && !run.output.status.success()
+            && output_mentions_unsupported_json(&run.output)
+        {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Codex progress stream unavailable; retrying workflow composition",
+            );
+            let mut fallback = build_workflow_compose_codex_command(
+                &codex_bin,
+                &job_path,
+                &image_paths,
+                prompt.trim(),
+                &source_names,
+                false,
+            );
+            run = run_codex_with_progress(
+                &mut fallback,
+                GENERATION_TIMEOUT,
+                app.clone(),
+                run_id.clone(),
+                job_path.clone(),
+                Some(result_path.clone()),
+                codex_started_at,
+            )
+            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+        }
+
+        if !run.completed_from_result_file && !run.output.status.success() {
+            if let Some(message) = final_codex_agent_message(&run.output) {
+                return Err(format!("Codex did not compose an image.\n\n{message}"));
+            }
+            return Err(command_failure("Codex workflow composition", &run.output));
+        }
+
+        let recovered_source_path = if !file_has_png_signature(&result_path) {
+            recover_result_png(
+                &job_path,
+                &result_path,
+                Some(&run.output),
+                run.thread_id.as_deref(),
+                Some(codex_started_at),
+            )
+        } else {
+            find_codex_cached_png(run.thread_id.as_deref(), codex_started_at, &result_path)
+        };
+
+        if recovered_source_path.is_some()
+            && recovered_source_path.as_deref() != Some(result_path.as_path())
+        {
+            emit_codex_progress(&app, &run_id, "Recovered composed PNG; importing");
+        }
+
+        emit_codex_progress(&app, &run_id, "Reading composed PNG");
+        if !result_path.exists() {
+            if let Some(message) = final_codex_agent_message(&run.output) {
+                return Err(format!(
+                    "Codex did not expose a composed image.\n\n{message}\n\nInternal copy path: {}",
+                    result_path.display()
+                ));
+            }
+            return Err(format!(
+                "CX Paint could not find a composed PNG at {}.",
+                result_path.display()
+            ));
+        }
+
+        let data_url = read_png_data_url(&result_path)?;
+        let asset = if let Some(project_dir) = project_dir {
+            emit_codex_progress(&app, &run_id, "Saving composed image to the project");
+            let bytes = fs::read(&result_path)
+                .map_err(|e| format!("Failed to read composed image for project storage: {e}"))?;
+            let (id, relative_path) =
+                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
+            let asset = ProjectAsset {
+                id,
+                kind: "generated".into(),
+                name: format!(
+                    "Workflow: {}",
+                    prompt.trim().chars().take(48).collect::<String>()
+                ),
+                relative_path,
+                created_at: now_id(),
+                prompt: Some(prompt.trim().into()),
+                source_file_name: recovered_source_path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string),
                 width: None,
                 height: None,
                 mime: Some("image/png".into()),
@@ -2037,6 +2693,20 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         None::<&str>,
     )?;
+    let ai_decouple = MenuItem::with_id(
+        app,
+        "app:ai-decouple",
+        "Extract Assets...",
+        true,
+        None::<&str>,
+    )?;
+    let workflow_board = MenuItem::with_id(
+        app,
+        "app:workflow-board",
+        "New Workflow Board",
+        true,
+        None::<&str>,
+    )?;
     let zoom_in = MenuItem::with_id(app, "app:zoom-in", "Zoom In", true, Some("CmdOrCtrl+="))?;
     let zoom_out = MenuItem::with_id(app, "app:zoom-out", "Zoom Out", true, Some("CmdOrCtrl+-"))?;
     let fit = MenuItem::with_id(
@@ -2125,7 +2795,17 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )?;
     let select = Submenu::with_items(app, "Select", true, &[&select_all, &deselect, &inverse])?;
     let filter = Submenu::with_items(app, "Filter", true, &[&gaussian, &sharpen])?;
-    let ai = Submenu::with_items(app, "AI", true, &[&ai_generate])?;
+    let ai = Submenu::with_items(
+        app,
+        "AI",
+        true,
+        &[
+            &ai_generate,
+            &ai_decouple,
+            &PredefinedMenuItem::separator(app)?,
+            &workflow_board,
+        ],
+    )?;
     let view = Submenu::with_items(app, "View", true, &[&zoom_in, &zoom_out, &fit, &actual])?;
     let help = Submenu::with_items(app, "Help", true, &[&about])?;
 
@@ -2161,6 +2841,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate_image,
             generate_codex_image,
+            decouple_codex_image,
+            compose_codex_workflow,
             project_open_folder,
             project_refresh,
             project_store_asset_bytes,
@@ -2197,6 +2879,52 @@ mod tests {
     fn png_data_url_rejects_non_png() {
         let err = png_data_url(b"not a png").expect_err("invalid PNG should fail");
         assert!(err.contains("not a valid PNG"));
+    }
+
+    #[test]
+    fn ora_thumbnail_data_url_reads_embedded_thumbnail() {
+        let job = TempJobDir::new("cxpaint-ora-thumb-test").expect("temp dir");
+        let path = job.path().join("document.ora");
+        let file = fs::File::create(&path).expect("ora file");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        archive.start_file("mimetype", options).expect("mimetype");
+        archive
+            .write_all(b"image/openraster")
+            .expect("mimetype bytes");
+        archive
+            .start_file("Thumbnails/thumbnail.png", options)
+            .expect("thumbnail");
+        archive.write_all(ONE_PIXEL_PNG).expect("thumbnail bytes");
+        archive.finish().expect("finish archive");
+
+        let data_url = ora_thumbnail_data_url(&path).expect("thumbnail data url");
+        assert!(data_url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn ora_thumbnail_data_url_falls_back_to_merged_image() {
+        let job = TempJobDir::new("cxpaint-ora-merged-test").expect("temp dir");
+        let path = job.path().join("document.ora");
+        let file = fs::File::create(&path).expect("ora file");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        archive.start_file("mimetype", options).expect("mimetype");
+        archive
+            .write_all(b"image/openraster")
+            .expect("mimetype bytes");
+        archive
+            .start_file("mergedimage.png", options)
+            .expect("merged image");
+        archive.write_all(ONE_PIXEL_PNG).expect("merged bytes");
+        archive.finish().expect("finish archive");
+
+        let data_url = ora_thumbnail_data_url(&path).expect("merged data url");
+        assert!(data_url.starts_with("data:image/png;base64,"));
     }
 
     #[test]
@@ -2269,6 +2997,67 @@ mod tests {
         let message = final_codex_agent_message_from_text(stdout, "")
             .expect("should extract final agent message");
         assert!(message.starts_with("Generated one raster PNG"));
+    }
+
+    #[test]
+    fn decouple_codex_command_delimits_image_args_before_prompt() {
+        let job = TempJobDir::new("cxpaint-decouple-command-test").expect("temp dir");
+        let command = build_decouple_codex_command("codex", job.path(), "separate objects", true);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        let image_idx = args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("image arg should be present");
+        assert_eq!(
+            args[image_idx + 1],
+            job.path().join("source.png").to_string_lossy()
+        );
+        assert_eq!(args[image_idx + 2], "--");
+        assert!(
+            args[image_idx + 3].contains("User guidance:\nseparate objects"),
+            "prompt should be passed after -- instead of being consumed as another image path",
+        );
+    }
+
+    #[test]
+    fn workflow_compose_command_delimits_variadic_image_args_before_prompt() {
+        let job = TempJobDir::new("cxpaint-workflow-command-test").expect("temp dir");
+        let image_paths = vec![job.path().join("girl.png"), job.path().join("truck.png")];
+        let names = vec!["girl".to_string(), "truck".to_string()];
+        let command = build_workflow_compose_codex_command(
+            "codex",
+            job.path(),
+            &image_paths,
+            "compose scene",
+            &names,
+            true,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        let image_idx = args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("image arg should be present");
+        assert_eq!(args[image_idx + 1], image_paths[0].to_string_lossy());
+        assert_eq!(args[image_idx + 2], image_paths[1].to_string_lossy());
+        assert_eq!(args[image_idx + 3], "--");
+        assert!(args[image_idx + 4].contains("Composition prompt:\ncompose scene"));
+    }
+
+    #[test]
+    fn safe_document_file_name_preserves_workflow_extension() {
+        assert_eq!(
+            safe_document_file_name("Beach Board.cxflow.json"),
+            "beach-board.cxflow.json"
+        );
+        assert_eq!(safe_document_file_name("demo.ora"), "demo.ora");
     }
 
     #[test]

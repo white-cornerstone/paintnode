@@ -21,6 +21,16 @@ import {
   type PixelOp,
 } from '../engine/adjustments';
 import { gaussianBlur, sharpen } from '../engine/filters';
+import {
+  DEFAULT_LINE_HEIGHT,
+  cloneModel,
+  defaultStyle,
+  isBlankModel,
+  textLayerName,
+  type TextModel,
+  type TextStyle,
+} from '../engine/text/model';
+import { renderTextToCanvas, textBounds } from '../engine/text/render';
 import type { Tool, ToolHost } from '../engine/tools/Tool';
 import { PaintTool } from '../engine/tools/PaintTool';
 import { FillTool } from '../engine/tools/FillTool';
@@ -49,6 +59,29 @@ export interface LayerSourceMeta {
   path?: string | null;
 }
 
+export interface DecoupledLayerImport {
+  name: string;
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  x?: number | null;
+  y?: number | null;
+  opacity?: number | null;
+  visible?: boolean | null;
+  sourceMeta?: LayerSourceMeta;
+}
+
+/** An in-progress text edit driven by the on-canvas TextEditorOverlay. */
+export interface TextEditSession {
+  /** Layer being edited, or null when creating a new text layer. */
+  layerId: string | null;
+  isNew: boolean;
+  /** Working model; its x/y are the document-space top-left of the text box. */
+  model: TextModel;
+  /** Style used for new/empty text and as the toolbar's starting values. */
+  baseStyle: TextStyle;
+}
+
 export interface DocumentSession {
   id: string;
   doc: PaintDocument;
@@ -59,6 +92,8 @@ export interface DocumentSession {
   autosavedRevision: number;
   savedPath: string | null;
   autosavePath: string | null;
+  /** Remembered "embed fonts?" choice for this document (null = ask on next save). */
+  embedFonts: boolean | null;
 }
 
 export class EditorStore implements ToolHost {
@@ -94,8 +129,15 @@ export class EditorStore implements ToolHost {
   spongeMode = $state<'saturate' | 'desaturate'>('saturate');
   /** Whether Alt/Option is currently held — drives the live zoom-mode preview. */
   altDown = $state(false);
-  // Text tool: pending insertion point (drives the text dialog)
-  pendingText = $state<{ x: number; y: number } | null>(null);
+  // Type tool: the active on-canvas text edit session (null = not editing).
+  textEdit = $state<TextEditSession | null>(null);
+  // Set when a pixel tool is used on a text layer — drives the "rasterize first?" prompt.
+  rasterizePrompt = $state<{ layerId: string; name: string } | null>(null);
+  // Remembered Type-tool defaults for the next new text layer.
+  lastFontFamily = $state('sans-serif');
+  lastFontSize = $state(72);
+  /** Set by the text overlay so other UI (e.g. canvas clicks) can commit the edit. */
+  private textCommitFn: (() => void) | null = null;
 
   activeToolId = $state('brush');
   flashMessage = $state('');
@@ -198,6 +240,7 @@ export class EditorStore implements ToolHost {
       autosavedRevision: 0,
       savedPath: null,
       autosavePath: null,
+      embedFonts: null,
     };
   }
 
@@ -229,8 +272,26 @@ export class EditorStore implements ToolHost {
   setForeground(rgb: RGB): void {
     this.foreground = rgb;
   }
-  requestText(x: number, y: number): void {
-    this.pendingText = { x, y };
+  beginText(x: number, y: number): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const hit = this.textLayerAt(x, y);
+    if (hit) {
+      this.beginEditLayer(hit);
+      return;
+    }
+    const style = defaultStyle({
+      family: this.lastFontFamily,
+      size: this.lastFontSize,
+      color: { ...this.foreground },
+    });
+    const model: TextModel = {
+      version: 1,
+      x: Math.round(x),
+      y: Math.round(y),
+      paragraphs: [{ align: 'left', lineHeight: DEFAULT_LINE_HEIGHT, runs: [{ text: '', style }] }],
+    };
+    this.textEdit = { layerId: null, isNew: true, model, baseStyle: style };
   }
   bump(): void {
     this.notify(true);
@@ -834,24 +895,230 @@ export class EditorStore implements ToolHost {
     this.invalidate();
   }
 
-  /** Rasterize text onto a new layer at the pending insertion point (undoable). */
-  addText(text: string, fontSize: number, fontFamily: string): void {
+  // --- Text editing (undoable) ---
+
+  /** Topmost visible text layer whose rendered bounds contain (x, y), else null. */
+  private textLayerAt(x: number, y: number): Layer | null {
     const doc = this.doc;
-    const pos = this.pendingText;
-    this.pendingText = null;
-    if (!doc || !pos || !text.trim()) return;
-    this.structural('Text', () => {
-      const name = text.split('\n')[0].slice(0, 24) || 'Text';
-      const layer = new Layer(doc.width, doc.height, name);
-      const c = layer.ctx;
-      c.fillStyle = rgbToCss(this.foreground, 1);
-      c.textBaseline = 'top';
-      c.font = `${fontSize}px ${fontFamily}`;
-      const lh = fontSize * 1.3;
-      text.split('\n').forEach((line, i) => c.fillText(line, pos.x, pos.y + i * lh));
+    if (!doc) return null;
+    const pad = 4;
+    for (let i = doc.layers.length - 1; i >= 0; i--) {
+      const l = doc.layers[i];
+      if (l.kind !== 'text' || !l.text || !l.visible) continue;
+      const b = textBounds(l.text);
+      const rx = b.x + l.x;
+      const ry = b.y + l.y;
+      if (x >= rx - pad && x <= rx + b.w + pad && y >= ry - pad && y <= ry + b.h + pad) return l;
+    }
+    return null;
+  }
+
+  private beginEditLayer(layer: Layer): void {
+    if (!layer.text) return;
+    this.doc?.setActive(layer.id);
+    // Fold any layer offset (from the Move tool) into the working model's position.
+    const model = cloneModel(layer.text);
+    model.x += layer.x;
+    model.y += layer.y;
+    layer.suppressed = true; // hide pixels; the overlay shows live text
+    const baseStyle = model.paragraphs[0]?.runs[0]?.style ?? defaultStyle();
+    this.textEdit = { layerId: layer.id, isNew: false, model, baseStyle };
+    this.bump();
+    this.invalidate();
+  }
+
+  /** Overlay registers/clears a callback so a canvas click can commit the active edit. */
+  registerTextCommit(fn: (() => void) | null): void {
+    this.textCommitFn = fn;
+  }
+  commitActiveText(): void {
+    this.textCommitFn?.();
+  }
+
+  /** Finish the active edit, applying `model` (undoable). */
+  commitText(model: TextModel): void {
+    const session = this.textEdit;
+    const doc = this.doc;
+    this.textEdit = null;
+    this.textCommitFn = null;
+    if (!doc || !session) return;
+    const blank = isBlankModel(model);
+
+    if (session.isNew) {
+      if (blank) {
+        this.bump();
+        this.invalidate();
+        return; // nothing typed → no layer
+      }
+      this.rememberTextDefaults(model);
+      this.structural('Text', () => {
+        const layer = new Layer(doc.width, doc.height, textLayerName(model));
+        layer.kind = 'text';
+        layer.text = cloneModel(model);
+        renderTextToCanvas(layer.canvas, layer.text);
+        layer.touch();
+        doc.insertAboveActive(layer);
+      });
+      return;
+    }
+
+    const layer = doc.layers.find((l) => l.id === session.layerId);
+    if (!layer) {
+      this.bump();
+      this.invalidate();
+      return;
+    }
+    layer.suppressed = false;
+    if (blank) {
+      // All text deleted → remove the layer (Photoshop-style), unless it's the only one.
+      if (doc.layers.length > 1) {
+        this.structural('Delete Text', () => doc.remove(layer.id));
+      } else {
+        this.bump();
+        this.invalidate();
+      }
+      return;
+    }
+    this.rememberTextDefaults(model);
+    this.applyTextEdit(layer, model);
+  }
+
+  /** Cancel the active edit without changing pixels/model. */
+  cancelText(): void {
+    const session = this.textEdit;
+    this.textEdit = null;
+    this.textCommitFn = null;
+    if (!session) return;
+    if (!session.isNew && session.layerId) {
+      const layer = this.doc?.layers.find((l) => l.id === session.layerId);
+      if (layer) layer.suppressed = false;
+    }
+    this.bump();
+    this.invalidate();
+  }
+
+  private rememberTextDefaults(model: TextModel): void {
+    const style = model.paragraphs[0]?.runs[0]?.style;
+    if (style) {
+      this.lastFontFamily = style.family;
+      this.lastFontSize = style.size;
+    }
+  }
+
+  /** Apply an edit to an existing text layer with an undoable, region-snapshotted command. */
+  private applyTextEdit(layer: Layer, newModel: TextModel): void {
+    const doc = this.doc!;
+    const beforeModel = layer.text ? cloneModel(layer.text) : null;
+    const bx = layer.x;
+    const by = layer.y;
+    const region = this.unionTextRegion(beforeModel, bx, by, newModel, doc);
+    const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    const applyNew = () => {
+      layer.text = cloneModel(newModel);
+      layer.x = 0;
+      layer.y = 0;
+      renderTextToCanvas(layer.canvas, layer.text);
       layer.touch();
-      doc.insertAboveActive(layer);
+    };
+    applyNew();
+    const after = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    this.history.push({
+      label: 'Edit Text',
+      undo: () => {
+        layer.text = beforeModel;
+        layer.x = bx;
+        layer.y = by;
+        layer.ctx.putImageData(before.data, before.x, before.y);
+        layer.touch();
+        this.bump();
+        this.invalidate();
+      },
+      redo: () => {
+        layer.x = 0;
+        layer.y = 0;
+        layer.text = cloneModel(newModel);
+        layer.ctx.putImageData(after.data, after.x, after.y);
+        layer.touch();
+        this.bump();
+        this.invalidate();
+      },
     });
+    this.bump();
+    this.invalidate();
+  }
+
+  /** Document-clamped rect covering both the old and new text extents. */
+  private unionTextRegion(
+    beforeModel: TextModel | null,
+    bx: number,
+    by: number,
+    newModel: TextModel,
+    doc: PaintDocument,
+  ): Rect {
+    const rects: Rect[] = [];
+    if (beforeModel) {
+      const b = textBounds(beforeModel);
+      rects.push({ x: b.x + bx, y: b.y + by, w: b.w, h: b.h });
+    }
+    const n = textBounds(newModel);
+    rects.push({ x: n.x, y: n.y, w: n.w, h: n.h });
+    const minX = Math.min(...rects.map((r) => r.x));
+    const minY = Math.min(...rects.map((r) => r.y));
+    const maxX = Math.max(...rects.map((r) => r.x + r.w));
+    const maxY = Math.max(...rects.map((r) => r.y + r.h));
+    const pad = 2;
+    return (
+      clampRect({ x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 }, doc.width, doc.height) ?? {
+        x: 0,
+        y: 0,
+        w: doc.width,
+        h: doc.height,
+      }
+    );
+  }
+
+  /** A pixel tool was aimed at a text layer — ask whether to rasterize it first. */
+  promptRasterize(layer: Layer): void {
+    this.rasterizePrompt = { layerId: layer.id, name: layer.name };
+  }
+  confirmRasterize(): void {
+    const p = this.rasterizePrompt;
+    this.rasterizePrompt = null;
+    if (p) this.rasterizeType(p.layerId);
+  }
+  dismissRasterize(): void {
+    this.rasterizePrompt = null;
+  }
+
+  /** Rasterize the active text layer's model into a new raster layer (undoable). */
+  rasterizeType(id: string): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const layer = doc.layers.find((l) => l.id === id);
+    if (!layer || layer.kind !== 'text') return;
+    const prevModel = layer.text;
+    this.history.push({
+      label: 'Rasterize Type',
+      undo: () => {
+        layer.kind = 'text';
+        layer.text = prevModel;
+        layer.touch();
+        this.bump();
+        this.invalidate();
+      },
+      redo: () => {
+        layer.kind = 'raster';
+        layer.text = null;
+        layer.touch();
+        this.bump();
+        this.invalidate();
+      },
+    });
+    layer.kind = 'raster';
+    layer.text = null;
+    layer.touch();
+    this.bump();
+    this.invalidate();
   }
 
   /** Insert an external image as a new, centered layer (undoable). */
@@ -878,6 +1145,46 @@ export class EditorStore implements ToolHost {
       placedId = layer.id;
     });
     return { oversized: isOversized, layerId: placedId };
+  }
+
+  /** Insert a stack of AI-decoupled layers above the source layer as one undoable edit. */
+  insertDecoupledLayers(
+    sourceLayerId: string,
+    layers: DecoupledLayerImport[],
+    options: { hideSource?: boolean } = {},
+  ): number {
+    const doc = this.doc;
+    if (!doc || layers.length === 0) return 0;
+    const sourceIdx = doc.indexOf(sourceLayerId);
+    if (sourceIdx < 0) return 0;
+    const sourceLayer = doc.layers[sourceIdx];
+    let inserted = 0;
+    this.structural('Extract Assets', () => {
+      const next = doc.layers.slice();
+      const built = layers.map((item) => {
+        const layer = new Layer(
+          item.width,
+          item.height,
+          item.name || `Decoupled ${inserted + 1}`,
+          undefined,
+          sourceLayer.x + Math.round(item.x ?? 0),
+          sourceLayer.y + Math.round(item.y ?? 0),
+        );
+        layer.opacity = Math.max(0, Math.min(1, item.opacity ?? 1));
+        layer.visible = item.visible ?? true;
+        layer.sourceAssetId = item.sourceMeta?.assetId ?? null;
+        layer.sourcePath = item.sourceMeta?.path ?? null;
+        layer.ctx.drawImage(item.source, 0, 0);
+        layer.touch();
+        inserted++;
+        return layer;
+      });
+      if (options.hideSource) sourceLayer.visible = false;
+      next.splice(sourceIdx + 1, 0, ...built);
+      doc.layers = next;
+      doc.activeLayerId = built.at(-1)?.id ?? sourceLayerId;
+    });
+    return inserted;
   }
 }
 

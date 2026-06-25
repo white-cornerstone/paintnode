@@ -1,0 +1,381 @@
+<script lang="ts">
+  import { onDestroy } from 'svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import Modal from './Modal.svelte';
+  import Icon from './Icon.svelte';
+  import { tooltip } from '../actions/tooltip';
+  import { chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
+  import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
+  import { project } from '../state/project.svelte';
+  import { decoupleCodexImage, isDesktop, type DecoupledLayerResult } from '../integrations/desktop';
+  import { Copy } from '../icons';
+
+  let { onClose }: { onClose: () => void } = $props();
+
+  type CodexProgressPayload = { runId: string; message: string };
+
+  const desktop = isDesktop();
+  const KEY = 'cxpaint.decouple';
+  const DEFAULT_PROMPT =
+    'Extract reusable assets for a later AI composition workflow: main subject, important props, environment plate, and any useful shadows or reflections.';
+
+  function loadCfg(): { codexBin: string; prompt: string; placeOnCanvas: boolean; tolerance: number } {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          codexBin: '',
+          prompt: DEFAULT_PROMPT,
+          tolerance: 30,
+          ...parsed,
+          placeOnCanvas: parsed.placeOnCanvas ?? false,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+    return { codexBin: '', prompt: DEFAULT_PROMPT, placeOnCanvas: false, tolerance: 30 };
+  }
+
+  const init = loadCfg();
+  let codexBin = $state(init.codexBin);
+  let prompt = $state(init.prompt);
+  let placeOnCanvas = $state(init.placeOnCanvas);
+  let tolerance = $state(init.tolerance);
+  let busy = $state(false);
+  let error = $state('');
+  let copied = $state(false);
+  let progress = $state('');
+  let notes = $state('');
+  let stopProgress: UnlistenFn | null = null;
+
+  function createRunId(): string {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `decouple-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function clearProgressListener() {
+    stopProgress?.();
+    stopProgress = null;
+  }
+
+  onDestroy(clearProgressListener);
+
+  async function copyError() {
+    if (!error) return;
+    try {
+      await navigator.clipboard.writeText(error);
+    } catch {
+      const area = document.createElement('textarea');
+      area.value = error;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+    }
+    copied = true;
+    window.setTimeout(() => (copied = false), 1200);
+  }
+
+  async function canvasPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+    return new Uint8Array(await (await canvasToPngBlob(canvas)).arrayBuffer());
+  }
+
+  async function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((next) => (next ? resolve(next) : reject(new Error('Could not encode layer PNG.'))), 'image/png');
+    });
+    return blob;
+  }
+
+  async function layerToImport(layer: DecoupledLayerResult): Promise<DecoupledLayerImport> {
+    const blob = await (await fetch(layer.dataUrl)).blob();
+    const bmp = await createImageBitmap(blob);
+    const canvas = document.createElement('canvas');
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Unable to prepare decoupled layer.');
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+
+    const key = layer.keyColor ? parseHexColor(layer.keyColor) : null;
+    if (layer.keyColor && !key) {
+      throw new Error(`Layer "${layer.name}" returned invalid keyColor "${layer.keyColor}".`);
+    }
+    if (key) {
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      connectedMatteToAlpha(img.data, {
+        key,
+        width: canvas.width,
+        height: canvas.height,
+        tolerance,
+        softness: Math.max(12, tolerance * 1.2),
+        floodTolerance: Math.min(260, tolerance + Math.max(24, tolerance * 3.2)),
+        despill: 0.35,
+      });
+      chromaKeyToAlpha(img.data, {
+        key,
+        tolerance: Math.max(8, tolerance * 0.55),
+        softness: Math.max(4, tolerance * 0.25),
+        despill: 0.35,
+      });
+      ctx.putImageData(img, 0, 0);
+    }
+
+    return {
+      name: layer.name,
+      source: canvas,
+      width: canvas.width,
+      height: canvas.height,
+      x: layer.x,
+      y: layer.y,
+      opacity: layer.opacity,
+      visible: layer.visible,
+      sourceMeta: {},
+    };
+  }
+
+  async function run() {
+    error = '';
+    copied = false;
+    notes = '';
+    const sourceLayer = editor.activeLayer;
+    if (!desktop) {
+      error = 'Available only in the desktop app.';
+      return;
+    }
+    if (!sourceLayer) {
+      error = 'Select a source layer to extract assets from.';
+      return;
+    }
+    if (!project.path && !placeOnCanvas) {
+      error = 'Open a project folder, or enable placing extracted assets on the canvas.';
+      return;
+    }
+    try {
+      localStorage.setItem(KEY, JSON.stringify({ codexBin, prompt, placeOnCanvas, tolerance }));
+    } catch {
+      /* ignore */
+    }
+
+    busy = true;
+    progress = 'Preparing source layer...';
+    editor.flash('Extracting assets with Codex...');
+    clearProgressListener();
+    const runId = createRunId();
+    try {
+      stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
+        if (event.payload.runId === runId && event.payload.message.trim()) {
+          progress = event.payload.message.trim();
+        }
+      });
+    } catch {
+      progress = 'Local Codex is running...';
+    }
+
+    try {
+      const sourcePng = await canvasPngBytes(sourceLayer.canvas);
+      const result = await decoupleCodexImage(
+        { bin: codexBin, projectPath: project.path, runId },
+        sourcePng,
+        prompt.trim() || DEFAULT_PROMPT,
+        false,
+      );
+      progress = 'Cleaning and saving extracted assets...';
+      const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
+      for (const item of imports) {
+        const blob = await canvasToPngBlob(item.source as HTMLCanvasElement);
+        const asset = await project.storeGeneratedBlob(
+          blob,
+          `${item.name || 'Extracted asset'}.png`,
+          `Extracted asset from ${sourceLayer.name}`,
+          item.width,
+          item.height,
+        );
+        item.sourceMeta = {
+          assetId: asset?.id ?? null,
+          path: asset?.relativePath ?? null,
+        };
+      }
+      const inserted = placeOnCanvas
+        ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
+        : 0;
+      notes = result.notes ?? '';
+      editor.flash(
+        placeOnCanvas
+          ? `Extracted ${imports.length} assets and placed ${inserted} layers`
+          : `Extracted ${imports.length} assets`,
+      );
+      onClose();
+    } catch (e) {
+      error = (e as Error)?.message ?? String(e);
+      editor.flash('Asset extraction failed');
+    } finally {
+      busy = false;
+      progress = '';
+      clearProgressListener();
+    }
+  }
+</script>
+
+<Modal title="Extract Assets (AI)" {onClose} width={500}>
+  <div class="dlg-form">
+    {#if !desktop}
+      <p class="warn">
+        This runs local Codex and only works in the desktop app. Launch it with
+        <code>npm run tauri:dev</code>.
+      </p>
+    {/if}
+
+    <label class="dlg-field">
+      <span>Codex command (optional)</span>
+      <input type="text" bind:value={codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
+    </label>
+
+    <label class="dlg-field">
+      <span>Asset guidance</span>
+      <textarea bind:value={prompt} rows="4" spellcheck="true"></textarea>
+    </label>
+
+    <div class="split-row">
+      <label class="check-row">
+        <input type="checkbox" bind:checked={placeOnCanvas} />
+        <span>Place extracted assets on canvas</span>
+      </label>
+      <label class="compact-field">
+        <span>Key tolerance</span>
+        <input type="number" min="0" max="120" step="1" bind:value={tolerance} />
+      </label>
+    </div>
+
+    <p class="hint">
+      Codex returns named PNG assets and a manifest. CX Paint cleans keyed or matte backgrounds,
+      saves transparent assets to the project, and can optionally place them as layers.
+    </p>
+
+    {#if busy}
+      <div class="progress-line" role="status" aria-live="polite">
+        <span class="progress-dot" aria-hidden="true"></span>
+        <span>{progress}</span>
+      </div>
+    {/if}
+
+    {#if notes}
+      <p class="hint">{notes}</p>
+    {/if}
+
+    {#if error}
+      <div class="error-box">
+        <div class="error-head">
+          <span>Extraction failed</span>
+          <button
+            class="copy-error"
+            type="button"
+            aria-label="Copy error"
+            use:tooltip={{ text: copied ? 'Copied' : 'Copy error', placement: 'left' }}
+            onclick={copyError}
+          >
+            <Icon svg={Copy} size={15} />
+          </button>
+        </div>
+        <pre>{error}</pre>
+      </div>
+    {/if}
+
+    <div class="dlg-actions">
+      <button onclick={onClose}>Cancel</button>
+      <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !editor.activeLayer}>
+        {busy ? 'Extracting...' : 'Extract'}
+      </button>
+    </div>
+  </div>
+</Modal>
+
+<style>
+  .split-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 132px;
+    gap: 12px;
+    align-items: end;
+  }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .compact-field {
+    display: grid;
+    gap: 4px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .compact-field input {
+    width: 100%;
+  }
+  .hint {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .warn {
+    margin: 0;
+    color: #ffd27a;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .progress-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 24px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .progress-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .error-box {
+    border: 1px solid #7a2d2d;
+    background: #2a1717;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .error-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    border-bottom: 1px solid #7a2d2d;
+    color: #ffb0b0;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .copy-error {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 22px;
+    padding: 0;
+  }
+  pre {
+    max-height: 180px;
+    margin: 0;
+    padding: 8px;
+    overflow: auto;
+    white-space: pre-wrap;
+    color: #ffd6d6;
+    font-size: 11px;
+  }
+</style>

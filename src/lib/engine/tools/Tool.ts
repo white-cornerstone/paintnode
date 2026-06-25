@@ -36,8 +36,8 @@ export interface ToolHost {
   setActiveStroke(stroke: ActiveStroke | null): void;
   setSelection(sel: Selection | null): void;
   setForeground(rgb: RGB): void;
-  /** Text tool: ask the UI to open the text dialog at a document position. */
-  requestText(x: number, y: number): void;
+  /** Type tool: begin editing at a document position (new text, or the text layer there). */
+  beginText(x: number, y: number): void;
   /** Notify reactive UI that pixels/layers changed (refresh thumbnails, history buttons). */
   bump(): void;
   invalidate(): void;
@@ -70,6 +70,8 @@ export interface Tool {
   readonly cursor: string;
   /** Whether the viewport should draw the brush-size ring for this tool. */
   readonly usesBrushCursor?: boolean;
+  /** True if the tool mutates the active layer's pixels (used to guard text layers). */
+  readonly editsPixels?: boolean;
   pointerDown(e: PointerInfo): void;
   pointerMove(e: PointerInfo): void;
   pointerUp(e: PointerInfo): void;

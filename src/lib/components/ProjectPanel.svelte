@@ -4,12 +4,16 @@
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { workflow } from '../state/workflow.svelte';
   import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
   import { isDesktop } from '../integrations/desktop';
   import { bytesToBitmap } from '../io';
   import { loadOra } from '../ora/load';
   import {
     ArchiveClock,
+    Apps,
+    AppsList,
+    AppsListDetail,
     ArrowSync,
     Delete,
     Document,
@@ -18,18 +22,39 @@
     Image,
     Open,
     OpenFolder,
+    Sparkle,
   } from '../icons';
+
+  type ViewMode = 'list' | 'icon' | 'detail';
+  type FileMenu = {
+    file: ProjectFile;
+    allowDelete: boolean;
+    x: number;
+    y: number;
+  };
 
   let { collapsed = $bindable(false) }: { collapsed?: boolean } = $props();
 
   const desktop = isDesktop();
+  let viewMode = $state<ViewMode>('list');
+  let fileMenu = $state<FileMenu | null>(null);
   const files = $derived(project.current?.files ?? []);
   const assets = $derived(project.current?.assets ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
   const documentFiles = $derived(files.filter((file) => file.kind === 'document'));
+  const workflowFiles = $derived(files.filter((file) => file.kind === 'workflow'));
   const autosaveFiles = $derived(files.filter((file) => file.kind === 'autosave'));
   const generatedFiles = $derived(files.filter((file) => file.kind === 'generated'));
   const importedFiles = $derived(files.filter((file) => file.kind === 'imported'));
+  const viewModes: { id: ViewMode; label: string; icon: string }[] = [
+    { id: 'list', label: 'List view', icon: AppsList },
+    { id: 'icon', label: 'Icon view', icon: Apps },
+    { id: 'detail', label: 'Detail view', icon: AppsListDetail },
+  ];
+  const dateFormatter =
+    typeof Intl !== 'undefined'
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      : null;
 
   function assetFor(file: ProjectFile): ProjectAsset | null {
     return assetByPath.get(file.relativePath) ?? null;
@@ -39,12 +64,17 @@
     return /\.ora$/i.test(file.name) || file.mime === 'image/openraster';
   }
 
+  function isWorkflow(file: ProjectFile): boolean {
+    return file.kind === 'workflow' || /\.cxflow\.json$/i.test(file.name);
+  }
+
   function isImage(file: ProjectFile): boolean {
     return file.mime?.startsWith('image/') === true && !isOra(file);
   }
 
   function iconFor(file: ProjectFile): string {
     if (file.kind === 'autosave') return ArchiveClock;
+    if (isWorkflow(file)) return Sparkle;
     if (isOra(file) || file.kind === 'document') return Document;
     if (isImage(file)) return Image;
     return Folder;
@@ -56,18 +86,58 @@
     return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
   }
 
+  function kindLabel(file: ProjectFile): string {
+    return file.kind === 'document'
+      ? 'document'
+      : file.kind === 'workflow'
+        ? 'workflow'
+      : file.kind === 'autosave'
+        ? 'autosave'
+        : file.kind === 'generated'
+          ? 'generated'
+          : file.kind === 'imported'
+            ? 'imported'
+            : file.kind;
+  }
+
   function metaFor(file: ProjectFile): string {
-    const label =
-      file.kind === 'document'
-        ? 'document'
-        : file.kind === 'autosave'
-          ? 'autosave'
-          : file.kind === 'generated'
-            ? 'generated'
-            : file.kind === 'imported'
-              ? 'imported'
-              : file.kind;
-    return `${label} · ${formatSize(file.size)}`;
+    return `${kindLabel(file)} · ${formatSize(file.size)}`;
+  }
+
+  function formatDate(ms: number | null | undefined): string {
+    if (!ms) return '-';
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) return '-';
+    return dateFormatter?.format(date) ?? date.toLocaleString();
+  }
+
+  function openFileMenu(event: MouseEvent, file: ProjectFile, allowDelete: boolean): void {
+    event.preventDefault();
+    fileMenu = {
+      file,
+      allowDelete,
+      x: Math.min(event.clientX, window.innerWidth - 172),
+      y: Math.min(event.clientY, window.innerHeight - 116),
+    };
+  }
+
+  function closeFileMenu(): void {
+    fileMenu = null;
+  }
+
+  function showDetails(): void {
+    viewMode = 'detail';
+    closeFileMenu();
+  }
+
+  async function revealFromMenu(file: ProjectFile): Promise<void> {
+    closeFileMenu();
+    await revealFile(file);
+  }
+
+  async function removeFromMenu(file: ProjectFile): Promise<void> {
+    closeFileMenu();
+    await remove(file);
   }
 
   function bufferFrom(bytes: Uint8Array): ArrayBuffer {
@@ -82,6 +152,13 @@
         doc.name = file.name.replace(/\.ora$/i, '');
         editor.openDocument(doc);
         editor.markSaved(file.relativePath);
+        editor.flash(`Opened ${file.name}`);
+        return;
+      }
+
+      if (isWorkflow(file)) {
+        const bytes = await project.readFile(file);
+        workflow.openFromBytes(bytes, file.relativePath, file.name.replace(/\.cxflow\.json$/i, ''));
         editor.flash(`Opened ${file.name}`);
         return;
       }
@@ -129,6 +206,127 @@
   }
 </script>
 
+{#snippet fileThumb(file: ProjectFile, actionLabel: 'Open' | 'Place')}
+  <button class="thumb" aria-label={`${actionLabel} ${file.name}`} onclick={() => void openFile(file)}>
+    {#if file.previewDataUrl}
+      <img src={file.previewDataUrl} alt="" />
+    {:else}
+      <Icon svg={iconFor(file)} size={22} />
+    {/if}
+  </button>
+{/snippet}
+
+{#snippet fileActions(file: ProjectFile, allowDelete: boolean)}
+  <div class="file-actions">
+    <button
+      aria-label={`Reveal ${file.name}`}
+      use:tooltip={{ text: 'Reveal file', placement: 'left' }}
+      onclick={() => void revealFile(file)}
+    >
+      <Icon svg={Open} size={14} />
+    </button>
+    {#if allowDelete && assetFor(file)}
+      <button
+        aria-label={`Move ${file.name} to trash`}
+        use:tooltip={{ text: 'Move to trash', placement: 'left' }}
+        onclick={() => void remove(file)}
+      >
+        <Icon svg={Delete} size={14} />
+      </button>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet fileTile(file: ProjectFile, actionLabel: 'Open' | 'Place', allowDelete: boolean)}
+  {#if viewMode === 'icon'}
+    <div
+      class="file-tile"
+      role="listitem"
+      oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}
+    >
+      {@render fileThumb(file, actionLabel)}
+      <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
+    </div>
+  {:else}
+    <div class="file-row" role="listitem" oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}>
+      {@render fileThumb(file, actionLabel)}
+      <div class="meta">
+        <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
+        <span>{metaFor(file)}</span>
+      </div>
+      {@render fileActions(file, allowDelete)}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet detailRow(file: ProjectFile, actionLabel: 'Open' | 'Place', allowDelete: boolean)}
+  <div
+    class="detail-row"
+    role="row"
+    tabindex="-1"
+    oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}
+  >
+    <div class="detail-file" role="cell">
+      {@render fileThumb(file, actionLabel)}
+      <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
+    </div>
+    <span role="cell">{kindLabel(file)}</span>
+    <span role="cell">{formatSize(file.size)}</span>
+    <span role="cell">{formatDate(file.createdAt)}</span>
+    <span role="cell">{formatDate(file.modifiedAt)}</span>
+    {@render fileActions(file, allowDelete)}
+  </div>
+{/snippet}
+
+{#snippet fileGroup(
+  icon: string,
+  title: string,
+  groupFiles: ProjectFile[],
+  actionLabel: 'Open' | 'Place',
+  allowDelete: boolean,
+  emptyText: string,
+)}
+  <section class="group">
+    <div class="group-head">
+      <Icon svg={icon} size={14} />
+      <span>{title}</span>
+      <small>{groupFiles.length}</small>
+    </div>
+    {#if groupFiles.length === 0}
+      <p class="empty">{emptyText}</p>
+    {:else if viewMode === 'detail'}
+      <div class="detail-scroll">
+        <div class="detail-list" role="table" aria-label={title}>
+          <div class="detail-head" role="row">
+            <span role="columnheader">Name</span>
+            <span role="columnheader">Type</span>
+            <span role="columnheader">Size</span>
+            <span role="columnheader">Created</span>
+            <span role="columnheader">Modified</span>
+            <span role="columnheader" aria-label="Actions"></span>
+          </div>
+          {#each groupFiles as file (file.relativePath)}
+            {@render detailRow(file, actionLabel, allowDelete)}
+          {/each}
+        </div>
+      </div>
+    {:else}
+      <div class={viewMode === 'icon' ? 'file-grid' : 'file-list'} role="list">
+        {#each groupFiles as file (file.relativePath)}
+          {@render fileTile(file, actionLabel, allowDelete)}
+        {/each}
+      </div>
+    {/if}
+  </section>
+{/snippet}
+
+<svelte:window
+  onpointerdown={closeFileMenu}
+  onkeydown={(event) => {
+    if (event.key === 'Escape') closeFileMenu();
+  }}
+/>
+
 <Panel title="Project" grow bind:collapsed>
   <div class="project">
     {#if !desktop}
@@ -145,6 +343,19 @@
           <span>{project.current.name}</span>
         </div>
         <div class="head-actions">
+          <div class="view-switch" role="group" aria-label="Project view mode">
+            {#each viewModes as mode}
+              <button
+                class:active={viewMode === mode.id}
+                aria-label={mode.label}
+                aria-pressed={viewMode === mode.id}
+                use:tooltip={{ text: mode.label, placement: 'bottom' }}
+                onclick={() => (viewMode = mode.id)}
+              >
+                <Icon svg={mode.icon} size={15} />
+              </button>
+            {/each}
+          </div>
           <button
             aria-label="Refresh project"
             use:tooltip={{ text: 'Refresh project', placement: 'left' }}
@@ -167,171 +378,38 @@
       {/if}
 
       <div class="browser">
-        <section class="group">
-          <div class="group-head">
-            <Icon svg={Document} size={14} />
-            <span>Documents</span>
-            <small>{documentFiles.length}</small>
-          </div>
-          {#if documentFiles.length === 0}
-            <p class="empty">Saved .ora files appear here.</p>
-          {:else}
-            {#each documentFiles as file (file.relativePath)}
-              <div class="file-row">
-                <button class="thumb" aria-label={`Open ${file.name}`} onclick={() => void openFile(file)}>
-                  {#if file.previewDataUrl}
-                    <img src={file.previewDataUrl} alt="" />
-                  {:else}
-                    <Icon svg={iconFor(file)} size={22} />
-                  {/if}
-                </button>
-                <div class="meta">
-                  <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
-                  <span>{metaFor(file)}</span>
-                </div>
-                <div class="file-actions">
-                  <button
-                    aria-label={`Reveal ${file.name}`}
-                    use:tooltip={{ text: 'Reveal file', placement: 'left' }}
-                    onclick={() => void revealFile(file)}
-                  >
-                    <Icon svg={Open} size={14} />
-                  </button>
-                </div>
-              </div>
-            {/each}
-          {/if}
-        </section>
-
-        <section class="group">
-          <div class="group-head">
-            <Icon svg={ArchiveClock} size={14} />
-            <span>Autosave</span>
-            <small>{autosaveFiles.length}</small>
-          </div>
-          {#if autosaveFiles.length === 0}
-            <p class="empty">Timed recovery copies appear here.</p>
-          {:else}
-            {#each autosaveFiles as file (file.relativePath)}
-              <div class="file-row">
-                <button class="thumb" aria-label={`Open ${file.name}`} onclick={() => void openFile(file)}>
-                  {#if file.previewDataUrl}
-                    <img src={file.previewDataUrl} alt="" />
-                  {:else}
-                    <Icon svg={iconFor(file)} size={22} />
-                  {/if}
-                </button>
-                <div class="meta">
-                  <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
-                  <span>{metaFor(file)}</span>
-                </div>
-                <div class="file-actions">
-                  <button
-                    aria-label={`Reveal ${file.name}`}
-                    use:tooltip={{ text: 'Reveal file', placement: 'left' }}
-                    onclick={() => void revealFile(file)}
-                  >
-                    <Icon svg={Open} size={14} />
-                  </button>
-                </div>
-              </div>
-            {/each}
-          {/if}
-        </section>
-
-        <section class="group">
-          <div class="group-head">
-            <Icon svg={Image} size={14} />
-            <span>Assets / Generated</span>
-            <small>{generatedFiles.length}</small>
-          </div>
-          {#if generatedFiles.length === 0}
-            <p class="empty">AI-generated source images appear here.</p>
-          {:else}
-            {#each generatedFiles as file (file.relativePath)}
-              <div class="file-row">
-                <button class="thumb" aria-label={`Place ${file.name}`} onclick={() => void openFile(file)}>
-                  {#if file.previewDataUrl}
-                    <img src={file.previewDataUrl} alt="" />
-                  {:else}
-                    <Icon svg={iconFor(file)} size={22} />
-                  {/if}
-                </button>
-                <div class="meta">
-                  <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
-                  <span>{metaFor(file)}</span>
-                </div>
-                <div class="file-actions">
-                  <button
-                    aria-label={`Reveal ${file.name}`}
-                    use:tooltip={{ text: 'Reveal file', placement: 'left' }}
-                    onclick={() => void revealFile(file)}
-                  >
-                    <Icon svg={Open} size={14} />
-                  </button>
-                  {#if assetFor(file)}
-                    <button
-                      aria-label={`Move ${file.name} to trash`}
-                      use:tooltip={{ text: 'Move to trash', placement: 'left' }}
-                      onclick={() => void remove(file)}
-                    >
-                      <Icon svg={Delete} size={14} />
-                    </button>
-                  {/if}
-                </div>
-              </div>
-            {/each}
-          {/if}
-        </section>
-
-        <section class="group">
-          <div class="group-head">
-            <Icon svg={Folder} size={14} />
-            <span>Assets / Imported</span>
-            <small>{importedFiles.length}</small>
-          </div>
-          {#if importedFiles.length === 0}
-            <p class="empty">Placed source images appear here.</p>
-          {:else}
-            {#each importedFiles as file (file.relativePath)}
-              <div class="file-row">
-                <button class="thumb" aria-label={`Place ${file.name}`} onclick={() => void openFile(file)}>
-                  {#if file.previewDataUrl}
-                    <img src={file.previewDataUrl} alt="" />
-                  {:else}
-                    <Icon svg={iconFor(file)} size={22} />
-                  {/if}
-                </button>
-                <div class="meta">
-                  <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
-                  <span>{metaFor(file)}</span>
-                </div>
-                <div class="file-actions">
-                  <button
-                    aria-label={`Reveal ${file.name}`}
-                    use:tooltip={{ text: 'Reveal file', placement: 'left' }}
-                    onclick={() => void revealFile(file)}
-                  >
-                    <Icon svg={Open} size={14} />
-                  </button>
-                  {#if assetFor(file)}
-                    <button
-                      aria-label={`Move ${file.name} to trash`}
-                      use:tooltip={{ text: 'Move to trash', placement: 'left' }}
-                      onclick={() => void remove(file)}
-                    >
-                      <Icon svg={Delete} size={14} />
-                    </button>
-                  {/if}
-                </div>
-              </div>
-            {/each}
-          {/if}
-        </section>
+        {@render fileGroup(Document, 'Documents', documentFiles, 'Open', false, 'Saved .ora files appear here.')}
+        {@render fileGroup(Sparkle, 'Workflows', workflowFiles, 'Open', false, 'Saved composition boards appear here.')}
+        {@render fileGroup(ArchiveClock, 'Autosave', autosaveFiles, 'Open', false, 'Timed recovery copies appear here.')}
+        {@render fileGroup(
+          Image,
+          'Assets / Generated',
+          generatedFiles,
+          'Place',
+          true,
+          'AI-generated and extracted assets appear here.',
+        )}
+        {@render fileGroup(Folder, 'Assets / Imported', importedFiles, 'Place', true, 'Placed source images appear here.')}
       </div>
     {/if}
   </div>
 </Panel>
+
+{#if fileMenu}
+  <div
+    class="file-menu"
+    style={`left:${fileMenu.x}px;top:${fileMenu.y}px`}
+    role="menu"
+    tabindex="-1"
+    onpointerdown={(event) => event.stopPropagation()}
+  >
+    <button role="menuitem" onclick={showDetails}>View details</button>
+    <button role="menuitem" onclick={() => void revealFromMenu(fileMenu!.file)}>Reveal file</button>
+    {#if fileMenu.allowDelete && assetFor(fileMenu.file)}
+      <button role="menuitem" onclick={() => void removeFromMenu(fileMenu!.file)}>Move to trash</button>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .project {
@@ -357,6 +435,7 @@
   }
   .project-name {
     min-width: 0;
+    flex: 1;
     color: var(--text-bright);
     font-weight: 600;
   }
@@ -369,6 +448,7 @@
   .file-actions {
     display: flex;
     flex: none;
+    align-items: center;
     gap: 4px;
   }
   .head-actions button,
@@ -378,6 +458,29 @@
     width: 24px;
     height: 24px;
     padding: 0;
+  }
+  .view-switch {
+    display: flex;
+    flex: none;
+    padding: 2px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .view-switch button {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 24px;
+    padding: 0;
+    color: var(--text-dim);
+    background: transparent;
+    border-color: transparent;
+  }
+  .view-switch button.active {
+    color: var(--text-bright);
+    background: var(--accent);
+    border-color: var(--accent);
   }
   .browser {
     display: flex;
@@ -416,6 +519,11 @@
     font-size: 10px;
     font-weight: 600;
   }
+  .file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
   .file-row {
     display: grid;
     grid-template-columns: 42px minmax(0, 1fr) auto;
@@ -426,6 +534,80 @@
     background: var(--bg-input);
     border: 1px solid var(--border-soft);
     border-radius: 4px;
+  }
+  .file-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
+    gap: 7px;
+  }
+  .file-tile {
+    display: grid;
+    grid-template-rows: 78px auto;
+    align-items: start;
+    justify-items: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 6px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .file-tile .thumb {
+    width: 100%;
+    height: 78px;
+  }
+  .file-tile .file-name {
+    min-height: 28px;
+    line-height: 1.25;
+    text-align: center;
+    white-space: normal;
+  }
+  .detail-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    background: var(--bg-input);
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .detail-list {
+    min-width: 650px;
+  }
+  .detail-head,
+  .detail-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1fr) 74px 64px 128px 128px auto;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 5px;
+  }
+  .detail-head {
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .detail-row + .detail-row {
+    border-top: 1px solid var(--border-soft);
+  }
+  .detail-file {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr);
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+  .detail-row > span {
+    overflow: hidden;
+    color: var(--text-dim);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .detail-row .thumb {
+    width: 30px;
+    height: 24px;
   }
   .thumb {
     display: grid;
@@ -479,5 +661,31 @@
     white-space: pre-wrap;
     user-select: text;
     -webkit-user-select: text;
+  }
+  .file-menu {
+    position: fixed;
+    z-index: 1000;
+    display: grid;
+    min-width: 156px;
+    padding: 4px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 10px 26px rgb(0 0 0 / 35%);
+  }
+  .file-menu button {
+    display: block;
+    width: 100%;
+    padding: 6px 8px;
+    background: transparent;
+    border-color: transparent;
+    color: var(--text);
+    font-size: 12px;
+    text-align: left;
+  }
+  .file-menu button:hover,
+  .file-menu button:focus-visible {
+    background: var(--bg-input);
+    color: var(--text-bright);
   }
 </style>

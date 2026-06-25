@@ -12,8 +12,11 @@ export { default as ArrowMove } from '@fluentui/svg-icons/icons/arrow_move_24_re
 export { default as PaintBrush } from '@fluentui/svg-icons/icons/paint_brush_24_regular.svg?raw';
 export { default as Eraser } from '@fluentui/svg-icons/icons/eraser_24_regular.svg?raw';
 export { default as PaintBucket } from '@fluentui/svg-icons/icons/paint_bucket_24_regular.svg?raw';
+export { default as PaintBucketFilled } from '@fluentui/svg-icons/icons/paint_bucket_24_filled.svg?raw';
 export { default as Eyedropper } from '@fluentui/svg-icons/icons/eyedropper_24_regular.svg?raw';
+export { default as EyedropperFilled } from '@fluentui/svg-icons/icons/eyedropper_24_filled.svg?raw';
 export { default as Hand } from '@fluentui/svg-icons/icons/hand_left_24_regular.svg?raw';
+export { default as HandFilled } from '@fluentui/svg-icons/icons/hand_left_24_filled.svg?raw';
 export { default as Search } from '@fluentui/svg-icons/icons/search_24_regular.svg?raw';
 export { default as ZoomIn } from '@fluentui/svg-icons/icons/zoom_in_24_regular.svg?raw';
 export { default as ZoomOut } from '@fluentui/svg-icons/icons/zoom_out_24_regular.svg?raw';
@@ -23,6 +26,7 @@ export { default as Eye } from '@fluentui/svg-icons/icons/eye_24_regular.svg?raw
 export { default as EyeOff } from '@fluentui/svg-icons/icons/eye_off_24_regular.svg?raw';
 
 export { default as Add } from '@fluentui/svg-icons/icons/add_24_regular.svg?raw';
+export { default as AddFilled } from '@fluentui/svg-icons/icons/add_24_filled.svg?raw';
 export { default as Checkmark } from '@fluentui/svg-icons/icons/checkmark_24_regular.svg?raw';
 export { default as SquareMultiple } from '@fluentui/svg-icons/icons/square_multiple_24_regular.svg?raw';
 export { default as Merge } from '@fluentui/svg-icons/icons/merge_24_regular.svg?raw';
@@ -35,6 +39,9 @@ export { default as ArrowSwap } from '@fluentui/svg-icons/icons/arrow_swap_24_re
 export { default as Image } from '@fluentui/svg-icons/icons/image_24_regular.svg?raw';
 export { default as Copy } from '@fluentui/svg-icons/icons/copy_24_regular.svg?raw';
 export { default as ArchiveClock } from '@fluentui/svg-icons/icons/archive_clock_24_regular.svg?raw';
+export { default as Apps } from '@fluentui/svg-icons/icons/apps_24_regular.svg?raw';
+export { default as AppsList } from '@fluentui/svg-icons/icons/apps_list_24_regular.svg?raw';
+export { default as AppsListDetail } from '@fluentui/svg-icons/icons/apps_list_detail_24_regular.svg?raw';
 export { default as Document } from '@fluentui/svg-icons/icons/document_24_regular.svg?raw';
 export { default as Folder } from '@fluentui/svg-icons/icons/folder_24_regular.svg?raw';
 export { default as FolderOpen } from '@fluentui/svg-icons/icons/folder_open_24_regular.svg?raw';
@@ -69,6 +76,16 @@ export { default as Sharpen } from '@fluentui/svg-icons/icons/triangle_24_regula
 export { default as Dodge } from '@fluentui/svg-icons/icons/weather_sunny_24_regular.svg?raw';
 export { default as Burn } from '@fluentui/svg-icons/icons/dark_theme_24_regular.svg?raw';
 export { default as Sponge } from '@fluentui/svg-icons/icons/drop_24_regular.svg?raw';
+
+// Type editing toolbar
+export { default as TextBold } from '@fluentui/svg-icons/icons/text_bold_24_regular.svg?raw';
+export { default as TextItalic } from '@fluentui/svg-icons/icons/text_italic_24_regular.svg?raw';
+export { default as TextUnderline } from '@fluentui/svg-icons/icons/text_underline_24_regular.svg?raw';
+export { default as TextAlignLeft } from '@fluentui/svg-icons/icons/text_align_left_24_regular.svg?raw';
+export { default as TextAlignCenter } from '@fluentui/svg-icons/icons/text_align_center_24_regular.svg?raw';
+export { default as TextAlignRight } from '@fluentui/svg-icons/icons/text_align_right_24_regular.svg?raw';
+export { default as TextColor } from '@fluentui/svg-icons/icons/text_color_24_regular.svg?raw';
+export { default as LineSpacing } from '@fluentui/svg-icons/icons/text_line_spacing_24_regular.svg?raw';
 
 // Image menu
 export { default as Crop } from '@fluentui/svg-icons/icons/crop_24_regular.svg?raw';

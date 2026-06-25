@@ -44,6 +44,8 @@
     icon: string;
     label: string;
     key?: string;
+    /** Listed in the flyout but not yet implemented. */
+    disabled?: boolean;
   }
   interface GroupSlot {
     kind: 'group';
@@ -84,7 +86,16 @@
       ],
     },
     { kind: 'tool', id: 'shape', key: 'U', icon: Shapes },
-    { kind: 'tool', id: 'text', key: 'T', icon: TextT },
+    {
+      kind: 'group',
+      name: 'type',
+      members: [
+        { id: 'text', icon: TextT, label: 'Horizontal Type Tool', key: 'T' },
+        { id: 'type-vertical', icon: TextT, label: 'Vertical Type Tool', disabled: true },
+        { id: 'type-mask-h', icon: TextT, label: 'Horizontal Type Mask Tool', disabled: true },
+        { id: 'type-mask-v', icon: TextT, label: 'Vertical Type Mask Tool', disabled: true },
+      ],
+    },
     { kind: 'tool', id: 'hand', key: 'H', icon: Hand },
     { kind: 'tool', id: 'zoom', key: 'Z', icon: Search }, // mode shows on the cursor
   ];
@@ -109,7 +120,7 @@
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
   // Remembered active member per flyout group (Photoshop shows the last-used tool of a group).
-  let lastMember = $state<Record<string, string>>({ focus: 'blur', toning: 'dodge' });
+  let lastMember = $state<Record<string, string>>({ focus: 'blur', toning: 'dodge', type: 'text' });
   const shownMember = (slot: GroupSlot): GroupMember => {
     const active = slot.members.find((m) => m.id === editor.activeToolId);
     return active ?? slot.members.find((m) => m.id === lastMember[slot.name]) ?? slot.members[0];
@@ -157,6 +168,11 @@
     editor.setTool(shownMember(slot).id);
   }
   function chooseMember(slot: GroupSlot, m: GroupMember) {
+    if (m.disabled) {
+      editor.flash(`${m.label} is coming soon`);
+      openGroup = null;
+      return;
+    }
     lastMember[slot.name] = m.id;
     editor.setTool(m.id);
     openGroup = null;
@@ -232,7 +248,12 @@
           {#if openGroup === slot.name}
             <div class="flyout" role="menu">
               {#each slot.members as m (m.id)}
-                <button class="flyout-item" role="menuitem" onclick={() => chooseMember(slot, m)}>
+                <button
+                  class="flyout-item"
+                  class:disabled={m.disabled}
+                  role="menuitem"
+                  onclick={() => chooseMember(slot, m)}
+                >
                   <span class="mark">
                     {#if editor.activeToolId === m.id}
                       <Icon svg={Checkmark} size={12} />
@@ -240,7 +261,7 @@
                   </span>
                   <Icon svg={m.icon} size={18} />
                   <span class="lbl">{m.label}</span>
-                  <span class="sc">{m.key ?? ''}</span>
+                  <span class="sc">{m.disabled ? 'Soon' : (m.key ?? '')}</span>
                 </button>
               {/each}
             </div>
@@ -389,6 +410,13 @@
   .flyout-item:hover {
     background: var(--accent);
     color: #fff;
+  }
+  .flyout-item.disabled {
+    opacity: 0.45;
+  }
+  .flyout-item.disabled:hover {
+    background: var(--bg-panel-2);
+    color: var(--text-dim);
   }
   .flyout-item .mark {
     width: 12px;

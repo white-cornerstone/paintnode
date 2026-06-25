@@ -16,6 +16,7 @@ export abstract class RetouchBrush implements Tool {
   abstract readonly name: string;
   readonly cursor = 'crosshair';
   readonly usesBrushCursor = true;
+  readonly editsPixels = true;
 
   /** The layer being edited, available to subclasses during a stroke. */
   protected layer: Layer | null = null;

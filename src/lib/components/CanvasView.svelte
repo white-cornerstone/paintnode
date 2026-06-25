@@ -2,21 +2,122 @@
   import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { isDesktop } from '../integrations/desktop';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
+  import Icon from './Icon.svelte';
+  import TextEditorOverlay from './TextEditorOverlay.svelte';
+  import {
+    Add,
+    AddFilled,
+    ArrowMove,
+    Eyedropper,
+    EyedropperFilled,
+    Hand,
+    HandFilled,
+    PaintBucket,
+    PaintBucketFilled,
+    TextT,
+    ZoomIn,
+    ZoomOut,
+  } from '../icons';
+  import { getCurrentWindow, type CursorIcon } from '@tauri-apps/api/window';
 
   let canvasEl: HTMLCanvasElement;
   let containerEl: HTMLDivElement;
   let vp: Viewport | undefined;
+  const desktop = isDesktop();
+  const appWindow = desktop ? getCurrentWindow() : null;
+
+  // Bumped each render while editing text so the overlay tracks pan/zoom.
+  let viewTick = $state(0);
+  const overlayBox = $derived.by(() => {
+    viewTick;
+    const s = editor.textEdit;
+    if (!s || !vp || !canvasEl) return null;
+    const rect = canvasEl.getBoundingClientRect();
+    const p = vp.docToScreen(s.model.x, s.model.y);
+    return { left: rect.left + p.x, top: rect.top + p.y, scale: vp.scale };
+  });
+  // Recompute the overlay box immediately when an edit session starts/ends.
+  $effect(() => {
+    editor.textEdit;
+    viewTick = performance.now();
+  });
 
   let spaceDown = $state(false);
   let scrollW = $state(1);
   let scrollH = $state(1);
-  let panning = false;
-  let interacting = false;
+  let scrollLeftCss = $state(0);
+  let scrollTopCss = $state(0);
+  let pointerClientX = $state(0);
+  let pointerClientY = $state(0);
+  let panning = $state(false);
+  let interacting = $state(false);
+  let pointerInViewport = $state(false);
   let syncingScroll = false;
   let last = { x: 0, y: 0 };
   const SCROLL_PAD = 80;
+  let resizeFrame = 0;
+  let nativeCursor: { icon: CursorIcon; visible: boolean } | null = null;
+  type ToolCursor =
+    | 'move'
+    | 'marquee'
+    | 'lasso'
+    | 'crop'
+    | 'eyedropper'
+    | 'fill'
+    | 'gradient'
+    | 'shape'
+    | 'text'
+    | 'hand-open'
+    | 'hand-closed'
+    | 'zoom-in'
+    | 'zoom-out';
+
+  function cursorIconFor(cssCursor: string): CursorIcon {
+    switch (cssCursor) {
+      case 'crosshair':
+        return 'crosshair';
+      case 'move':
+        return 'move';
+      case 'text':
+        return 'text';
+      case 'grab':
+        return 'grab';
+      case 'grabbing':
+        return 'grabbing';
+      case 'zoom-in':
+        return 'zoomIn';
+      case 'zoom-out':
+        return 'zoomOut';
+      default:
+        return 'default';
+    }
+  }
+
+  function setNativeCursor(cssCursor: string, active: boolean): void {
+    if (!appWindow) return;
+    if (cssCursor.startsWith('url(')) {
+      if (nativeCursor?.visible === false) {
+        nativeCursor = { icon: 'default', visible: true };
+        void appWindow.setCursorVisible(true).catch(() => {
+          nativeCursor = null;
+        });
+      }
+      return;
+    }
+    const visible = active && cssCursor === 'none' ? false : true;
+    const icon = active && visible ? cursorIconFor(cssCursor) : 'default';
+    if (nativeCursor?.icon === icon && nativeCursor.visible === visible) return;
+    nativeCursor = { icon, visible };
+    void appWindow
+      .setCursorVisible(visible)
+      .then(() => appWindow.setCursorIcon(icon))
+      .catch(() => {
+        nativeCursor = null;
+      });
+  }
 
   function pos(e: PointerEvent) {
     const r = canvasEl.getBoundingClientRect();
@@ -53,6 +154,18 @@
 
   function onPointerDown(e: PointerEvent) {
     if (!vp) return;
+    pointerClientX = e.clientX;
+    pointerClientY = e.clientY;
+    // A click anywhere on the canvas commits the active text edit.
+    if (editor.textEdit) {
+      editor.commitActiveText();
+      return;
+    }
+    // A pixel tool can't paint on a text layer — offer to rasterize it first.
+    if (e.button === 0 && !spaceDown && editor.activeTool.editsPixels && editor.activeLayer?.kind === 'text') {
+      editor.promptRasterize(editor.activeLayer);
+      return;
+    }
     try {
       canvasEl.setPointerCapture(e.pointerId);
     } catch {
@@ -71,6 +184,8 @@
 
   function onPointerMove(e: PointerEvent) {
     if (!vp) return;
+    pointerClientX = e.clientX;
+    pointerClientY = e.clientY;
     const { cssX, cssY } = pos(e);
     const dxCss = cssX - last.x;
     const dyCss = cssY - last.y;
@@ -91,6 +206,8 @@
 
   function onPointerUp(e: PointerEvent) {
     if (!vp) return;
+    pointerClientX = e.clientX;
+    pointerClientY = e.clientY;
     try {
       canvasEl.releasePointerCapture(e.pointerId);
     } catch {
@@ -108,6 +225,7 @@
   }
 
   function onPointerLeave() {
+    pointerInViewport = false;
     if (!vp) return;
     if (!interacting && !panning) {
       vp.cursor = null;
@@ -143,11 +261,16 @@
     syncingScroll = true;
     containerEl.scrollLeft = nextLeft;
     containerEl.scrollTop = nextTop;
+    scrollLeftCss = nextLeft;
+    scrollTopCss = nextTop;
     requestAnimationFrame(() => (syncingScroll = false));
   }
 
   function syncViewportToScroll() {
-    if (!vp || !containerEl || syncingScroll) return;
+    if (!vp || !containerEl) return;
+    scrollLeftCss = containerEl.scrollLeft;
+    scrollTopCss = containerEl.scrollTop;
+    if (syncingScroll) return;
     const doc = editor.doc;
     if (!doc) return;
     const docW = doc.width * vp.scale;
@@ -167,14 +290,19 @@
     vp.onAfterRender = () => {
       ui.zoom = vp!.scale;
       syncScrollToViewport();
+      if (editor.textEdit) viewTick++;
     };
     editor.viewport = vp;
     vp.resize();
     requestAnimationFrame(() => vp!.fitToView());
 
     const ro = new ResizeObserver(() => {
-      vp!.resize();
-      syncScrollToViewport();
+      if (resizeFrame) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        vp!.resize();
+        syncScrollToViewport();
+      });
     });
     ro.observe(containerEl);
 
@@ -205,6 +333,7 @@
 
     return () => {
       ro.disconnect();
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
       containerEl.removeEventListener('wheel', onWheel);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
@@ -248,31 +377,103 @@
     vp.invalidate();
   });
 
-  const cursorStyle = $derived(
-    panning
-      ? 'grabbing'
-      : spaceDown
-        ? 'grab'
-        : editor.activeToolId === 'zoom'
-          ? editor.effectiveZoomMode === 'out'
-            ? 'zoom-out'
-            : 'zoom-in'
-          : editor.activeTool.cursor,
+  const overlayCursor = $derived.by(() => {
+    if (!pointerInViewport) return null;
+    if (panning || (editor.activeToolId === 'hand' && interacting)) return 'hand-closed';
+    if (spaceDown || editor.activeToolId === 'hand') return 'hand-open';
+    if (editor.activeToolId === 'zoom') return editor.effectiveZoomMode === 'out' ? 'zoom-out' : 'zoom-in';
+    if (editor.activeToolId === 'move') return 'move';
+    if (editor.activeToolId === 'marquee') return 'marquee';
+    if (editor.activeToolId === 'lasso') return 'lasso';
+    if (editor.activeToolId === 'crop') return 'crop';
+    if (editor.activeToolId === 'eyedropper') return 'eyedropper';
+    if (editor.activeToolId === 'fill') return 'fill';
+    if (editor.activeToolId === 'gradient') return 'gradient';
+    if (editor.activeToolId === 'shape') return 'shape';
+    if (editor.activeToolId === 'text') return 'text';
+    return null;
+  });
+  const cursorStyle = $derived(overlayCursor ? 'none' : editor.activeTool.cursor);
+  const cursorPressed = $derived(!!overlayCursor && (interacting || panning));
+  const cursorIcon = $derived.by(() => {
+    switch (overlayCursor) {
+      case 'move':
+        return ArrowMove;
+      case 'marquee':
+      case 'lasso':
+      case 'crop':
+      case 'gradient':
+      case 'shape':
+        return cursorPressed ? AddFilled : Add;
+      case 'eyedropper':
+        return cursorPressed ? EyedropperFilled : Eyedropper;
+      case 'fill':
+        return cursorPressed ? PaintBucketFilled : PaintBucket;
+      case 'text':
+        return TextT;
+      case 'hand-open':
+      case 'hand-closed':
+        return cursorPressed ? HandFilled : Hand;
+      case 'zoom-in':
+        return ZoomIn;
+      case 'zoom-out':
+        return ZoomOut;
+      default:
+        return null;
+    }
+  });
+  const cursorIconSize = $derived(
+    overlayCursor === 'marquee' ||
+      overlayCursor === 'lasso' ||
+      overlayCursor === 'crop' ||
+      overlayCursor === 'gradient' ||
+      overlayCursor === 'shape'
+      ? 16
+      : 19,
   );
+
+  $effect(() => {
+    setNativeCursor(cursorStyle, pointerInViewport);
+  });
 </script>
 
-<div class="viewport" bind:this={containerEl} onscroll={syncViewportToScroll}>
+<div
+  class="viewport"
+  bind:this={containerEl}
+  style="cursor:{cursorStyle}"
+  role="presentation"
+  onpointerenter={(e) => {
+    pointerInViewport = true;
+    pointerClientX = e.clientX;
+    pointerClientY = e.clientY;
+  }}
+  onpointerleave={onPointerLeave}
+  onscroll={syncViewportToScroll}
+>
   <canvas
     bind:this={canvasEl}
-    style="cursor:{cursorStyle}"
+    style="cursor:{cursorStyle}; transform:translate3d({scrollLeftCss}px, {scrollTopCss}px, 0)"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
-    onpointerleave={onPointerLeave}
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
   <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
+  {#if editor.textEdit && overlayBox}
+    <TextEditorOverlay box={overlayBox} />
+  {/if}
 </div>
+
+{#if overlayCursor && cursorIcon}
+  <div
+    class={`tool-cursor ${overlayCursor}`}
+    class:pressed={cursorPressed}
+    style="left:{pointerClientX}px; top:{pointerClientY}px"
+    aria-hidden="true"
+  >
+    <Icon svg={cursorIcon} size={cursorIconSize} />
+  </div>
+{/if}
 
 <style>
   .viewport {
@@ -283,7 +484,7 @@
     background: var(--bg-canvas);
   }
   canvas {
-    position: sticky;
+    position: absolute;
     top: 0;
     left: 0;
     z-index: 1;
@@ -296,5 +497,40 @@
     position: relative;
     z-index: 0;
     pointer-events: none;
+    cursor: inherit;
+  }
+  .tool-cursor {
+    position: fixed;
+    z-index: 500;
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    color: #050505;
+    pointer-events: none;
+    will-change: transform;
+  }
+  .tool-cursor :global(svg) {
+    filter: drop-shadow(0 1px 0 #fff) drop-shadow(1px 0 0 #fff) drop-shadow(0 -1px 0 #fff)
+      drop-shadow(-1px 0 0 #fff) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+  }
+  .tool-cursor.zoom-in,
+  .tool-cursor.zoom-out,
+  .tool-cursor.hand-open,
+  .tool-cursor.hand-closed,
+  .tool-cursor.move {
+    transform: translate3d(-11px, -11px, 0);
+  }
+  .tool-cursor.marquee,
+  .tool-cursor.shape,
+  .tool-cursor.text {
+    transform: translate3d(-3px, -3px, 0);
+  }
+  .tool-cursor.lasso,
+  .tool-cursor.crop,
+  .tool-cursor.eyedropper,
+  .tool-cursor.gradient,
+  .tool-cursor.fill {
+    transform: translate3d(-5px, -5px, 0);
   }
 </style>
