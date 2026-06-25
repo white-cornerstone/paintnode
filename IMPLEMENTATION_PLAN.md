@@ -50,7 +50,7 @@ Undoable. Menu item + a Layers-panel affordance; text layers show a "T" badge.
 **Files**: `editor.svelte.ts`, `MenuBar.svelte`, `LayersPanel.svelte`.
 **Success**: Rasterize Type on a text layer → `kind:'raster'`, pixels unchanged, no longer
 editable as text; undo restores the text layer.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 5: Fonts — import + optional embed
 **Goal**: Import fonts (`FontFace`), curated family list. On save, if text layers use

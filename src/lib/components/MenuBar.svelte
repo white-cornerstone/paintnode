@@ -83,6 +83,12 @@
         { label: 'Duplicate Layer', action: () => { const id = activeId(); if (id) editor.duplicateLayer(id); } },
         { label: 'Delete Layer', action: () => { const id = activeId(); if (id) editor.deleteLayer(id); } },
         { sep: true },
+        {
+          label: 'Rasterize Type',
+          action: () => { const id = activeId(); if (id) editor.rasterizeType(id); },
+          disabled: () => editor.activeLayer?.kind !== 'text',
+        },
+        { sep: true },
         { label: 'Merge Down', action: () => { const id = activeId(); if (id) editor.mergeDown(id); } },
       ],
     },

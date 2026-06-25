@@ -7,7 +7,7 @@
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, TextT } from '../icons';
 
   let {
     collapsed = $bindable(false),
@@ -131,7 +131,17 @@
           <Icon svg={l.visible ? Eye : EyeOff} size={17} />
         </button>
 
-        <LayerThumb layer={l} />
+        <div class="thumb-wrap">
+          <LayerThumb layer={l} />
+          {#if l.kind === 'text'}
+            <span
+              class="type-badge"
+              use:tooltip={{ text: 'Editable type layer', placement: 'right' }}
+            >
+              <Icon svg={TextT} size={11} />
+            </span>
+          {/if}
+        </div>
 
         <div class="name">
           {#if editingId === l.id}
@@ -264,6 +274,24 @@
   .eye.off {
     color: var(--text-dim);
     opacity: 0.5;
+  }
+  .thumb-wrap {
+    position: relative;
+    flex: none;
+    display: flex;
+  }
+  .type-badge {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    width: 15px;
+    height: 15px;
+    display: grid;
+    place-items: center;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-bright);
   }
   .name {
     flex: 1;
