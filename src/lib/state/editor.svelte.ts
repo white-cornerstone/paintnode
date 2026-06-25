@@ -21,6 +21,8 @@ import {
   type PixelOp,
 } from '../engine/adjustments';
 import { gaussianBlur, sharpen } from '../engine/filters';
+import { defaultStyle, plainTextModel, textLayerName } from '../engine/text/model';
+import { renderTextToCanvas } from '../engine/text/render';
 import type { Tool, ToolHost } from '../engine/tools/Tool';
 import { PaintTool } from '../engine/tools/PaintTool';
 import { FillTool } from '../engine/tools/FillTool';
@@ -834,21 +836,19 @@ export class EditorStore implements ToolHost {
     this.invalidate();
   }
 
-  /** Rasterize text onto a new layer at the pending insertion point (undoable). */
+  /** Create an editable text layer at the pending insertion point (undoable). */
   addText(text: string, fontSize: number, fontFamily: string): void {
     const doc = this.doc;
     const pos = this.pendingText;
     this.pendingText = null;
     if (!doc || !pos || !text.trim()) return;
+    const style = defaultStyle({ family: fontFamily, size: fontSize, color: { ...this.foreground } });
+    const model = plainTextModel(text, pos.x, pos.y, style);
     this.structural('Text', () => {
-      const name = text.split('\n')[0].slice(0, 24) || 'Text';
-      const layer = new Layer(doc.width, doc.height, name);
-      const c = layer.ctx;
-      c.fillStyle = rgbToCss(this.foreground, 1);
-      c.textBaseline = 'top';
-      c.font = `${fontSize}px ${fontFamily}`;
-      const lh = fontSize * 1.3;
-      text.split('\n').forEach((line, i) => c.fillText(line, pos.x, pos.y + i * lh));
+      const layer = new Layer(doc.width, doc.height, textLayerName(model));
+      layer.kind = 'text';
+      layer.text = model;
+      renderTextToCanvas(layer.canvas, model);
       layer.touch();
       doc.insertAboveActive(layer);
     });
