@@ -1479,8 +1479,11 @@ Goal:
 Required AI-image workflow:
 - Use Codex image generation / the `$imagegen` image skill for the visual reconstruction steps, not text-only reasoning.
 - First identify and label the main objects in `source.png`.
+- Decide the asset inventory before generating images. Avoid duplicate visual ownership: if an item is extracted as its own asset, remove or neutralize it from any larger subject asset that originally held, overlapped, or contained it.
 - Generate a clean environment/background asset when useful.
 - For each major editable object, generate an isolated standalone asset from the source image.
+- If a person/character originally holds a separately extracted prop, generate the person/character asset with natural empty hands, a neutral pose, or cleanly reconstructed fingers/hands instead of still holding that prop.
+- If an object is embedded in or occludes another extracted asset, choose one primary asset to own that object and reconstruct the other asset without it.
 - When transparent output is not practical, generate that object on a perfectly flat single-color matte background and record the exact matte color in `keyColor`.
 - After each generated image is available, copy or save the resulting PNG into the current working directory using the filename you list in `manifest.json`.
 - You may use scripts only for deterministic processing: locating generated PNGs, copying files, chroma-keying a matte, cropping transparent bounds, inspecting dimensions, and validating output.
@@ -3021,6 +3024,16 @@ mod tests {
             args[image_idx + 3].contains("User guidance:\nseparate objects"),
             "prompt should be passed after -- instead of being consumed as another image path",
         );
+    }
+
+    #[test]
+    fn decouple_prompt_prevents_duplicate_held_props_across_assets() {
+        let prompt = decouple_codex_prompt("extract girl and apple");
+        assert!(prompt.contains("Avoid duplicate visual ownership"));
+        assert!(
+            prompt.contains("If a person/character originally holds a separately extracted prop")
+        );
+        assert!(prompt.contains("natural empty hands"));
     }
 
     #[test]
