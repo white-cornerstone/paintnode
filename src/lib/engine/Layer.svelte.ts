@@ -26,6 +26,11 @@ export class Layer {
   text = $state<TextModel | null>(null);
   /** Bumped whenever pixels change, so reactive thumbnails can refresh. */
   pixelRev = $state(0);
+  /**
+   * Transient: when true the compositor skips this layer. Used while a text layer is being
+   * edited (the live HTML overlay stands in for its pixels). Not cloned or persisted.
+   */
+  suppressed = false;
 
   readonly canvas: HTMLCanvasElement;
   readonly ctx: CanvasRenderingContext2D;

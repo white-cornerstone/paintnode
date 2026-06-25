@@ -70,6 +70,16 @@ export { default as Dodge } from '@fluentui/svg-icons/icons/weather_sunny_24_reg
 export { default as Burn } from '@fluentui/svg-icons/icons/dark_theme_24_regular.svg?raw';
 export { default as Sponge } from '@fluentui/svg-icons/icons/drop_24_regular.svg?raw';
 
+// Type editing toolbar
+export { default as TextBold } from '@fluentui/svg-icons/icons/text_bold_24_regular.svg?raw';
+export { default as TextItalic } from '@fluentui/svg-icons/icons/text_italic_24_regular.svg?raw';
+export { default as TextUnderline } from '@fluentui/svg-icons/icons/text_underline_24_regular.svg?raw';
+export { default as TextAlignLeft } from '@fluentui/svg-icons/icons/text_align_left_24_regular.svg?raw';
+export { default as TextAlignCenter } from '@fluentui/svg-icons/icons/text_align_center_24_regular.svg?raw';
+export { default as TextAlignRight } from '@fluentui/svg-icons/icons/text_align_right_24_regular.svg?raw';
+export { default as TextColor } from '@fluentui/svg-icons/icons/text_color_24_regular.svg?raw';
+export { default as LineSpacing } from '@fluentui/svg-icons/icons/text_line_spacing_24_regular.svg?raw';
+
 // Image menu
 export { default as Crop } from '@fluentui/svg-icons/icons/crop_24_regular.svg?raw';
 export { default as RotateLeft } from '@fluentui/svg-icons/icons/rotate_left_24_regular.svg?raw';

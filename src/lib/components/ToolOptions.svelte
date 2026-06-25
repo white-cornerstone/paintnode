@@ -134,7 +134,7 @@
     </label>
     <span class="hint">Drag to set direction · Shift constrains</span>
   {:else if tool === 'text'}
-    <span class="hint">Click on the canvas to place text.</span>
+    <span class="hint">Click to add text, or click existing text to edit · Esc to commit</span>
   {:else if tool === 'eyedropper'}
     <span class="hint">Click or drag to sample a color into the foreground.</span>
   {:else if tool === 'move'}

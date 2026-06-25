@@ -16,7 +16,6 @@
   import BrightnessContrastDialog from './lib/components/BrightnessContrastDialog.svelte';
   import HueSaturationDialog from './lib/components/HueSaturationDialog.svelte';
   import GaussianBlurDialog from './lib/components/GaussianBlurDialog.svelte';
-  import TextDialog from './lib/components/TextDialog.svelte';
   import AiGenerateDialog from './lib/components/AiGenerateDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
@@ -426,10 +425,6 @@
   <GaussianBlurDialog onClose={() => ui.close()} />
 {:else if ui.dialog === 'aiGenerate'}
   <AiGenerateDialog onClose={() => ui.close()} />
-{/if}
-
-{#if editor.pendingText}
-  <TextDialog onClose={() => (editor.pendingText = null)} />
 {/if}
 
 <style>

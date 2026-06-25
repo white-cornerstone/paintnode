@@ -4,10 +4,27 @@
   import { ui } from '../state/ui.svelte';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
+  import TextEditorOverlay from './TextEditorOverlay.svelte';
 
   let canvasEl: HTMLCanvasElement;
   let containerEl: HTMLDivElement;
   let vp: Viewport | undefined;
+
+  // Bumped each render while editing text so the overlay tracks pan/zoom.
+  let viewTick = $state(0);
+  const overlayBox = $derived.by(() => {
+    viewTick;
+    const s = editor.textEdit;
+    if (!s || !vp || !canvasEl) return null;
+    const rect = canvasEl.getBoundingClientRect();
+    const p = vp.docToScreen(s.model.x, s.model.y);
+    return { left: rect.left + p.x, top: rect.top + p.y, scale: vp.scale };
+  });
+  // Recompute the overlay box immediately when an edit session starts/ends.
+  $effect(() => {
+    editor.textEdit;
+    viewTick++;
+  });
 
   let spaceDown = $state(false);
   let scrollW = $state(1);
@@ -53,6 +70,11 @@
 
   function onPointerDown(e: PointerEvent) {
     if (!vp) return;
+    // A click anywhere on the canvas commits the active text edit.
+    if (editor.textEdit) {
+      editor.commitActiveText();
+      return;
+    }
     try {
       canvasEl.setPointerCapture(e.pointerId);
     } catch {
@@ -167,6 +189,7 @@
     vp.onAfterRender = () => {
       ui.zoom = vp!.scale;
       syncScrollToViewport();
+      if (editor.textEdit) viewTick++;
     };
     editor.viewport = vp;
     vp.resize();
@@ -272,6 +295,9 @@
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
   <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
+  {#if editor.textEdit && overlayBox}
+    <TextEditorOverlay box={overlayBox} />
+  {/if}
 </div>
 
 <style>

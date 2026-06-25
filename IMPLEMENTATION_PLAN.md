@@ -42,7 +42,7 @@ on Esc / click-away; undoable. Type-tool flyout listing the 4 Photoshop variants
 DOM↔model serialize), `editor.svelte.ts`, `CanvasView.svelte`, `Toolbar.svelte`,
 `ToolOptions.svelte`, `icons/index.ts`.
 **Success**: Create, edit, restyle a per-run-styled text layer; reopen still editable.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 4: Rasterize Type
 **Goal**: Convert a text layer to a plain raster layer (drop the model, keep pixels).

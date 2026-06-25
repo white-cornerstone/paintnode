@@ -36,8 +36,8 @@ export interface ToolHost {
   setActiveStroke(stroke: ActiveStroke | null): void;
   setSelection(sel: Selection | null): void;
   setForeground(rgb: RGB): void;
-  /** Text tool: ask the UI to open the text dialog at a document position. */
-  requestText(x: number, y: number): void;
+  /** Type tool: begin editing at a document position (new text, or the text layer there). */
+  beginText(x: number, y: number): void;
   /** Notify reactive UI that pixels/layers changed (refresh thumbnails, history buttons). */
   bump(): void;
   invalidate(): void;
