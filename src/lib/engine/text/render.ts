@@ -15,26 +15,42 @@ export function fontString(s: TextStyle): string {
   return `${style}${weight}${s.size}px ${s.family}`;
 }
 
-// A shared offscreen context used only for text measurement.
+/** Minimal text-measurement surface — a 2D context satisfies it (keeps layout testable). */
+export interface TextMeasurer {
+  font: string;
+  measureText(text: string): { width: number; fontBoundingBoxAscent?: number; fontBoundingBoxDescent?: number };
+}
+
+/** Draw surface used by {@link drawTextModel} — a 2D context satisfies it. */
+export interface TextDrawTarget extends TextMeasurer {
+  fillStyle: string | CanvasGradient | CanvasPattern;
+  textBaseline: CanvasTextBaseline;
+  save(): void;
+  restore(): void;
+  fillText(text: string, x: number, y: number): void;
+  fillRect(x: number, y: number, w: number, h: number): void;
+}
+
+// A shared offscreen context used for text measurement (lazy; browser only).
 let measureCtx: CanvasRenderingContext2D | null = null;
 function getMeasureCtx(): CanvasRenderingContext2D {
   if (!measureCtx) measureCtx = ctx2d(createCanvas(8, 8));
   return measureCtx;
 }
 
-function fontMetrics(ctx: CanvasRenderingContext2D, style: TextStyle): { ascent: number; descent: number } {
-  ctx.font = fontString(style);
-  const m = ctx.measureText('Mg');
+function fontMetrics(m: TextMeasurer, style: TextStyle): { ascent: number; descent: number } {
+  m.font = fontString(style);
+  const tm = m.measureText('Mg');
   return {
-    ascent: m.fontBoundingBoxAscent || style.size * 0.8,
-    descent: m.fontBoundingBoxDescent || style.size * 0.2,
+    ascent: tm.fontBoundingBoxAscent || style.size * 0.8,
+    descent: tm.fontBoundingBoxDescent || style.size * 0.2,
   };
 }
 
 /** Advance width of a run, including tracking. */
-function runWidth(ctx: CanvasRenderingContext2D, run: TextRun): number {
-  ctx.font = fontString(run.style);
-  const base = ctx.measureText(run.text).width;
+function runWidth(m: TextMeasurer, run: TextRun): number {
+  m.font = fontString(run.style);
+  const base = m.measureText(run.text).width;
   return run.style.tracking ? base + run.style.tracking * run.text.length : base;
 }
 
@@ -57,8 +73,7 @@ export interface TextLayout {
 }
 
 /** Lay out a model into positioned lines (one paragraph = one line in point text). */
-export function layoutModel(model: TextModel): TextLayout {
-  const ctx = getMeasureCtx();
+export function layoutModel(model: TextModel, measurer: TextMeasurer = getMeasureCtx()): TextLayout {
   const lines: LaidLine[] = [];
   for (const p of model.paragraphs) {
     const runs = p.runs.length ? p.runs : [{ text: '', style: defaultLineStyle(p) }];
@@ -67,8 +82,8 @@ export function layoutModel(model: TextModel): TextLayout {
     let descent = 0;
     let maxSize = 0;
     for (const r of runs) {
-      width += runWidth(ctx, r);
-      const fm = fontMetrics(ctx, r.style);
+      width += runWidth(measurer, r);
+      const fm = fontMetrics(measurer, r.style);
       ascent = Math.max(ascent, fm.ascent);
       descent = Math.max(descent, fm.descent);
       maxSize = Math.max(maxSize, r.style.size);
@@ -88,7 +103,7 @@ function defaultLineStyle(p: { runs: TextRun[] }): TextStyle {
   return p.runs[0]?.style ?? defaultStyle();
 }
 
-function drawRun(ctx: CanvasRenderingContext2D, run: TextRun, x: number, baseline: number): number {
+function drawRun(ctx: TextDrawTarget, run: TextRun, x: number, baseline: number): number {
   if (!run.style.tracking) {
     ctx.fillText(run.text, x, baseline);
     return ctx.measureText(run.text).width;
@@ -102,8 +117,8 @@ function drawRun(ctx: CanvasRenderingContext2D, run: TextRun, x: number, baselin
 }
 
 /** Draw a text model into a 2D context (caller clears first if needed). */
-export function drawTextModel(ctx: CanvasRenderingContext2D, model: TextModel): void {
-  const layout = layoutModel(model);
+export function drawTextModel(ctx: TextDrawTarget, model: TextModel): void {
+  const layout = layoutModel(model, ctx);
   ctx.save();
   ctx.textBaseline = 'alphabetic';
   let y = model.y;
@@ -134,13 +149,16 @@ export function renderTextToCanvas(canvas: HTMLCanvasElement, model: TextModel):
   drawTextModel(ctx, model);
 }
 
-export function measureTextModel(model: TextModel): { width: number; height: number } {
-  const { width, height } = layoutModel(model);
+export function measureTextModel(
+  model: TextModel,
+  measurer: TextMeasurer = getMeasureCtx(),
+): { width: number; height: number } {
+  const { width, height } = layoutModel(model, measurer);
   return { width, height };
 }
 
 /** Document-space bounding box of the rendered text (for hit-testing). */
-export function textBounds(model: TextModel): Rect {
-  const { width, height } = layoutModel(model);
+export function textBounds(model: TextModel, measurer: TextMeasurer = getMeasureCtx()): Rect {
+  const { width, height } = layoutModel(model, measurer);
   return { x: model.x, y: model.y, w: width, h: height };
 }

@@ -9,6 +9,17 @@ Photoshop-style raster image editor (Svelte 5 + TypeScript + Vite) that uses the
 - `npm run dev` — start the dev server (Vite, port 5173)
 - `npm run build` — production build → `dist/` (fully static, no backend)
 - `npm run check` — `svelte-check` type check. **Must pass with 0 errors and 0 warnings.**
+- `npm test` — run the Vitest unit suite (`npm run test:watch` while developing). **Must pass.**
+
+## Testing
+
+Unit tests live next to the code as `*.test.ts` and run in a Node environment via Vitest.
+Focus tests on the framework-agnostic engine logic in `src/lib/engine/` — pure functions with
+no DOM/canvas dependency are the most valuable to cover (text model, color math, text layout).
+Keep that logic testable: prefer pure functions and dependency injection over reaching for the
+DOM. For example, the text renderer (`engine/text/render.ts`) takes an injectable measure/draw
+surface (a real 2D context in the app, a fake in tests) so its layout math is unit-testable.
+DOM/canvas- and component-level coverage needs a browser environment and is not set up yet.
 
 ## Project layout
 
