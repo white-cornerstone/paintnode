@@ -2,6 +2,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { clamp, oraToBlend } from '../engine/types';
+import { deserializeModel, type TextModel } from '../engine/text/model';
 import { bytesToBitmap } from '../io';
 
 /** Parse an OpenRaster (.ora) file into a PaintDocument. Nested group stacks are flattened. */
@@ -45,6 +46,13 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     const opacityRaw = parseFloat(el.getAttribute('opacity') || '1');
     const sourceAssetId = el.getAttribute('cx-source-asset-id');
     const sourcePath = el.getAttribute('cx-source-path');
+    // Editable text layer: parse the sidecar model. The PNG is still used for pixels
+    // (it renders identically even when the original fonts are missing on this machine).
+    let textModel: TextModel | null = null;
+    if (el.getAttribute('cx-layer-kind') === 'text') {
+      const textPath = el.getAttribute('cx-text-data');
+      if (textPath && files[textPath]) textModel = deserializeModel(strFromU8(files[textPath]));
+    }
     const layer = new Layer(w, h, name);
     layer.x = x;
     layer.y = y;
@@ -53,6 +61,10 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     layer.opacity = clamp(Number.isNaN(opacityRaw) ? 1 : opacityRaw, 0, 1);
     layer.visible = (el.getAttribute('visibility') || 'visible') !== 'hidden';
     layer.blendMode = oraToBlend(el.getAttribute('composite-op'));
+    if (textModel) {
+      layer.kind = 'text';
+      layer.text = textModel;
+    }
 
     if (src && files[src]) {
       const bmp = await bytesToBitmap(files[src]);
@@ -62,6 +74,10 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
       loaded.opacity = layer.opacity;
       loaded.visible = layer.visible;
       loaded.blendMode = layer.blendMode;
+      if (textModel) {
+        loaded.kind = 'text';
+        loaded.text = textModel;
+      }
       loaded.ctx.drawImage(bmp, 0, 0);
       bmp.close();
       loaded.touch();

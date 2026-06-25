@@ -115,3 +115,66 @@ export function fontFamiliesUsed(m: TextModel): string[] {
   for (const p of m.paragraphs) for (const r of p.runs) set.add(r.style.family);
   return [...set];
 }
+
+// --- Serialization (sidecar JSON inside the .ora) ---
+
+export function serializeModel(m: TextModel): string {
+  return JSON.stringify(m);
+}
+
+/** Parse a model from its JSON sidecar, coercing/validating defensively. */
+export function deserializeModel(raw: string): TextModel | null {
+  let o: unknown;
+  try {
+    o = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== 'object') return null;
+  const obj = o as Record<string, unknown>;
+  const rawParagraphs = Array.isArray(obj.paragraphs) ? obj.paragraphs : [];
+  const paragraphs = rawParagraphs.map(coerceParagraph);
+  if (!paragraphs.length) return null;
+  return { version: 1, x: num(obj.x, 0), y: num(obj.y, 0), paragraphs };
+}
+
+function num(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+function coerceAlign(v: unknown): TextAlign {
+  return v === 'center' || v === 'right' ? v : 'left';
+}
+
+function coerceColor(v: unknown): RGB {
+  const o = (v ?? {}) as Record<string, unknown>;
+  return { r: num(o.r, 0), g: num(o.g, 0), b: num(o.b, 0) };
+}
+
+function coerceStyle(v: unknown): TextStyle {
+  const o = (v ?? {}) as Record<string, unknown>;
+  return defaultStyle({
+    family: typeof o.family === 'string' ? o.family : 'sans-serif',
+    size: num(o.size, 72),
+    color: coerceColor(o.color),
+    bold: !!o.bold,
+    italic: !!o.italic,
+    underline: !!o.underline,
+    tracking: num(o.tracking, 0),
+  });
+}
+
+function coerceParagraph(v: unknown): TextParagraph {
+  const o = (v ?? {}) as Record<string, unknown>;
+  const rawRuns = Array.isArray(o.runs) ? o.runs : [];
+  const runs = rawRuns
+    .map((r) => {
+      const ro = (r ?? {}) as Record<string, unknown>;
+      return { text: typeof ro.text === 'string' ? ro.text : '', style: coerceStyle(ro.style) };
+    });
+  return {
+    align: coerceAlign(o.align),
+    lineHeight: num(o.lineHeight, DEFAULT_LINE_HEIGHT),
+    runs: runs.length ? runs : [{ text: '', style: defaultStyle() }],
+  };
+}
