@@ -3,7 +3,8 @@
   import { editor } from '../state/editor.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { TextBold, TextItalic, TextUnderline, TextAlignLeft, TextAlignCenter, TextAlignRight } from '../icons';
+  import { TextBold, TextItalic, TextUnderline, TextAlignLeft, TextAlignCenter, TextAlignRight, Add } from '../icons';
+  import { fonts } from '../state/fonts.svelte';
   import { rgbToHex } from '../engine/color';
   import {
     DEFAULT_LINE_HEIGHT,
@@ -33,22 +34,12 @@
   let curAlign = $state<TextAlign>('left');
   let curLineHeight = $state(DEFAULT_LINE_HEIGHT);
 
-  const FONTS = [
-    'sans-serif',
-    'serif',
-    'monospace',
-    'Arial',
-    'Helvetica',
-    'Georgia',
-    'Times New Roman',
-    'Courier New',
-    'Trebuchet MS',
-    'Verdana',
-    'Impact',
-    'Comic Sans MS',
-  ];
-
   const BLOCK_TAGS = new Set(['DIV', 'P']);
+
+  async function importFont(): Promise<void> {
+    const family = await fonts.importViaPicker();
+    if (family) setFamily(family);
+  }
 
   // --- model -> DOM ---
 
@@ -413,10 +404,17 @@
     use:tooltip={{ text: 'Font family', placement: 'top' }}
     aria-label="Font family"
   >
-    {#each FONTS as f (f)}
+    {#each fonts.all as f (f)}
       <option value={f} style="font-family:{f}">{f}</option>
     {/each}
   </select>
+  <button
+    class="import"
+    onmousedown={(e) => e.preventDefault()}
+    onclick={importFont}
+    use:tooltip={{ text: 'Import font…', placement: 'top' }}
+    aria-label="Import font"><Icon svg={Add} size={15} /></button
+  >
 
   <input
     class="size"

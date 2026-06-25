@@ -17,6 +17,7 @@
   import HueSaturationDialog from './lib/components/HueSaturationDialog.svelte';
   import GaussianBlurDialog from './lib/components/GaussianBlurDialog.svelte';
   import AiGenerateDialog from './lib/components/AiGenerateDialog.svelte';
+  import FontEmbedDialog from './lib/components/FontEmbedDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -425,6 +426,10 @@
   <GaussianBlurDialog onClose={() => ui.close()} />
 {:else if ui.dialog === 'aiGenerate'}
   <AiGenerateDialog onClose={() => ui.close()} />
+{/if}
+
+{#if ui.fontEmbed}
+  <FontEmbedDialog />
 {/if}
 
 <style>

@@ -80,6 +80,8 @@ export interface DocumentSession {
   autosavedRevision: number;
   savedPath: string | null;
   autosavePath: string | null;
+  /** Remembered "embed fonts?" choice for this document (null = ask on next save). */
+  embedFonts: boolean | null;
 }
 
 export class EditorStore implements ToolHost {
@@ -224,6 +226,7 @@ export class EditorStore implements ToolHost {
       autosavedRevision: 0,
       savedPath: null,
       autosavePath: null,
+      embedFonts: null,
     };
   }
 

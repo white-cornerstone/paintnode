@@ -3,6 +3,7 @@ import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { clamp, oraToBlend } from '../engine/types';
 import { deserializeModel, type TextModel } from '../engine/text/model';
+import { fonts } from '../state/fonts.svelte';
 import { bytesToBitmap } from '../io';
 
 /** Parse an OpenRaster (.ora) file into a PaintDocument. Nested group stacks are flattened. */
@@ -90,5 +91,23 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
   if (layers.length === 0) layers.push(new Layer(w, h, 'Layer 1'));
   doc.layers = layers;
   doc.activeLayerId = layers[layers.length - 1].id;
+
+  // Register any embedded fonts so text layers stay editable with the right font.
+  const manifestBytes = files['fonts/manifest.json'];
+  if (manifestBytes) {
+    try {
+      const manifest = JSON.parse(strFromU8(manifestBytes)) as { family: string; file: string }[];
+      for (const entry of manifest) {
+        const data = files[entry.file];
+        if (data && entry.family) {
+          const ext = entry.file.match(/\.([^.]+)$/)?.[1] ?? 'font';
+          await fonts.registerEmbedded(entry.family, data, ext);
+        }
+      }
+    } catch {
+      /* ignore a malformed font manifest */
+    }
+  }
+
   return doc;
 }

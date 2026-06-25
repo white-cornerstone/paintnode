@@ -56,8 +56,19 @@ function buildStackXml(
   );
 }
 
-/** Serialize a document to an OpenRaster (.ora) Blob. */
-export async function saveOra(doc: PaintDocument): Promise<Blob> {
+/** A font to embed in the .ora so its text layers stay editable with the right font. */
+export interface EmbeddedFont {
+  family: string;
+  bytes: Uint8Array;
+  ext: string;
+}
+
+function safeFileName(s: string): string {
+  return s.replace(/[^a-z0-9._-]+/gi, '_').slice(0, 48) || 'font';
+}
+
+/** Serialize a document to an OpenRaster (.ora) Blob, optionally embedding fonts. */
+export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = []): Promise<Blob> {
   const enc = new TextEncoder();
   const files: Zippable = {};
 
@@ -86,6 +97,16 @@ export async function saveOra(doc: PaintDocument): Promise<Blob> {
   files['Thumbnails/thumbnail.png'] = await canvasToPngBytes(thumb);
 
   files['stack.xml'] = enc.encode(buildStackXml(doc, srcMap, textMap));
+
+  // Optional embedded fonts: extra files other ORA readers ignore.
+  if (embedFonts.length) {
+    const manifest = embedFonts.map((f, i) => {
+      const file = `fonts/${safeFileName(f.family)}-${i}.${f.ext}`;
+      files[file] = f.bytes;
+      return { family: f.family, file };
+    });
+    files['fonts/manifest.json'] = enc.encode(JSON.stringify(manifest));
+  }
 
   const zipped = zipSync(files, { level: 6 });
   return new Blob([zipped], { type: 'image/openraster' });
