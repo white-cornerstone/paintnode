@@ -1,9 +1,11 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { workflow, type WorkflowTool } from '../state/workflow.svelte';
 
   const tool = $derived(editor.activeToolId);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
+  const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
   // Tools that share the round-brush controls (size / hardness / strength).
   const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge'];
   const usesBrush = $derived(brushTools.includes(tool));
@@ -16,10 +18,61 @@
           ? 'Flow'
           : 'Strength',
   );
+  const workflowToolNames: Record<WorkflowTool, string> = {
+    move: 'Move',
+    asset: 'Asset Node',
+    composition: 'Composition Node',
+    output: 'Output Node',
+  };
+  const nodePalettes = ['#3a3c42', '#3e4f7a', '#3e6b57', '#74583c', '#70435f', '#5b4f7a'];
+  const selectedKindLabel = $derived(
+    workflow.selection?.kind === 'asset'
+      ? 'Asset'
+      : workflow.selection?.kind === 'composition'
+        ? 'Composition'
+        : workflow.selection?.kind === 'output'
+          ? 'Output'
+          : 'None',
+  );
 </script>
 
 <div class="options">
-  {#if hasDocument}
+  {#if hasWorkflow}
+    <span class="tool-name">{workflowToolNames[workflow.tool]}</span>
+    <span class="divider"></span>
+    {#if workflow.tool === 'move'}
+      <span class="hint">Drag empty workflow canvas to pan. Drag node headers to move nodes.</span>
+    {:else}
+      <span class="hint">Drag on the workflow canvas to place or resize a {workflowToolNames[workflow.tool].toLowerCase()}.</span>
+    {/if}
+
+    <span class="divider"></span>
+    <div class="opt">
+      Type
+      <span class="pill">{selectedKindLabel}</span>
+    </div>
+    <label class="opt">
+      Name
+      <input
+        class="node-name"
+        value={workflow.selectedLabel()}
+        placeholder="node name"
+        disabled={!workflow.selection}
+        oninput={(event) => workflow.setSelectedLabel(event.currentTarget.value)}
+      />
+    </label>
+    <div class="palette" aria-label="Node color palette">
+      {#each nodePalettes as color (color)}
+        <button
+          class:active={workflow.selectedColor() === color}
+          style={`background:${color}`}
+          aria-label={`Set node color ${color}`}
+          disabled={!workflow.selection}
+          onclick={() => workflow.setSelectedColor(color)}
+        ></button>
+      {/each}
+    </div>
+  {:else if hasDocument}
     <span class="tool-name">{editor.activeTool.name}</span>
     <span class="divider"></span>
 
@@ -203,6 +256,33 @@
   .hint {
     color: var(--text-dim);
     font-style: italic;
+  }
+  .pill {
+    min-width: 86px;
+    padding: 3px 8px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text);
+  }
+  .node-name {
+    width: 180px;
+  }
+  .palette {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .palette button {
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+    padding: 0;
+  }
+  .palette button.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
   }
   .seg {
     display: inline-flex;

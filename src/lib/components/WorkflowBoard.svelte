@@ -18,6 +18,8 @@
   let progress = $state('');
   let error = $state('');
   let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
+  let panning: { x: number; y: number } | null = null;
+  let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let boardEl = $state<HTMLDivElement>();
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -107,14 +109,15 @@
     node: WorkflowAssetNode | undefined = undefined,
   ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
-    const rect = boardEl.getBoundingClientRect();
     const x = type === 'asset' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : workflow.outputX;
     const y = type === 'asset' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : workflow.outputY;
+    if (type === 'asset' && node) workflow.select({ kind: 'asset', id: node.id });
+    else workflow.select(type === 'prompt' ? { kind: 'composition' } : { kind: 'output' });
     dragging = {
       type,
       id: node?.id,
-      dx: event.clientX - rect.left - x,
-      dy: event.clientY - rect.top - y,
+      dx: boardPoint(event).x - x,
+      dy: boardPoint(event).y - y,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
     event.stopPropagation();
@@ -138,17 +141,106 @@
   }
 
   function onPointerMove(event: PointerEvent): void {
-    if (!dragging || !boardEl) return;
-    const rect = boardEl.getBoundingClientRect();
-    const x = event.clientX - rect.left - dragging.dx;
-    const y = event.clientY - rect.top - dragging.dy;
-    if (dragging.type === 'asset' && dragging.id) workflow.moveNode(dragging.id, x, y);
-    else if (dragging.type === 'prompt') workflow.movePrompt(x, y);
-    else workflow.moveOutput(x, y);
+    if (panning) {
+      workflow.panBy(event.clientX - panning.x, event.clientY - panning.y);
+      panning = { x: event.clientX, y: event.clientY };
+      return;
+    }
+    if (drawing) {
+      const point = boardPoint(event);
+      drawing = {
+        ...drawing,
+        width: point.x - drawing.x,
+        height: point.y - drawing.y,
+      };
+      return;
+    }
+    if (dragging) {
+      const point = boardPoint(event);
+      const x = point.x - dragging.dx;
+      const y = point.y - dragging.dy;
+      if (dragging.type === 'asset' && dragging.id) workflow.moveNode(dragging.id, x, y);
+      else if (dragging.type === 'prompt') workflow.movePrompt(x, y);
+      else workflow.moveOutput(x, y);
+    }
   }
 
   function stopDrag(): void {
+    if (drawing) {
+      commitDrawing();
+    }
     dragging = null;
+    panning = null;
+  }
+
+  function boardPoint(event: PointerEvent): { x: number; y: number } {
+    if (!boardEl) return { x: 0, y: 0 };
+    const rect = boardEl.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left - workflow.panX,
+      y: event.clientY - rect.top - workflow.panY,
+    };
+  }
+
+  function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } {
+    const x = rect.width < 0 ? rect.x + rect.width : rect.x;
+    const y = rect.height < 0 ? rect.y + rect.height : rect.y;
+    return {
+      x,
+      y,
+      width: Math.abs(rect.width),
+      height: Math.abs(rect.height),
+    };
+  }
+
+  function onBoardPointerDown(event: PointerEvent): void {
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    if (event.button !== 0) return;
+    if (workflow.tool === 'move') {
+      panning = { x: event.clientX, y: event.clientY };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+    const point = boardPoint(event);
+    drawing = { type: workflow.tool, x: point.x, y: point.y, width: 0, height: 0 };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function commitDrawing(): void {
+    if (!drawing) return;
+    const rect = normalizeRect(drawing);
+    const width = rect.width < 12 ? (drawing.type === 'composition' ? workflow.compositionWidth : drawing.type === 'output' ? workflow.outputWidth : ASSET_NODE_W) : rect.width;
+    const height = rect.height < 12 ? (drawing.type === 'composition' ? workflow.compositionHeight : drawing.type === 'output' ? workflow.outputHeight : 190) : rect.height;
+    if (drawing.type === 'asset') workflow.addBlankAsset(rect.x, rect.y, width, height);
+    else if (drawing.type === 'composition') {
+      workflow.movePrompt(rect.x, rect.y);
+      workflow.resizePrompt(width, height);
+      workflow.select({ kind: 'composition' });
+      workflow.setTool('move');
+    } else {
+      workflow.moveOutput(rect.x, rect.y);
+      workflow.resizeOutput(width, height);
+      workflow.select({ kind: 'output' });
+      workflow.setTool('move');
+    }
+    drawing = null;
+  }
+
+  function assetTitle(node: WorkflowAssetNode): string {
+    return `Asset - ${node.name || 'Untitled'}`;
+  }
+
+  function compositionTitle(): string {
+    return workflow.compositionName ? `Composition - ${workflow.compositionName}` : 'Composition';
+  }
+
+  function outputTitle(): string {
+    return workflow.outputName ? `Output - ${workflow.outputName}` : 'Output';
   }
 
   function storyboardCtx(): CanvasRenderingContext2D | null {
@@ -354,126 +446,161 @@
 
     <div
       class="board"
+      class:adding={workflow.tool !== 'move'}
+      class:panning={workflow.tool === 'move'}
       role="application"
       aria-label="Workflow composition board"
       bind:this={boardEl}
+      style={`background-position:${workflow.panX}px ${workflow.panY}px`}
+      onpointerdown={onBoardPointerDown}
       onpointermove={onPointerMove}
       onpointerup={stopDrag}
       onpointercancel={stopDrag}
     >
-      <svg class="links" aria-hidden="true">
-        {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
-          <line
-            x1={node.x + ASSET_NODE_W}
-            y1={node.y + NODE_HEAD_H / 2}
-            x2={workflow.promptX}
-            y2={workflow.promptY + NODE_HEAD_H / 2}
-          />
-        {/each}
-      </svg>
+      <div class="board-world" style={`transform:translate(${workflow.panX}px, ${workflow.panY}px)`}>
+        <svg class="links" aria-hidden="true">
+          {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
+            <line
+              x1={node.x + node.width}
+              y1={node.y + NODE_HEAD_H / 2}
+              x2={workflow.promptX}
+              y2={workflow.promptY + NODE_HEAD_H / 2}
+            />
+          {/each}
+        </svg>
 
-      {#each workflow.nodes as node (node.id)}
-        {@const asset = assetFor(node)}
+        {#if drawing}
+          {@const rect = normalizeRect(drawing)}
+          <div
+            class="draw-preview"
+            style={`transform:translate(${rect.x}px, ${rect.y}px); width:${Math.max(12, rect.width)}px; height:${Math.max(12, rect.height)}px`}
+          ></div>
+        {/if}
+
+        {#each workflow.nodes as node (node.id)}
+          {@const asset = assetFor(node)}
+          <article
+            class="asset-node"
+            class:included={node.included}
+            class:selected={workflow.selection?.kind === 'asset' && workflow.selection.id === node.id}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; --node-color:${node.color}`}
+            onpointerdown={(event) => {
+              workflow.select({ kind: 'asset', id: node.id });
+              event.stopPropagation();
+            }}
+          >
+            <div class="node-head" use:dragHandle={{ type: 'asset', node }}>
+              <span>{assetTitle(node)}</span>
+              <div class="node-tools">
+                <button
+                  class:active={node.included}
+                  aria-label={`${node.included ? 'Exclude' : 'Include'} ${node.name} in composition`}
+                  use:tooltip={{ text: node.included ? 'Connected to composition' : 'Include in composition', placement: 'top' }}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.setNodeIncluded(node.id, !node.included);
+                  }}
+                >
+                  <Icon svg={Link} size={13} />
+                </button>
+                <button
+                  aria-label={`Remove ${node.name}`}
+                  use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.removeNode(node.id);
+                  }}
+                >
+                  <Icon svg={Delete} size={13} />
+                </button>
+              </div>
+            </div>
+            <div class="node-preview" style={`height:${Math.max(64, node.height - 84)}px`}>
+              {#if asset?.previewDataUrl}<img src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+            </div>
+            <textarea
+              aria-label={`Role for ${node.name}`}
+              placeholder="role in composition"
+              value={node.note}
+              onpointerdown={(event) => event.stopPropagation()}
+              oninput={(event) => workflow.setNodeNote(node.id, event.currentTarget.value)}
+            ></textarea>
+          </article>
+        {/each}
+
         <article
-          class="asset-node"
-          class:included={node.included}
-          style={`transform:translate(${node.x}px, ${node.y}px)`}
+          class="prompt-node"
+          class:selected={workflow.selection?.kind === 'composition'}
+          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; --node-color:${workflow.compositionColor}`}
+          onpointerdown={(event) => {
+            workflow.select({ kind: 'composition' });
+            event.stopPropagation();
+          }}
         >
-          <div class="node-head" use:dragHandle={{ type: 'asset', node }}>
-            <span>{node.name}</span>
+          <div class="node-head" use:dragHandle={{ type: 'prompt' }}>
+            <span>{compositionTitle()}</span>
             <div class="node-tools">
-              <button
-                class:active={node.included}
-                aria-label={`${node.included ? 'Exclude' : 'Include'} ${node.name} in composition`}
-                use:tooltip={{ text: node.included ? 'Connected to composition' : 'Include in composition', placement: 'top' }}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  workflow.setNodeIncluded(node.id, !node.included);
-                }}
-              >
-                <Icon svg={Link} size={13} />
-              </button>
-              <button
-                aria-label={`Remove ${node.name}`}
-                use:tooltip={{ text: 'Remove node', placement: 'top' }}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  workflow.removeNode(node.id);
-                }}
-              >
-                <Icon svg={Delete} size={13} />
-              </button>
+              <span class="connected-count">{workflow.nodes.filter((node) => node.included).length} linked</span>
             </div>
           </div>
-          <div class="node-preview">
-            {#if asset?.previewDataUrl}<img src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+          <div class="storyboard">
+            <div class="storyboard-head">
+              <span><Icon svg={PaintBrush} size={13} /> Storyboard</span>
+              <button
+                aria-label="Clear storyboard"
+                use:tooltip={{ text: 'Clear storyboard', placement: 'top' }}
+                onclick={clearStoryboard}
+              >
+                <Icon svg={Dismiss} size={13} />
+              </button>
+            </div>
+            <canvas
+              bind:this={storyboardCanvas}
+              width={STORYBOARD_W}
+              height={STORYBOARD_H}
+              aria-label="Storyboard annotation canvas"
+              onpointerdown={startSketch}
+              onpointermove={moveSketch}
+              onpointerup={stopSketch}
+              onpointercancel={stopSketch}
+            ></canvas>
           </div>
           <textarea
-            aria-label={`Role for ${node.name}`}
-            placeholder="role in composition"
-            value={node.note}
+            class="composition-text"
+            placeholder="A girl on the beach standing in front of an ice cream truck, holding an ice cream..."
+            value={workflow.prompt}
             onpointerdown={(event) => event.stopPropagation()}
-            oninput={(event) => workflow.setNodeNote(node.id, event.currentTarget.value)}
+            oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
+          <label>
+            <span>Codex command</span>
+            <input bind:value={codexBin} placeholder="codex or full path" />
+          </label>
+          {#if busy}<p class="progress">{progress}</p>{/if}
+          {#if error}<p class="err">{error}</p>{/if}
         </article>
-      {/each}
 
-      <article class="prompt-node" style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px)`}>
-        <div class="node-head" use:dragHandle={{ type: 'prompt' }}>
-          <span>Composition</span>
-          <div class="node-tools">
-            <span class="connected-count">{workflow.nodes.filter((node) => node.included).length} linked</span>
+        <article
+          class="output-node"
+          class:selected={workflow.selection?.kind === 'output'}
+          style={`transform:translate(${workflow.outputX}px, ${workflow.outputY}px); width:${workflow.outputWidth}px; --node-color:${workflow.outputColor}`}
+          onpointerdown={(event) => {
+            workflow.select({ kind: 'output' });
+            event.stopPropagation();
+          }}
+        >
+          <div class="node-head" use:dragHandle={{ type: 'output' }}><span>{outputTitle()}</span></div>
+          <div class="output-preview" style={`height:${Math.max(76, workflow.outputHeight - 74)}px`}>
+            {#if outputAsset?.previewDataUrl}<img src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
           </div>
-        </div>
-        <div class="storyboard">
-          <div class="storyboard-head">
-            <span><Icon svg={PaintBrush} size={13} /> Storyboard</span>
-            <button
-              aria-label="Clear storyboard"
-              use:tooltip={{ text: 'Clear storyboard', placement: 'top' }}
-              onclick={clearStoryboard}
-            >
-              <Icon svg={Dismiss} size={13} />
+          <div class="output-actions">
+            <button onclick={() => void placeOutput()} disabled={!outputAsset}>
+              <Icon svg={Open} size={14} />
+              Place
             </button>
           </div>
-          <canvas
-            bind:this={storyboardCanvas}
-            width={STORYBOARD_W}
-            height={STORYBOARD_H}
-            aria-label="Storyboard annotation canvas"
-            onpointerdown={startSketch}
-            onpointermove={moveSketch}
-            onpointerup={stopSketch}
-            onpointercancel={stopSketch}
-          ></canvas>
-        </div>
-        <textarea
-          class="composition-text"
-          placeholder="A girl on the beach standing in front of an ice cream truck, holding an ice cream..."
-          value={workflow.prompt}
-          onpointerdown={(event) => event.stopPropagation()}
-          oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
-        ></textarea>
-        <label>
-          <span>Codex command</span>
-          <input bind:value={codexBin} placeholder="codex or full path" />
-        </label>
-        {#if busy}<p class="progress">{progress}</p>{/if}
-        {#if error}<p class="err">{error}</p>{/if}
-      </article>
-
-      <article class="output-node" style={`transform:translate(${workflow.outputX}px, ${workflow.outputY}px)`}>
-        <div class="node-head" use:dragHandle={{ type: 'output' }}><span>Output</span></div>
-        <div class="output-preview">
-          {#if outputAsset?.previewDataUrl}<img src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
-        </div>
-        <div class="output-actions">
-          <button onclick={() => void placeOutput()} disabled={!outputAsset}>
-            <Icon svg={Open} size={14} />
-            Place
-          </button>
-        </div>
-      </article>
+        </article>
+      </div>
     </div>
   </div>
 </section>
@@ -576,6 +703,21 @@
       linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
     background-size: 24px 24px;
+    touch-action: none;
+  }
+  .board.panning {
+    cursor: grab;
+  }
+  .board.panning:active {
+    cursor: grabbing;
+  }
+  .board.adding {
+    cursor: copy;
+  }
+  .board-world {
+    position: absolute;
+    inset: 0;
+    transform-origin: top left;
   }
   .links {
     position: absolute;
@@ -583,6 +725,7 @@
     width: 100%;
     height: 100%;
     pointer-events: none;
+    overflow: visible;
   }
   .links line {
     stroke: var(--accent);
@@ -595,7 +738,7 @@
   .output-node {
     position: absolute;
     width: 205px;
-    background: #2f3033;
+    background: color-mix(in srgb, var(--node-color, #3a3c42) 22%, #2f3033);
     border: 1px solid #4b4d52;
     border-radius: 6px;
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
@@ -614,11 +757,19 @@
   .output-node {
     width: 210px;
   }
+  .asset-node.selected,
+  .prompt-node.selected,
+  .output-node.selected {
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 72%, transparent),
+      0 12px 30px rgba(0, 0, 0, 0.28);
+  }
   .node-head {
     justify-content: space-between;
     height: 32px;
     padding: 0 8px;
-    background: #383a3e;
+    background: color-mix(in srgb, var(--node-color, #3a3c42) 55%, #383a3e);
     border-bottom: 1px solid #4b4d52;
     font-size: 12px;
     font-weight: 700;
@@ -725,5 +876,11 @@
     justify-content: flex-end;
     padding: 8px;
     border-top: 1px solid #4b4d52;
+  }
+  .draw-preview {
+    position: absolute;
+    border: 1px dashed var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    pointer-events: none;
   }
 </style>

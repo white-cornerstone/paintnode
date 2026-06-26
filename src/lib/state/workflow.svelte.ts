@@ -9,18 +9,34 @@ export interface WorkflowAssetNode {
   relativePath: string;
   x: number;
   y: number;
+  width: number;
+  height: number;
+  color: string;
   included: boolean;
   note: string;
 }
+
+export type WorkflowTool = 'move' | 'asset' | 'composition' | 'output';
+export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output' };
 
 export interface WorkflowFile {
   version: 1;
   name: string;
   prompt: string;
+  compositionName?: string;
+  compositionWidth?: number;
+  compositionHeight?: number;
+  compositionColor?: string;
   promptX: number;
   promptY: number;
+  outputName?: string;
+  outputWidth?: number;
+  outputHeight?: number;
+  outputColor?: string;
   outputX: number;
   outputY: number;
+  panX?: number;
+  panY?: number;
   storyboardDataUrl: string | null;
   nodes: WorkflowAssetNode[];
   outputAssetId: string | null;
@@ -41,11 +57,23 @@ class WorkflowStore {
   active = $state(false);
   name = $state('Untitled Workflow');
   savedPath = $state<string | null>(null);
+  tool = $state<WorkflowTool>('move');
+  selection = $state<WorkflowSelection | null>({ kind: 'composition' });
   prompt = $state('');
+  compositionName = $state('');
+  compositionWidth = $state(340);
+  compositionHeight = $state(408);
+  compositionColor = $state('#3a3c42');
   promptX = $state(480);
   promptY = $state(70);
+  outputName = $state('');
+  outputWidth = $state(210);
+  outputHeight = $state(190);
+  outputColor = $state('#3a3c42');
   outputX = $state(895);
   outputY = $state(96);
+  panX = $state(0);
+  panY = $state(0);
   storyboardDataUrl = $state<string | null>(null);
   nodes = $state<WorkflowAssetNode[]>([]);
   outputAssetId = $state<string | null>(null);
@@ -63,11 +91,23 @@ class WorkflowStore {
     ui.showWorkflow();
     this.name = cleanWorkflowName(name);
     this.savedPath = null;
+    this.tool = 'move';
+    this.selection = { kind: 'composition' };
     this.prompt = '';
+    this.compositionName = '';
+    this.compositionWidth = 340;
+    this.compositionHeight = 408;
+    this.compositionColor = '#3a3c42';
     this.promptX = 480;
     this.promptY = 70;
+    this.outputName = '';
+    this.outputWidth = 210;
+    this.outputHeight = 190;
+    this.outputColor = '#3a3c42';
     this.outputX = 895;
     this.outputY = 96;
+    this.panX = 0;
+    this.panY = 0;
     this.storyboardDataUrl = null;
     this.nodes = [];
     this.outputAssetId = null;
@@ -92,26 +132,61 @@ class WorkflowStore {
     this.bump();
   }
 
+  setTool(tool: WorkflowTool): void {
+    this.tool = tool;
+  }
+
+  select(selection: WorkflowSelection | null): void {
+    this.selection = selection;
+  }
+
   addAsset(asset: ProjectAsset): void {
     const index = this.nodes.length;
+    const node = {
+      id: id('asset'),
+      assetId: asset.id,
+      name: asset.name.replace(/\.[^.]+$/, '') || 'Asset',
+      relativePath: asset.relativePath,
+      x: 80 + (index % 3) * 230,
+      y: 110 + Math.floor(index / 3) * 160,
+      width: 205,
+      height: 190,
+      color: '#3a3c42',
+      included: true,
+      note: '',
+    };
     this.nodes = [
       ...this.nodes,
-      {
-        id: id('asset'),
-        assetId: asset.id,
-        name: asset.name.replace(/\.[^.]+$/, '') || 'Asset',
-        relativePath: asset.relativePath,
-        x: 80 + (index % 3) * 230,
-        y: 110 + Math.floor(index / 3) * 160,
-        included: true,
-        note: '',
-      },
+      node,
     ];
+    this.selection = { kind: 'asset', id: node.id };
+    this.tool = 'move';
+    this.bump();
+  }
+
+  addBlankAsset(x: number, y: number, width: number, height: number): void {
+    const node = {
+      id: id('asset'),
+      assetId: null,
+      name: `Asset ${this.nodes.length + 1}`,
+      relativePath: '',
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.max(160, Math.round(width)),
+      height: Math.max(130, Math.round(height)),
+      color: '#3a3c42',
+      included: true,
+      note: '',
+    };
+    this.nodes = [...this.nodes, node];
+    this.selection = { kind: 'asset', id: node.id };
+    this.tool = 'move';
     this.bump();
   }
 
   removeNode(id: string): void {
     this.nodes = this.nodes.filter((node) => node.id !== id);
+    if (this.selection?.kind === 'asset' && this.selection.id === id) this.selection = null;
     this.bump();
   }
 
@@ -123,9 +198,23 @@ class WorkflowStore {
     this.bump();
   }
 
+  resizeNode(id: string, width: number, height: number): void {
+    const node = this.nodes.find((item) => item.id === id);
+    if (!node) return;
+    node.width = Math.max(160, Math.round(width));
+    node.height = Math.max(130, Math.round(height));
+    this.bump();
+  }
+
   movePrompt(x: number, y: number): void {
     this.promptX = Math.round(x);
     this.promptY = Math.round(y);
+    this.bump();
+  }
+
+  resizePrompt(width: number, height: number): void {
+    this.compositionWidth = Math.max(260, Math.round(width));
+    this.compositionHeight = Math.max(260, Math.round(height));
     this.bump();
   }
 
@@ -133,6 +222,17 @@ class WorkflowStore {
     this.outputX = Math.round(x);
     this.outputY = Math.round(y);
     this.bump();
+  }
+
+  resizeOutput(width: number, height: number): void {
+    this.outputWidth = Math.max(170, Math.round(width));
+    this.outputHeight = Math.max(150, Math.round(height));
+    this.bump();
+  }
+
+  panBy(dx: number, dy: number): void {
+    this.panX = Math.round(this.panX + dx);
+    this.panY = Math.round(this.panY + dy);
   }
 
   setNodeIncluded(id: string, included: boolean): void {
@@ -159,6 +259,58 @@ class WorkflowStore {
     this.bump();
   }
 
+  selectedLabel(): string {
+    const selection = this.selection;
+    if (selection?.kind === 'asset') {
+      return this.nodes.find((node) => node.id === selection.id)?.name ?? '';
+    }
+    if (selection?.kind === 'composition') return this.compositionName;
+    if (selection?.kind === 'output') return this.outputName;
+    return '';
+  }
+
+  selectedColor(): string {
+    const selection = this.selection;
+    if (selection?.kind === 'asset') {
+      return this.nodes.find((node) => node.id === selection.id)?.color ?? '#3a3c42';
+    }
+    if (selection?.kind === 'composition') return this.compositionColor;
+    if (selection?.kind === 'output') return this.outputColor;
+    return '#3a3c42';
+  }
+
+  setSelectedLabel(name: string): void {
+    const selection = this.selection;
+    if (selection?.kind === 'asset') {
+      const node = this.nodes.find((item) => item.id === selection.id);
+      if (!node) return;
+      node.name = name.trim() || 'Asset';
+    } else if (selection?.kind === 'composition') {
+      this.compositionName = name.trim();
+    } else if (selection?.kind === 'output') {
+      this.outputName = name.trim();
+    } else {
+      return;
+    }
+    this.bump();
+  }
+
+  setSelectedColor(color: string): void {
+    const selection = this.selection;
+    if (selection?.kind === 'asset') {
+      const node = this.nodes.find((item) => item.id === selection.id);
+      if (!node) return;
+      node.color = color;
+    } else if (selection?.kind === 'composition') {
+      this.compositionColor = color;
+    } else if (selection?.kind === 'output') {
+      this.outputColor = color;
+    } else {
+      return;
+    }
+    this.bump();
+  }
+
   setOutput(asset: ProjectAsset | null): void {
     this.outputAssetId = asset?.id ?? null;
     this.outputRelativePath = asset?.relativePath ?? null;
@@ -170,10 +322,20 @@ class WorkflowStore {
       version: 1,
       name: this.name,
       prompt: this.prompt,
+      compositionName: this.compositionName,
+      compositionWidth: this.compositionWidth,
+      compositionHeight: this.compositionHeight,
+      compositionColor: this.compositionColor,
       promptX: this.promptX,
       promptY: this.promptY,
+      outputName: this.outputName,
+      outputWidth: this.outputWidth,
+      outputHeight: this.outputHeight,
+      outputColor: this.outputColor,
       outputX: this.outputX,
       outputY: this.outputY,
+      panX: this.panX,
+      panY: this.panY,
       storyboardDataUrl: this.storyboardDataUrl,
       nodes: this.nodes.map((node) => ({ ...node })),
       outputAssetId: this.outputAssetId,
@@ -193,13 +355,25 @@ class WorkflowStore {
     }
     this.active = true;
     ui.showWorkflow();
+    this.tool = 'move';
+    this.selection = { kind: 'composition' };
     this.name = cleanWorkflowName(parsed.name ?? fallbackName);
     this.savedPath = savedPath;
     this.prompt = parsed.prompt ?? '';
+    this.compositionName = parsed.compositionName ?? '';
+    this.compositionWidth = Number.isFinite(parsed.compositionWidth) ? Math.round(parsed.compositionWidth!) : 340;
+    this.compositionHeight = Number.isFinite(parsed.compositionHeight) ? Math.round(parsed.compositionHeight!) : 408;
+    this.compositionColor = parsed.compositionColor ?? '#3a3c42';
     this.promptX = Number.isFinite(parsed.promptX) ? Math.round(parsed.promptX!) : 480;
     this.promptY = Number.isFinite(parsed.promptY) ? Math.round(parsed.promptY!) : 70;
+    this.outputName = parsed.outputName ?? '';
+    this.outputWidth = Number.isFinite(parsed.outputWidth) ? Math.round(parsed.outputWidth!) : 210;
+    this.outputHeight = Number.isFinite(parsed.outputHeight) ? Math.round(parsed.outputHeight!) : 190;
+    this.outputColor = parsed.outputColor ?? '#3a3c42';
     this.outputX = Number.isFinite(parsed.outputX) ? Math.round(parsed.outputX!) : 895;
     this.outputY = Number.isFinite(parsed.outputY) ? Math.round(parsed.outputY!) : 96;
+    this.panX = Number.isFinite(parsed.panX) ? Math.round(parsed.panX!) : 0;
+    this.panY = Number.isFinite(parsed.panY) ? Math.round(parsed.panY!) : 0;
     this.storyboardDataUrl = parsed.storyboardDataUrl ?? null;
     this.nodes = parsed.nodes.map((node, index) => ({
       id: node.id || id('asset'),
@@ -208,9 +382,12 @@ class WorkflowStore {
       relativePath: node.relativePath || '',
       x: Number.isFinite(node.x) ? Math.round(node.x) : 80 + index * 32,
       y: Number.isFinite(node.y) ? Math.round(node.y) : 120 + index * 32,
+      width: Number.isFinite(node.width) ? Math.max(160, Math.round(node.width!)) : 205,
+      height: Number.isFinite(node.height) ? Math.max(130, Math.round(node.height!)) : 190,
+      color: node.color || '#3a3c42',
       included: node.included ?? true,
       note: node.note ?? '',
-    })).filter((node) => node.relativePath);
+    }));
     this.outputAssetId = parsed.outputAssetId ?? null;
     this.outputRelativePath = parsed.outputRelativePath ?? null;
     this.rev = 0;

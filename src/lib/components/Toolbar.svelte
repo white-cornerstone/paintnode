@@ -1,6 +1,7 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { workflow, type WorkflowTool } from '../state/workflow.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import {
@@ -28,6 +29,9 @@
     TextT,
     Hand,
     Search,
+    ImageAdd,
+    Board,
+    Open,
     Sparkle,
     ArrowSwap,
   } from '../icons';
@@ -54,6 +58,12 @@
   }
   type MarqueeSlot = { kind: 'marquee' };
   type Slot = ToolSlot | GroupSlot | MarqueeSlot;
+  interface WorkflowSlot {
+    id: WorkflowTool;
+    label: string;
+    icon: string;
+    tooltip: string;
+  }
 
   const slots: Slot[] = [
     { kind: 'tool', id: 'move', key: 'V', icon: ArrowMove },
@@ -117,6 +127,14 @@
     marqueeItems.find((m) => m.shape === editor.marqueeShape) ?? marqueeItems[0],
   );
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
+  const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
+  const enabled = $derived(hasDocument || hasWorkflow);
+  const workflowSlots: WorkflowSlot[] = [
+    { id: 'move', label: 'Move', icon: ArrowMove, tooltip: 'Move workflow canvas' },
+    { id: 'asset', label: 'Asset node', icon: ImageAdd, tooltip: 'Draw asset node' },
+    { id: 'composition', label: 'Composition node', icon: Board, tooltip: 'Place composition node' },
+    { id: 'output', label: 'Output node', icon: Open, tooltip: 'Place output node' },
+  ];
 
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
@@ -190,9 +208,22 @@
   onkeydown={(e) => (e.key === 'Escape' ? (openGroup = null) : null)}
 />
 
-<div class="toolbar" class:disabled={!hasDocument}>
+<div class="toolbar" class:disabled={!enabled}>
   <div class="tools">
-    {#each slots as slot, i (i)}
+    {#if hasWorkflow}
+      {#each workflowSlots as slot (slot.id)}
+        <button
+          class="tool"
+          class:active={workflow.tool === slot.id}
+          use:tooltip={{ text: slot.tooltip, placement: 'right' }}
+          onclick={() => workflow.setTool(slot.id)}
+          aria-label={slot.label}
+        >
+          <Icon svg={slot.icon} size={20} />
+        </button>
+      {/each}
+    {:else}
+      {#each slots as slot, i (i)}
       {#if slot.kind === 'marquee'}
         <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
           <button
@@ -287,53 +318,56 @@
           <Icon svg={slot.icon} size={20} />
         </button>
       {/if}
-    {/each}
+      {/each}
 
-    <div class="tool-divider"></div>
+      <div class="tool-divider"></div>
 
-    <button
-      class="tool ai"
-      use:tooltip={{ text: 'Generate Image (AI)', placement: 'right' }}
-      onclick={() => ui.open('aiGenerate')}
-      aria-label="Generate Image (AI)"
-      disabled={!hasDocument}
-    >
-      <Icon svg={Sparkle} size={20} />
-    </button>
+      <button
+        class="tool ai"
+        use:tooltip={{ text: 'Generate Image (AI)', placement: 'right' }}
+        onclick={() => ui.open('aiGenerate')}
+        aria-label="Generate Image (AI)"
+        disabled={!hasDocument}
+      >
+        <Icon svg={Sparkle} size={20} />
+      </button>
+    {/if}
   </div>
 
-  <div class="colors">
-    <button
-      class="swatch bg"
-      style="background:{editor.backgroundCss}"
-      use:tooltip={{ text: 'Background color', placement: 'right' }}
-      aria-label="Background color"
-      onclick={() => editor.swapColors()}
-      disabled={!hasDocument}
-    ></button>
-    <button
-      class="swatch fg"
-      style="background:{editor.foregroundCss}"
-      use:tooltip={{ text: 'Foreground color', placement: 'right' }}
-      aria-label="Foreground color"
-      onclick={() => editor.swapColors()}
-      disabled={!hasDocument}
-    ></button>
-    <button
-      class="swap"
-      use:tooltip={{ text: 'Swap colors (X)', placement: 'right' }}
-      onclick={() => editor.swapColors()}
-      aria-label="Swap colors"
-      disabled={!hasDocument}><Icon svg={ArrowSwap} size={13} /></button
-    >
-    <button
-      class="defaults"
-      use:tooltip={{ text: 'Default colors (D)', placement: 'right' }}
-      onclick={() => editor.resetColors()}
-      aria-label="Default colors"
-      disabled={!hasDocument}
-    ><span class="d-bg"></span><span class="d-fg"></span></button>
-  </div>
+  {#if !hasWorkflow}
+    <div class="colors">
+      <button
+        class="swatch bg"
+        style="background:{editor.backgroundCss}"
+        use:tooltip={{ text: 'Background color', placement: 'right' }}
+        aria-label="Background color"
+        onclick={() => editor.swapColors()}
+        disabled={!hasDocument}
+      ></button>
+      <button
+        class="swatch fg"
+        style="background:{editor.foregroundCss}"
+        use:tooltip={{ text: 'Foreground color', placement: 'right' }}
+        aria-label="Foreground color"
+        onclick={() => editor.swapColors()}
+        disabled={!hasDocument}
+      ></button>
+      <button
+        class="swap"
+        use:tooltip={{ text: 'Swap colors (X)', placement: 'right' }}
+        onclick={() => editor.swapColors()}
+        aria-label="Swap colors"
+        disabled={!hasDocument}><Icon svg={ArrowSwap} size={13} /></button
+      >
+      <button
+        class="defaults"
+        use:tooltip={{ text: 'Default colors (D)', placement: 'right' }}
+        onclick={() => editor.resetColors()}
+        aria-label="Default colors"
+        disabled={!hasDocument}
+      ><span class="d-bg"></span><span class="d-fg"></span></button>
+    </div>
+  {/if}
 </div>
 
 <style>
