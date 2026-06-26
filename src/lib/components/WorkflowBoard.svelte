@@ -50,6 +50,22 @@
     }
   });
 
+  $effect(() => {
+    const board = boardEl;
+    if (!board) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        const rect = board.getBoundingClientRect();
+        workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 'in' : 'out');
+      } else {
+        workflow.panBy(-event.deltaX, -event.deltaY);
+      }
+    };
+    board.addEventListener('wheel', onWheel, { passive: false });
+    return () => board.removeEventListener('wheel', onWheel);
+  });
+
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
   }
