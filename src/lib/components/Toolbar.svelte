@@ -116,6 +116,7 @@
   const currentMarquee = $derived(
     marqueeItems.find((m) => m.shape === editor.marqueeShape) ?? marqueeItems[0],
   );
+  const hasDocument = $derived(!!editor.doc);
 
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
@@ -134,6 +135,7 @@
   let longFired = false;
 
   function groupDown(e: PointerEvent, name: string) {
+    if (!hasDocument) return;
     if (e.button !== 0) return;
     longFired = false;
     pressTimer = window.setTimeout(() => {
@@ -146,6 +148,7 @@
   }
 
   function marqueeClick() {
+    if (!hasDocument) return;
     if (longFired) {
       longFired = false;
       return; // long-press already opened the flyout
@@ -154,12 +157,14 @@
     editor.setTool('marquee');
   }
   function chooseShape(shape: MarqueeShape) {
+    if (!hasDocument) return;
     editor.marqueeShape = shape;
     editor.setTool('marquee');
     openGroup = null;
   }
 
   function groupClick(slot: GroupSlot) {
+    if (!hasDocument) return;
     if (longFired) {
       longFired = false;
       return;
@@ -168,6 +173,7 @@
     editor.setTool(shownMember(slot).id);
   }
   function chooseMember(slot: GroupSlot, m: GroupMember) {
+    if (!hasDocument) return;
     if (m.disabled) {
       editor.flash(`${m.label} is coming soon`);
       openGroup = null;
@@ -184,14 +190,14 @@
   onkeydown={(e) => (e.key === 'Escape' ? (openGroup = null) : null)}
 />
 
-<div class="toolbar">
+<div class="toolbar" class:disabled={!hasDocument}>
   <div class="tools">
     {#each slots as slot, i (i)}
       {#if slot.kind === 'marquee'}
         <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
           <button
             class="tool"
-            class:active={editor.activeToolId === 'marquee'}
+            class:active={hasDocument && editor.activeToolId === 'marquee'}
             use:tooltip={{ text: 'Marquee (M) — hold for shapes', placement: 'right' }}
             onclick={marqueeClick}
             onpointerdown={(e) => groupDown(e, 'marquee')}
@@ -203,16 +209,17 @@
             }}
             aria-label="Marquee"
             aria-haspopup="menu"
+            disabled={!hasDocument}
           >
             <Icon svg={currentMarquee.icon} rotate={currentMarquee.rotate ?? 0} size={20} />
             <span class="tri"></span>
           </button>
-          {#if openGroup === 'marquee'}
+          {#if hasDocument && openGroup === 'marquee'}
             <div class="flyout" role="menu">
               {#each marqueeItems as m (m.shape)}
                 <button class="flyout-item" role="menuitem" onclick={() => chooseShape(m.shape)}>
                   <span class="mark">
-                    {#if editor.marqueeShape === m.shape}
+                    {#if hasDocument && editor.marqueeShape === m.shape}
                       <Icon svg={Checkmark} size={12} />
                     {/if}
                   </span>
@@ -229,7 +236,7 @@
         <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
           <button
             class="tool"
-            class:active={groupActive(slot)}
+            class:active={hasDocument && groupActive(slot)}
             use:tooltip={{ text: `${shown.label} — hold for tools`, placement: 'right' }}
             onclick={() => groupClick(slot)}
             onpointerdown={(e) => groupDown(e, slot.name)}
@@ -241,11 +248,12 @@
             }}
             aria-label={shown.label}
             aria-haspopup="menu"
+            disabled={!hasDocument}
           >
             <Icon svg={shown.icon} size={20} />
             <span class="tri"></span>
           </button>
-          {#if openGroup === slot.name}
+          {#if hasDocument && openGroup === slot.name}
             <div class="flyout" role="menu">
               {#each slot.members as m (m.id)}
                 <button
@@ -255,7 +263,7 @@
                   onclick={() => chooseMember(slot, m)}
                 >
                   <span class="mark">
-                    {#if editor.activeToolId === m.id}
+                    {#if hasDocument && editor.activeToolId === m.id}
                       <Icon svg={Checkmark} size={12} />
                     {/if}
                   </span>
@@ -270,10 +278,11 @@
       {:else}
         <button
           class="tool"
-          class:active={editor.activeToolId === slot.id}
+          class:active={hasDocument && editor.activeToolId === slot.id}
           use:tooltip={{ text: `${nameOf(slot.id)} (${slot.key})`, placement: 'right' }}
           onclick={() => editor.setTool(slot.id)}
           aria-label={nameOf(slot.id)}
+          disabled={!hasDocument}
         >
           <Icon svg={slot.icon} size={20} />
         </button>
@@ -287,6 +296,7 @@
       use:tooltip={{ text: 'Generate Image (AI)', placement: 'right' }}
       onclick={() => ui.open('aiGenerate')}
       aria-label="Generate Image (AI)"
+      disabled={!hasDocument}
     >
       <Icon svg={Sparkle} size={20} />
     </button>
@@ -299,6 +309,7 @@
       use:tooltip={{ text: 'Background color', placement: 'right' }}
       aria-label="Background color"
       onclick={() => editor.swapColors()}
+      disabled={!hasDocument}
     ></button>
     <button
       class="swatch fg"
@@ -306,18 +317,21 @@
       use:tooltip={{ text: 'Foreground color', placement: 'right' }}
       aria-label="Foreground color"
       onclick={() => editor.swapColors()}
+      disabled={!hasDocument}
     ></button>
     <button
       class="swap"
       use:tooltip={{ text: 'Swap colors (X)', placement: 'right' }}
       onclick={() => editor.swapColors()}
-      aria-label="Swap colors"><Icon svg={ArrowSwap} size={13} /></button
+      aria-label="Swap colors"
+      disabled={!hasDocument}><Icon svg={ArrowSwap} size={13} /></button
     >
     <button
       class="defaults"
       use:tooltip={{ text: 'Default colors (D)', placement: 'right' }}
       onclick={() => editor.resetColors()}
       aria-label="Default colors"
+      disabled={!hasDocument}
     ><span class="d-bg"></span><span class="d-fg"></span></button>
   </div>
 </div>
@@ -354,8 +368,24 @@
     border-radius: 4px;
     color: var(--text);
   }
+  .toolbar.disabled .tools,
+  .toolbar.disabled .colors {
+    opacity: 0.38;
+  }
+  .toolbar.disabled .tool,
+  .toolbar.disabled .swatch,
+  .toolbar.disabled .swap,
+  .toolbar.disabled .defaults {
+    cursor: default;
+  }
   .tool:hover {
     background: var(--bg-elevated);
+  }
+  .tool:disabled,
+  .tool:disabled:hover {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text);
   }
   .tool.active {
     background: var(--accent);
@@ -369,6 +399,9 @@
     margin: 5px 0;
   }
   .tool.ai {
+    color: var(--accent);
+  }
+  .tool.ai:disabled {
     color: var(--accent);
   }
   /* Flyout indicator triangle, bottom-right corner */
@@ -453,6 +486,11 @@
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
     padding: 0;
     cursor: pointer;
+  }
+  .swatch:disabled,
+  .swap:disabled,
+  .defaults:disabled {
+    cursor: default;
   }
   .swatch.fg {
     top: 11px;

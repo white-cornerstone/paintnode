@@ -399,14 +399,16 @@
 
   // Update brush-cursor ring radius for paint tools.
   $effect(() => {
+    const doc = editor.doc;
     const t = editor.activeTool;
     const size = editor.brushSize;
     if (!vp) return;
-    vp.brushRadius = t.usesBrushCursor ? size / 2 : 0;
+    vp.brushRadius = doc && t.usesBrushCursor ? size / 2 : 0;
     vp.invalidate();
   });
 
   const overlayCursor = $derived.by(() => {
+    if (!editor.doc) return null;
     if (!pointerInViewport) return null;
     if (panning || (editor.activeToolId === 'hand' && interacting)) return 'hand-closed';
     if (spaceDown || editor.activeToolId === 'hand') return 'hand-open';
@@ -422,7 +424,7 @@
     if (editor.activeToolId === 'text') return 'text';
     return null;
   });
-  const cursorStyle = $derived(overlayCursor ? 'none' : editor.activeTool.cursor);
+  const cursorStyle = $derived(!editor.doc ? 'default' : overlayCursor ? 'none' : editor.activeTool.cursor);
   const cursorPressed = $derived(!!overlayCursor && (interacting || panning));
   const cursorIcon = $derived.by(() => {
     switch (overlayCursor) {

@@ -113,10 +113,12 @@ export function installKeyboard(): () => void {
       return;
     }
 
-    if (k in TOOL_KEYS) {
+    if (editor.doc && k in TOOL_KEYS) {
       editor.setTool(TOOL_KEYS[k]);
       return;
     }
+
+    if (!editor.doc) return;
 
     switch (e.key) {
       case 'Delete':
