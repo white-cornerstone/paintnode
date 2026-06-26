@@ -16,8 +16,9 @@ export interface WorkflowAssetNode {
   note: string;
 }
 
-export type WorkflowTool = 'move' | 'asset' | 'composition' | 'output';
+export type WorkflowTool = 'move' | 'zoom' | 'asset' | 'composition' | 'output';
 export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output' };
+export type WorkflowZoomMode = 'in' | 'out';
 
 export interface WorkflowFile {
   version: 1;
@@ -37,6 +38,7 @@ export interface WorkflowFile {
   outputY: number;
   panX?: number;
   panY?: number;
+  zoom?: number;
   storyboardDataUrl: string | null;
   nodes: WorkflowAssetNode[];
   outputAssetId: string | null;
@@ -58,6 +60,7 @@ class WorkflowStore {
   name = $state('Untitled Workflow');
   savedPath = $state<string | null>(null);
   tool = $state<WorkflowTool>('move');
+  zoomMode = $state<WorkflowZoomMode>('in');
   selection = $state<WorkflowSelection | null>({ kind: 'composition' });
   prompt = $state('');
   compositionName = $state('');
@@ -74,6 +77,7 @@ class WorkflowStore {
   outputY = $state(96);
   panX = $state(0);
   panY = $state(0);
+  zoom = $state(1);
   storyboardDataUrl = $state<string | null>(null);
   nodes = $state<WorkflowAssetNode[]>([]);
   outputAssetId = $state<string | null>(null);
@@ -92,6 +96,7 @@ class WorkflowStore {
     this.name = cleanWorkflowName(name);
     this.savedPath = null;
     this.tool = 'move';
+    this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
     this.prompt = '';
     this.compositionName = '';
@@ -108,6 +113,7 @@ class WorkflowStore {
     this.outputY = 96;
     this.panX = 0;
     this.panY = 0;
+    this.zoom = 1;
     this.storyboardDataUrl = null;
     this.nodes = [];
     this.outputAssetId = null;
@@ -134,6 +140,10 @@ class WorkflowStore {
 
   setTool(tool: WorkflowTool): void {
     this.tool = tool;
+  }
+
+  setZoomMode(mode: WorkflowZoomMode): void {
+    this.zoomMode = mode;
   }
 
   select(selection: WorkflowSelection | null): void {
@@ -233,6 +243,24 @@ class WorkflowStore {
   panBy(dx: number, dy: number): void {
     this.panX = Math.round(this.panX + dx);
     this.panY = Math.round(this.panY + dy);
+  }
+
+  setZoom(nextZoom: number): void {
+    this.zoom = Math.min(4, Math.max(0.2, Number(nextZoom.toFixed(3))));
+  }
+
+  zoomAt(viewX: number, viewY: number, direction: WorkflowZoomMode): void {
+    const current = this.zoom;
+    const next = Math.min(4, Math.max(0.2, current * (direction === 'in' ? 1.25 : 0.8)));
+    const worldX = (viewX - this.panX) / current;
+    const worldY = (viewY - this.panY) / current;
+    this.zoom = Number(next.toFixed(3));
+    this.panX = Math.round(viewX - worldX * this.zoom);
+    this.panY = Math.round(viewY - worldY * this.zoom);
+  }
+
+  resetZoom(): void {
+    this.zoom = 1;
   }
 
   setNodeIncluded(id: string, included: boolean): void {
@@ -336,6 +364,7 @@ class WorkflowStore {
       outputY: this.outputY,
       panX: this.panX,
       panY: this.panY,
+      zoom: this.zoom,
       storyboardDataUrl: this.storyboardDataUrl,
       nodes: this.nodes.map((node) => ({ ...node })),
       outputAssetId: this.outputAssetId,
@@ -356,6 +385,7 @@ class WorkflowStore {
     this.active = true;
     ui.showWorkflow();
     this.tool = 'move';
+    this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
     this.name = cleanWorkflowName(parsed.name ?? fallbackName);
     this.savedPath = savedPath;
@@ -374,6 +404,7 @@ class WorkflowStore {
     this.outputY = Number.isFinite(parsed.outputY) ? Math.round(parsed.outputY!) : 96;
     this.panX = Number.isFinite(parsed.panX) ? Math.round(parsed.panX!) : 0;
     this.panY = Number.isFinite(parsed.panY) ? Math.round(parsed.panY!) : 0;
+    this.zoom = Number.isFinite(parsed.zoom) ? Math.min(4, Math.max(0.2, Number(parsed.zoom!.toFixed(3)))) : 1;
     this.storyboardDataUrl = parsed.storyboardDataUrl ?? null;
     this.nodes = parsed.nodes.map((node, index) => ({
       id: node.id || id('asset'),

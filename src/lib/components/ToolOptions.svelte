@@ -20,6 +20,7 @@
   );
   const workflowToolNames: Record<WorkflowTool, string> = {
     move: 'Move',
+    zoom: 'Zoom',
     asset: 'Asset Node',
     composition: 'Composition Node',
     output: 'Output Node',
@@ -42,6 +43,14 @@
     <span class="divider"></span>
     {#if workflow.tool === 'move'}
       <span class="hint">Drag empty workflow canvas to pan. Drag node headers to move nodes.</span>
+    {:else if workflow.tool === 'zoom'}
+      <div class="seg">
+        <button class:on={workflow.zoomMode === 'in'} onclick={() => workflow.setZoomMode('in')}>Zoom In</button>
+        <button class:on={workflow.zoomMode === 'out'} onclick={() => workflow.setZoomMode('out')}>Zoom Out</button>
+      </div>
+      <button onclick={() => workflow.resetZoom()}>100%</button>
+      <span class="val">{Math.round(workflow.zoom * 100)}%</span>
+      <span class="hint">Click the workflow canvas to zoom {workflow.zoomMode}. Hold Alt to invert.</span>
     {:else}
       <span class="hint">Drag on the workflow canvas to place or resize a {workflowToolNames[workflow.tool].toLowerCase()}.</span>
     {/if}
@@ -286,6 +295,8 @@
   }
   .seg {
     display: inline-flex;
+    flex: none;
+    width: max-content;
     border: 1px solid var(--border-soft);
     border-radius: 4px;
     overflow: hidden;

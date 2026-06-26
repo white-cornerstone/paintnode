@@ -177,8 +177,8 @@
     if (!boardEl) return { x: 0, y: 0 };
     const rect = boardEl.getBoundingClientRect();
     return {
-      x: event.clientX - rect.left - workflow.panX,
-      y: event.clientY - rect.top - workflow.panY,
+      x: (event.clientX - rect.left - workflow.panX) / workflow.zoom,
+      y: (event.clientY - rect.top - workflow.panY) / workflow.zoom,
     };
   }
 
@@ -201,6 +201,15 @@
   function onBoardPointerDown(event: PointerEvent): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     if (event.button !== 0) return;
+    if (workflow.tool === 'zoom') {
+      if (!boardEl) return;
+      const rect = boardEl.getBoundingClientRect();
+      const direction = event.altKey
+        ? workflow.zoomMode === 'in' ? 'out' : 'in'
+        : workflow.zoomMode;
+      workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, direction);
+      return;
+    }
     if (workflow.tool === 'move') {
       panning = { x: event.clientX, y: event.clientY };
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -446,18 +455,19 @@
 
     <div
       class="board"
-      class:adding={workflow.tool !== 'move'}
+      class:adding={workflow.tool !== 'move' && workflow.tool !== 'zoom'}
       class:panning={workflow.tool === 'move'}
+      class:zooming={workflow.tool === 'zoom'}
       role="application"
       aria-label="Workflow composition board"
       bind:this={boardEl}
-      style={`background-position:${workflow.panX}px ${workflow.panY}px`}
+      style={`background-position:${workflow.panX}px ${workflow.panY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
       onpointerdown={onBoardPointerDown}
       onpointermove={onPointerMove}
       onpointerup={stopDrag}
       onpointercancel={stopDrag}
     >
-      <div class="board-world" style={`transform:translate(${workflow.panX}px, ${workflow.panY}px)`}>
+      <div class="board-world" style={`transform:translate(${workflow.panX}px, ${workflow.panY}px) scale(${workflow.zoom})`}>
         <svg class="links" aria-hidden="true">
           {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
             <line
@@ -713,6 +723,9 @@
   }
   .board.adding {
     cursor: copy;
+  }
+  .board.zooming {
+    cursor: zoom-in;
   }
   .board-world {
     position: absolute;
