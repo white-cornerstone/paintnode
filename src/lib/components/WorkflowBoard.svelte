@@ -22,7 +22,7 @@
     color: string;
     included?: boolean;
   };
-  type WorkflowMapBounds = { minX: number; minY: number; width: number; height: number };
+  type WorkflowMapBounds = { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number };
   type WorkflowMapModel = {
     items: WorkflowMapRect[];
     viewport: WorkflowMapRect;
@@ -36,6 +36,7 @@
   let error = $state('');
   let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
+  let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
@@ -49,6 +50,7 @@
   const NODE_HEAD_H = 32;
   const STORYBOARD_W = 312;
   const STORYBOARD_H = 132;
+  const MAP_EDGE_PADDING = 260;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
@@ -76,6 +78,7 @@
     const resize = () => {
       boardWidth = Math.max(1, board.clientWidth);
       boardHeight = Math.max(1, board.clientHeight);
+      clampWorkflowPan();
     };
     resize();
     const observer = new ResizeObserver(resize);
@@ -85,8 +88,9 @@
       if (event.ctrlKey || event.metaKey) {
         const rect = board.getBoundingClientRect();
         workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 'in' : 'out');
+        clampWorkflowPan();
       } else {
-        workflow.panBy(-event.deltaX, -event.deltaY);
+        panBoardBy(-event.deltaX, -event.deltaY);
       }
     };
     board.addEventListener('wheel', onWheel, { passive: false });
@@ -181,7 +185,7 @@
 
   function onPointerMove(event: PointerEvent): void {
     if (panning) {
-      workflow.panBy(event.clientX - panning.x, event.clientY - panning.y);
+      panBoardBy(event.clientX - panning.x, event.clientY - panning.y);
       panning = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -258,6 +262,21 @@
     ];
   }
 
+  function mapBoundsFor(items: WorkflowMapRect[], padding: number): WorkflowMapBounds {
+    const minX = Math.min(...items.map((rect) => rect.x)) - padding;
+    const minY = Math.min(...items.map((rect) => rect.y)) - padding;
+    const maxX = Math.max(...items.map((rect) => rect.x + rect.width)) + padding;
+    const maxY = Math.max(...items.map((rect) => rect.y + rect.height)) + padding;
+    return {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      width: Math.max(1, maxX - minX),
+      height: Math.max(1, maxY - minY),
+    };
+  }
+
   function workflowViewportRect(): WorkflowMapRect {
     const zoom = Math.max(0.001, workflow.zoom);
     return {
@@ -274,20 +293,10 @@
   function workflowMap(): WorkflowMapModel {
     const items = workflowMapItems();
     const viewport = workflowViewportRect();
-    const rects = [...items, viewport];
-    const minX = Math.min(...rects.map((rect) => rect.x)) - 90;
-    const minY = Math.min(...rects.map((rect) => rect.y)) - 90;
-    const maxX = Math.max(...rects.map((rect) => rect.x + rect.width)) + 90;
-    const maxY = Math.max(...rects.map((rect) => rect.y + rect.height)) + 90;
     return {
       items,
       viewport,
-      bounds: {
-        minX,
-        minY,
-        width: Math.max(1, maxX - minX),
-        height: Math.max(1, maxY - minY),
-      },
+      bounds: mapBoundsFor(items, MAP_EDGE_PADDING),
     };
   }
 
@@ -310,6 +319,48 @@
     ].join(';');
   }
 
+  function clampWorkflowPan(): void {
+    const bounds = workflowMapModel.bounds;
+    const zoom = Math.max(0.001, workflow.zoom);
+    const viewportW = boardWidth / zoom;
+    const viewportH = boardHeight / zoom;
+    const worldLeft = -workflow.panX / zoom;
+    const worldTop = -workflow.panY / zoom;
+    const nextLeft = clampViewportOrigin(worldLeft, viewportW, bounds.minX, bounds.maxX);
+    const nextTop = clampViewportOrigin(worldTop, viewportH, bounds.minY, bounds.maxY);
+    const nextPanX = -nextLeft * zoom;
+    const nextPanY = -nextTop * zoom;
+    const dx = nextPanX - workflow.panX;
+    const dy = nextPanY - workflow.panY;
+    if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) workflow.panBy(dx, dy);
+  }
+
+  function clampViewportOrigin(origin: number, viewportSize: number, min: number, max: number): number {
+    const size = Math.max(1, max - min);
+    if (viewportSize >= size) return min + (size - viewportSize) / 2;
+    return Math.min(Math.max(origin, min), max - viewportSize);
+  }
+
+  function panBoardBy(dx: number, dy: number): void {
+    workflow.panBy(dx, dy);
+    clampWorkflowPan();
+  }
+
+  function setViewportOrigin(left: number, top: number): void {
+    const zoom = Math.max(0.001, workflow.zoom);
+    const nextPanX = -left * zoom;
+    const nextPanY = -top * zoom;
+    workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
+    clampWorkflowPan();
+  }
+
+  function centerBoardAt(worldX: number, worldY: number): void {
+    const nextPanX = boardWidth / 2 - worldX * workflow.zoom;
+    const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
+    workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
+    clampWorkflowPan();
+  }
+
   function mapLinkStyle(node: WorkflowAssetNode, map: WorkflowMapModel): string {
     const x1 = mapX(node.x + node.width, map);
     const y1 = mapY(node.y + NODE_HEAD_H / 2, map);
@@ -323,13 +374,52 @@
   }
 
   function centerBoardFromMap(event: PointerEvent, map: WorkflowMapModel): void {
-    if (!(event.currentTarget instanceof HTMLElement)) return;
+    const point = mapPoint(event, map);
+    if (!point) return;
+    centerBoardAt(point.x, point.y);
+  }
+
+  function mapPoint(event: PointerEvent, map: WorkflowMapModel): { x: number; y: number } | null {
+    if (!(event.currentTarget instanceof HTMLElement)) return null;
     const rect = event.currentTarget.getBoundingClientRect();
-    const worldX = map.bounds.minX + ((event.clientX - rect.left) / rect.width) * map.bounds.width;
-    const worldY = map.bounds.minY + ((event.clientY - rect.top) / rect.height) * map.bounds.height;
-    const nextPanX = boardWidth / 2 - worldX * workflow.zoom;
-    const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
-    workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
+    return {
+      x: map.bounds.minX + ((event.clientX - rect.left) / rect.width) * map.bounds.width,
+      y: map.bounds.minY + ((event.clientY - rect.top) / rect.height) * map.bounds.height,
+    };
+  }
+
+  function rectContainsPoint(rect: WorkflowMapRect, point: { x: number; y: number }): boolean {
+    return point.x >= rect.x
+      && point.x <= rect.x + rect.width
+      && point.y >= rect.y
+      && point.y <= rect.y + rect.height;
+  }
+
+  function startMapDrag(event: PointerEvent, map: WorkflowMapModel): void {
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    const point = mapPoint(event, map);
+    if (!point) return;
+    event.preventDefault();
+    if (rectContainsPoint(map.viewport, point)) {
+      mapDragging = {
+        offsetX: point.x - map.viewport.x,
+        offsetY: point.y - map.viewport.y,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+    centerBoardFromMap(event, map);
+  }
+
+  function moveMapDrag(event: PointerEvent, map: WorkflowMapModel): void {
+    if (!mapDragging) return;
+    const point = mapPoint(event, map);
+    if (!point) return;
+    setViewportOrigin(point.x - mapDragging.offsetX, point.y - mapDragging.offsetY);
+  }
+
+  function stopMapDrag(): void {
+    mapDragging = null;
   }
 
   function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
@@ -358,6 +448,7 @@
         ? workflow.zoomMode === 'in' ? 'out' : 'in'
         : workflow.zoomMode;
       workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, direction);
+      clampWorkflowPan();
       return;
     }
     if (workflow.tool === 'hand') {
@@ -606,8 +697,12 @@
       <div class="workflow-map">
         <button
           class="workflow-map-canvas"
-          aria-label="Workflow map. Click to center the workflow canvas."
-          onpointerdown={(event) => centerBoardFromMap(event, workflowMapModel)}
+          class:dragging={mapDragging}
+          aria-label="Workflow map. Drag the viewport frame or click to center the workflow canvas."
+          onpointerdown={(event) => startMapDrag(event, workflowMapModel)}
+          onpointermove={(event) => moveMapDrag(event, workflowMapModel)}
+          onpointerup={stopMapDrag}
+          onpointercancel={stopMapDrag}
         >
           {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
             <span class="map-link" style={mapLinkStyle(node, workflowMapModel)}></span>
@@ -890,10 +985,14 @@
       linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
     background-color: #202225;
     background-size: 18px 18px;
-    cursor: crosshair;
+    cursor: grab;
+    touch-action: none;
   }
   .workflow-map-canvas:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, #3b3d41);
+  }
+  .workflow-map-canvas.dragging {
+    cursor: grabbing;
   }
   .map-node,
   .map-viewport,
