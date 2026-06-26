@@ -24,6 +24,7 @@
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { ChevronDoubleLeft, ChevronDoubleRight, ColorPalette, Folder, Layers } from './lib/icons';
   import { installKeyboard } from './lib/state/keyboard';
   import {
@@ -41,6 +42,7 @@
   import { workflow } from './lib/state/workflow.svelte';
 
   const desktop = isDesktop();
+  const appWindow = desktop ? getCurrentWindow() : null;
   let rightCollapsed = $state(false);
   let projectCollapsed = $state(false);
   let colorCollapsed = $state(false);
@@ -309,6 +311,24 @@
     }
   }
 
+  function handleTitlebarPointerDown(event: PointerEvent): void {
+    if (!appWindow || event.button !== 0) return;
+    if (event.detail === 2) {
+      void appWindow.toggleMaximize();
+      return;
+    }
+    void appWindow.startDragging();
+  }
+
+  function titlebarDrag(node: HTMLElement): { destroy: () => void } {
+    node.addEventListener('pointerdown', handleTitlebarPointerDown);
+    return {
+      destroy() {
+        node.removeEventListener('pointerdown', handleTitlebarPointerDown);
+      },
+    };
+  }
+
   onMount(() => {
     const disposeKeyboard = installKeyboard();
     void project.restore();
@@ -340,8 +360,8 @@
 
 <div class="app">
   {#if desktop}
-    <div class="desktop-titlebar" data-tauri-drag-region>
-      <div class="desktop-title" data-tauri-drag-region>CX Paint</div>
+    <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
+      <div class="desktop-title">CX Paint</div>
     </div>
   {:else}
     <MenuBar />
@@ -470,12 +490,12 @@
     border-bottom: 1px solid var(--border);
     user-select: none;
     -webkit-user-select: none;
-    -webkit-app-region: drag;
   }
   .desktop-title {
     color: var(--text);
     font-size: 13px;
     font-weight: 700;
+    pointer-events: none;
   }
   .middle {
     flex: 1;
