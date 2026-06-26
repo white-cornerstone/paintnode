@@ -130,7 +130,7 @@
   const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
   const enabled = $derived(hasDocument || hasWorkflow);
   const workflowSlots: WorkflowSlot[] = [
-    { id: 'move', label: 'Move', icon: ArrowMove, tooltip: 'Move workflow canvas' },
+    { id: 'hand', label: 'Hand', icon: Hand, tooltip: 'Hand tool' },
     { id: 'asset', label: 'Asset node', icon: ImageAdd, tooltip: 'Draw asset node' },
     { id: 'composition', label: 'Composition node', icon: Board, tooltip: 'Place composition node' },
     { id: 'output', label: 'Output node', icon: Open, tooltip: 'Place output node' },

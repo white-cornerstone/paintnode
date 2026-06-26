@@ -232,7 +232,7 @@
       workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, direction);
       return;
     }
-    if (workflow.tool === 'move') {
+    if (workflow.tool === 'hand') {
       panning = { x: event.clientX, y: event.clientY };
       event.currentTarget.setPointerCapture(event.pointerId);
       return;
@@ -252,12 +252,12 @@
       workflow.movePrompt(rect.x, rect.y);
       workflow.resizePrompt(width, height);
       workflow.select({ kind: 'composition' });
-      workflow.setTool('move');
+      workflow.setTool('hand');
     } else {
       workflow.moveOutput(rect.x, rect.y);
       workflow.resizeOutput(width, height);
       workflow.select({ kind: 'output' });
-      workflow.setTool('move');
+      workflow.setTool('hand');
     }
     drawing = null;
   }
@@ -477,8 +477,8 @@
 
     <div
       class="board"
-      class:adding={workflow.tool !== 'move' && workflow.tool !== 'zoom'}
-      class:panning={workflow.tool === 'move'}
+      class:adding={workflow.tool !== 'hand' && workflow.tool !== 'zoom'}
+      class:panning={workflow.tool === 'hand'}
       class:zooming={workflow.tool === 'zoom'}
       role="application"
       aria-label="Workflow composition board"

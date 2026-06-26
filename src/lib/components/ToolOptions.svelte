@@ -19,7 +19,7 @@
           : 'Strength',
   );
   const workflowToolNames: Record<WorkflowTool, string> = {
-    move: 'Move',
+    hand: 'Hand',
     zoom: 'Zoom',
     asset: 'Asset Node',
     composition: 'Composition Node',
@@ -41,8 +41,8 @@
   {#if hasWorkflow}
     <span class="tool-name">{workflowToolNames[workflow.tool]}</span>
     <span class="divider"></span>
-    {#if workflow.tool === 'move'}
-      <span class="hint">Drag empty workflow canvas to pan. Drag node headers to move nodes.</span>
+    {#if workflow.tool === 'hand'}
+      <span class="hint">Drag empty workflow canvas to pan. Drag node headers to reposition nodes.</span>
     {:else if workflow.tool === 'zoom'}
       <div class="seg">
         <button class:on={workflow.zoomMode === 'in'} onclick={() => workflow.setZoomMode('in')}>Zoom In</button>

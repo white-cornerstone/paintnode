@@ -10,7 +10,7 @@
   const pct = $derived(Math.round((hasWorkflow ? workflow.zoom : ui.zoom) * 100));
   const layerCount = $derived(doc?.layers.length ?? 0);
   const workflowToolNames: Record<WorkflowTool, string> = {
-    move: 'Move',
+    hand: 'Hand',
     zoom: 'Zoom',
     asset: 'Asset Node',
     composition: 'Composition Node',

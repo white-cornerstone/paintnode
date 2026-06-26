@@ -16,7 +16,7 @@ export interface WorkflowAssetNode {
   note: string;
 }
 
-export type WorkflowTool = 'move' | 'zoom' | 'asset' | 'composition' | 'output';
+export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
 export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output' };
 export type WorkflowZoomMode = 'in' | 'out';
 
@@ -59,7 +59,7 @@ class WorkflowStore {
   active = $state(false);
   name = $state('Untitled Workflow');
   savedPath = $state<string | null>(null);
-  tool = $state<WorkflowTool>('move');
+  tool = $state<WorkflowTool>('hand');
   zoomMode = $state<WorkflowZoomMode>('in');
   selection = $state<WorkflowSelection | null>({ kind: 'composition' });
   prompt = $state('');
@@ -95,7 +95,7 @@ class WorkflowStore {
     ui.showWorkflow();
     this.name = cleanWorkflowName(name);
     this.savedPath = null;
-    this.tool = 'move';
+    this.tool = 'hand';
     this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
     this.prompt = '';
@@ -170,7 +170,7 @@ class WorkflowStore {
       node,
     ];
     this.selection = { kind: 'asset', id: node.id };
-    this.tool = 'move';
+    this.tool = 'hand';
     this.bump();
   }
 
@@ -190,7 +190,7 @@ class WorkflowStore {
     };
     this.nodes = [...this.nodes, node];
     this.selection = { kind: 'asset', id: node.id };
-    this.tool = 'move';
+    this.tool = 'hand';
     this.bump();
   }
 
@@ -384,7 +384,7 @@ class WorkflowStore {
     }
     this.active = true;
     ui.showWorkflow();
-    this.tool = 'move';
+    this.tool = 'hand';
     this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
     this.name = cleanWorkflowName(parsed.name ?? fallbackName);
