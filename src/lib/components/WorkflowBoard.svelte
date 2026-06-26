@@ -37,6 +37,9 @@
   let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
+  let overscrollX = $state(0);
+  let overscrollY = $state(0);
+  let overscrollAnimating = $state(false);
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
@@ -45,12 +48,17 @@
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
   let stopProgress: UnlistenFn | null = null;
+  let overscrollReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   const ASSET_NODE_W = 205;
   const NODE_HEAD_H = 32;
   const STORYBOARD_W = 312;
   const STORYBOARD_H = 132;
   const MAP_EDGE_PADDING = 260;
+  const MIN_OVERSCROLL = 14;
+  const MAX_OVERSCROLL = 52;
+  const OVERSCROLL_DAMPING = 0.18;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
@@ -64,7 +72,11 @@
   );
   const workflowMapModel = $derived(workflowMap());
 
-  onDestroy(() => stopProgress?.());
+  onDestroy(() => {
+    stopProgress?.();
+    if (overscrollReleaseTimer) clearTimeout(overscrollReleaseTimer);
+    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
+  });
 
   $effect(() => {
     if (storyboardCanvas) {
@@ -319,11 +331,13 @@
     ].join(';');
   }
 
-  function clampWorkflowPan(): void {
+  function clampWorkflowPan(): { rejectedX: number; rejectedY: number } {
     const bounds = workflowMapModel.bounds;
     const zoom = Math.max(0.001, workflow.zoom);
     const viewportW = boardWidth / zoom;
     const viewportH = boardHeight / zoom;
+    const attemptedPanX = workflow.panX;
+    const attemptedPanY = workflow.panY;
     const worldLeft = -workflow.panX / zoom;
     const worldTop = -workflow.panY / zoom;
     const nextLeft = clampViewportOrigin(worldLeft, viewportW, bounds.minX, bounds.maxX);
@@ -333,6 +347,10 @@
     const dx = nextPanX - workflow.panX;
     const dy = nextPanY - workflow.panY;
     if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) workflow.panBy(dx, dy);
+    return {
+      rejectedX: attemptedPanX - workflow.panX,
+      rejectedY: attemptedPanY - workflow.panY,
+    };
   }
 
   function clampViewportOrigin(origin: number, viewportSize: number, min: number, max: number): number {
@@ -341,9 +359,43 @@
     return Math.min(Math.max(origin, min), max - viewportSize);
   }
 
-  function panBoardBy(dx: number, dy: number): void {
+  function panBoardBy(dx: number, dy: number, bounce = true): void {
     workflow.panBy(dx, dy);
-    clampWorkflowPan();
+    const rejected = clampWorkflowPan();
+    if (bounce) {
+      if (Math.abs(rejected.rejectedX) >= 0.5 || Math.abs(rejected.rejectedY) >= 0.5) {
+        applyOverscroll(rejected.rejectedX, rejected.rejectedY);
+      } else if (overscrollAnimating) {
+        clearOverscroll();
+      }
+    }
+  }
+
+  function applyOverscroll(rejectedX: number, rejectedY: number): void {
+    const nextX = dampOverscroll(rejectedX);
+    const nextY = dampOverscroll(rejectedY);
+    if (nextX === 0 && nextY === 0) return;
+    if (overscrollReleaseTimer) clearTimeout(overscrollReleaseTimer);
+    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
+    overscrollAnimating = false;
+    overscrollX = nextX;
+    overscrollY = nextY;
+    overscrollReleaseTimer = setTimeout(() => {
+      overscrollAnimating = true;
+      overscrollX = 0;
+      overscrollY = 0;
+      overscrollReleaseTimer = null;
+      overscrollEndTimer = setTimeout(() => {
+        overscrollAnimating = false;
+        overscrollEndTimer = null;
+      }, 190);
+    }, 72);
+  }
+
+  function dampOverscroll(value: number): number {
+    if (Math.abs(value) < 0.5) return 0;
+    const magnitude = Math.min(MAX_OVERSCROLL, Math.max(MIN_OVERSCROLL, Math.abs(value) * OVERSCROLL_DAMPING));
+    return Math.sign(value) * magnitude;
   }
 
   function setViewportOrigin(left: number, top: number): void {
@@ -352,6 +404,7 @@
     const nextPanY = -top * zoom;
     workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
+    clearOverscroll();
   }
 
   function centerBoardAt(worldX: number, worldY: number): void {
@@ -359,6 +412,21 @@
     const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
     workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
+    clearOverscroll();
+  }
+
+  function clearOverscroll(): void {
+    if (overscrollReleaseTimer) {
+      clearTimeout(overscrollReleaseTimer);
+      overscrollReleaseTimer = null;
+    }
+    if (overscrollEndTimer) {
+      clearTimeout(overscrollEndTimer);
+      overscrollEndTimer = null;
+    }
+    overscrollX = 0;
+    overscrollY = 0;
+    overscrollAnimating = false;
   }
 
   function mapLinkStyle(node: WorkflowAssetNode, map: WorkflowMapModel): string {
@@ -415,6 +483,7 @@
     if (!mapDragging) return;
     const point = mapPoint(event, map);
     if (!point) return;
+    clearOverscroll();
     setViewportOrigin(point.x - mapDragging.offsetX, point.y - mapDragging.offsetY);
   }
 
@@ -733,17 +802,18 @@
       class:zooming={workflow.tool === 'zoom'}
       class:zoom-in={workflow.tool === 'zoom' && effectiveZoomMode === 'in'}
       class:zoom-out={workflow.tool === 'zoom' && effectiveZoomMode === 'out'}
+      class:overscrolling={overscrollAnimating}
       role="application"
       aria-label="Workflow composition board"
       bind:this={boardEl}
-      style={`background-position:${workflow.panX}px ${workflow.panY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
+      style={`background-position:${workflow.panX + overscrollX}px ${workflow.panY + overscrollY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
       onpointerdown={onBoardPointerDown}
       onpointerleave={onPointerLeave}
       onpointermove={onPointerMove}
       onpointerup={stopDrag}
       onpointercancel={stopDrag}
     >
-      <div class="board-world" style={`transform:translate(${workflow.panX}px, ${workflow.panY}px) scale(${workflow.zoom})`}>
+      <div class="board-world" style={`transform:translate(${workflow.panX + overscrollX}px, ${workflow.panY + overscrollY}px) scale(${workflow.zoom})`}>
         <svg class="links" aria-hidden="true">
           {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
             <line
@@ -1081,10 +1151,16 @@
   .board.zooming.zoom-out {
     cursor: zoom-out;
   }
+  .board.overscrolling {
+    transition: background-position 170ms cubic-bezier(0.18, 0.88, 0.28, 1);
+  }
   .board-world {
     position: absolute;
     inset: 0;
     transform-origin: top left;
+  }
+  .board.overscrolling .board-world {
+    transition: transform 170ms cubic-bezier(0.18, 0.88, 0.28, 1);
   }
   .links {
     position: absolute;
