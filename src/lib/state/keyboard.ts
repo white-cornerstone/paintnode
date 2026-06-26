@@ -113,12 +113,14 @@ export function installKeyboard(): () => void {
       return;
     }
 
-    if (editor.doc && k in TOOL_KEYS) {
+    const hasDocumentSurface = ui.activeSurface === 'document' && !!editor.doc;
+
+    if (hasDocumentSurface && k in TOOL_KEYS) {
       editor.setTool(TOOL_KEYS[k]);
       return;
     }
 
-    if (!editor.doc) return;
+    if (!hasDocumentSurface) return;
 
     switch (e.key) {
       case 'Delete':

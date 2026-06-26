@@ -116,7 +116,7 @@
   const currentMarquee = $derived(
     marqueeItems.find((m) => m.shape === editor.marqueeShape) ?? marqueeItems[0],
   );
-  const hasDocument = $derived(!!editor.doc);
+  const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
 
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
+  import { ui } from '../state/ui.svelte';
 
   const tool = $derived(editor.activeToolId);
+  const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   // Tools that share the round-brush controls (size / hardness / strength).
   const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge'];
   const usesBrush = $derived(brushTools.includes(tool));
@@ -17,7 +19,7 @@
 </script>
 
 <div class="options">
-  {#if editor.doc}
+  {#if hasDocument}
     <span class="tool-name">{editor.activeTool.name}</span>
     <span class="divider"></span>
 

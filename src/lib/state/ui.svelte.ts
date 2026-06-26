@@ -20,6 +20,7 @@ class UiState {
   cursor = $state<{ x: number; y: number } | null>(null);
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
+  activeSurface = $state<'document' | 'workflow'>('document');
 
   // Font-embed prompt shown on save when text uses imported (embeddable) fonts.
   fontEmbed = $state<FontEmbedPrompt | null>(null);
@@ -30,6 +31,12 @@ class UiState {
   }
   close(): void {
     this.dialog = null;
+  }
+  showDocument(): void {
+    this.activeSurface = 'document';
+  }
+  showWorkflow(): void {
+    this.activeSurface = 'workflow';
   }
 
   /** Show the embed prompt and resolve with the user's choice. */

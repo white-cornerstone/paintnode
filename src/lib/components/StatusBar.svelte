@@ -3,6 +3,7 @@
   import { ui } from '../state/ui.svelte';
 
   const doc = $derived(editor.doc);
+  const hasDocument = $derived(ui.activeSurface === 'document' && !!doc);
   const pct = $derived(Math.round(ui.zoom * 100));
   const layerCount = $derived(doc?.layers.length ?? 0);
 
@@ -10,14 +11,14 @@
   let draft = $state('');
 
   function startEdit(e: FocusEvent) {
-    if (!doc) return;
+    if (!hasDocument) return;
     editing = true;
     draft = String(pct);
     const el = e.currentTarget as HTMLInputElement;
     queueMicrotask(() => el.select());
   }
   function applyZoom() {
-    if (!doc) {
+    if (!hasDocument) {
       editing = false;
       return;
     }
@@ -37,30 +38,30 @@
 </script>
 
 <footer class="status">
-  <span class="item">{doc ? `${doc.width} × ${doc.height} px` : ''}</span>
+  <span class="item">{hasDocument && doc ? `${doc.width} × ${doc.height} px` : ''}</span>
   <span class="sep"></span>
   <input
     class="zoom-input"
     type="text"
     inputmode="decimal"
-    value={doc ? (editing ? draft : `${pct}%`) : ''}
+    value={hasDocument ? (editing ? draft : `${pct}%`) : ''}
     oninput={(e) => (draft = e.currentTarget.value)}
     onfocus={startEdit}
     onblur={applyZoom}
     onkeydown={onKey}
     aria-label="Zoom level (type a percentage)"
     title="Zoom — click and type a percentage"
-    disabled={!doc}
+    disabled={!hasDocument}
   />
   <span class="sep"></span>
-  <span class="item pos">{doc && ui.cursor ? `${ui.cursor.x}, ${ui.cursor.y}` : ''}</span>
+  <span class="item pos">{hasDocument && ui.cursor ? `${ui.cursor.x}, ${ui.cursor.y}` : ''}</span>
   {#if editor.flashMessage}
     <span class="flash">{editor.flashMessage}</span>
   {/if}
   <span class="spacer"></span>
-  <span class="item dim">{doc ? `${layerCount} layer${layerCount === 1 ? '' : 's'}` : ''}</span>
+  <span class="item dim">{hasDocument ? `${layerCount} layer${layerCount === 1 ? '' : 's'}` : ''}</span>
   <span class="sep"></span>
-  <span class="item dim">{doc ? editor.activeTool.name : ''}</span>
+  <span class="item dim">{hasDocument ? editor.activeTool.name : ''}</span>
 </footer>
 
 <style>

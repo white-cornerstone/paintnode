@@ -48,6 +48,7 @@ import { SmudgeTool } from '../engine/tools/SmudgeTool';
 import { FocusTool } from '../engine/tools/FocusTool';
 import { ToningTool } from '../engine/tools/ToningTool';
 import { HandTool, ZoomTool } from '../engine/tools/NavTools';
+import { ui } from './ui.svelte';
 
 export interface PlacedImageResult {
   oversized: boolean;
@@ -408,11 +409,15 @@ export class EditorStore implements ToolHost {
   openDocument(doc: PaintDocument, focus = true): void {
     const session = this.makeSession(doc);
     this.documents = [...this.documents, session];
-    if (focus) this.switchDocument(session.id);
+    if (focus) {
+      ui.showDocument();
+      this.switchDocument(session.id);
+    }
     else if (!this.activeDocumentId) this.switchDocument(session.id);
   }
 
   setDocument(doc: PaintDocument): void {
+    ui.showDocument();
     const session = this.makeSession(doc);
     const currentId = this.activeDocumentId;
     const idx = currentId ? this.documents.findIndex((d) => d.id === currentId) : -1;
@@ -437,7 +442,9 @@ export class EditorStore implements ToolHost {
 
   switchDocument(id: string): void {
     const session = this.documents.find((d) => d.id === id);
-    if (!session || session.id === this.activeDocumentId) return;
+    if (!session) return;
+    ui.showDocument();
+    if (session.id === this.activeDocumentId) return;
     const current = this.activeDocument;
     if (current) current.selection = this.selection;
     this.activeDocumentId = session.id;
@@ -459,6 +466,7 @@ export class EditorStore implements ToolHost {
     const next = this.documents.slice();
     next.splice(idx, 1);
     this.documents = next;
+    if (next.length > 0 && ui.activeSurface === 'document') ui.showDocument();
     if (wasActive) {
       const fallback = next[Math.min(idx, next.length - 1)];
       this.activeDocumentId = null;

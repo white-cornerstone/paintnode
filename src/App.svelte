@@ -50,7 +50,7 @@
   let panelStackEl = $state<HTMLDivElement>();
   let autoCollapsedIds = $state<PanelId[]>([]);
   let fittingPanels = false;
-  const hasDocument = $derived(!!editor.doc);
+  const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
 
   type PanelId = 'color' | 'layers';
   const panelOrder: PanelId[] = ['color', 'layers'];
@@ -373,10 +373,10 @@
       <ToolOptions />
       <div class="content-row">
         <section class="center">
-          {#if workflow.active}
+          <DocumentTabs />
+          {#if ui.activeSurface === 'workflow' && workflow.active}
             <WorkflowBoard />
           {:else}
-            <DocumentTabs />
             <CanvasView />
           {/if}
         </section>

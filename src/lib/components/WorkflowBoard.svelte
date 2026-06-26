@@ -313,28 +313,6 @@
 </script>
 
 <section class="workflow-shell">
-  <header class="workflow-top">
-    <div class="title">
-      <Icon svg={Sparkle} size={16} />
-      <input
-        aria-label="Workflow name"
-        value={workflow.name}
-        oninput={(event) => workflow.setName(event.currentTarget.value)}
-      />
-      {#if workflow.dirty}<span class="dirty">Unsaved</span>{/if}
-    </div>
-    <div class="actions">
-      <button onclick={() => workflow.close()}>Canvas</button>
-      <button onclick={() => workflow.newBoard()}>New</button>
-      <button onclick={() => void save()} disabled={!project.path}>Save</button>
-      <button onclick={() => void saveAs()} disabled={!project.path}>Save As</button>
-      <button class="primary" onclick={() => void generate()} disabled={busy || !project.path}>
-        <Icon svg={Sparkle} size={15} />
-        {busy ? 'Generating' : 'Generate'}
-      </button>
-    </div>
-  </header>
-
   <div class="workflow-main">
     <aside class="asset-tray">
       <div class="tray-head">
@@ -509,36 +487,11 @@
     background: #242526;
     color: var(--text);
   }
-  .workflow-top {
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    height: 43px;
-    padding: 0 10px;
-    background: var(--bg-panel);
-    border-bottom: 1px solid var(--border);
-  }
-  .title,
-  .actions,
   .node-head,
   .output-actions {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .title input {
-    width: 230px;
-    font-weight: 700;
-  }
-  .dirty {
-    color: var(--text-dim);
-    font-size: 12px;
-  }
-  .primary {
-    background: var(--accent);
-    color: #fff;
   }
   .workflow-main {
     display: flex;

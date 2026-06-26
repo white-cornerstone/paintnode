@@ -1,5 +1,6 @@
 import type { ProjectAsset } from '../integrations/desktop';
 import { project } from './project.svelte';
+import { ui } from './ui.svelte';
 
 export interface WorkflowAssetNode {
   id: string;
@@ -59,6 +60,7 @@ class WorkflowStore {
 
   newBoard(name = 'Untitled Workflow'): void {
     this.active = true;
+    ui.showWorkflow();
     this.name = cleanWorkflowName(name);
     this.savedPath = null;
     this.prompt = '';
@@ -77,10 +79,12 @@ class WorkflowStore {
   show(): void {
     if (!this.active) this.newBoard();
     this.active = true;
+    ui.showWorkflow();
   }
 
   close(): void {
     this.active = false;
+    ui.showDocument();
   }
 
   setName(name: string): void {
@@ -188,6 +192,7 @@ class WorkflowStore {
       throw new Error('Workflow file is not a supported CX Paint workflow.');
     }
     this.active = true;
+    ui.showWorkflow();
     this.name = cleanWorkflowName(parsed.name ?? fallbackName);
     this.savedPath = savedPath;
     this.prompt = parsed.prompt ?? '';
