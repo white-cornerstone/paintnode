@@ -50,6 +50,7 @@
   let panelStackEl = $state<HTMLDivElement>();
   let autoCollapsedIds = $state<PanelId[]>([]);
   let fittingPanels = false;
+  const hasDocument = $derived(!!editor.doc);
 
   type PanelId = 'color' | 'layers';
   const panelOrder: PanelId[] = ['color', 'layers'];
@@ -379,6 +380,45 @@
             <CanvasView />
           {/if}
         </section>
+        {#if hasDocument}
+          <aside class="right" class:collapsed={rightCollapsed}>
+            {#if rightCollapsed}
+              <div class="dock-rail">
+                <button
+                  class="panel-toggle expand"
+                  onclick={() => (rightCollapsed = false)}
+                  use:tooltip={{ text: 'Expand panels', placement: 'left' }}
+                  aria-label="Expand panels"
+                ><Icon svg={ChevronDoubleLeft} size={16} /></button>
+                <button class="rail-item" onclick={() => (rightCollapsed = false)} aria-label="Color">
+                  <Icon svg={ColorPalette} size={18} /><span>Color</span>
+                </button>
+                <button class="rail-item" onclick={() => (rightCollapsed = false)} aria-label="Layers">
+                  <Icon svg={Layers} size={18} /><span>Layers</span>
+                </button>
+              </div>
+            {:else}
+              <div class="column-bar">
+                <button
+                  class="panel-toggle"
+                  onclick={() => (rightCollapsed = true)}
+                  use:tooltip={{ text: 'Collapse panels', placement: 'left' }}
+                  aria-label="Collapse panels"
+                ><Icon svg={ChevronDoubleRight} size={16} /></button>
+              </div>
+              <div class="panel-stack" bind:this={panelStackEl}>
+                <ColorPanel
+                  bind:collapsed={colorCollapsed}
+                  onToggle={(collapsed) => requestPanelCollapsed('color', collapsed)}
+                />
+                <LayersPanel
+                  bind:collapsed={layersCollapsed}
+                  onToggle={(collapsed) => requestPanelCollapsed('layers', collapsed)}
+                />
+              </div>
+            {/if}
+          </aside>
+        {/if}
         <aside class="project-side" class:collapsed={projectCollapsed}>
           {#if projectCollapsed}
             <div class="project-rail">
@@ -401,43 +441,6 @@
               ><Icon svg={ChevronDoubleRight} size={16} /></button>
             </div>
             <ProjectPanel />
-          {/if}
-        </aside>
-        <aside class="right" class:collapsed={rightCollapsed}>
-          {#if rightCollapsed}
-            <div class="dock-rail">
-              <button
-                class="panel-toggle expand"
-                onclick={() => (rightCollapsed = false)}
-                use:tooltip={{ text: 'Expand panels', placement: 'left' }}
-                aria-label="Expand panels"
-              ><Icon svg={ChevronDoubleLeft} size={16} /></button>
-              <button class="rail-item" onclick={() => (rightCollapsed = false)} aria-label="Color">
-                <Icon svg={ColorPalette} size={18} /><span>Color</span>
-              </button>
-              <button class="rail-item" onclick={() => (rightCollapsed = false)} aria-label="Layers">
-                <Icon svg={Layers} size={18} /><span>Layers</span>
-              </button>
-            </div>
-          {:else}
-            <div class="column-bar">
-              <button
-                class="panel-toggle"
-                onclick={() => (rightCollapsed = true)}
-                use:tooltip={{ text: 'Collapse panels', placement: 'left' }}
-                aria-label="Collapse panels"
-              ><Icon svg={ChevronDoubleRight} size={16} /></button>
-            </div>
-            <div class="panel-stack" bind:this={panelStackEl}>
-              <ColorPanel
-                bind:collapsed={colorCollapsed}
-                onToggle={(collapsed) => requestPanelCollapsed('color', collapsed)}
-              />
-              <LayersPanel
-                bind:collapsed={layersCollapsed}
-                onToggle={(collapsed) => requestPanelCollapsed('layers', collapsed)}
-              />
-            </div>
           {/if}
         </aside>
         </div>
