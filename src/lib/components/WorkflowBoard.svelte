@@ -829,6 +829,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex: none;
     padding: 8px;
     font-size: 12px;
     font-weight: 700;
@@ -839,6 +840,8 @@
     border-top: 1px solid var(--border);
   }
   .asset-list {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -867,6 +870,7 @@
     white-space: nowrap;
   }
   .workflow-map {
+    flex: none;
     display: grid;
     gap: 6px;
     padding: 0 8px 10px;
@@ -942,6 +946,10 @@
     color: var(--text-dim);
     font-size: 12px;
     line-height: 1.4;
+  }
+  .asset-tray > .empty {
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .err {
     color: #ffb0b0;
