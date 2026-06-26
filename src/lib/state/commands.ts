@@ -55,6 +55,9 @@ async function resolveEmbed(
 const isOra = (file: File): boolean =>
   /\.ora$/i.test(file.name) || file.type === 'image/openraster';
 
+const isRasterImage = (file: File): boolean =>
+  file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+
 async function openImageAsDocument(file: File): Promise<void> {
   const bmp = await createImageBitmap(file);
   const doc = new PaintDocument(bmp.width, bmp.height, file.name.replace(/\.[^.]+$/, ''));
@@ -77,16 +80,25 @@ async function openDocumentFile(file: File): Promise<void> {
   }
 }
 
+export async function openDocumentFiles(files: Iterable<File>): Promise<void> {
+  const supported = Array.from(files).filter((file) => isOra(file) || isRasterImage(file));
+  if (!supported.length) {
+    editor.flash('No supported image or .ora files');
+    return;
+  }
+  try {
+    for (const file of supported) await openDocumentFile(file);
+    editor.flash(supported.length === 1 ? `Opened ${supported[0].name}` : `Opened ${supported.length} files`);
+  } catch (e) {
+    editor.flash('Open failed: ' + (e as Error).message);
+  }
+}
+
 /** File ▸ Open — accepts .ora and common raster formats. */
 export async function openCommand(): Promise<void> {
   const files = await openFiles('.ora,image/openraster,image/png,image/jpeg,image/webp,image/gif', true);
   if (!files.length) return;
-  try {
-    for (const file of files) await openDocumentFile(file);
-    editor.flash(files.length === 1 ? `Opened ${files[0].name}` : `Opened ${files.length} files`);
-  } catch (e) {
-    editor.flash('Open failed: ' + (e as Error).message);
-  }
+  await openDocumentFiles(files);
 }
 
 /** File ▸ Place — import an image as a new layer in the current document. */

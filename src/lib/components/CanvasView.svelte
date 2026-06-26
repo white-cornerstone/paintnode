@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
-  import { openCommand } from '../state/commands';
+  import { openCommand, openDocumentFiles } from '../state/commands';
+  import { workflow } from '../state/workflow.svelte';
   import { isDesktop } from '../integrations/desktop';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
@@ -56,6 +57,7 @@
   let panning = $state(false);
   let interacting = $state(false);
   let pointerInViewport = $state(false);
+  let dragOverEmpty = $state(false);
   let syncingScroll = false;
   let last = { x: 0, y: 0 };
   const SCROLL_PAD = 80;
@@ -281,6 +283,32 @@
     vp.invalidate();
   }
 
+  function hasFileDrag(e: DragEvent): boolean {
+    return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+  }
+
+  function onWorkspaceDragOver(e: DragEvent): void {
+    if (editor.doc || !hasFileDrag(e)) return;
+    e.preventDefault();
+    dragOverEmpty = true;
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+
+  function onWorkspaceDragLeave(e: DragEvent): void {
+    if (e.currentTarget !== containerEl) return;
+    const next = e.relatedTarget as Node | null;
+    if (next && containerEl.contains(next)) return;
+    dragOverEmpty = false;
+  }
+
+  async function onWorkspaceDrop(e: DragEvent): Promise<void> {
+    if (editor.doc) return;
+    e.preventDefault();
+    dragOverEmpty = false;
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length) await openDocumentFiles(files);
+  }
+
   onMount(() => {
     vp = new Viewport(
       canvasEl,
@@ -449,6 +477,9 @@
     pointerClientY = e.clientY;
   }}
   onpointerleave={onPointerLeave}
+  ondragover={onWorkspaceDragOver}
+  ondragleave={onWorkspaceDragLeave}
+  ondrop={onWorkspaceDrop}
   onscroll={syncViewportToScroll}
 >
   <canvas
@@ -461,11 +492,20 @@
   ></canvas>
   <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
   {#if !editor.doc}
-    <div class="empty-workspace">
-      <div class="empty-title">No documents open</div>
-      <div class="empty-actions">
-        <button onclick={() => ui.open('new')}>New Document</button>
-        <button onclick={() => void openCommand()}>Open</button>
+    <div class="empty-workspace" class:dragover={dragOverEmpty}>
+      <div class="empty-list" aria-label="No documents open">
+        <button type="button" class="empty-action" onclick={() => ui.open('new')}>
+          <span>New Document</span>
+          <kbd>⌘N</kbd>
+        </button>
+        <button type="button" class="empty-action" onclick={() => void openCommand()}>
+          <span>Open File</span>
+          <kbd>⌘O</kbd>
+        </button>
+        <button type="button" class="empty-action" onclick={() => workflow.newBoard()}>
+          <span>New Workflow Board</span>
+        </button>
+        <div class="empty-drop">Drop image or .ora files here to open them</div>
       </div>
     </div>
   {/if}
@@ -515,20 +555,50 @@
     z-index: 2;
     display: grid;
     place-content: center;
-    gap: 12px;
     color: var(--text-dim);
-    pointer-events: none;
-  }
-  .empty-title {
-    text-align: center;
-    font-size: 13px;
-    font-weight: 700;
-  }
-  .empty-actions {
-    display: flex;
-    justify-content: center;
-    gap: 8px;
     pointer-events: auto;
+  }
+  .empty-list {
+    width: min(320px, calc(100vw - 72px));
+  }
+  .empty-action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 24px;
+    align-items: baseline;
+    width: 100%;
+    min-height: 28px;
+    padding: 2px 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+  .empty-action:hover,
+  .empty-action:focus-visible {
+    background: transparent;
+    color: #fff;
+  }
+  .empty-action:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 3px;
+  }
+  .empty-action kbd {
+    font: inherit;
+    color: var(--text-dim);
+  }
+  .empty-drop {
+    margin-top: 8px;
+    padding-top: 6px;
+    font-size: 13px;
+    line-height: 1.35;
+    color: var(--text-dim);
+  }
+  .empty-workspace.dragover .empty-drop {
+    color: var(--accent);
   }
   .tool-cursor {
     position: fixed;
