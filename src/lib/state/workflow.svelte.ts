@@ -16,6 +16,12 @@ export interface WorkflowAssetNode {
   note: string;
 }
 
+export interface WorkflowConnection {
+  id: string;
+  from: string;
+  to: string;
+}
+
 export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
 export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output' };
 export type WorkflowZoomMode = 'in' | 'out';
@@ -41,6 +47,7 @@ export interface WorkflowFile {
   zoom?: number;
   storyboardDataUrl: string | null;
   nodes: WorkflowAssetNode[];
+  connections?: WorkflowConnection[];
   outputAssetId: string | null;
   outputRelativePath: string | null;
 }
@@ -80,6 +87,7 @@ class WorkflowStore {
   zoom = $state(1);
   storyboardDataUrl = $state<string | null>(null);
   nodes = $state<WorkflowAssetNode[]>([]);
+  connections = $state<WorkflowConnection[]>([]);
   outputAssetId = $state<string | null>(null);
   outputRelativePath = $state<string | null>(null);
   rev = $state(0);
@@ -116,6 +124,7 @@ class WorkflowStore {
     this.zoom = 1;
     this.storyboardDataUrl = null;
     this.nodes = [];
+    this.connections = [];
     this.outputAssetId = null;
     this.outputRelativePath = null;
     this.rev = 0;
@@ -169,9 +178,9 @@ class WorkflowStore {
       ...this.nodes,
       node,
     ];
+    this.connect(node.id, 'composition');
     this.selection = { kind: 'asset', id: node.id };
     this.tool = 'hand';
-    this.bump();
   }
 
   addBlankAsset(x: number, y: number, width: number, height: number): void {
@@ -189,13 +198,14 @@ class WorkflowStore {
       note: '',
     };
     this.nodes = [...this.nodes, node];
+    this.connect(node.id, 'composition');
     this.selection = { kind: 'asset', id: node.id };
     this.tool = 'hand';
-    this.bump();
   }
 
   removeNode(id: string): void {
     this.nodes = this.nodes.filter((node) => node.id !== id);
+    this.connections = this.connections.filter((connection) => connection.from !== id && connection.to !== id);
     if (this.selection?.kind === 'asset' && this.selection.id === id) this.selection = null;
     this.bump();
   }
@@ -266,8 +276,73 @@ class WorkflowStore {
   setNodeIncluded(id: string, included: boolean): void {
     const node = this.nodes.find((item) => item.id === id);
     if (!node) return;
-    node.included = included;
+    const wasIncluded = node.included;
+    if (included) {
+      if (!this.isConnected(id, 'composition')) this.connect(id, 'composition');
+      else if (!wasIncluded) {
+        node.included = true;
+        this.bump();
+      }
+    } else {
+      this.disconnectNodes(id, 'composition');
+    }
+  }
+
+  connect(from: string, to: string): void {
+    if (!this.canConnect(from, to)) return;
+    if (this.connections.some((connection) => connection.from === from && connection.to === to)) return;
+    this.connections = [
+      ...this.connections,
+      { id: id('connection'), from, to },
+    ];
+    const fromNode = this.nodes.find((node) => node.id === from);
+    if (fromNode && to === 'composition') fromNode.included = true;
     this.bump();
+  }
+
+  disconnectConnection(id: string): void {
+    const connection = this.connections.find((item) => item.id === id);
+    if (!connection) return;
+    this.connections = this.connections.filter((item) => item.id !== id);
+    if (connection?.to === 'composition') {
+      const node = this.nodes.find((item) => item.id === connection.from);
+      if (node) node.included = this.connections.some((item) => item.from === node.id && item.to === 'composition');
+    }
+    this.bump();
+  }
+
+  disconnectNodes(from: string, to: string): void {
+    const before = this.connections.length;
+    const node = to === 'composition' ? this.nodes.find((item) => item.id === from) : null;
+    const wasIncluded = node?.included ?? false;
+    this.connections = this.connections.filter((connection) => connection.from !== from || connection.to !== to);
+    if (node) node.included = false;
+    if (this.connections.length !== before || wasIncluded !== (node?.included ?? false)) this.bump();
+  }
+
+  isConnected(from: string, to: string): boolean {
+    return this.connections.some((connection) => connection.from === from && connection.to === to);
+  }
+
+  incoming(nodeId: string): WorkflowConnection[] {
+    return this.connections.filter((connection) => connection.to === nodeId);
+  }
+
+  outgoing(nodeId: string): WorkflowConnection[] {
+    return this.connections.filter((connection) => connection.from === nodeId);
+  }
+
+  connectedAssetNodesTo(nodeId: string): WorkflowAssetNode[] {
+    const incomingIds = new Set(this.incoming(nodeId).map((connection) => connection.from));
+    return this.nodes.filter((node) => incomingIds.has(node.id));
+  }
+
+  canConnect(from: string, to: string): boolean {
+    return from !== to && this.workflowNodeExists(from) && this.workflowNodeExists(to);
+  }
+
+  private workflowNodeExists(nodeId: string): boolean {
+    return nodeId === 'composition' || nodeId === 'output' || this.nodes.some((node) => node.id === nodeId);
   }
 
   setPrompt(prompt: string): void {
@@ -367,6 +442,7 @@ class WorkflowStore {
       zoom: this.zoom,
       storyboardDataUrl: this.storyboardDataUrl,
       nodes: this.nodes.map((node) => ({ ...node })),
+      connections: this.connections.map((connection) => ({ ...connection })),
       outputAssetId: this.outputAssetId,
       outputRelativePath: this.outputRelativePath,
     };
@@ -419,6 +495,17 @@ class WorkflowStore {
       included: node.included ?? true,
       note: node.note ?? '',
     }));
+    const parsedConnections = Array.isArray(parsed.connections)
+      ? parsed.connections
+        .filter((connection): connection is WorkflowConnection => typeof connection?.id === 'string' && typeof connection.from === 'string' && typeof connection.to === 'string')
+        .filter((connection, index, all) => all.findIndex((item) => item.from === connection.from && item.to === connection.to) === index)
+      : [];
+    this.connections = parsedConnections.filter((connection) => this.canConnect(connection.from, connection.to));
+    if (!parsedConnections.length) {
+      this.connections = this.nodes
+        .filter((node) => node.included)
+        .map((node) => ({ id: id('connection'), from: node.id, to: 'composition' }));
+    }
     this.outputAssetId = parsed.outputAssetId ?? null;
     this.outputRelativePath = parsed.outputRelativePath ?? null;
     this.rev = 0;

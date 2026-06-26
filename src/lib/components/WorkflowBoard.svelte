@@ -1,17 +1,19 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { composeCodexWorkflow, isDesktop, type ProjectAsset } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
-  import { workflow, type WorkflowAssetNode } from '../state/workflow.svelte';
-  import { Add, ArrowSync, Delete, Dismiss, Image, Link, Open, PaintBrush, Sparkle } from '../icons';
+  import { workflow, type WorkflowAssetNode, type WorkflowConnection } from '../state/workflow.svelte';
+  import { Add, ArrowSync, Delete, Dismiss, Image, Link, Open, PaintBrush } from '../icons';
 
   type CodexProgressPayload = { runId: string; message: string };
   type WorkflowMapKind = 'asset' | 'composition' | 'output' | 'viewport';
+  type WorkflowNodeId = string;
   type WorkflowMapRect = {
     id: string;
     kind: WorkflowMapKind;
@@ -37,6 +39,7 @@
   let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
+  let connecting = $state<{ from: WorkflowNodeId; x: number; y: number } | null>(null);
   let overscrollX = $state(0);
   let overscrollY = $state(0);
   let overscrollAnimating = $state(false);
@@ -52,7 +55,6 @@
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   const ASSET_NODE_W = 205;
-  const NODE_HEAD_H = 32;
   const STORYBOARD_W = 312;
   const STORYBOARD_H = 132;
   const MAP_EDGE_PADDING = 260;
@@ -71,6 +73,7 @@
       : workflow.zoomMode,
   );
   const workflowMapModel = $derived(workflowMap());
+  const graphConnections = $derived(workflow.connections);
 
   onDestroy(() => {
     stopProgress?.();
@@ -196,6 +199,11 @@
   }
 
   function onPointerMove(event: PointerEvent): void {
+    if (connecting) {
+      const point = boardPoint(event);
+      connecting = { ...connecting, x: point.x, y: point.y };
+      return;
+    }
     if (panning) {
       panBoardBy(event.clientX - panning.x, event.clientY - panning.y);
       panning = { x: event.clientX, y: event.clientY };
@@ -224,6 +232,7 @@
     if (drawing) {
       commitDrawing();
     }
+    connecting = null;
     dragging = null;
     panning = null;
   }
@@ -429,11 +438,14 @@
     overscrollAnimating = false;
   }
 
-  function mapLinkStyle(node: WorkflowAssetNode, map: WorkflowMapModel): string {
-    const x1 = mapX(node.x + node.width, map);
-    const y1 = mapY(node.y + NODE_HEAD_H / 2, map);
-    const x2 = mapX(workflow.promptX, map);
-    const y2 = mapY(workflow.promptY + NODE_HEAD_H / 2, map);
+  function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
+    const source = outputPortPoint(connection.from);
+    const target = inputPortPoint(connection.to);
+    if (!source || !target) return 'display:none';
+    const x1 = mapX(source.x, map);
+    const y1 = mapY(source.y, map);
+    const x2 = mapX(target.x, map);
+    const y2 = mapY(target.y, map);
     const dx = x2 - x1;
     const dy = y2 - y1;
     const length = Math.hypot(dx, dy);
@@ -489,6 +501,74 @@
 
   function stopMapDrag(): void {
     mapDragging = null;
+  }
+
+  function workflowNodeRect(nodeId: WorkflowNodeId): { x: number; y: number; width: number; height: number } | null {
+    if (nodeId === 'composition') {
+      return { x: workflow.promptX, y: workflow.promptY, width: workflow.compositionWidth, height: workflow.compositionHeight };
+    }
+    if (nodeId === 'output') {
+      return { x: workflow.outputX, y: workflow.outputY, width: workflow.outputWidth, height: workflow.outputHeight };
+    }
+    const node = workflow.nodes.find((item) => item.id === nodeId);
+    return node ? { x: node.x, y: node.y, width: node.width, height: node.height } : null;
+  }
+
+  function inputPortPoint(nodeId: WorkflowNodeId): { x: number; y: number } | null {
+    const rect = workflowNodeRect(nodeId);
+    if (!rect) return null;
+    return { x: rect.x, y: rect.y + rect.height / 2 };
+  }
+
+  function outputPortPoint(nodeId: WorkflowNodeId): { x: number; y: number } | null {
+    const rect = workflowNodeRect(nodeId);
+    if (!rect) return null;
+    return { x: rect.x + rect.width, y: rect.y + rect.height / 2 };
+  }
+
+  function connectionPath(connection: WorkflowConnection): string {
+    const source = outputPortPoint(connection.from);
+    const target = inputPortPoint(connection.to);
+    if (!source || !target) return '';
+    return routedPath(source, target);
+  }
+
+  function pendingConnectionPath(): string {
+    if (!connecting) return '';
+    const source = outputPortPoint(connecting.from);
+    if (!source) return '';
+    return routedPath(source, { x: connecting.x, y: connecting.y });
+  }
+
+  function routedPath(source: { x: number; y: number }, target: { x: number; y: number }): string {
+    return getSmoothStepPath({
+      sourceX: source.x,
+      sourceY: source.y,
+      sourcePosition: Position.Right,
+      targetX: target.x,
+      targetY: target.y,
+      targetPosition: Position.Left,
+      borderRadius: 18,
+      offset: 28,
+    })[0];
+  }
+
+  function startConnection(event: PointerEvent, from: WorkflowNodeId): void {
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    const point = boardPoint(event);
+    connecting = { from, x: point.x, y: point.y };
+    event.stopPropagation();
+  }
+
+  function finishConnection(event: PointerEvent, to: WorkflowNodeId): void {
+    if (!connecting) return;
+    workflow.connect(connecting.from, to);
+    connecting = null;
+    event.stopPropagation();
+  }
+
+  function portTitle(kind: 'input' | 'output', nodeName: string): string {
+    return kind === 'input' ? `Input for ${nodeName}` : `Output from ${nodeName}`;
   }
 
   function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
@@ -662,8 +742,8 @@
       error = 'Open a project folder before generating.';
       return;
     }
-    const includedNodes = workflow.nodes.filter((node) => node.included);
-    if (!includedNodes.length) {
+    const sourceNodes = workflow.connectedAssetNodesTo('composition');
+    if (!sourceNodes.length) {
       error = 'Connect at least one asset to the composition prompt.';
       return;
     }
@@ -689,7 +769,7 @@
 
     try {
       const sources = [];
-      for (const node of includedNodes) {
+      for (const node of sourceNodes) {
         const asset = assetFor(node);
         if (!asset) continue;
         sources.push({
@@ -773,8 +853,8 @@
           onpointerup={stopMapDrag}
           onpointercancel={stopMapDrag}
         >
-          {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
-            <span class="map-link" style={mapLinkStyle(node, workflowMapModel)}></span>
+          {#each graphConnections as connection (connection.id)}
+            <span class="map-link" style={mapLinkStyle(connection, workflowMapModel)}></span>
           {/each}
           {#each workflowMapModel.items as item (item.id)}
             <span
@@ -814,15 +894,31 @@
       onpointercancel={stopDrag}
     >
       <div class="board-world" style={`transform:translate(${workflow.panX + overscrollX}px, ${workflow.panY + overscrollY}px) scale(${workflow.zoom})`}>
-        <svg class="links" aria-hidden="true">
-          {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
-            <line
-              x1={node.x + node.width}
-              y1={node.y + NODE_HEAD_H / 2}
-              x2={workflow.promptX}
-              y2={workflow.promptY + NODE_HEAD_H / 2}
-            />
+        <svg class="links" aria-label="Workflow connections">
+          {#each graphConnections as connection (connection.id)}
+            {@const path = connectionPath(connection)}
+            {#if path}
+              <path
+                d={path}
+                role="button"
+                tabindex="0"
+                aria-label="Disconnect workflow connection"
+                onpointerdown={(event) => {
+                  workflow.disconnectConnection(connection.id);
+                  event.stopPropagation();
+                }}
+                onkeydown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return;
+                  event.preventDefault();
+                  workflow.disconnectConnection(connection.id);
+                }}
+              />
+            {/if}
           {/each}
+          {#if connecting}
+            {@const path = pendingConnectionPath()}
+            {#if path}<path class="pending" d={path} />{/if}
+          {/if}
         </svg>
 
         {#if drawing}
@@ -845,16 +941,29 @@
               event.stopPropagation();
             }}
           >
+            <button
+              class="node-port input"
+              aria-label={portTitle('input', node.name)}
+              use:tooltip={{ text: 'Input', placement: 'left' }}
+              onpointerdown={(event) => event.stopPropagation()}
+              onpointerup={(event) => finishConnection(event, node.id)}
+            ></button>
+            <button
+              class="node-port output"
+              aria-label={portTitle('output', node.name)}
+              use:tooltip={{ text: 'Output', placement: 'right' }}
+              onpointerdown={(event) => startConnection(event, node.id)}
+            ></button>
             <div class="node-head" use:dragHandle={{ type: 'asset', node }}>
               <span>{assetTitle(node)}</span>
               <div class="node-tools">
                 <button
-                  class:active={node.included}
-                  aria-label={`${node.included ? 'Exclude' : 'Include'} ${node.name} in composition`}
-                  use:tooltip={{ text: node.included ? 'Connected to composition' : 'Include in composition', placement: 'top' }}
+                  class:active={workflow.isConnected(node.id, 'composition')}
+                  aria-label={`${workflow.isConnected(node.id, 'composition') ? 'Disconnect' : 'Connect'} ${node.name} to composition`}
+                  use:tooltip={{ text: workflow.isConnected(node.id, 'composition') ? 'Connected to composition' : 'Connect to composition', placement: 'top' }}
                   onclick={(event) => {
                     event.stopPropagation();
-                    workflow.setNodeIncluded(node.id, !node.included);
+                    workflow.setNodeIncluded(node.id, !workflow.isConnected(node.id, 'composition'));
                   }}
                 >
                   <Icon svg={Link} size={13} />
@@ -893,10 +1002,23 @@
             event.stopPropagation();
           }}
         >
+          <button
+            class="node-port input"
+            aria-label={portTitle('input', compositionTitle())}
+            use:tooltip={{ text: 'Input', placement: 'left' }}
+            onpointerdown={(event) => event.stopPropagation()}
+            onpointerup={(event) => finishConnection(event, 'composition')}
+          ></button>
+          <button
+            class="node-port output"
+            aria-label={portTitle('output', compositionTitle())}
+            use:tooltip={{ text: 'Output', placement: 'right' }}
+            onpointerdown={(event) => startConnection(event, 'composition')}
+          ></button>
           <div class="node-head" use:dragHandle={{ type: 'prompt' }}>
             <span>{compositionTitle()}</span>
             <div class="node-tools">
-              <span class="connected-count">{workflow.nodes.filter((node) => node.included).length} linked</span>
+              <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
           </div>
           <div class="storyboard">
@@ -945,6 +1067,19 @@
             event.stopPropagation();
           }}
         >
+          <button
+            class="node-port input"
+            aria-label={portTitle('input', outputTitle())}
+            use:tooltip={{ text: 'Input', placement: 'left' }}
+            onpointerdown={(event) => event.stopPropagation()}
+            onpointerup={(event) => finishConnection(event, 'output')}
+          ></button>
+          <button
+            class="node-port output"
+            aria-label={portTitle('output', outputTitle())}
+            use:tooltip={{ text: 'Output', placement: 'right' }}
+            onpointerdown={(event) => startConnection(event, 'output')}
+          ></button>
           <div class="node-head" use:dragHandle={{ type: 'output' }}><span>{outputTitle()}</span></div>
           <div class="output-preview" style={`height:${Math.max(76, workflow.outputHeight - 74)}px`}>
             {#if outputAsset?.previewDataUrl}<img src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
@@ -1098,8 +1233,8 @@
   .map-link {
     height: 1px;
     transform-origin: 0 50%;
-    border-top: 1px dashed color-mix(in srgb, var(--accent) 78%, transparent);
-    opacity: 0.72;
+    border-top: 1px solid color-mix(in srgb, var(--accent) 72%, transparent);
+    opacity: 0.66;
   }
   .map-meta {
     display: flex;
@@ -1170,11 +1305,21 @@
     pointer-events: none;
     overflow: visible;
   }
-  .links line {
+  .links path {
+    fill: none;
     stroke: var(--accent);
-    stroke-width: 2;
-    stroke-dasharray: 7 5;
-    opacity: 0.75;
+    stroke-width: 2.25;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.88;
+    pointer-events: stroke;
+  }
+  .links path.pending {
+    opacity: 0.58;
+  }
+  .links path:focus-visible {
+    outline: none;
+    stroke-width: 4;
   }
   .asset-node,
   .prompt-node,
@@ -1185,7 +1330,7 @@
     border: 1px solid #4b4d52;
     border-radius: 6px;
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
-    overflow: hidden;
+    overflow: visible;
   }
   .asset-node {
     opacity: 0.72;
@@ -1220,6 +1365,36 @@
   }
   .node-head:active {
     cursor: grabbing;
+  }
+  .node-port {
+    position: absolute;
+    top: 50%;
+    z-index: 8;
+    display: grid;
+    place-items: center;
+    width: 13px;
+    height: 13px;
+    padding: 0;
+    border: 2px solid #a6aab2;
+    border-radius: 50%;
+    background: #202123;
+    box-shadow:
+      0 0 0 2px rgba(0, 0, 0, 0.36),
+      0 2px 8px rgba(0, 0, 0, 0.36);
+    transform: translateY(-50%);
+  }
+  .node-port.input {
+    left: -7px;
+    cursor: default;
+  }
+  .node-port.output {
+    right: -7px;
+    cursor: crosshair;
+  }
+  .node-port:hover,
+  .node-port:focus-visible {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 22%, #202123);
   }
   .node-tools {
     display: flex;
