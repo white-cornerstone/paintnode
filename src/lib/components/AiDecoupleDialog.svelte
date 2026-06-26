@@ -99,7 +99,7 @@
 
   async function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
     const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((next) => (next ? resolve(next) : reject(new Error('Could not encode layer PNG.'))), 'image/png');
+      canvas.toBlob((next) => (next ? resolve(next) : reject(new Error('Could not encode asset PNG.'))), 'image/png');
     });
     return blob;
   }
@@ -111,7 +111,7 @@
     canvas.width = bmp.width;
     canvas.height = bmp.height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error('Unable to prepare decoupled layer.');
+    if (!ctx) throw new Error('Unable to prepare extracted asset.');
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
 
@@ -134,7 +134,7 @@
 
     const key = layer.keyColor ? parseHexColor(layer.keyColor) : null;
     if (layer.keyColor && !key) {
-      throw new Error(`Layer "${layer.name}" returned invalid keyColor "${layer.keyColor}".`);
+      throw new Error(`Asset "${layer.name}" returned invalid keyColor "${layer.keyColor}".`);
     }
     if (key) {
       const img = ctx.getImageData(0, 0, canvas.width, canvas.height);

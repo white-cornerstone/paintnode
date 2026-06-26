@@ -110,6 +110,7 @@ struct DecoupleImageResult {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DecoupleManifest {
+    #[serde(default, alias = "assets")]
     layers: Vec<DecoupleManifestLayer>,
     notes: Option<String>,
 }
@@ -1494,11 +1495,11 @@ Required AI-image workflow:
 
 Required files in the current working directory:
 - `manifest.json`
-- One PNG file for each layer listed in `manifest.json`
+- One PNG file for each asset listed in `manifest.json`
 
 Manifest schema:
 {{
-  "layers": [
+  "assets": [
     {{
       "name": "Girl",
       "file": "girl-asset.png",
@@ -1513,7 +1514,7 @@ Manifest schema:
   "notes": "Optional short notes about rough edges or generated/inpainted regions."
 }}
 
-Layer file requirements:
+Asset file requirements:
 - PNG only.
 - Prefer transparent-background PNGs with real alpha for object/character/prop assets.
 - If the asset PNG has a background but you can create a soft alpha mask, save the grayscale mask as a PNG and set `alphaMask` to that filename.
@@ -1861,7 +1862,7 @@ async fn generate_codex_image(
     .map_err(|e| format!("Task error: {e}"))?
 }
 
-/// Ask local Codex to turn one source PNG into a manifest plus multiple layer PNGs.
+/// Ask local Codex to turn one source PNG into a manifest plus reusable asset PNGs.
 ///
 /// The app owns the deterministic import step; Codex only needs to satisfy the file contract.
 #[tauri::command]
@@ -1875,7 +1876,7 @@ async fn decouple_codex_image(
     store_assets: Option<bool>,
 ) -> Result<DecoupleImageResult, String> {
     if !is_png(&source_png) {
-        return Err("Decouple source must be a PNG image.".into());
+        return Err("Asset extraction source must be a PNG image.".into());
     }
 
     tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
@@ -1964,7 +1965,7 @@ async fn decouple_codex_image(
             )
         })?;
         let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
-            .map_err(|e| format!("Decouple manifest is invalid JSON: {e}"))?;
+            .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
         if manifest.layers.is_empty() {
             return Err("Asset manifest did not contain any assets.".into());
         }
@@ -2022,7 +2023,9 @@ async fn decouple_codex_image(
                             name: name.clone(),
                             relative_path,
                             created_at: now_id(),
-                            prompt: Some(format!("Decoupled from source: {user_prompt}")),
+                            prompt: Some(format!(
+                                "Extracted workflow asset from source: {user_prompt}"
+                            )),
                             source_file_name: Path::new(&layer.file)
                                 .file_name()
                                 .and_then(|s| s.to_str())
@@ -3068,6 +3071,7 @@ mod tests {
         let prompt = decouple_codex_prompt("extract rope railing");
         assert!(prompt.contains("PNG with real transparency"));
         assert!(prompt.contains("soft alpha for hair, lace, rope"));
+        assert!(prompt.contains("\"assets\": ["));
         assert!(prompt.contains("\"alphaMask\": null"));
         assert!(prompt.contains("last fallback"));
     }
@@ -3076,7 +3080,7 @@ mod tests {
     fn decouple_manifest_reads_optional_alpha_mask() {
         let manifest: DecoupleManifest = serde_json::from_str(
             r#"{
-              "layers": [
+              "assets": [
                 {
                   "name": "Rope railing",
                   "file": "rope.png",
@@ -3097,6 +3101,30 @@ mod tests {
             manifest.layers[0].alpha_mask.as_deref(),
             Some("rope-mask.png")
         );
+    }
+
+    #[test]
+    fn decouple_manifest_accepts_legacy_layers_key() {
+        let manifest: DecoupleManifest = serde_json::from_str(
+            r#"{
+              "layers": [
+                {
+                  "name": "Girl",
+                  "file": "girl.png",
+                  "alphaMask": null,
+                  "keyColor": null,
+                  "x": 0,
+                  "y": 0,
+                  "opacity": 1,
+                  "visible": true
+                }
+              ]
+            }"#,
+        )
+        .expect("legacy manifest should parse");
+
+        assert_eq!(manifest.layers.len(), 1);
+        assert_eq!(manifest.layers[0].name, "Girl");
     }
 
     #[test]
