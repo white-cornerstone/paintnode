@@ -4,11 +4,11 @@
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { composeCodexWorkflow, isDesktop, type ProjectAsset, type ProjectFile } from '../integrations/desktop';
-  import { bytesToBitmap } from '../io';
+  import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { workflow, type WorkflowAssetNode } from '../state/workflow.svelte';
-  import { Add, ArrowSync, Delete, Document, Image, Open, Sparkle } from '../icons';
+  import { Add, ArrowSync, Delete, Dismiss, Document, Image, Link, Open, PaintBrush, Sparkle } from '../icons';
 
   type CodexProgressPayload = { runId: string; message: string };
 
@@ -17,9 +17,16 @@
   let busy = $state(false);
   let progress = $state('');
   let error = $state('');
-  let dragging: { id: string; dx: number; dy: number } | null = null;
+  let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
+  let sketching = false;
   let boardEl = $state<HTMLDivElement>();
+  let storyboardCanvas = $state<HTMLCanvasElement>();
   let stopProgress: UnlistenFn | null = null;
+
+  const ASSET_NODE_W = 205;
+  const NODE_HEAD_H = 32;
+  const STORYBOARD_W = 312;
+  const STORYBOARD_H = 132;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
@@ -28,6 +35,12 @@
   );
 
   onDestroy(() => stopProgress?.());
+
+  $effect(() => {
+    if (storyboardCanvas) {
+      void restoreStoryboard(workflow.storyboardDataUrl);
+    }
+  });
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
@@ -88,25 +101,144 @@
     }
   }
 
-  function nodePointerDown(event: PointerEvent, node: WorkflowAssetNode): void {
+  function dragPointerDown(
+    event: PointerEvent,
+    type: 'asset' | 'prompt' | 'output',
+    node: WorkflowAssetNode | undefined = undefined,
+  ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
     const rect = boardEl.getBoundingClientRect();
+    const x = type === 'asset' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : workflow.outputX;
+    const y = type === 'asset' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : workflow.outputY;
     dragging = {
-      id: node.id,
-      dx: event.clientX - rect.left - node.x,
-      dy: event.clientY - rect.top - node.y,
+      type,
+      id: node?.id,
+      dx: event.clientX - rect.left - x,
+      dy: event.clientY - rect.top - y,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+  }
+
+  function dragHandle(
+    element: HTMLElement,
+    params: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode },
+  ): { update: (next: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode }) => void; destroy: () => void } {
+    let current = params;
+    const onDown = (event: PointerEvent) => dragPointerDown(event, current.type, current.node);
+    element.addEventListener('pointerdown', onDown);
+    return {
+      update(next) {
+        current = next;
+      },
+      destroy() {
+        element.removeEventListener('pointerdown', onDown);
+      },
+    };
   }
 
   function onPointerMove(event: PointerEvent): void {
     if (!dragging || !boardEl) return;
     const rect = boardEl.getBoundingClientRect();
-    workflow.moveNode(dragging.id, event.clientX - rect.left - dragging.dx, event.clientY - rect.top - dragging.dy);
+    const x = event.clientX - rect.left - dragging.dx;
+    const y = event.clientY - rect.top - dragging.dy;
+    if (dragging.type === 'asset' && dragging.id) workflow.moveNode(dragging.id, x, y);
+    else if (dragging.type === 'prompt') workflow.movePrompt(x, y);
+    else workflow.moveOutput(x, y);
   }
 
   function stopDrag(): void {
     dragging = null;
+  }
+
+  function storyboardCtx(): CanvasRenderingContext2D | null {
+    if (!storyboardCanvas) return null;
+    const ctx = storyboardCanvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#5bb7ff';
+    return ctx;
+  }
+
+  function isStoryboardBlank(): boolean {
+    if (!storyboardCanvas) return true;
+    const ctx = storyboardCanvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return true;
+    const data = ctx.getImageData(0, 0, storyboardCanvas.width, storyboardCanvas.height).data;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] > 0) return false;
+    }
+    return true;
+  }
+
+  async function restoreStoryboard(dataUrl: string | null): Promise<void> {
+    if (!storyboardCanvas) return;
+    const ctx = storyboardCtx();
+    if (!ctx) return;
+    ctx.clearRect(0, 0, storyboardCanvas.width, storyboardCanvas.height);
+    if (!dataUrl) return;
+    const img = new globalThis.Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Could not load storyboard sketch.'));
+      img.src = dataUrl;
+    });
+    ctx.drawImage(img, 0, 0, storyboardCanvas.width, storyboardCanvas.height);
+  }
+
+  function persistStoryboard(): void {
+    if (!storyboardCanvas || isStoryboardBlank()) {
+      workflow.setStoryboardDataUrl(null);
+      return;
+    }
+    workflow.setStoryboardDataUrl(storyboardCanvas.toDataURL('image/png'));
+  }
+
+  function sketchPoint(event: PointerEvent): { x: number; y: number } | null {
+    if (!storyboardCanvas) return null;
+    const rect = storyboardCanvas.getBoundingClientRect();
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * storyboardCanvas.width,
+      y: ((event.clientY - rect.top) / rect.height) * storyboardCanvas.height,
+    };
+  }
+
+  function startSketch(event: PointerEvent): void {
+    const ctx = storyboardCtx();
+    const point = sketchPoint(event);
+    if (!ctx || !point || !(event.currentTarget instanceof HTMLElement)) return;
+    sketching = true;
+    ctx.beginPath();
+    ctx.moveTo(point.x, point.y);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+  }
+
+  function moveSketch(event: PointerEvent): void {
+    if (!sketching) return;
+    const ctx = storyboardCtx();
+    const point = sketchPoint(event);
+    if (!ctx || !point) return;
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+    event.stopPropagation();
+  }
+
+  function stopSketch(event: PointerEvent | undefined = undefined): void {
+    if (!sketching) return;
+    sketching = false;
+    persistStoryboard();
+    event?.stopPropagation();
+  }
+
+  function clearStoryboard(event: MouseEvent): void {
+    event.stopPropagation();
+    const ctx = storyboardCtx();
+    if (!ctx || !storyboardCanvas) return;
+    ctx.clearRect(0, 0, storyboardCanvas.width, storyboardCanvas.height);
+    workflow.setStoryboardDataUrl(null);
   }
 
   async function generate(): Promise<void> {
@@ -119,8 +251,9 @@
       error = 'Open a project folder before generating.';
       return;
     }
-    if (!workflow.nodes.length) {
-      error = 'Add at least one asset node.';
+    const includedNodes = workflow.nodes.filter((node) => node.included);
+    if (!includedNodes.length) {
+      error = 'Connect at least one asset to the composition prompt.';
       return;
     }
     if (!workflow.prompt.trim()) {
@@ -145,13 +278,20 @@
 
     try {
       const sources = [];
-      for (const node of workflow.nodes) {
+      for (const node of includedNodes) {
         const asset = assetFor(node);
         if (!asset) continue;
         sources.push({
           name: node.note ? `${node.name}: ${node.note}` : node.name,
           bytes: await project.readFile({ ...asset, kind: 'generated', modifiedAt: asset.createdAt, size: 0, exists: true }),
         });
+      }
+      if (storyboardCanvas && !isStoryboardBlank()) {
+        sources.push({
+          name: 'Storyboard sketch: composition layout and handwritten placement annotations',
+          bytes: await canvasToPngBytes(storyboardCanvas),
+        });
+        persistStoryboard();
       }
       if (!sources.length) throw new Error('Workflow asset files are missing.');
       const result = await composeCodexWorkflow({ bin: codexBin, projectPath: project.path, runId }, workflow.prompt, sources);
@@ -243,25 +383,49 @@
       onpointerup={stopDrag}
       onpointercancel={stopDrag}
     >
+      <svg class="links" aria-hidden="true">
+        {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
+          <line
+            x1={node.x + ASSET_NODE_W}
+            y1={node.y + NODE_HEAD_H / 2}
+            x2={workflow.promptX}
+            y2={workflow.promptY + NODE_HEAD_H / 2}
+          />
+        {/each}
+      </svg>
+
       {#each workflow.nodes as node (node.id)}
         {@const asset = assetFor(node)}
         <article
           class="asset-node"
+          class:included={node.included}
           style={`transform:translate(${node.x}px, ${node.y}px)`}
-          onpointerdown={(event) => nodePointerDown(event, node)}
         >
-          <div class="node-head">
+          <div class="node-head" use:dragHandle={{ type: 'asset', node }}>
             <span>{node.name}</span>
-            <button
-              aria-label={`Remove ${node.name}`}
-              use:tooltip={{ text: 'Remove node', placement: 'top' }}
-              onclick={(event) => {
-                event.stopPropagation();
-                workflow.removeNode(node.id);
-              }}
-            >
-              <Icon svg={Delete} size={13} />
-            </button>
+            <div class="node-tools">
+              <button
+                class:active={node.included}
+                aria-label={`${node.included ? 'Exclude' : 'Include'} ${node.name} in composition`}
+                use:tooltip={{ text: node.included ? 'Connected to composition' : 'Include in composition', placement: 'top' }}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  workflow.setNodeIncluded(node.id, !node.included);
+                }}
+              >
+                <Icon svg={Link} size={13} />
+              </button>
+              <button
+                aria-label={`Remove ${node.name}`}
+                use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  workflow.removeNode(node.id);
+                }}
+              >
+                <Icon svg={Delete} size={13} />
+              </button>
+            </div>
           </div>
           <div class="node-preview">
             {#if asset?.previewDataUrl}<img src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
@@ -276,11 +440,40 @@
         </article>
       {/each}
 
-      <article class="prompt-node">
-        <div class="node-head"><span>Composition Prompt</span></div>
+      <article class="prompt-node" style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px)`}>
+        <div class="node-head" use:dragHandle={{ type: 'prompt' }}>
+          <span>Composition</span>
+          <div class="node-tools">
+            <span class="connected-count">{workflow.nodes.filter((node) => node.included).length} linked</span>
+          </div>
+        </div>
+        <div class="storyboard">
+          <div class="storyboard-head">
+            <span><Icon svg={PaintBrush} size={13} /> Storyboard</span>
+            <button
+              aria-label="Clear storyboard"
+              use:tooltip={{ text: 'Clear storyboard', placement: 'top' }}
+              onclick={clearStoryboard}
+            >
+              <Icon svg={Dismiss} size={13} />
+            </button>
+          </div>
+          <canvas
+            bind:this={storyboardCanvas}
+            width={STORYBOARD_W}
+            height={STORYBOARD_H}
+            aria-label="Storyboard annotation canvas"
+            onpointerdown={startSketch}
+            onpointermove={moveSketch}
+            onpointerup={stopSketch}
+            onpointercancel={stopSketch}
+          ></canvas>
+        </div>
         <textarea
+          class="composition-text"
           placeholder="A girl on the beach standing in front of an ice cream truck, holding an ice cream..."
           value={workflow.prompt}
+          onpointerdown={(event) => event.stopPropagation()}
           oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
         ></textarea>
         <label>
@@ -291,8 +484,8 @@
         {#if error}<p class="err">{error}</p>{/if}
       </article>
 
-      <article class="output-node">
-        <div class="node-head"><span>Output</span></div>
+      <article class="output-node" style={`transform:translate(${workflow.outputX}px, ${workflow.outputY}px)`}>
+        <div class="node-head" use:dragHandle={{ type: 'output' }}><span>Output</span></div>
         <div class="output-preview">
           {#if outputAsset?.previewDataUrl}<img src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
         </div>
@@ -431,6 +624,19 @@
       linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
     background-size: 24px 24px;
   }
+  .links {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .links line {
+    stroke: var(--accent);
+    stroke-width: 2;
+    stroke-dasharray: 7 5;
+    opacity: 0.75;
+  }
   .asset-node,
   .prompt-node,
   .output-node {
@@ -443,19 +649,16 @@
     overflow: hidden;
   }
   .asset-node {
-    cursor: grab;
+    opacity: 0.72;
   }
-  .asset-node:active {
-    cursor: grabbing;
+  .asset-node.included {
+    border-color: color-mix(in srgb, var(--accent) 65%, #4b4d52);
+    opacity: 1;
   }
   .prompt-node {
-    right: 280px;
-    top: 70px;
-    width: 310px;
+    width: 340px;
   }
   .output-node {
-    right: 34px;
-    top: 96px;
     width: 210px;
   }
   .node-head {
@@ -466,13 +669,31 @@
     border-bottom: 1px solid #4b4d52;
     font-size: 12px;
     font-weight: 700;
+    cursor: grab;
   }
-  .node-head button {
+  .node-head:active {
+    cursor: grabbing;
+  }
+  .node-tools {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .node-head button,
+  .storyboard-head button {
     display: grid;
     place-items: center;
     width: 22px;
     height: 22px;
     padding: 0;
+  }
+  .node-head button.active {
+    color: var(--accent);
+  }
+  .connected-count {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 500;
   }
   .node-preview,
   .output-preview {
@@ -505,7 +726,40 @@
     background: #242528;
   }
   .prompt-node textarea {
-    min-height: 132px;
+    min-height: 96px;
+  }
+  .storyboard {
+    border-bottom: 1px solid #4b4d52;
+    background: #242528;
+  }
+  .storyboard-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 28px;
+    padding: 0 8px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .storyboard-head span {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .storyboard canvas {
+    display: block;
+    width: 100%;
+    height: 132px;
+    cursor: crosshair;
+    background:
+      linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+    background-color: #1d1f22;
+    background-size: 24px 24px;
+    touch-action: none;
+  }
+  .composition-text {
+    min-height: 86px;
   }
   .prompt-node label {
     display: grid;

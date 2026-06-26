@@ -8,6 +8,7 @@ export interface WorkflowAssetNode {
   relativePath: string;
   x: number;
   y: number;
+  included: boolean;
   note: string;
 }
 
@@ -15,6 +16,11 @@ export interface WorkflowFile {
   version: 1;
   name: string;
   prompt: string;
+  promptX: number;
+  promptY: number;
+  outputX: number;
+  outputY: number;
+  storyboardDataUrl: string | null;
   nodes: WorkflowAssetNode[];
   outputAssetId: string | null;
   outputRelativePath: string | null;
@@ -35,6 +41,11 @@ class WorkflowStore {
   name = $state('Untitled Workflow');
   savedPath = $state<string | null>(null);
   prompt = $state('');
+  promptX = $state(480);
+  promptY = $state(70);
+  outputX = $state(895);
+  outputY = $state(96);
+  storyboardDataUrl = $state<string | null>(null);
   nodes = $state<WorkflowAssetNode[]>([]);
   outputAssetId = $state<string | null>(null);
   outputRelativePath = $state<string | null>(null);
@@ -51,6 +62,11 @@ class WorkflowStore {
     this.name = cleanWorkflowName(name);
     this.savedPath = null;
     this.prompt = '';
+    this.promptX = 480;
+    this.promptY = 70;
+    this.outputX = 895;
+    this.outputY = 96;
+    this.storyboardDataUrl = null;
     this.nodes = [];
     this.outputAssetId = null;
     this.outputRelativePath = null;
@@ -83,6 +99,7 @@ class WorkflowStore {
         relativePath: asset.relativePath,
         x: 80 + (index % 3) * 230,
         y: 110 + Math.floor(index / 3) * 160,
+        included: true,
         note: '',
       },
     ];
@@ -102,8 +119,32 @@ class WorkflowStore {
     this.bump();
   }
 
+  movePrompt(x: number, y: number): void {
+    this.promptX = Math.round(x);
+    this.promptY = Math.round(y);
+    this.bump();
+  }
+
+  moveOutput(x: number, y: number): void {
+    this.outputX = Math.round(x);
+    this.outputY = Math.round(y);
+    this.bump();
+  }
+
+  setNodeIncluded(id: string, included: boolean): void {
+    const node = this.nodes.find((item) => item.id === id);
+    if (!node) return;
+    node.included = included;
+    this.bump();
+  }
+
   setPrompt(prompt: string): void {
     this.prompt = prompt;
+    this.bump();
+  }
+
+  setStoryboardDataUrl(dataUrl: string | null): void {
+    this.storyboardDataUrl = dataUrl;
     this.bump();
   }
 
@@ -125,6 +166,11 @@ class WorkflowStore {
       version: 1,
       name: this.name,
       prompt: this.prompt,
+      promptX: this.promptX,
+      promptY: this.promptY,
+      outputX: this.outputX,
+      outputY: this.outputY,
+      storyboardDataUrl: this.storyboardDataUrl,
       nodes: this.nodes.map((node) => ({ ...node })),
       outputAssetId: this.outputAssetId,
       outputRelativePath: this.outputRelativePath,
@@ -145,6 +191,11 @@ class WorkflowStore {
     this.name = cleanWorkflowName(parsed.name ?? fallbackName);
     this.savedPath = savedPath;
     this.prompt = parsed.prompt ?? '';
+    this.promptX = Number.isFinite(parsed.promptX) ? Math.round(parsed.promptX!) : 480;
+    this.promptY = Number.isFinite(parsed.promptY) ? Math.round(parsed.promptY!) : 70;
+    this.outputX = Number.isFinite(parsed.outputX) ? Math.round(parsed.outputX!) : 895;
+    this.outputY = Number.isFinite(parsed.outputY) ? Math.round(parsed.outputY!) : 96;
+    this.storyboardDataUrl = parsed.storyboardDataUrl ?? null;
     this.nodes = parsed.nodes.map((node, index) => ({
       id: node.id || id('asset'),
       assetId: node.assetId ?? null,
@@ -152,6 +203,7 @@ class WorkflowStore {
       relativePath: node.relativePath || '',
       x: Number.isFinite(node.x) ? Math.round(node.x) : 80 + index * 32,
       y: Number.isFinite(node.y) ? Math.round(node.y) : 120 + index * 32,
+      included: node.included ?? true,
       note: node.note ?? '',
     })).filter((node) => node.relativePath);
     this.outputAssetId = parsed.outputAssetId ?? null;

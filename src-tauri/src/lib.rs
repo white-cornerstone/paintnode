@@ -1572,14 +1572,16 @@ fn workflow_compose_prompt(prompt: &str, source_names: &[String]) -> String {
     format!(
         r#"Use $imagegen to compose one new raster PNG for CX Paint from the attached workflow asset images.
 
-Workflow assets:
+Connected workflow inputs:
 {sources}
 
 Composition prompt:
 {prompt}
 
 Requirements:
-- Use the attached images as visual references/assets for identity, subject appearance, object design, and scene ingredients.
+- Treat every attached image as intentionally connected to the composition node.
+- Use all attached asset images as visual references/assets for identity, subject appearance, object design, and scene ingredients unless the prompt explicitly says to omit one.
+- If an attached image is named "Storyboard sketch", use it as the layout, placement, and annotation guide for the final image.
 - Create one coherent new image from the composition prompt.
 - Match perspective, lighting, scale, and contact shadows plausibly.
 - Do not make a collage or contact sheet.
@@ -3153,6 +3155,23 @@ mod tests {
         assert_eq!(args[image_idx + 2], image_paths[1].to_string_lossy());
         assert_eq!(args[image_idx + 3], "--");
         assert!(args[image_idx + 4].contains("Composition prompt:\ncompose scene"));
+    }
+
+    #[test]
+    fn workflow_compose_prompt_requires_connected_assets_and_storyboard() {
+        let prompt = workflow_compose_prompt(
+            "girl holds apple by the water",
+            &[
+                "Girl With Empty Hands".to_string(),
+                "Storyboard sketch: composition layout and handwritten placement annotations"
+                    .to_string(),
+            ],
+        );
+
+        assert!(prompt.contains("Connected workflow inputs"));
+        assert!(prompt.contains("Treat every attached image as intentionally connected"));
+        assert!(prompt.contains("Use all attached asset images"));
+        assert!(prompt.contains("If an attached image is named \"Storyboard sketch\""));
     }
 
     #[test]
