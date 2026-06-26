@@ -7,7 +7,8 @@
   import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
-  import { decoupleCodexImage, isDesktop, type DecoupledLayerResult } from '../integrations/desktop';
+  import { workflow } from '../state/workflow.svelte';
+  import { decoupleCodexImage, isDesktop, type DecoupledLayerResult, type ProjectAsset } from '../integrations/desktop';
   import { Copy } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -19,7 +20,13 @@
   const DEFAULT_PROMPT =
     'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
 
-  function loadCfg(): { codexBin: string; prompt: string; placeOnCanvas: boolean; tolerance: number } {
+  function loadCfg(): {
+    codexBin: string;
+    prompt: string;
+    addToWorkflow: boolean;
+    placeOnCanvas: boolean;
+    tolerance: number;
+  } {
     try {
       const raw = localStorage.getItem(KEY);
       if (raw) {
@@ -29,18 +36,20 @@
           prompt: DEFAULT_PROMPT,
           tolerance: 30,
           ...parsed,
+          addToWorkflow: parsed.addToWorkflow ?? true,
           placeOnCanvas: parsed.placeOnCanvas ?? false,
         };
       }
     } catch {
       /* ignore */
     }
-    return { codexBin: '', prompt: DEFAULT_PROMPT, placeOnCanvas: false, tolerance: 30 };
+    return { codexBin: '', prompt: DEFAULT_PROMPT, addToWorkflow: true, placeOnCanvas: false, tolerance: 30 };
   }
 
   const init = loadCfg();
   let codexBin = $state(init.codexBin);
   let prompt = $state(init.prompt);
+  let addToWorkflow = $state(init.addToWorkflow);
   let placeOnCanvas = $state(init.placeOnCanvas);
   let tolerance = $state(init.tolerance);
   let busy = $state(false);
@@ -49,6 +58,10 @@
   let progress = $state('');
   let notes = $state('');
   let stopProgress: UnlistenFn | null = null;
+
+  $effect(() => {
+    if (!project.path && addToWorkflow) addToWorkflow = false;
+  });
 
   function createRunId(): string {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -174,7 +187,7 @@
       return;
     }
     try {
-      localStorage.setItem(KEY, JSON.stringify({ codexBin, prompt, placeOnCanvas, tolerance }));
+      localStorage.setItem(KEY, JSON.stringify({ codexBin, prompt, addToWorkflow, placeOnCanvas, tolerance }));
     } catch {
       /* ignore */
     }
@@ -204,6 +217,7 @@
       );
       progress = 'Cleaning and saving extracted assets...';
       const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
+      const extractedAssets: ProjectAsset[] = [];
       for (const item of imports) {
         const blob = await canvasToPngBlob(item.source as HTMLCanvasElement);
         const asset = await project.storeGeneratedBlob(
@@ -217,6 +231,16 @@
           assetId: asset?.id ?? null,
           path: asset?.relativePath ?? null,
         };
+        if (asset) extractedAssets.push(asset);
+      }
+      const addedToWorkflow = addToWorkflow && extractedAssets.length > 0;
+      if (addedToWorkflow) {
+        if (!workflow.active) workflow.newBoard(`${sourceLayer.name} Assets`);
+        for (const asset of extractedAssets) workflow.addAsset(asset);
+        if (!workflow.prompt.trim()) {
+          workflow.setPrompt('Use these extracted assets as visual references to compose a new image.');
+        }
+        workflow.show();
       }
       const inserted = placeOnCanvas
         ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
@@ -225,7 +249,9 @@
       editor.flash(
         placeOnCanvas
           ? `Extracted ${imports.length} assets and placed ${inserted} layers`
-          : `Extracted ${imports.length} assets`,
+          : addedToWorkflow
+            ? `Extracted ${imports.length} assets to workflow`
+            : `Extracted ${imports.length} assets`,
       );
       onClose();
     } catch (e) {
@@ -259,10 +285,16 @@
     </label>
 
     <div class="split-row">
-      <label class="check-row">
-        <input type="checkbox" bind:checked={placeOnCanvas} />
-        <span>Place extracted assets on canvas</span>
-      </label>
+      <div class="check-stack">
+        <label class="check-row">
+          <input type="checkbox" bind:checked={addToWorkflow} disabled={!project.path} />
+          <span>Add assets to workflow board</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" bind:checked={placeOnCanvas} />
+          <span>Place extracted assets on canvas</span>
+        </label>
+      </div>
       <label class="compact-field">
         <span>Key tolerance</span>
         <input type="number" min="0" max="120" step="1" bind:value={tolerance} />
@@ -325,6 +357,10 @@
     gap: 8px;
     color: var(--text);
     font-size: 13px;
+  }
+  .check-stack {
+    display: grid;
+    gap: 7px;
   }
   .compact-field {
     display: grid;
