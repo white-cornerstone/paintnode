@@ -2759,6 +2759,30 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         Some("CmdOrCtrl+1"),
     )?;
     let about = MenuItem::with_id(app, "app:about", "About CX Paint", true, None::<&str>)?;
+    let help_about = MenuItem::with_id(
+        app,
+        "app:help-about",
+        "About CX Paint",
+        true,
+        None::<&str>,
+    )?;
+
+    let app_menu = Submenu::with_items(
+        app,
+        "CX Paint",
+        true,
+        &[
+            &about,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
 
     let file = Submenu::with_items(
         app,
@@ -2842,12 +2866,12 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         ],
     )?;
     let view = Submenu::with_items(app, "View", true, &[&zoom_in, &zoom_out, &fit, &actual])?;
-    let help = Submenu::with_items(app, "Help", true, &[&about])?;
+    let help = Submenu::with_items(app, "Help", true, &[&help_about])?;
 
     Menu::with_items(
         app,
         &[
-            &file, &edit, &image, &layer, &select, &filter, &ai, &view, &help,
+            &app_menu, &file, &edit, &image, &layer, &select, &filter, &ai, &view, &help,
         ],
     )
 }

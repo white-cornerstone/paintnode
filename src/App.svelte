@@ -307,6 +307,7 @@
         editor.viewport?.setZoom(1);
         break;
       case 'app:about':
+      case 'app:help-about':
         ui.open('about');
         break;
     }
