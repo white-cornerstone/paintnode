@@ -8,7 +8,7 @@
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { workflow, type WorkflowAssetNode } from '../state/workflow.svelte';
-  import { Add, ArrowSync, Delete, Dismiss, Document, Image, Link, Open, PaintBrush, Sparkle } from '../icons';
+  import { Add, ArrowSync, Delete, Dismiss, Document, Image, Link, Open, PaintBrush, Sparkle, ZoomIn, ZoomOut } from '../icons';
 
   type CodexProgressPayload = { runId: string; message: string };
 
@@ -21,6 +21,9 @@
   let panning: { x: number; y: number } | null = null;
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
+  let pointerInBoard = $state(false);
+  let pointerClientX = $state(0);
+  let pointerClientY = $state(0);
   let boardEl = $state<HTMLDivElement>();
   let storyboardCanvas = $state<HTMLCanvasElement>();
   let stopProgress: UnlistenFn | null = null;
@@ -35,6 +38,8 @@
   const outputAsset = $derived(
     assets.find((asset) => asset.id === workflow.outputAssetId || asset.relativePath === workflow.outputRelativePath) ?? null,
   );
+  const showZoomCursor = $derived(pointerInBoard && workflow.tool === 'zoom');
+  const zoomCursorIcon = $derived(workflow.zoomMode === 'out' ? ZoomOut : ZoomIn);
 
   onDestroy(() => stopProgress?.());
 
@@ -141,6 +146,9 @@
   }
 
   function onPointerMove(event: PointerEvent): void {
+    pointerInBoard = true;
+    pointerClientX = event.clientX;
+    pointerClientY = event.clientY;
     if (panning) {
       workflow.panBy(event.clientX - panning.x, event.clientY - panning.y);
       panning = { x: event.clientX, y: event.clientY };
@@ -173,6 +181,17 @@
     panning = null;
   }
 
+  function onPointerEnter(event: PointerEvent): void {
+    pointerInBoard = true;
+    pointerClientX = event.clientX;
+    pointerClientY = event.clientY;
+  }
+
+  function onPointerLeave(): void {
+    pointerInBoard = false;
+    stopDrag();
+  }
+
   function boardPoint(event: PointerEvent): { x: number; y: number } {
     if (!boardEl) return { x: 0, y: 0 };
     const rect = boardEl.getBoundingClientRect();
@@ -201,6 +220,9 @@
   function onBoardPointerDown(event: PointerEvent): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     if (event.button !== 0) return;
+    pointerInBoard = true;
+    pointerClientX = event.clientX;
+    pointerClientY = event.clientY;
     if (workflow.tool === 'zoom') {
       if (!boardEl) return;
       const rect = boardEl.getBoundingClientRect();
@@ -463,6 +485,8 @@
       bind:this={boardEl}
       style={`background-position:${workflow.panX}px ${workflow.panY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
       onpointerdown={onBoardPointerDown}
+      onpointerenter={onPointerEnter}
+      onpointerleave={onPointerLeave}
       onpointermove={onPointerMove}
       onpointerup={stopDrag}
       onpointercancel={stopDrag}
@@ -615,6 +639,16 @@
   </div>
 </section>
 
+{#if showZoomCursor}
+  <div
+    class="workflow-tool-cursor zoom"
+    style="left:{pointerClientX}px; top:{pointerClientY}px"
+    aria-hidden="true"
+  >
+    <Icon svg={zoomCursorIcon} size={19} />
+  </div>
+{/if}
+
 <style>
   .workflow-shell {
     display: flex;
@@ -725,7 +759,7 @@
     cursor: copy;
   }
   .board.zooming {
-    cursor: zoom-in;
+    cursor: none;
   }
   .board-world {
     position: absolute;
@@ -895,5 +929,23 @@
     border: 1px dashed var(--accent);
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     pointer-events: none;
+  }
+  .workflow-tool-cursor {
+    position: fixed;
+    z-index: 500;
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    color: #050505;
+    pointer-events: none;
+    will-change: transform;
+  }
+  .workflow-tool-cursor :global(svg) {
+    filter: drop-shadow(0 1px 0 #fff) drop-shadow(1px 0 0 #fff) drop-shadow(0 -1px 0 #fff)
+      drop-shadow(-1px 0 0 #fff) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+  }
+  .workflow-tool-cursor.zoom {
+    transform: translate3d(-11px, -11px, 0);
   }
 </style>

@@ -1,29 +1,42 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { workflow, type WorkflowTool } from '../state/workflow.svelte';
 
   const doc = $derived(editor.doc);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!doc);
-  const pct = $derived(Math.round(ui.zoom * 100));
+  const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
+  const hasZoomSurface = $derived(hasDocument || hasWorkflow);
+  const pct = $derived(Math.round((hasWorkflow ? workflow.zoom : ui.zoom) * 100));
   const layerCount = $derived(doc?.layers.length ?? 0);
+  const workflowToolNames: Record<WorkflowTool, string> = {
+    move: 'Move',
+    zoom: 'Zoom',
+    asset: 'Asset Node',
+    composition: 'Composition Node',
+    output: 'Output Node',
+  };
 
   let editing = $state(false);
   let draft = $state('');
 
   function startEdit(e: FocusEvent) {
-    if (!hasDocument) return;
+    if (!hasZoomSurface) return;
     editing = true;
     draft = String(pct);
     const el = e.currentTarget as HTMLInputElement;
     queueMicrotask(() => el.select());
   }
   function applyZoom() {
-    if (!hasDocument) {
+    if (!hasZoomSurface) {
       editing = false;
       return;
     }
     const v = parseFloat(draft);
-    if (!Number.isNaN(v) && v > 0) editor.viewport?.setZoom(v / 100);
+    if (!Number.isNaN(v) && v > 0) {
+      if (hasWorkflow) workflow.setZoom(v / 100);
+      else editor.viewport?.setZoom(v / 100);
+    }
     editing = false;
   }
   function onKey(e: KeyboardEvent) {
@@ -44,14 +57,14 @@
     class="zoom-input"
     type="text"
     inputmode="decimal"
-    value={hasDocument ? (editing ? draft : `${pct}%`) : ''}
+    value={hasZoomSurface ? (editing ? draft : `${pct}%`) : ''}
     oninput={(e) => (draft = e.currentTarget.value)}
     onfocus={startEdit}
     onblur={applyZoom}
     onkeydown={onKey}
     aria-label="Zoom level (type a percentage)"
     title="Zoom — click and type a percentage"
-    disabled={!hasDocument}
+    disabled={!hasZoomSurface}
   />
   <span class="sep"></span>
   <span class="item pos">{hasDocument && ui.cursor ? `${ui.cursor.x}, ${ui.cursor.y}` : ''}</span>
@@ -61,7 +74,7 @@
   <span class="spacer"></span>
   <span class="item dim">{hasDocument ? `${layerCount} layer${layerCount === 1 ? '' : 's'}` : ''}</span>
   <span class="sep"></span>
-  <span class="item dim">{hasDocument ? editor.activeTool.name : ''}</span>
+  <span class="item dim">{hasDocument ? editor.activeTool.name : hasWorkflow ? workflowToolNames[workflow.tool] : ''}</span>
 </footer>
 
 <style>

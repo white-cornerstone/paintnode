@@ -49,7 +49,6 @@
         <button class:on={workflow.zoomMode === 'out'} onclick={() => workflow.setZoomMode('out')}>Zoom Out</button>
       </div>
       <button onclick={() => workflow.resetZoom()}>100%</button>
-      <span class="val">{Math.round(workflow.zoom * 100)}%</span>
       <span class="hint">Click the workflow canvas to zoom {workflow.zoomMode}. Hold Alt to invert.</span>
     {:else}
       <span class="hint">Drag on the workflow canvas to place or resize a {workflowToolNames[workflow.tool].toLowerCase()}.</span>
