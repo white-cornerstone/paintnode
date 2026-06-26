@@ -3,14 +3,31 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { composeCodexWorkflow, isDesktop, type ProjectAsset, type ProjectFile } from '../integrations/desktop';
+  import { composeCodexWorkflow, isDesktop, type ProjectAsset } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { workflow, type WorkflowAssetNode } from '../state/workflow.svelte';
-  import { Add, ArrowSync, Delete, Dismiss, Document, Image, Link, Open, PaintBrush, Sparkle } from '../icons';
+  import { Add, ArrowSync, Delete, Dismiss, Image, Link, Open, PaintBrush, Sparkle } from '../icons';
 
   type CodexProgressPayload = { runId: string; message: string };
+  type WorkflowMapKind = 'asset' | 'composition' | 'output' | 'viewport';
+  type WorkflowMapRect = {
+    id: string;
+    kind: WorkflowMapKind;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    color: string;
+    included?: boolean;
+  };
+  type WorkflowMapBounds = { minX: number; minY: number; width: number; height: number };
+  type WorkflowMapModel = {
+    items: WorkflowMapRect[];
+    viewport: WorkflowMapRect;
+    bounds: WorkflowMapBounds;
+  };
 
   const desktop = isDesktop();
   let codexBin = $state('');
@@ -23,6 +40,8 @@
   let sketching = false;
   let altDown = $state(false);
   let boardEl = $state<HTMLDivElement>();
+  let boardWidth = $state(1);
+  let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
   let stopProgress: UnlistenFn | null = null;
 
@@ -41,6 +60,7 @@
       ? workflow.zoomMode === 'in' ? 'out' : 'in'
       : workflow.zoomMode,
   );
+  const workflowMapModel = $derived(workflowMap());
 
   onDestroy(() => stopProgress?.());
 
@@ -53,6 +73,13 @@
   $effect(() => {
     const board = boardEl;
     if (!board) return;
+    const resize = () => {
+      boardWidth = Math.max(1, board.clientWidth);
+      boardHeight = Math.max(1, board.clientHeight);
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(board);
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (event.ctrlKey || event.metaKey) {
@@ -63,15 +90,14 @@
       }
     };
     board.addEventListener('wheel', onWheel, { passive: false });
-    return () => board.removeEventListener('wheel', onWheel);
+    return () => {
+      observer.disconnect();
+      board.removeEventListener('wheel', onWheel);
+    };
   });
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
-  }
-
-  function workflowFiles(): ProjectFile[] {
-    return project.current?.files.filter((file) => file.kind === 'workflow') ?? [];
   }
 
   function createRunId(): string {
@@ -96,15 +122,6 @@
       editor.flash(relativePath ? `Saved ${relativePath}` : 'Open a project folder to save workflow');
     } catch (e) {
       editor.flash('Workflow save failed: ' + ((e as Error)?.message ?? String(e)));
-    }
-  }
-
-  async function openWorkflow(file: ProjectFile): Promise<void> {
-    try {
-      workflow.openFromBytes(await project.readFile(file), file.relativePath, file.name.replace(/\.cxflow\.json$/i, ''));
-      editor.flash(`Opened ${file.name}`);
-    } catch (e) {
-      editor.flash('Open workflow failed: ' + ((e as Error)?.message ?? String(e)));
     }
   }
 
@@ -206,6 +223,113 @@
       x: (event.clientX - rect.left - workflow.panX) / workflow.zoom,
       y: (event.clientY - rect.top - workflow.panY) / workflow.zoom,
     };
+  }
+
+  function workflowMapItems(): WorkflowMapRect[] {
+    return [
+      ...workflow.nodes.map((node) => ({
+        id: node.id,
+        kind: 'asset' as const,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        color: node.color,
+        included: node.included,
+      })),
+      {
+        id: 'composition',
+        kind: 'composition',
+        x: workflow.promptX,
+        y: workflow.promptY,
+        width: workflow.compositionWidth,
+        height: workflow.compositionHeight,
+        color: workflow.compositionColor,
+      },
+      {
+        id: 'output',
+        kind: 'output',
+        x: workflow.outputX,
+        y: workflow.outputY,
+        width: workflow.outputWidth,
+        height: workflow.outputHeight,
+        color: workflow.outputColor,
+      },
+    ];
+  }
+
+  function workflowViewportRect(): WorkflowMapRect {
+    const zoom = Math.max(0.001, workflow.zoom);
+    return {
+      id: 'viewport',
+      kind: 'viewport',
+      x: -workflow.panX / zoom,
+      y: -workflow.panY / zoom,
+      width: boardWidth / zoom,
+      height: boardHeight / zoom,
+      color: 'var(--accent)',
+    };
+  }
+
+  function workflowMap(): WorkflowMapModel {
+    const items = workflowMapItems();
+    const viewport = workflowViewportRect();
+    const rects = [...items, viewport];
+    const minX = Math.min(...rects.map((rect) => rect.x)) - 90;
+    const minY = Math.min(...rects.map((rect) => rect.y)) - 90;
+    const maxX = Math.max(...rects.map((rect) => rect.x + rect.width)) + 90;
+    const maxY = Math.max(...rects.map((rect) => rect.y + rect.height)) + 90;
+    return {
+      items,
+      viewport,
+      bounds: {
+        minX,
+        minY,
+        width: Math.max(1, maxX - minX),
+        height: Math.max(1, maxY - minY),
+      },
+    };
+  }
+
+  function mapX(x: number, map: WorkflowMapModel): number {
+    return ((x - map.bounds.minX) / map.bounds.width) * 100;
+  }
+
+  function mapY(y: number, map: WorkflowMapModel): number {
+    return ((y - map.bounds.minY) / map.bounds.height) * 100;
+  }
+
+  function mapRectStyle(rect: WorkflowMapRect, map: WorkflowMapModel): string {
+    const minSize = rect.kind === 'viewport' ? 8 : 5;
+    return [
+      `left:${mapX(rect.x, map)}%`,
+      `top:${mapY(rect.y, map)}%`,
+      `width:max(${minSize}px, ${(rect.width / map.bounds.width) * 100}%)`,
+      `height:max(${minSize}px, ${(rect.height / map.bounds.height) * 100}%)`,
+      `--mini-color:${rect.color}`,
+    ].join(';');
+  }
+
+  function mapLinkStyle(node: WorkflowAssetNode, map: WorkflowMapModel): string {
+    const x1 = mapX(node.x + node.width, map);
+    const y1 = mapY(node.y + NODE_HEAD_H / 2, map);
+    const x2 = mapX(workflow.promptX, map);
+    const y2 = mapY(workflow.promptY + NODE_HEAD_H / 2, map);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const length = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    return `left:${x1}%; top:${y1}%; width:${length}%; transform:rotate(${angle}deg)`;
+  }
+
+  function centerBoardFromMap(event: PointerEvent, map: WorkflowMapModel): void {
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const worldX = map.bounds.minX + ((event.clientX - rect.left) / rect.width) * map.bounds.width;
+    const worldY = map.bounds.minY + ((event.clientY - rect.top) / rect.height) * map.bounds.height;
+    const nextPanX = boardWidth / 2 - worldX * workflow.zoom;
+    const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
+    workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
   }
 
   function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
@@ -477,15 +601,33 @@
       {/if}
 
       <div class="tray-head workflows">
-        <span>Workflows</span>
+        <span>Map</span>
       </div>
-      <div class="workflow-list">
-        {#each workflowFiles() as file (file.relativePath)}
-          <button onclick={() => void openWorkflow(file)}>
-            <Icon svg={Document} size={14} />
-            <span>{file.name}</span>
-          </button>
-        {/each}
+      <div class="workflow-map">
+        <button
+          class="workflow-map-canvas"
+          aria-label="Workflow map. Click to center the workflow canvas."
+          onpointerdown={(event) => centerBoardFromMap(event, workflowMapModel)}
+        >
+          {#each workflow.nodes.filter((node) => node.included) as node (node.id)}
+            <span class="map-link" style={mapLinkStyle(node, workflowMapModel)}></span>
+          {/each}
+          {#each workflowMapModel.items as item (item.id)}
+            <span
+              class="map-node"
+              class:asset={item.kind === 'asset'}
+              class:composition={item.kind === 'composition'}
+              class:output={item.kind === 'output'}
+              class:included={item.included}
+              style={mapRectStyle(item, workflowMapModel)}
+            ></span>
+          {/each}
+          <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
+        </button>
+        <div class="map-meta">
+          <span>{workflow.nodes.length + 2} nodes</span>
+          <span>{Math.round(workflow.zoom * 100)}%</span>
+        </div>
       </div>
     </aside>
 
@@ -696,16 +838,14 @@
   .workflows {
     border-top: 1px solid var(--border);
   }
-  .asset-list,
-  .workflow-list {
+  .asset-list {
     display: flex;
     flex-direction: column;
     gap: 4px;
     overflow: auto;
     padding: 0 8px 8px;
   }
-  .asset-item,
-  .workflow-list button {
+  .asset-item {
     display: grid;
     grid-template-columns: 34px minmax(0, 1fr) 16px;
     align-items: center;
@@ -714,9 +854,6 @@
     padding: 5px;
     text-align: left;
   }
-  .workflow-list button {
-    grid-template-columns: 18px minmax(0, 1fr);
-  }
   .asset-item img {
     width: 34px;
     height: 34px;
@@ -724,11 +861,79 @@
     background: var(--bg-input);
   }
   .asset-item span,
-  .workflow-list span,
   .node-head span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .workflow-map {
+    display: grid;
+    gap: 6px;
+    padding: 0 8px 10px;
+  }
+  .workflow-map-canvas {
+    position: relative;
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    min-height: 148px;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid #3b3d41;
+    border-radius: 6px;
+    background:
+      linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+    background-color: #202225;
+    background-size: 18px 18px;
+    cursor: crosshair;
+  }
+  .workflow-map-canvas:hover {
+    border-color: color-mix(in srgb, var(--accent) 50%, #3b3d41);
+  }
+  .map-node,
+  .map-viewport,
+  .map-link {
+    position: absolute;
+    display: block;
+    pointer-events: none;
+  }
+  .map-node {
+    border: 1px solid color-mix(in srgb, var(--mini-color) 58%, #65686f);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--mini-color) 40%, #4b4d52);
+    opacity: 0.78;
+  }
+  .map-node.asset:not(.included) {
+    opacity: 0.38;
+  }
+  .map-node.composition {
+    background: color-mix(in srgb, var(--accent) 28%, #4b4d52);
+    border-color: color-mix(in srgb, var(--accent) 65%, #65686f);
+  }
+  .map-node.output {
+    background: color-mix(in srgb, #6b7cff 28%, #4b4d52);
+  }
+  .map-viewport {
+    border: 2px solid var(--accent);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.35),
+      0 0 10px color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+  .map-link {
+    height: 1px;
+    transform-origin: 0 50%;
+    border-top: 1px dashed color-mix(in srgb, var(--accent) 78%, transparent);
+    opacity: 0.72;
+  }
+  .map-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--text-dim);
+    font-size: 11px;
   }
   .empty,
   .err,
