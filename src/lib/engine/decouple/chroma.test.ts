@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from './chroma';
+import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from './chroma';
 
 describe('parseHexColor', () => {
   it('parses six digit hex colors with or without #', () => {
@@ -78,5 +78,36 @@ describe('connectedMatteToAlpha', () => {
     expect(data[0 * 4 + 3]).toBeLessThan(255);
     expect(data[(1 * width + 1) * 4 + 3]).toBe(255);
     expect(data[(2 * width + 2) * 4 + 3]).toBe(255);
+  });
+});
+
+describe('applyAlphaMask', () => {
+  it('uses grayscale mask coverage as soft alpha', () => {
+    const data = new Uint8ClampedArray([
+      200, 10, 10, 255,
+      200, 10, 10, 255,
+      200, 10, 10, 128,
+    ]);
+    const mask = new Uint8ClampedArray([
+      255, 255, 255, 255,
+      128, 128, 128, 255,
+      0, 0, 0, 255,
+    ]);
+
+    const stats = applyAlphaMask(data, mask);
+
+    expect(stats).toEqual({ transparentPixels: 1, softenedPixels: 1 });
+    expect(data[3]).toBe(255);
+    expect(data[7]).toBe(128);
+    expect(data[11]).toBe(0);
+  });
+
+  it('multiplies mask coverage by existing alpha', () => {
+    const data = new Uint8ClampedArray([20, 40, 60, 128]);
+    const mask = new Uint8ClampedArray([255, 255, 255, 128]);
+
+    applyAlphaMask(data, mask);
+
+    expect(data[3]).toBe(64);
   });
 });

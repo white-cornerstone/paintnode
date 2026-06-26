@@ -74,6 +74,7 @@ export interface WorkflowSourceImage {
 export interface DecoupledLayerResult {
   name: string;
   dataUrl: string;
+  alphaMaskDataUrl?: string | null;
   keyColor?: string | null;
   x?: number | null;
   y?: number | null;

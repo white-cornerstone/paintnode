@@ -15,6 +15,11 @@ export interface ChromaKeyStats {
   softenedPixels: number;
 }
 
+export interface AlphaMaskStats {
+  transparentPixels: number;
+  softenedPixels: number;
+}
+
 export interface ConnectedMatteOptions extends ChromaKeyOptions {
   width: number;
   height: number;
@@ -166,4 +171,35 @@ export function connectedMatteToAlpha(
   }
 
   return { keyedPixels, softenedPixels };
+}
+
+/**
+ * Apply a same-sized grayscale alpha mask to RGBA pixels in-place.
+ *
+ * White mask pixels keep the asset opaque, black pixels remove it, and gray pixels
+ * produce partial alpha for soft hair, lace, rope, glass, shadows, and antialiasing.
+ */
+export function applyAlphaMask(data: Uint8ClampedArray, mask: Uint8ClampedArray): AlphaMaskStats {
+  const pixels = Math.min(Math.floor(data.length / 4), Math.floor(mask.length / 4));
+  let transparentPixels = 0;
+  let softenedPixels = 0;
+
+  for (let p = 0; p < pixels; p++) {
+    const i = p * 4;
+    const existingAlpha = data[i + 3];
+    if (existingAlpha === 0) {
+      transparentPixels++;
+      continue;
+    }
+
+    const luminance = (mask[i] * 0.2126 + mask[i + 1] * 0.7152 + mask[i + 2] * 0.0722) / 255;
+    const coverage = clamp(luminance * (mask[i + 3] / 255), 0, 1);
+    const nextAlpha = Math.round(existingAlpha * coverage);
+    data[i + 3] = nextAlpha;
+
+    if (nextAlpha === 0) transparentPixels++;
+    else if (nextAlpha < existingAlpha) softenedPixels++;
+  }
+
+  return { transparentPixels, softenedPixels };
 }

@@ -4,7 +4,7 @@
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
+  import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { decoupleCodexImage, isDesktop, type DecoupledLayerResult } from '../integrations/desktop';
@@ -17,7 +17,7 @@
   const desktop = isDesktop();
   const KEY = 'cxpaint.decouple';
   const DEFAULT_PROMPT =
-    'Extract reusable assets for a later AI composition workflow: main subject, important props, environment plate, and any useful shadows or reflections.';
+    'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
 
   function loadCfg(): { codexBin: string; prompt: string; placeOnCanvas: boolean; tolerance: number } {
     try {
@@ -101,6 +101,23 @@
     if (!ctx) throw new Error('Unable to prepare decoupled layer.');
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
+
+    if (layer.alphaMaskDataUrl) {
+      const maskBlob = await (await fetch(layer.alphaMaskDataUrl)).blob();
+      const maskBmp = await createImageBitmap(maskBlob);
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = canvas.width;
+      maskCanvas.height = canvas.height;
+      const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
+      if (!maskCtx) throw new Error(`Unable to prepare alpha mask for "${layer.name}".`);
+      maskCtx.drawImage(maskBmp, 0, 0, canvas.width, canvas.height);
+      maskBmp.close();
+
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const mask = maskCtx.getImageData(0, 0, canvas.width, canvas.height);
+      applyAlphaMask(img.data, mask.data);
+      ctx.putImageData(img, 0, 0);
+    }
 
     const key = layer.keyColor ? parseHexColor(layer.keyColor) : null;
     if (layer.keyColor && !key) {
@@ -253,8 +270,8 @@
     </div>
 
     <p class="hint">
-      Codex returns named PNG assets and a manifest. CX Paint cleans keyed or matte backgrounds,
-      saves transparent assets to the project, and can optionally place them as layers.
+      Codex returns named workflow assets and a manifest. CX Paint saves transparent assets to the
+      project, applies alpha masks when provided, and uses color-key cleanup only as a fallback.
     </p>
 
     {#if busy}

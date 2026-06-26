@@ -90,6 +90,7 @@ struct GeneratedImageResult {
 struct DecoupledLayerResult {
     name: String,
     data_url: String,
+    alpha_mask_data_url: Option<String>,
     key_color: Option<String>,
     x: Option<i32>,
     y: Option<i32>,
@@ -118,6 +119,7 @@ struct DecoupleManifest {
 struct DecoupleManifestLayer {
     name: String,
     file: String,
+    alpha_mask: Option<String>,
     key_color: Option<String>,
     x: Option<i32>,
     y: Option<i32>,
@@ -1471,8 +1473,8 @@ User guidance:
 {user_prompt}
 
 Goal:
-- Extract or regenerate useful standalone visual assets from the source image for later AI compositing workflows.
-- Think of the result as reusable ingredients for a node/workflow composition, not as layers that must perfectly reassemble over the source photo.
+- Extract or regenerate useful standalone visual assets from the source image for later AI compositing workflows and storyboard planning.
+- Think of the result as reusable visual references/ingredients for a node workflow, not as layers that must stack back together to recreate the source photo.
 - Prefer assets such as people/characters, held objects, vehicles, product/prop objects, architectural landmarks, environment plates, plants, and useful shadows/reflections when helpful.
 - Preserve the subject identity, pose, style, lighting direction, and broad perspective, but prioritize clean reusable assets over exact original occlusion geometry.
 
@@ -1484,9 +1486,11 @@ Required AI-image workflow:
 - For each major editable object, generate an isolated standalone asset from the source image.
 - If a person/character originally holds a separately extracted prop, generate the person/character asset with natural empty hands, a neutral pose, or cleanly reconstructed fingers/hands instead of still holding that prop.
 - If an object is embedded in or occludes another extracted asset, choose one primary asset to own that object and reconstruct the other asset without it.
-- When transparent output is not practical, generate that object on a perfectly flat single-color matte background and record the exact matte color in `keyColor`.
+- The preferred deliverable for each object/character/prop is a PNG with real transparency, including soft alpha for hair, lace, rope, glass, shadows, antialiasing, and semi-transparent material.
+- If real transparent output is not practical, create a grayscale alpha mask PNG with the same dimensions as the asset PNG and record it in `alphaMask`; white means opaque, black means transparent, and gray means partially transparent.
+- Use a perfectly flat single-color matte background and `keyColor` only as the last fallback when neither real alpha nor an alpha mask is practical.
 - After each generated image is available, copy or save the resulting PNG into the current working directory using the filename you list in `manifest.json`.
-- You may use scripts only for deterministic processing: locating generated PNGs, copying files, chroma-keying a matte, cropping transparent bounds, inspecting dimensions, and validating output.
+- You may use scripts only for deterministic processing: locating generated PNGs, copying files, applying or validating alpha masks, chroma-keying a matte, cropping transparent bounds, inspecting dimensions, and validating output.
 
 Required files in the current working directory:
 - `manifest.json`
@@ -1498,6 +1502,7 @@ Manifest schema:
     {{
       "name": "Girl",
       "file": "girl-asset.png",
+      "alphaMask": null,
       "keyColor": null,
       "x": 0,
       "y": 0,
@@ -1510,8 +1515,9 @@ Manifest schema:
 
 Layer file requirements:
 - PNG only.
-- Prefer transparent-background PNGs for object/character/prop assets.
-- If you generate an object on a plain matte/green-screen background, set `keyColor` to the exact matte color such as "#00ff00"; CX Paint will remove that color into alpha.
+- Prefer transparent-background PNGs with real alpha for object/character/prop assets.
+- If the asset PNG has a background but you can create a soft alpha mask, save the grayscale mask as a PNG and set `alphaMask` to that filename.
+- If you generate an object on a plain matte/green-screen background without an alpha mask, set `keyColor` to the exact matte color such as "#00ff00"; CX Paint will remove that color into alpha.
 - Choose a matte color that does not appear in the object. It does not need to be green.
 - For reusable assets, prefer tight crops with transparent or keyed backgrounds. Set `x` and `y` to 0 unless the image is intentionally a full-size environment plate.
 - Use manifest order from broad environment assets to foreground subject/prop assets.
@@ -1984,6 +1990,26 @@ async fn decouple_codex_image(
             }
 
             let data_url = png_data_url(&bytes)?;
+            let alpha_mask_data_url = match layer.alpha_mask.as_deref().map(str::trim) {
+                Some(mask_file) if !mask_file.is_empty() => {
+                    let mask_path = safe_job_child_path(&job_path, mask_file)?;
+                    let mask_bytes = fs::read(&mask_path).map_err(|e| {
+                        format!(
+                            "Alpha mask for asset '{}' was listed but could not be read at {}: {e}",
+                            name,
+                            mask_path.display()
+                        )
+                    })?;
+                    if !is_png(&mask_bytes) {
+                        return Err(format!(
+                            "Alpha mask for asset '{}' is not a valid PNG.",
+                            name
+                        ));
+                    }
+                    Some(png_data_url(&mask_bytes)?)
+                }
+                _ => None,
+            };
             let asset = match (store_assets, project_dir.as_ref()) {
                 (true, Some(project_dir)) => {
                     let (id, relative_path) =
@@ -2013,6 +2039,7 @@ async fn decouple_codex_image(
             layers.push(DecoupledLayerResult {
                 name,
                 data_url,
+                alpha_mask_data_url,
                 key_color: layer.key_color,
                 x: layer.x,
                 y: layer.y,
@@ -3034,6 +3061,42 @@ mod tests {
             prompt.contains("If a person/character originally holds a separately extracted prop")
         );
         assert!(prompt.contains("natural empty hands"));
+    }
+
+    #[test]
+    fn decouple_prompt_prefers_soft_alpha_assets_over_keyed_mattes() {
+        let prompt = decouple_codex_prompt("extract rope railing");
+        assert!(prompt.contains("PNG with real transparency"));
+        assert!(prompt.contains("soft alpha for hair, lace, rope"));
+        assert!(prompt.contains("\"alphaMask\": null"));
+        assert!(prompt.contains("last fallback"));
+    }
+
+    #[test]
+    fn decouple_manifest_reads_optional_alpha_mask() {
+        let manifest: DecoupleManifest = serde_json::from_str(
+            r#"{
+              "layers": [
+                {
+                  "name": "Rope railing",
+                  "file": "rope.png",
+                  "alphaMask": "rope-mask.png",
+                  "keyColor": null,
+                  "x": 0,
+                  "y": 0,
+                  "opacity": 1,
+                  "visible": true
+                }
+              ],
+              "notes": "mask used for soft rope edges"
+            }"#,
+        )
+        .expect("manifest should parse");
+
+        assert_eq!(
+            manifest.layers[0].alpha_mask.as_deref(),
+            Some("rope-mask.png")
+        );
     }
 
     #[test]
