@@ -37,6 +37,9 @@ export { default as Delete } from '@fluentui/svg-icons/icons/delete_24_regular.s
 export { default as Dismiss } from '@fluentui/svg-icons/icons/dismiss_24_regular.svg?raw';
 export { default as ArrowSwap } from '@fluentui/svg-icons/icons/arrow_swap_24_regular.svg?raw';
 export { default as Image } from '@fluentui/svg-icons/icons/image_24_regular.svg?raw';
+export { default as ImageAdd } from '@fluentui/svg-icons/icons/image_add_24_regular.svg?raw';
+export { default as Board } from '@fluentui/svg-icons/icons/board_24_regular.svg?raw';
+export { default as FolderAdd } from '@fluentui/svg-icons/icons/folder_add_24_regular.svg?raw';
 export { default as Copy } from '@fluentui/svg-icons/icons/copy_24_regular.svg?raw';
 export { default as ArchiveClock } from '@fluentui/svg-icons/icons/archive_clock_24_regular.svg?raw';
 export { default as Apps } from '@fluentui/svg-icons/icons/apps_24_regular.svg?raw';

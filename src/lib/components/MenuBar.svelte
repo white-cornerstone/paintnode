@@ -1,7 +1,6 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
-  import { workflow } from '../state/workflow.svelte';
   import {
     openCommand,
     saveOraCommand,
@@ -117,8 +116,6 @@
           action: () => ui.open('aiDecouple'),
           disabled: () => !editor.activeLayer,
         },
-        { sep: true },
-        { label: 'New Workflow Board', action: () => workflow.newBoard() },
       ],
     },
     {
