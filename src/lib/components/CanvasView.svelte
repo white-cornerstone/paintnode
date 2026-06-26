@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { openCommand } from '../state/commands';
   import { isDesktop } from '../integrations/desktop';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
@@ -459,6 +460,15 @@
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
   <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
+  {#if !editor.doc}
+    <div class="empty-workspace">
+      <div class="empty-title">No documents open</div>
+      <div class="empty-actions">
+        <button onclick={() => ui.open('new')}>New Document</button>
+        <button onclick={() => void openCommand()}>Open</button>
+      </div>
+    </div>
+  {/if}
   {#if editor.textEdit && overlayBox}
     <TextEditorOverlay box={overlayBox} />
   {/if}
@@ -498,6 +508,27 @@
     z-index: 0;
     pointer-events: none;
     cursor: inherit;
+  }
+  .empty-workspace {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    place-content: center;
+    gap: 12px;
+    color: var(--text-dim);
+    pointer-events: none;
+  }
+  .empty-title {
+    text-align: center;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .empty-actions {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    pointer-events: auto;
   }
   .tool-cursor {
     position: fixed;

@@ -453,10 +453,6 @@ export class EditorStore implements ToolHost {
   }
 
   closeDocument(id: string): void {
-    if (this.documents.length <= 1) {
-      this.flash('Keep at least one document open');
-      return;
-    }
     const idx = this.documents.findIndex((d) => d.id === id);
     if (idx < 0) return;
     const wasActive = this.activeDocumentId === id;
@@ -467,6 +463,17 @@ export class EditorStore implements ToolHost {
       const fallback = next[Math.min(idx, next.length - 1)];
       this.activeDocumentId = null;
       if (fallback) this.switchDocument(fallback.id);
+      else {
+        this.doc = null;
+        this.selection = null;
+        this.activeStroke = null;
+        this.textEdit = null;
+        this.rasterizePrompt = null;
+        this.attachHistory(new History(60));
+        this.viewport?.invalidateComposite();
+        this.viewport?.invalidate();
+        this.notify();
+      }
     } else {
       this.notify();
     }
