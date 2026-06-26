@@ -40,18 +40,13 @@
 <div class="options">
   {#if hasWorkflow}
     <span class="tool-name">{workflowToolNames[workflow.tool]}</span>
-    <span class="divider"></span>
-    {#if workflow.tool === 'hand'}
-      <span class="hint">Drag empty workflow canvas to pan. Drag node headers to reposition nodes.</span>
-    {:else if workflow.tool === 'zoom'}
+    {#if workflow.tool === 'zoom'}
+      <span class="divider"></span>
       <div class="seg">
         <button class:on={workflow.zoomMode === 'in'} onclick={() => workflow.setZoomMode('in')}>Zoom In</button>
         <button class:on={workflow.zoomMode === 'out'} onclick={() => workflow.setZoomMode('out')}>Zoom Out</button>
       </div>
       <button onclick={() => workflow.resetZoom()}>100%</button>
-      <span class="hint">Click the workflow canvas to zoom {workflow.zoomMode}. Hold Alt to invert.</span>
-    {:else}
-      <span class="hint">Drag on the workflow canvas to place or resize a {workflowToolNames[workflow.tool].toLowerCase()}.</span>
     {/if}
 
     <span class="divider"></span>
