@@ -1422,6 +1422,7 @@
     display: grid;
     place-items: center;
     height: 106px;
+    overflow: hidden;
     background:
       linear-gradient(45deg, #3c3d40 25%, transparent 25%),
       linear-gradient(-45deg, #3c3d40 25%, transparent 25%),
@@ -1433,9 +1434,11 @@
   }
   .node-preview img,
   .output-preview img {
-    max-width: 100%;
-    max-height: 100%;
+    display: block;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
+    object-position: center;
   }
   .asset-node textarea,
   .prompt-node textarea {
