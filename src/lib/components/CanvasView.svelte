@@ -6,6 +6,7 @@
   import { workflow } from '../state/workflow.svelte';
   import { isDesktop } from '../integrations/desktop';
   import { Viewport } from '../engine/Viewport';
+  import { wheelZoomFactor } from '../engine/zoomGesture';
   import type { PointerInfo } from '../engine/tools/Tool';
   import Icon from './Icon.svelte';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
@@ -339,7 +340,7 @@
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
         const r = canvasEl.getBoundingClientRect();
-        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        const factor = wheelZoomFactor(e.deltaY, e.deltaMode);
         vp!.zoomBy(factor, e.clientX - r.left, e.clientY - r.top);
         ui.zoom = vp!.scale;
       } else {

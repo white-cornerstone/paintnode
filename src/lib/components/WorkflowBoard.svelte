@@ -6,6 +6,7 @@
   import { tooltip } from '../actions/tooltip';
   import { composeCodexWorkflow, isDesktop, type ProjectAsset } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
+  import { wheelZoomFactor } from '../engine/zoomGesture';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { workflow, type WorkflowAssetNode, type WorkflowConnection } from '../state/workflow.svelte';
@@ -107,7 +108,7 @@
       event.preventDefault();
       if (event.ctrlKey || event.metaKey) {
         const rect = board.getBoundingClientRect();
-        workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 'in' : 'out');
+        workflow.zoomBy(wheelZoomFactor(event.deltaY, event.deltaMode), event.clientX - rect.left, event.clientY - rect.top);
         clampWorkflowPan();
       } else {
         panBoardBy(-event.deltaX, -event.deltaY, true, 'idle');

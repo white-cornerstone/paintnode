@@ -269,6 +269,16 @@ class WorkflowStore {
     this.panY = Math.round(viewY - worldY * this.zoom);
   }
 
+  zoomBy(factor: number, viewX: number, viewY: number): void {
+    const current = this.zoom;
+    const next = Math.min(4, Math.max(0.2, current * factor));
+    const worldX = (viewX - this.panX) / current;
+    const worldY = (viewY - this.panY) / current;
+    this.zoom = Number(next.toFixed(3));
+    this.panX = Math.round(viewX - worldX * this.zoom);
+    this.panY = Math.round(viewY - worldY * this.zoom);
+  }
+
   resetZoom(): void {
     this.zoom = 1;
   }
