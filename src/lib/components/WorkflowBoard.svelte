@@ -961,6 +961,7 @@
                   class:active={workflow.isConnected(node.id, 'composition')}
                   aria-label={`${workflow.isConnected(node.id, 'composition') ? 'Disconnect' : 'Connect'} ${node.name} to composition`}
                   use:tooltip={{ text: workflow.isConnected(node.id, 'composition') ? 'Connected to composition' : 'Connect to composition', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
                   onclick={(event) => {
                     event.stopPropagation();
                     workflow.setNodeIncluded(node.id, !workflow.isConnected(node.id, 'composition'));
@@ -971,6 +972,7 @@
                 <button
                   aria-label={`Remove ${node.name}`}
                   use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
                   onclick={(event) => {
                     event.stopPropagation();
                     workflow.removeNode(node.id);
