@@ -954,10 +954,11 @@
               use:tooltip={{ text: 'Output', placement: 'right' }}
               onpointerdown={(event) => startConnection(event, node.id)}
             ></button>
-            <div class="node-head" use:dragHandle={{ type: 'asset', node }}>
-              <span>{assetTitle(node)}</span>
+            <div class="node-head">
+              <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>{assetTitle(node)}</span>
               <div class="node-tools">
                 <button
+                  type="button"
                   class:active={workflow.isConnected(node.id, 'composition')}
                   aria-label={`${workflow.isConnected(node.id, 'composition') ? 'Disconnect' : 'Connect'} ${node.name} to composition`}
                   use:tooltip={{ text: workflow.isConnected(node.id, 'composition') ? 'Connected to composition' : 'Connect to composition', placement: 'top' }}
@@ -970,6 +971,7 @@
                   <Icon svg={Link} size={13} />
                 </button>
                 <button
+                  type="button"
                   aria-label={`Remove ${node.name}`}
                   use:tooltip={{ text: 'Remove node', placement: 'top' }}
                   onpointerdown={(event) => event.stopPropagation()}
@@ -1017,8 +1019,8 @@
             use:tooltip={{ text: 'Output', placement: 'right' }}
             onpointerdown={(event) => startConnection(event, 'composition')}
           ></button>
-          <div class="node-head" use:dragHandle={{ type: 'prompt' }}>
-            <span>{compositionTitle()}</span>
+          <div class="node-head">
+            <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
@@ -1082,7 +1084,9 @@
             use:tooltip={{ text: 'Output', placement: 'right' }}
             onpointerdown={(event) => startConnection(event, 'output')}
           ></button>
-          <div class="node-head" use:dragHandle={{ type: 'output' }}><span>{outputTitle()}</span></div>
+          <div class="node-head">
+            <span class="node-drag-region" use:dragHandle={{ type: 'output' }}>{outputTitle()}</span>
+          </div>
           <div class="output-preview" style={`height:${Math.max(76, workflow.outputHeight - 74)}px`}>
             {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
           </div>
@@ -1363,9 +1367,16 @@
     border-bottom: 1px solid #4b4d52;
     font-size: 12px;
     font-weight: 700;
+  }
+  .node-drag-region {
+    display: flex;
+    align-items: center;
+    align-self: stretch;
+    min-width: 0;
+    flex: 1 1 auto;
     cursor: grab;
   }
-  .node-head:active {
+  .node-drag-region:active {
     cursor: grabbing;
   }
   .node-port {
