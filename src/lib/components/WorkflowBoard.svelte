@@ -981,7 +981,7 @@
               </div>
             </div>
             <div class="node-preview" style={`height:${Math.max(64, node.height - 84)}px`}>
-              {#if asset?.previewDataUrl}<img src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+              {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
             </div>
             <textarea
               aria-label={`Role for ${node.name}`}
@@ -1082,7 +1082,7 @@
           ></button>
           <div class="node-head" use:dragHandle={{ type: 'output' }}><span>{outputTitle()}</span></div>
           <div class="output-preview" style={`height:${Math.max(76, workflow.outputHeight - 74)}px`}>
-            {#if outputAsset?.previewDataUrl}<img src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
+            {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
           </div>
           <div class="output-actions">
             <button onclick={() => void placeOutput()} disabled={!outputAsset}>
@@ -1419,6 +1419,7 @@
   }
   .node-preview,
   .output-preview {
+    position: relative;
     display: grid;
     place-items: center;
     height: 106px;
@@ -1432,13 +1433,13 @@
     background-size: 16px 16px;
     background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   }
-  .node-preview img,
-  .output-preview img {
+  .node-preview .preview-image,
+  .output-preview .preview-image {
     display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: 100%;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
     object-fit: contain;
     object-position: center;
   }
