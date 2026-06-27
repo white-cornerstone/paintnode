@@ -8,8 +8,8 @@ describe('wheelZoomFactor', () => {
   });
 
   it('keeps small trackpad deltas precise', () => {
-    expect(wheelZoomFactor(-5)).toBeCloseTo(1.006, 3);
-    expect(wheelZoomFactor(5)).toBeCloseTo(0.994, 3);
+    expect(wheelZoomFactor(-5)).toBeCloseTo(1.015, 3);
+    expect(wheelZoomFactor(5)).toBeCloseTo(0.985, 3);
   });
 
   it('caps large deltas to prevent jumpy zoom', () => {

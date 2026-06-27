@@ -1,7 +1,7 @@
 const LINE_DELTA_PX = 16;
 const PAGE_DELTA_PX = 800;
 const MAX_DELTA_PX = 80;
-const PINCH_ZOOM_SENSITIVITY = 0.0012;
+const PINCH_ZOOM_SENSITIVITY = 0.003;
 
 export function wheelZoomFactor(deltaY: number, deltaMode = 0): number {
   const pixelDelta = deltaY * deltaModeMultiplier(deltaMode);
