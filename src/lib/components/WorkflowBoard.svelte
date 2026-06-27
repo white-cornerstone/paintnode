@@ -935,7 +935,7 @@
             class="asset-node"
             class:included={node.included}
             class:selected={workflow.selection?.kind === 'asset' && workflow.selection.id === node.id}
-            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; --node-color:${node.color}`}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onpointerdown={(event) => {
               workflow.select({ kind: 'asset', id: node.id });
               event.stopPropagation();
@@ -996,7 +996,7 @@
         <article
           class="prompt-node"
           class:selected={workflow.selection?.kind === 'composition'}
-          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; --node-color:${workflow.compositionColor}`}
+          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
           onpointerdown={(event) => {
             workflow.select({ kind: 'composition' });
             event.stopPropagation();
@@ -1061,7 +1061,7 @@
         <article
           class="output-node"
           class:selected={workflow.selection?.kind === 'output'}
-          style={`transform:translate(${workflow.outputX}px, ${workflow.outputY}px); width:${workflow.outputWidth}px; --node-color:${workflow.outputColor}`}
+          style={`transform:translate(${workflow.outputX}px, ${workflow.outputY}px); width:${workflow.outputWidth}px; --node-color:${workflow.outputColor}; --port-y:${workflow.outputHeight / 2}px`}
           onpointerdown={(event) => {
             workflow.select({ kind: 'output' });
             event.stopPropagation();
@@ -1368,7 +1368,7 @@
   }
   .node-port {
     position: absolute;
-    top: 50%;
+    top: var(--port-y, 50%);
     z-index: 8;
     display: grid;
     place-items: center;
