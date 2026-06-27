@@ -42,7 +42,7 @@
   let connecting = $state<{ from: WorkflowNodeId; x: number; y: number } | null>(null);
   let overscrollX = $state(0);
   let overscrollY = $state(0);
-  let overscrollAnimating = $state(false);
+  let overscrollReturning = $state(false);
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
@@ -51,16 +51,15 @@
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
   let stopProgress: UnlistenFn | null = null;
-  let overscrollReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   const ASSET_NODE_W = 205;
   const STORYBOARD_W = 312;
   const STORYBOARD_H = 132;
   const MAP_EDGE_PADDING = 260;
-  const MIN_OVERSCROLL = 14;
-  const MAX_OVERSCROLL = 52;
-  const OVERSCROLL_DAMPING = 0.18;
+  const MAX_OVERSCROLL = 32;
+  const OVERSCROLL_DAMPING = 0.14;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
@@ -77,7 +76,7 @@
 
   onDestroy(() => {
     stopProgress?.();
-    if (overscrollReleaseTimer) clearTimeout(overscrollReleaseTimer);
+    if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
 
@@ -90,13 +89,19 @@
   $effect(() => {
     const board = boardEl;
     if (!board) return;
+    let resizeFrame: number | null = null;
     const resize = () => {
+      resizeFrame = null;
       boardWidth = Math.max(1, board.clientWidth);
       boardHeight = Math.max(1, board.clientHeight);
       clampWorkflowPan();
     };
+    const scheduleResize = () => {
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(resize);
+    };
     resize();
-    const observer = new ResizeObserver(resize);
+    const observer = new ResizeObserver(scheduleResize);
     observer.observe(board);
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
@@ -105,11 +110,12 @@
         workflow.zoomAt(event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 'in' : 'out');
         clampWorkflowPan();
       } else {
-        panBoardBy(-event.deltaX, -event.deltaY);
+        panBoardBy(-event.deltaX, -event.deltaY, true, 'idle');
       }
     };
     board.addEventListener('wheel', onWheel, { passive: false });
     return () => {
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
       observer.disconnect();
       board.removeEventListener('wheel', onWheel);
     };
@@ -205,7 +211,7 @@
       return;
     }
     if (panning) {
-      panBoardBy(event.clientX - panning.x, event.clientY - panning.y);
+      panBoardBy(event.clientX - panning.x, event.clientY - panning.y, true, 'manual');
       panning = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -232,6 +238,7 @@
     if (drawing) {
       commitDrawing();
     }
+    releaseOverscroll();
     connecting = null;
     dragging = null;
     panning = null;
@@ -368,42 +375,41 @@
     return Math.min(Math.max(origin, min), max - viewportSize);
   }
 
-  function panBoardBy(dx: number, dy: number, bounce = true): void {
+  function panBoardBy(dx: number, dy: number, bounce = true, releaseMode: 'idle' | 'manual' = 'idle'): void {
     workflow.panBy(dx, dy);
     const rejected = clampWorkflowPan();
     if (bounce) {
       if (Math.abs(rejected.rejectedX) >= 0.5 || Math.abs(rejected.rejectedY) >= 0.5) {
-        applyOverscroll(rejected.rejectedX, rejected.rejectedY);
-      } else if (overscrollAnimating) {
+        applyOverscroll(rejected.rejectedX, rejected.rejectedY, releaseMode);
+      } else if (overscrollX !== 0 || overscrollY !== 0 || overscrollReturning) {
         clearOverscroll();
       }
     }
   }
 
-  function applyOverscroll(rejectedX: number, rejectedY: number): void {
+  function applyOverscroll(rejectedX: number, rejectedY: number, releaseMode: 'idle' | 'manual'): void {
     const nextX = dampOverscroll(rejectedX);
     const nextY = dampOverscroll(rejectedY);
     if (nextX === 0 && nextY === 0) return;
-    if (overscrollReleaseTimer) clearTimeout(overscrollReleaseTimer);
+    if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
-    overscrollAnimating = false;
+    overscrollReturning = false;
     overscrollX = nextX;
     overscrollY = nextY;
-    overscrollReleaseTimer = setTimeout(() => {
-      overscrollAnimating = true;
-      overscrollX = 0;
-      overscrollY = 0;
-      overscrollReleaseTimer = null;
-      overscrollEndTimer = setTimeout(() => {
-        overscrollAnimating = false;
-        overscrollEndTimer = null;
-      }, 190);
-    }, 72);
+    overscrollEndTimer = null;
+    if (releaseMode === 'idle') {
+      overscrollIdleTimer = setTimeout(() => {
+        overscrollIdleTimer = null;
+        releaseOverscroll();
+      }, 110);
+    } else {
+      overscrollIdleTimer = null;
+    }
   }
 
   function dampOverscroll(value: number): number {
     if (Math.abs(value) < 0.5) return 0;
-    const magnitude = Math.min(MAX_OVERSCROLL, Math.max(MIN_OVERSCROLL, Math.abs(value) * OVERSCROLL_DAMPING));
+    const magnitude = Math.min(MAX_OVERSCROLL, Math.abs(value) * OVERSCROLL_DAMPING);
     return Math.sign(value) * magnitude;
   }
 
@@ -425,9 +431,9 @@
   }
 
   function clearOverscroll(): void {
-    if (overscrollReleaseTimer) {
-      clearTimeout(overscrollReleaseTimer);
-      overscrollReleaseTimer = null;
+    if (overscrollIdleTimer) {
+      clearTimeout(overscrollIdleTimer);
+      overscrollIdleTimer = null;
     }
     if (overscrollEndTimer) {
       clearTimeout(overscrollEndTimer);
@@ -435,7 +441,26 @@
     }
     overscrollX = 0;
     overscrollY = 0;
-    overscrollAnimating = false;
+    overscrollReturning = false;
+  }
+
+  function releaseOverscroll(): void {
+    if (overscrollIdleTimer) {
+      clearTimeout(overscrollIdleTimer);
+      overscrollIdleTimer = null;
+    }
+    if (overscrollX === 0 && overscrollY === 0) {
+      overscrollReturning = false;
+      return;
+    }
+    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
+    overscrollReturning = true;
+    overscrollX = 0;
+    overscrollY = 0;
+    overscrollEndTimer = setTimeout(() => {
+      overscrollReturning = false;
+      overscrollEndTimer = null;
+    }, 210);
   }
 
   function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
@@ -882,7 +907,7 @@
       class:zooming={workflow.tool === 'zoom'}
       class:zoom-in={workflow.tool === 'zoom' && effectiveZoomMode === 'in'}
       class:zoom-out={workflow.tool === 'zoom' && effectiveZoomMode === 'out'}
-      class:overscrolling={overscrollAnimating}
+      class:overscrolling={overscrollReturning}
       role="application"
       aria-label="Workflow composition board"
       bind:this={boardEl}
@@ -1276,6 +1301,7 @@
       linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
     background-size: 24px 24px;
     touch-action: none;
+    will-change: background-position;
   }
   .board.panning {
     cursor: grab;
@@ -1293,15 +1319,16 @@
     cursor: zoom-out;
   }
   .board.overscrolling {
-    transition: background-position 170ms cubic-bezier(0.18, 0.88, 0.28, 1);
+    transition: background-position 210ms cubic-bezier(0.2, 0.9, 0.28, 1);
   }
   .board-world {
     position: absolute;
     inset: 0;
     transform-origin: top left;
+    will-change: transform;
   }
   .board.overscrolling .board-world {
-    transition: transform 170ms cubic-bezier(0.18, 0.88, 0.28, 1);
+    transition: transform 210ms cubic-bezier(0.2, 0.9, 0.28, 1);
   }
   .links {
     position: absolute;
