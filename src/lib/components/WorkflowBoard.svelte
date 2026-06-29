@@ -1,16 +1,28 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { composeCodexWorkflow, isDesktop, type ProjectAsset } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
+  import { PaintDocument } from '../engine/Document.svelte';
+  import { Layer } from '../engine/Layer.svelte';
+  import { modelToPlainText } from '../engine/text/model';
+  import { storyboardPlacementSummary } from '../engine/storyboard/analyze';
+  import { Viewport } from '../engine/Viewport';
+  import type { PointerInfo } from '../engine/tools/Tool';
   import { wheelZoomFactor } from '../engine/zoomGesture';
+  import { compositeToCanvas } from '../engine/compositor';
+  import { saveOra } from '../ora/save';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
-  import { workflow, type WorkflowAssetNode, type WorkflowConnection } from '../state/workflow.svelte';
-  import { Add, ArrowSync, Delete, Dismiss, Image, Link, Open, PaintBrush } from '../icons';
+  import { ui } from '../state/ui.svelte';
+  import { workflow, type WorkflowAssetNode, type WorkflowConnection, type WorkflowOutputNode } from '../state/workflow.svelte';
+  import { Add, ArrowSync, CommentNote, Delete, Dismiss, DocumentSave, Edit, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import TextEditorOverlay from './TextEditorOverlay.svelte';
+  import AnnotationOverlay from './AnnotationOverlay.svelte';
+  import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
 
   type CodexProgressPayload = { runId: string; message: string };
   type WorkflowMapKind = 'asset' | 'composition' | 'output' | 'viewport';
@@ -51,22 +63,29 @@
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
+  let storyboardViewport: Viewport | null = null;
+  let storyboardDoc: PaintDocument | null = null;
+  let storyboardResizeObserver: ResizeObserver | null = null;
+  let storyboardInteracting = false;
+  let storyboardPanning = false;
+  let storyboardPointerInViewport = $state(false);
+  let storyboardPointerClientX = $state(0);
+  let storyboardPointerClientY = $state(0);
+  let storyboardViewTick = $state(0);
+  let storyboardLast = { x: 0, y: 0 };
+  let storyboardAnnotationDraft = $state<AnnotationItem | null>(null);
+  let storyboardAnnotationDragStart: { x: number; y: number } | null = null;
   let stopProgress: UnlistenFn | null = null;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   const ASSET_NODE_W = 205;
-  const STORYBOARD_W = 312;
-  const STORYBOARD_H = 132;
   const MAP_EDGE_PADDING = 260;
   const MAX_OVERSCROLL = 32;
   const OVERSCROLL_DAMPING = 0.14;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
-  const outputAsset = $derived(
-    assets.find((asset) => asset.id === workflow.outputAssetId || asset.relativePath === workflow.outputRelativePath) ?? null,
-  );
   const effectiveZoomMode = $derived(
     altDown
       ? workflow.zoomMode === 'in' ? 'out' : 'in'
@@ -74,17 +93,105 @@
   );
   const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
+  const storyboardOverlayBox = $derived.by(() => {
+    storyboardViewTick;
+    const session = editor.textEdit;
+    const viewport = storyboardViewport;
+    const canvas = storyboardCanvas;
+    if (!workflow.storyboardEditing || !session || !viewport || !canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const point = viewport.docToScreen(session.model.x, session.model.y);
+    return { left: rect.left + point.x, top: rect.top + point.y, scale: viewport.scale };
+  });
 
   onDestroy(() => {
+    endStoryboardEditSession();
     stopProgress?.();
     if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
 
+  onMount(() => {
+    const flushBeforeSave = () => {
+      if (editor.textEdit) editor.commitActiveText();
+      if (workflow.storyboardEditing && storyboardDoc) persistStoryboardFromDoc();
+      else persistStoryboard();
+    };
+    const recordAnnotation = (event: Event) => {
+      if (!workflow.storyboardEditing || !storyboardDoc) return;
+      const detail = (event as CustomEvent<{ type?: string; text?: string; xPercent?: number; yPercent?: number }>).detail;
+      const text = detail?.text?.trim();
+      if (!text) return;
+      const type = detail.type?.trim() || 'annotation';
+      const x = Number.isFinite(detail.xPercent) ? Math.round(detail.xPercent!) : 50;
+      const y = Number.isFinite(detail.yPercent) ? Math.round(detail.yPercent!) : 50;
+      const next = [
+        ...workflow.storyboardAnnotations,
+        `at ${x}% x, ${y}% y (${type}): ${text}`,
+      ].slice(-24);
+      workflow.setStoryboardAnnotations(next);
+    };
+    window.addEventListener('paintnode:workflow-before-save', flushBeforeSave);
+    window.addEventListener('paintnode:annotation-created', recordAnnotation);
+    return () => {
+      window.removeEventListener('paintnode:workflow-before-save', flushBeforeSave);
+      window.removeEventListener('paintnode:annotation-created', recordAnnotation);
+    };
+  });
+
   $effect(() => {
-    if (storyboardCanvas) {
+    workflow.storyboardWidth;
+    workflow.storyboardHeight;
+    if (storyboardCanvas && !workflow.storyboardEditing) {
       void restoreStoryboard(workflow.storyboardDataUrl);
     }
+  });
+
+  $effect(() => {
+    if (workflow.storyboardEditing && storyboardCanvas && !storyboardViewport) {
+      void beginStoryboardEditSession();
+    } else if (!workflow.storyboardEditing && storyboardViewport) {
+      endStoryboardEditSession();
+    }
+  });
+
+  $effect(() => {
+    const doc = storyboardDoc;
+    if (!workflow.storyboardEditing || !doc) return;
+    const width = workflow.storyboardWidth;
+    const height = workflow.storyboardHeight;
+    if (doc.width !== width || doc.height !== height) {
+      editor.resizeImage(width, height);
+      requestAnimationFrame(() => storyboardViewport?.fitToView(12));
+      persistStoryboardFromDoc();
+    }
+  });
+
+  $effect(() => {
+    if (!workflow.storyboardEditing || !storyboardViewport) return;
+    const doc = editor.doc;
+    editor.rev;
+    if (doc) {
+      doc.layers;
+      doc.activeLayerId;
+      for (const layer of doc.layers) {
+        layer.visible;
+        layer.opacity;
+        layer.blendMode;
+        layer.pixelRev;
+      }
+    }
+    storyboardViewport.invalidateComposite();
+  });
+
+  $effect(() => {
+    const viewport = storyboardViewport;
+    const doc = editor.doc;
+    const tool = editor.activeTool;
+    const size = editor.brushSize;
+    if (!workflow.storyboardEditing || !viewport) return;
+    viewport.brushRadius = doc && tool.usesBrushCursor ? size / 2 : 0;
+    viewport.invalidate();
   });
 
   $effect(() => {
@@ -151,7 +258,12 @@
     }
   }
 
-  async function placeOutput(): Promise<void> {
+  function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
+    return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
+  }
+
+  async function placeOutput(node: WorkflowOutputNode): Promise<void> {
+    const outputAsset = outputAssetFor(node);
     if (!outputAsset) return;
     try {
       const result = await project.readAsset(outputAsset);
@@ -171,13 +283,14 @@
   function dragPointerDown(
     event: PointerEvent,
     type: 'asset' | 'prompt' | 'output',
-    node: WorkflowAssetNode | undefined = undefined,
+    node: WorkflowAssetNode | WorkflowOutputNode | undefined = undefined,
   ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
-    const x = type === 'asset' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : workflow.outputX;
-    const y = type === 'asset' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : workflow.outputY;
+    const output = type === 'output' && node ? workflow.outputNode(node.id) : null;
+    const x = type === 'asset' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
+    const y = type === 'asset' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
     if (type === 'asset' && node) workflow.select({ kind: 'asset', id: node.id });
-    else workflow.select(type === 'prompt' ? { kind: 'composition' } : { kind: 'output' });
+    else workflow.select(type === 'prompt' ? { kind: 'composition' } : { kind: 'output', id: output?.id ?? 'output' });
     dragging = {
       type,
       id: node?.id,
@@ -190,8 +303,8 @@
 
   function dragHandle(
     element: HTMLElement,
-    params: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode },
-  ): { update: (next: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode }) => void; destroy: () => void } {
+    params: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode | WorkflowOutputNode },
+  ): { update: (next: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode | WorkflowOutputNode }) => void; destroy: () => void } {
     let current = params;
     const onDown = (event: PointerEvent) => dragPointerDown(event, current.type, current.node);
     element.addEventListener('pointerdown', onDown);
@@ -231,7 +344,7 @@
       const y = point.y - dragging.dy;
       if (dragging.type === 'asset' && dragging.id) workflow.moveNode(dragging.id, x, y);
       else if (dragging.type === 'prompt') workflow.movePrompt(x, y);
-      else workflow.moveOutput(x, y);
+      else if (dragging.id) workflow.moveOutputNode(dragging.id, x, y);
     }
   }
 
@@ -288,6 +401,15 @@
         height: workflow.outputHeight,
         color: workflow.outputColor,
       },
+      ...workflow.outputNodes.filter((node) => node.id !== 'output').map((node) => ({
+        id: node.id,
+        kind: 'output' as const,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        color: node.color,
+      })),
     ];
   }
 
@@ -534,8 +656,13 @@
       return { x: workflow.promptX, y: workflow.promptY, width: workflow.compositionWidth, height: workflow.compositionHeight };
     }
     if (nodeId === 'output') {
-      return { x: workflow.outputX, y: workflow.outputY, width: workflow.outputWidth, height: workflow.outputHeight };
+      const node = workflow.outputNode('output');
+      return node
+        ? { x: node.x, y: node.y, width: node.width, height: node.height }
+        : { x: workflow.outputX, y: workflow.outputY, width: workflow.outputWidth, height: workflow.outputHeight };
     }
+    const outputNode = workflow.outputNode(nodeId);
+    if (outputNode) return { x: outputNode.x, y: outputNode.y, width: outputNode.width, height: outputNode.height };
     const node = workflow.nodes.find((item) => item.id === nodeId);
     return node ? { x: node.x, y: node.y, width: node.width, height: node.height } : null;
   }
@@ -648,10 +775,8 @@
       workflow.select({ kind: 'composition' });
       workflow.setTool('hand');
     } else {
-      workflow.moveOutput(rect.x, rect.y);
-      workflow.resizeOutput(width, height);
-      workflow.select({ kind: 'output' });
-      workflow.setTool('hand');
+      const node = workflow.addOutputNode(rect.x, rect.y, width, height);
+      workflow.select({ kind: 'output', id: node.id });
     }
     drawing = null;
   }
@@ -664,8 +789,341 @@
     return workflow.compositionName ? `Composition - ${workflow.compositionName}` : 'Composition';
   }
 
-  function outputTitle(): string {
-    return workflow.outputName ? `Output - ${workflow.outputName}` : 'Output';
+  function outputTitle(node: WorkflowOutputNode): string {
+    return node.name ? `Output - ${node.name}` : 'Output';
+  }
+
+  async function imageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+    const img = new globalThis.Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Could not load storyboard sketch.'));
+      img.src = dataUrl;
+    });
+    return img;
+  }
+
+  async function createStoryboardDocument(): Promise<PaintDocument> {
+    const doc = PaintDocument.blank(workflow.storyboardWidth, workflow.storyboardHeight, workflow.compositionName || 'Storyboard');
+    doc.annotations = workflow.storyboardAnnotationItems.map((item) => ({ ...item }));
+    doc.annotationsVisible = workflow.storyboardAnnotationsVisible;
+    const layer = doc.activeLayer;
+    if (layer) layer.name = 'Storyboard sketch';
+    if (workflow.storyboardDataUrl && layer) {
+      const img = await imageFromDataUrl(workflow.storyboardDataUrl);
+      layer.ctx.clearRect(0, 0, layer.width, layer.height);
+      layer.ctx.drawImage(img, 0, 0, layer.width, layer.height);
+      layer.touch();
+    }
+    return doc;
+  }
+
+  async function beginStoryboardEditSession(): Promise<void> {
+    if (!storyboardCanvas || storyboardViewport) return;
+    const doc = await createStoryboardDocument();
+    if (!workflow.storyboardEditing || !storyboardCanvas || storyboardViewport) return;
+    storyboardDoc = doc;
+    editor.beginEmbeddedDocument(doc);
+    storyboardViewport = new Viewport(
+      storyboardCanvas,
+      () => editor.doc,
+      () => editor.getActiveStroke(),
+      () => editor.getSelection(),
+    );
+    editor.viewport = storyboardViewport;
+    storyboardViewport.onAfterRender = () => {
+      storyboardViewTick++;
+      ui.zoom = storyboardViewport?.scale ?? ui.zoom;
+    };
+    storyboardViewport.resize();
+    requestAnimationFrame(() => storyboardViewport?.fitToView(12));
+    storyboardResizeObserver = new ResizeObserver(() => {
+      storyboardViewport?.resize();
+      requestAnimationFrame(() => storyboardViewport?.center());
+    });
+    storyboardResizeObserver.observe(storyboardCanvas);
+  }
+
+  function persistStoryboardFromDoc(): void {
+    const doc = storyboardDoc;
+    if (!doc) return;
+    const flattened = compositeToCanvas(doc);
+    workflow.setStoryboardDataUrl(flattened.toDataURL('image/png'));
+    workflow.setStoryboardAnnotations(mergeAnnotations(
+      workflow.storyboardAnnotations,
+      extractStoryboardAnnotations(doc),
+      overlayAnnotationInstructions(doc.annotations),
+    ));
+    workflow.setStoryboardAnnotationItems(doc.annotations);
+    workflow.setStoryboardAnnotationsVisible(doc.annotationsVisible);
+  }
+
+  function mergeAnnotations(...groups: string[][]): string[] {
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const group of groups) {
+      for (const annotation of group) {
+        const cleaned = annotation.trim();
+        if (!cleaned || seen.has(cleaned)) continue;
+        seen.add(cleaned);
+        merged.push(cleaned);
+      }
+    }
+    return merged.slice(-24);
+  }
+
+  function overlayAnnotationInstructions(items: AnnotationItem[]): string[] {
+    return items
+      .filter((item) => item.visible && item.text.trim())
+      .map((item) => {
+        const cx = Math.round(((item.x + item.width / 2) / Math.max(1, workflow.storyboardWidth)) * 100);
+        const cy = Math.round(((item.y + item.height / 2) / Math.max(1, workflow.storyboardHeight)) * 100);
+        return `at ${cx}% x, ${cy}% y (${item.kind} overlay): ${item.text.trim()}`;
+      });
+  }
+
+  function extractStoryboardAnnotations(doc: PaintDocument): string[] {
+    const annotations: string[] = [];
+    for (const layer of doc.layers) {
+      if (!layer.visible || layer.kind !== 'text' || !layer.text) continue;
+      const text = modelToPlainText(layer.text).replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      const xPercent = Math.round((layer.text.x / Math.max(1, doc.width)) * 100);
+      const yPercent = Math.round((layer.text.y / Math.max(1, doc.height)) * 100);
+      const layerName = layer.name.trim() && layer.name !== text ? ` (${layer.name.trim()})` : '';
+      annotations.push(`at ${xPercent}% x, ${yPercent}% y${layerName}: ${text}`);
+    }
+    return annotations;
+  }
+
+  function placementSummaryForCanvas(canvas: HTMLCanvasElement): string[] {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return [];
+    try {
+      return storyboardPlacementSummary(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    } catch {
+      return [];
+    }
+  }
+
+  function storyboardAnnotationsForDisplay(): AnnotationItem[] {
+    const base = workflow.storyboardEditing && storyboardDoc
+      ? storyboardDoc.annotations
+      : workflow.storyboardAnnotationItems;
+    return [...base, ...(storyboardAnnotationDraft ? [storyboardAnnotationDraft] : [])];
+  }
+
+  function storyboardAnnotationScale(): number {
+    if (!storyboardCanvas) return 1;
+    if (workflow.storyboardEditing && storyboardViewport) return storyboardViewport.scale;
+    return storyboardCanvas.getBoundingClientRect().width / Math.max(1, workflow.storyboardWidth);
+  }
+
+  function storyboardAnnotationScreenPoint(x: number, y: number): { x: number; y: number } {
+    if (workflow.storyboardEditing && storyboardViewport) return storyboardViewport.docToScreen(x, y);
+    const scale = storyboardAnnotationScale();
+    return { x: x * scale, y: y * scale };
+  }
+
+  function updateStoryboardAnnotation(id: string, patch: Partial<Omit<AnnotationItem, 'id'>>): void {
+    if (workflow.storyboardEditing && storyboardDoc) {
+      editor.updateAnnotation(id, patch);
+      persistStoryboardFromDoc();
+      return;
+    }
+    workflow.setStoryboardAnnotationItems(workflow.storyboardAnnotationItems.map((item) => item.id === id ? { ...item, ...patch } : item));
+  }
+
+  function deleteStoryboardAnnotation(id: string): void {
+    if (workflow.storyboardEditing && storyboardDoc) {
+      editor.deleteAnnotation(id);
+      persistStoryboardFromDoc();
+      return;
+    }
+    workflow.setStoryboardAnnotationItems(workflow.storyboardAnnotationItems.filter((item) => item.id !== id));
+  }
+
+  function endStoryboardEditSession(): void {
+    if (storyboardDoc) persistStoryboardFromDoc();
+    storyboardResizeObserver?.disconnect();
+    storyboardResizeObserver = null;
+    if (storyboardViewport) storyboardViewport.onAfterRender = undefined;
+    storyboardViewport?.destroy();
+    storyboardViewport = null;
+    storyboardDoc = null;
+    storyboardInteracting = false;
+    storyboardPanning = false;
+    storyboardPointerInViewport = false;
+    editor.endEmbeddedDocument();
+    requestAnimationFrame(() => {
+      if (storyboardCanvas && !workflow.storyboardEditing) void restoreStoryboard(workflow.storyboardDataUrl);
+    });
+  }
+
+  function storyboardPos(event: PointerEvent): { cssX: number; cssY: number } {
+    const rect = storyboardCanvas!.getBoundingClientRect();
+    return { cssX: event.clientX - rect.left, cssY: event.clientY - rect.top };
+  }
+
+  function storyboardPointerInfo(
+    event: PointerEvent,
+    cssX: number,
+    cssY: number,
+    dxCss: number,
+    dyCss: number,
+  ): PointerInfo {
+    const viewport = storyboardViewport!;
+    const point = viewport.screenToDoc(cssX, cssY);
+    return {
+      x: point.x,
+      y: point.y,
+      cssX,
+      cssY,
+      dxDoc: dxCss / viewport.scale,
+      dyDoc: dyCss / viewport.scale,
+      dxCss,
+      dyCss,
+      pressure: event.pressure || 0.5,
+      buttons: event.buttons,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      event,
+    };
+  }
+
+  function startStoryboardTool(event: PointerEvent): void {
+    if (!workflow.storyboardEditing) {
+      dragPointerDown(event, 'prompt');
+      return;
+    }
+    if (!storyboardViewport || !storyboardCanvas) return;
+    event.stopPropagation();
+    storyboardPointerClientX = event.clientX;
+    storyboardPointerClientY = event.clientY;
+    if (editor.textEdit) {
+      editor.commitActiveText();
+      persistStoryboardFromDoc();
+      return;
+    }
+    if (event.button === 0 && editor.activeTool.editsPixels && editor.activeLayer?.kind === 'text') {
+      editor.promptRasterize(editor.activeLayer);
+      return;
+    }
+    try {
+      storyboardCanvas.setPointerCapture(event.pointerId);
+    } catch {
+      /* pointer may already be captured */
+    }
+    const { cssX, cssY } = storyboardPos(event);
+    storyboardLast = { x: cssX, y: cssY };
+    if (event.button === 1) {
+      storyboardPanning = true;
+      return;
+    }
+    if (event.button !== 0) return;
+    if (editor.activeToolId === 'annotation') {
+      const info = storyboardPointerInfo(event, cssX, cssY, 0, 0);
+      storyboardAnnotationDragStart = { x: info.x, y: info.y };
+      storyboardAnnotationDraft = annotationFromDrag({
+        kind: editor.annotationType,
+        text: editor.annotationText,
+        start: storyboardAnnotationDragStart,
+        end: { x: info.x, y: info.y },
+        color: editor.foregroundCss,
+      });
+      storyboardInteracting = true;
+      return;
+    }
+    storyboardInteracting = true;
+    editor.activeTool.pointerDown(storyboardPointerInfo(event, cssX, cssY, 0, 0));
+  }
+
+  function moveStoryboardTool(event: PointerEvent): void {
+    if (!workflow.storyboardEditing || !storyboardViewport || !storyboardCanvas) return;
+    event.stopPropagation();
+    storyboardPointerClientX = event.clientX;
+    storyboardPointerClientY = event.clientY;
+    const { cssX, cssY } = storyboardPos(event);
+    const dxCss = cssX - storyboardLast.x;
+    const dyCss = cssY - storyboardLast.y;
+    const point = storyboardViewport.screenToDoc(cssX, cssY);
+    storyboardViewport.cursor = { x: point.x, y: point.y };
+    ui.cursor = { x: Math.floor(point.x), y: Math.floor(point.y) };
+    if (storyboardPanning) {
+      storyboardViewport.panBy(dxCss, dyCss);
+    } else if (storyboardInteracting) {
+      if (storyboardAnnotationDraft) {
+        const info = storyboardPointerInfo(event, cssX, cssY, dxCss, dyCss);
+        storyboardAnnotationDraft = annotationFromDrag({
+          kind: storyboardAnnotationDraft.kind,
+          text: storyboardAnnotationDraft.text,
+          start: storyboardAnnotationDragStart ?? { x: storyboardAnnotationDraft.x, y: storyboardAnnotationDraft.y },
+          end: { x: info.x, y: info.y },
+          color: storyboardAnnotationDraft.color,
+          id: storyboardAnnotationDraft.id,
+        });
+      } else {
+        editor.activeTool.pointerMove(storyboardPointerInfo(event, cssX, cssY, dxCss, dyCss));
+      }
+    } else if (storyboardViewport.brushRadius > 0) {
+      storyboardViewport.invalidate();
+    }
+    storyboardLast = { x: cssX, y: cssY };
+  }
+
+  function stopStoryboardTool(event: PointerEvent | undefined = undefined): void {
+    if (!workflow.storyboardEditing || !storyboardViewport || !storyboardCanvas) return;
+    event?.stopPropagation();
+    if (event) {
+      try {
+        storyboardCanvas.releasePointerCapture(event.pointerId);
+      } catch {
+        /* pointer may not be captured */
+      }
+    }
+    if (storyboardPanning) {
+      storyboardPanning = false;
+      return;
+    }
+    if (storyboardInteracting && event) {
+      const css = storyboardPos(event);
+      if (storyboardAnnotationDraft) {
+        editor.addAnnotation(storyboardAnnotationDraft.kind, storyboardAnnotationDraft.x, storyboardAnnotationDraft.y, storyboardAnnotationDraft.width, storyboardAnnotationDraft.height, storyboardAnnotationDraft.text, {
+          rotation: storyboardAnnotationDraft.rotation,
+          flipX: storyboardAnnotationDraft.flipX,
+          flipY: storyboardAnnotationDraft.flipY,
+          color: storyboardAnnotationDraft.color,
+        });
+        storyboardAnnotationDraft = null;
+        storyboardAnnotationDragStart = null;
+      } else {
+        editor.activeTool.pointerUp(storyboardPointerInfo(event, css.cssX, css.cssY, css.cssX - storyboardLast.x, css.cssY - storyboardLast.y));
+      }
+      storyboardInteracting = false;
+      persistStoryboardFromDoc();
+    }
+  }
+
+  function leaveStoryboardTool(): void {
+    storyboardPointerInViewport = false;
+    if (!storyboardViewport || storyboardInteracting || storyboardPanning) return;
+    storyboardViewport.cursor = null;
+    ui.cursor = null;
+    if (storyboardViewport.brushRadius > 0) storyboardViewport.invalidate();
+  }
+
+  function storyboardWheel(event: WheelEvent): void {
+    if (!workflow.storyboardEditing || !storyboardViewport || !storyboardCanvas) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.ctrlKey || event.metaKey) {
+      const rect = storyboardCanvas.getBoundingClientRect();
+      storyboardViewport.zoomBy(wheelZoomFactor(event.deltaY, event.deltaMode), event.clientX - rect.left, event.clientY - rect.top);
+    } else {
+      storyboardViewport.panBy(-event.deltaX, -event.deltaY);
+    }
   }
 
   function storyboardCtx(): CanvasRenderingContext2D | null {
@@ -674,12 +1132,24 @@
     if (!ctx) return null;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = '#5bb7ff';
+    ctx.lineWidth = Math.max(1, editor.brushSize);
+    ctx.globalAlpha = Math.max(0.01, Math.min(1, editor.brushOpacity));
+    ctx.globalCompositeOperation = workflow.storyboardTool === 'eraser' ? 'destination-out' : 'source-over';
+    ctx.strokeStyle = editor.foregroundCss;
     return ctx;
   }
 
   function isStoryboardBlank(): boolean {
+    if (workflow.storyboardEditing && storyboardDoc) {
+      const flattened = compositeToCanvas(storyboardDoc);
+      const ctx = flattened.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return true;
+      const data = ctx.getImageData(0, 0, flattened.width, flattened.height).data;
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 0) return false;
+      }
+      return true;
+    }
     if (!storyboardCanvas) return true;
     const ctx = storyboardCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return true;
@@ -692,22 +1162,37 @@
 
   async function restoreStoryboard(dataUrl: string | null): Promise<void> {
     if (!storyboardCanvas) return;
-    const ctx = storyboardCtx();
+    const ctx = storyboardCanvas.getContext('2d');
     if (!ctx) return;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, storyboardCanvas.width, storyboardCanvas.height);
-    if (!dataUrl) return;
-    const img = new globalThis.Image();
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error('Could not load storyboard sketch.'));
-      img.src = dataUrl;
-    });
-    ctx.drawImage(img, 0, 0, storyboardCanvas.width, storyboardCanvas.height);
+    if (!dataUrl) {
+      ctx.restore();
+      return;
+    }
+    try {
+      const img = new globalThis.Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('Could not load storyboard sketch.'));
+        img.src = dataUrl;
+      });
+      ctx.drawImage(img, 0, 0, storyboardCanvas.width, storyboardCanvas.height);
+    } finally {
+      ctx.restore();
+    }
   }
 
   function persistStoryboard(): void {
+    if (workflow.storyboardEditing && storyboardDoc) {
+      persistStoryboardFromDoc();
+      return;
+    }
     if (!storyboardCanvas || isStoryboardBlank()) {
       workflow.setStoryboardDataUrl(null);
+      workflow.setStoryboardAnnotations([]);
       return;
     }
     workflow.setStoryboardDataUrl(storyboardCanvas.toDataURL('image/png'));
@@ -723,17 +1208,18 @@
   }
 
   function startSketch(event: PointerEvent): void {
-    const ctx = storyboardCtx();
-    const point = sketchPoint(event);
-    if (!ctx || !point || !(event.currentTarget instanceof HTMLElement)) return;
-    sketching = true;
-    ctx.beginPath();
-    ctx.moveTo(point.x, point.y);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.stopPropagation();
+    if (workflow.storyboardEditing) {
+      startStoryboardTool(event);
+      return;
+    }
+    dragPointerDown(event, 'prompt');
   }
 
   function moveSketch(event: PointerEvent): void {
+    if (workflow.storyboardEditing) {
+      moveStoryboardTool(event);
+      return;
+    }
     if (!sketching) return;
     const ctx = storyboardCtx();
     const point = sketchPoint(event);
@@ -744,6 +1230,10 @@
   }
 
   function stopSketch(event: PointerEvent | undefined = undefined): void {
+    if (workflow.storyboardEditing) {
+      stopStoryboardTool(event);
+      return;
+    }
     if (!sketching) return;
     sketching = false;
     persistStoryboard();
@@ -752,13 +1242,86 @@
 
   function clearStoryboard(event: MouseEvent): void {
     event.stopPropagation();
+    if (workflow.storyboardEditing && storyboardDoc) {
+      for (const layer of storyboardDoc.layers) layer.clear();
+      storyboardDoc.annotations = [];
+      editor.bump();
+      storyboardViewport?.invalidateComposite();
+      workflow.setStoryboardDataUrl(null);
+      workflow.setStoryboardAnnotations([]);
+      workflow.setStoryboardAnnotationItems([]);
+      return;
+    }
     const ctx = storyboardCtx();
     if (!ctx || !storyboardCanvas) return;
     ctx.clearRect(0, 0, storyboardCanvas.width, storyboardCanvas.height);
     workflow.setStoryboardDataUrl(null);
+    workflow.setStoryboardAnnotations([]);
+    workflow.setStoryboardAnnotationItems([]);
   }
 
-  async function generate(): Promise<void> {
+  function safeSegment(value: string, fallback: string): string {
+    const slug = value
+      .trim()
+      .toLowerCase()
+      .replace(/\.ora$/i, '')
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 52);
+    return slug || fallback;
+  }
+
+  async function saveStoryboardOra(): Promise<void> {
+    if (!storyboardCanvas) return;
+    try {
+      persistStoryboard();
+      if (editor.textEdit) editor.commitActiveText();
+      const doc = workflow.storyboardEditing && storyboardDoc
+        ? storyboardDoc
+        : new PaintDocument(workflow.storyboardWidth, workflow.storyboardHeight, workflow.compositionName || 'Storyboard');
+      if (!workflow.storyboardEditing) {
+        doc.annotations = workflow.storyboardAnnotationItems.map((item) => ({ ...item }));
+        doc.annotationsVisible = workflow.storyboardAnnotationsVisible;
+        const layer = new Layer(workflow.storyboardWidth, workflow.storyboardHeight, 'Storyboard sketch');
+        layer.ctx.drawImage(storyboardCanvas, 0, 0, workflow.storyboardWidth, workflow.storyboardHeight);
+        layer.touch();
+        doc.layers = [layer];
+        doc.activeLayerId = layer.id;
+      }
+      const blob = await saveOra(doc);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const path = `storyboards/${safeSegment(workflow.name, 'workflow')}-${safeSegment(workflow.compositionName, 'composition')}.ora`;
+      const relativePath = await project.saveDocumentToPath(path, bytes);
+      workflow.setStoryboardOraPath(relativePath);
+      editor.flash(`Saved ${relativePath}`);
+    } catch (e) {
+      editor.flash('Storyboard save failed: ' + ((e as Error)?.message ?? String(e)));
+    }
+  }
+
+  function storyboardAspectHeight(): number {
+    return Math.max(120, Math.min(360, workflow.compositionWidth * (workflow.storyboardHeight / Math.max(1, workflow.storyboardWidth))));
+  }
+
+  function setStoryboardDimension(kind: 'width' | 'height', value: number): void {
+    const width = kind === 'width' ? value : workflow.storyboardWidth;
+    const height = kind === 'height' ? value : workflow.storyboardHeight;
+    workflow.setStoryboardSize(width, height);
+  }
+
+  function applyOutputPreset(node: WorkflowOutputNode, width: number, height: number): void {
+    workflow.setOutputFinalSize(node.id, width, height);
+  }
+
+  function targetOutputForGenerate(node: WorkflowOutputNode | undefined = undefined): WorkflowOutputNode {
+    if (node) return node;
+    if (workflow.selection?.kind === 'output') return workflow.outputNode(workflow.selection.id) ?? workflow.outputNodes[0];
+    const connected = workflow.outgoing('composition').map((connection) => workflow.outputNode(connection.to)).find(Boolean);
+    return connected ?? workflow.outputNodes[0];
+  }
+
+  async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
+    const targetOutput = targetOutputForGenerate(node);
     error = '';
     if (!desktop) {
       error = 'Workflow generation is available only in the desktop app.';
@@ -794,29 +1357,69 @@
     }
 
     try {
+      if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
       const sources = [];
-      for (const node of sourceNodes) {
+      let hasStoryboardSource = false;
+      let storyboardPlacementText = '';
+      if (storyboardCanvas && !isStoryboardBlank()) {
+        const storyboardSource = workflow.storyboardEditing && storyboardDoc
+          ? compositeToCanvas(storyboardDoc)
+          : storyboardCanvas;
+        storyboardPlacementText = placementSummaryForCanvas(storyboardSource)
+          .map((line, index) => `${index + 1}. ${line}`)
+          .join('\n');
+        sources.push({
+          name: `Storyboard sketch - mandatory layout guide (${workflow.storyboardWidth}x${workflow.storyboardHeight})`,
+          bytes: await canvasToPngBytes(storyboardSource),
+        });
+        hasStoryboardSource = true;
+        persistStoryboard();
+      }
+      const storyboardAnnotations = workflow.storyboardAnnotations
+        .map((annotation, index) => `${index + 1}. ${annotation}`)
+        .join('\n');
+      for (const [index, node] of sourceNodes.entries()) {
         const asset = assetFor(node);
         if (!asset) continue;
         sources.push({
-          name: node.note ? `${node.name}: ${node.note}` : node.name,
+          name: node.note
+            ? `Mandatory asset ${index + 1}: ${node.name}. Role: ${node.note}`
+            : `Mandatory asset ${index + 1}: ${node.name}`,
           bytes: await project.readFile({ ...asset, kind: 'generated', modifiedAt: asset.createdAt, size: 0, exists: true }),
         });
       }
-      if (storyboardCanvas && !isStoryboardBlank()) {
-        sources.push({
-          name: 'Storyboard sketch: composition layout and handwritten placement annotations',
-          bytes: await canvasToPngBytes(storyboardCanvas),
-        });
-        persistStoryboard();
-      }
       if (!sources.length) throw new Error('Workflow asset files are missing.');
-      const result = await composeCodexWorkflow({ bin: codexBin, projectPath: project.path, runId }, workflow.prompt, sources);
+      const requiredAssets = sourceNodes.map((node, index) => `${index + 1}. ${node.name}${node.note ? ` - ${node.note}` : ''}`).join('\n');
+      const prompt = `${workflow.prompt.trim()}
+
+Final output target: ${targetOutput.finalWidth} x ${targetOutput.finalHeight} pixels.
+
+Mandatory connected assets that must be visibly represented:
+${requiredAssets}
+
+${hasStoryboardSource ? `Storyboard requirement: input image 1 is the composition storyboard. Treat it as the primary spatial plan for the final image. Preserve the storyboard's relative placement, left/right ordering, approximate scale, subject pose, gesture direction, prop positions, foreground/background zones, and major empty areas. The storyboard is a rough semantic diagram, so do not copy its sketch/grid style; translate it into a polished final image using the connected assets and text prompt.` : ''}
+
+${storyboardPlacementText ? `Storyboard coordinate analysis extracted from the sketch pixels:
+${storyboardPlacementText}
+
+Use these coordinate notes as hard placement constraints. Keep the main subject/object centers in the same canvas region shown by the storyboard. If a major subject is detected in the left half or left third, do not move it to the right half in the final image unless the text explicitly says to override the storyboard.` : ''}
+
+${storyboardAnnotations ? `Storyboard text annotations extracted from editable layers:
+${storyboardAnnotations}
+
+These annotations are direct user instructions attached to the storyboard. Apply them to the nearest relevant region of the storyboard and treat them as higher priority than guessing from pixels alone.` : ''}
+
+Use the storyboard as the layout reference. This is a generative synthesis task, not a cut-and-paste pasteboard: reason from the connected assets and create a new coherent photo/image based on the text prompt. Use the assets as visual references for identity, subject appearance, prop/object appearance, environment, layout, lighting, and style. Do not blindly paste cropped source pixels together, and do not output only the background or only one source asset.
+
+Unless the user explicitly asks for an impossible or surreal composition, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction. If the user deliberately asks for something non-realistic, follow that request intentionally while keeping the result visually coherent.
+
+Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
+      const result = await composeCodexWorkflow({ bin: codexBin, projectPath: project.path, runId }, prompt, sources);
       if (result.asset) {
         await project.refresh();
-        workflow.setOutput(result.asset);
+        workflow.setOutput(result.asset, targetOutput.id);
       }
-      editor.flash('Workflow composition generated');
+      editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
       editor.flash('Workflow generation failed');
@@ -895,7 +1498,7 @@
           <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
         </button>
         <div class="map-meta">
-          <span>{workflow.nodes.length + 2} nodes</span>
+        <span>{workflow.nodes.length + 1 + workflow.outputNodes.length} nodes</span>
           <span>{Math.round(workflow.zoom * 100)}%</span>
         </div>
       </div>
@@ -1051,27 +1654,117 @@
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
           </div>
-          <div class="storyboard">
+          <div
+            class="storyboard"
+            class:editing={workflow.storyboardEditing}
+            role="group"
+            aria-label="Composition storyboard"
+            onpointerdown={(event) => {
+              if (!workflow.storyboardEditing) dragPointerDown(event, 'prompt');
+            }}
+          >
             <div class="storyboard-head">
               <span><Icon svg={PaintBrush} size={13} /> Storyboard</span>
-              <button
-                aria-label="Clear storyboard"
-                use:tooltip={{ text: 'Clear storyboard', placement: 'top' }}
-                onclick={clearStoryboard}
-              >
-                <Icon svg={Dismiss} size={13} />
-              </button>
+              <div class="storyboard-actions">
+                <button
+                  type="button"
+                  class:active={workflow.storyboardEditing}
+                  aria-label={workflow.storyboardEditing ? 'Exit storyboard edit mode' : 'Edit storyboard'}
+                  use:tooltip={{ text: workflow.storyboardEditing ? 'View mode' : 'Edit storyboard', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.setStoryboardEditing(!workflow.storyboardEditing);
+                  }}
+                >
+                  <Icon svg={Edit} size={13} />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Save storyboard as OpenRaster"
+                  use:tooltip={{ text: 'Save storyboard .ora', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    void saveStoryboardOra();
+                  }}
+                >
+                  <Icon svg={DocumentSave} size={13} />
+                </button>
+                <button
+                  type="button"
+                  class:active={workflow.storyboardAnnotationsVisible}
+                  aria-label={workflow.storyboardAnnotationsVisible ? 'Hide annotations' : 'Show annotations'}
+                  use:tooltip={{ text: workflow.storyboardAnnotationsVisible ? 'Hide annotations' : 'Show annotations', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    if (storyboardDoc) storyboardDoc.annotationsVisible = !workflow.storyboardAnnotationsVisible;
+                    workflow.setStoryboardAnnotationsVisible(!workflow.storyboardAnnotationsVisible);
+                  }}
+                >
+                  <Icon svg={CommentNote} size={13} />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Clear storyboard"
+                  use:tooltip={{ text: 'Clear storyboard', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={clearStoryboard}
+                >
+                  <Icon svg={Dismiss} size={13} />
+                </button>
+              </div>
             </div>
-            <canvas
-              bind:this={storyboardCanvas}
-              width={STORYBOARD_W}
-              height={STORYBOARD_H}
-              aria-label="Storyboard annotation canvas"
-              onpointerdown={startSketch}
-              onpointermove={moveSketch}
-              onpointerup={stopSketch}
-              onpointercancel={stopSketch}
-            ></canvas>
+            {#if workflow.storyboardEditing}
+              <div class="storyboard-edit-bar" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+                <label><Icon svg={SlideSize} size={13} /> <input type="number" min="64" step="1" value={workflow.storyboardWidth} oninput={(event) => setStoryboardDimension('width', event.currentTarget.valueAsNumber)} /></label>
+                <span class="dim-x">x</span>
+                <label><input type="number" min="64" step="1" value={workflow.storyboardHeight} oninput={(event) => setStoryboardDimension('height', event.currentTarget.valueAsNumber)} /></label>
+              </div>
+            {/if}
+            {#if workflow.storyboardOraPath}
+              <div class="storyboard-path" role="presentation" onpointerdown={(event) => event.stopPropagation()}>{workflow.storyboardOraPath}</div>
+            {/if}
+            <div class="storyboard-canvas-wrap" style={`height:${storyboardAspectHeight()}px`}>
+              <canvas
+                bind:this={storyboardCanvas}
+                width={workflow.storyboardWidth}
+                height={workflow.storyboardHeight}
+                aria-label="Storyboard annotation canvas"
+                onpointerenter={(event) => {
+                  if (!workflow.storyboardEditing) return;
+                  storyboardPointerInViewport = true;
+                  storyboardPointerClientX = event.clientX;
+                  storyboardPointerClientY = event.clientY;
+                }}
+                onpointerleave={workflow.storyboardEditing ? leaveStoryboardTool : undefined}
+                onpointerdown={startSketch}
+                onpointermove={moveSketch}
+                onpointerup={stopSketch}
+                onpointercancel={stopSketch}
+                onwheel={storyboardWheel}
+                oncontextmenu={(event) => {
+                  if (workflow.storyboardEditing) event.preventDefault();
+                }}
+              ></canvas>
+              <AnnotationOverlay
+                annotations={storyboardAnnotationsForDisplay()}
+                visible={workflow.storyboardAnnotationsVisible}
+                scale={storyboardAnnotationScale()}
+                revision={storyboardViewTick}
+                selectedId={workflow.storyboardEditing ? editor.selectedAnnotationId : null}
+                toScreen={storyboardAnnotationScreenPoint}
+                onSelect={(id) => {
+                  if (workflow.storyboardEditing) editor.selectAnnotation(id);
+                }}
+                onUpdate={updateStoryboardAnnotation}
+                onDelete={deleteStoryboardAnnotation}
+              />
+            </div>
+            {#if storyboardOverlayBox}
+              <TextEditorOverlay box={storyboardOverlayBox} />
+            {/if}
           </div>
           <textarea
             class="composition-text"
@@ -1088,41 +1781,76 @@
           {#if error}<p class="err">{error}</p>{/if}
         </article>
 
-        <article
-          class="output-node"
-          class:selected={workflow.selection?.kind === 'output'}
-          style={`transform:translate(${workflow.outputX}px, ${workflow.outputY}px); width:${workflow.outputWidth}px; --node-color:${workflow.outputColor}; --port-y:${workflow.outputHeight / 2}px`}
-          onpointerdown={(event) => {
-            workflow.select({ kind: 'output' });
-            event.stopPropagation();
-          }}
-        >
-          <button
-            class="node-port input"
-            aria-label={portTitle('input', outputTitle())}
-            use:tooltip={{ text: 'Input', placement: 'left' }}
-            onpointerdown={(event) => event.stopPropagation()}
-            onpointerup={(event) => finishConnection(event, 'output')}
-          ></button>
-          <button
-            class="node-port output"
-            aria-label={portTitle('output', outputTitle())}
-            use:tooltip={{ text: 'Output', placement: 'right' }}
-            onpointerdown={(event) => startConnection(event, 'output')}
-          ></button>
-          <div class="node-head">
-            <span class="node-drag-region" use:dragHandle={{ type: 'output' }}>{outputTitle()}</span>
-          </div>
-          <div class="output-preview" style={`height:${Math.max(76, workflow.outputHeight - 74)}px`}>
-            {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
-          </div>
-          <div class="output-actions">
-            <button onclick={() => void placeOutput()} disabled={!outputAsset}>
-              <Icon svg={Open} size={14} />
-              Place
-            </button>
-          </div>
-        </article>
+        {#each workflow.outputNodes as outputNode (outputNode.id)}
+          {@const outputAsset = outputAssetFor(outputNode)}
+          <article
+            class="output-node"
+            class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
+            style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
+            onpointerdown={(event) => {
+              workflow.select({ kind: 'output', id: outputNode.id });
+              event.stopPropagation();
+            }}
+          >
+            <button
+              class="node-port input"
+              aria-label={portTitle('input', outputTitle(outputNode))}
+              use:tooltip={{ text: 'Input', placement: 'left' }}
+              onpointerdown={(event) => event.stopPropagation()}
+              onpointerup={(event) => finishConnection(event, outputNode.id)}
+            ></button>
+            <button
+              class="node-port output"
+              aria-label={portTitle('output', outputTitle(outputNode))}
+              use:tooltip={{ text: 'Output', placement: 'right' }}
+              onpointerdown={(event) => startConnection(event, outputNode.id)}
+            ></button>
+            <div class="node-head">
+              <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
+              <div class="node-tools">
+                <button
+                  type="button"
+                  aria-label={`Remove ${outputTitle(outputNode)}`}
+                  use:tooltip={{ text: 'Remove output', placement: 'top' }}
+                  disabled={workflow.outputNodes.length <= 1}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.removeOutputNode(outputNode.id);
+                  }}
+                ><Icon svg={Delete} size={13} /></button>
+              </div>
+            </div>
+            <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
+              {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
+            </div>
+            <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+              <label>
+                Width
+                <input type="number" min="64" step="1" value={outputNode.finalWidth} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, event.currentTarget.valueAsNumber, outputNode.finalHeight)} />
+              </label>
+              <label>
+                Height
+                <input type="number" min="64" step="1" value={outputNode.finalHeight} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, outputNode.finalWidth, event.currentTarget.valueAsNumber)} />
+              </label>
+              <div class="preset-row">
+                <button type="button" onclick={() => applyOutputPreset(outputNode, 1024, 1024)}>1:1</button>
+                <button type="button" onclick={() => applyOutputPreset(outputNode, 1792, 1024)}>Banner</button>
+                <button type="button" onclick={() => applyOutputPreset(outputNode, 1080, 1920)}>IG</button>
+              </div>
+            </div>
+            <div class="output-actions">
+              <button onclick={() => void generate(outputNode)} disabled={busy}>
+                <Icon svg={PaintBrush} size={14} />
+                Generate
+              </button>
+              <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
+                <Icon svg={Open} size={14} />
+                Place
+              </button>
+            </div>
+          </article>
+        {/each}
       </div>
     </div>
   </div>
@@ -1450,7 +2178,8 @@
     height: 22px;
     padding: 0;
   }
-  .node-head button.active {
+  .node-head button.active,
+  .storyboard-head button.active {
     color: var(--accent);
   }
   .connected-count {
@@ -1500,6 +2229,10 @@
   .storyboard {
     border-bottom: 1px solid #4b4d52;
     background: #242528;
+    cursor: grab;
+  }
+  .storyboard.editing {
+    cursor: default;
   }
   .storyboard-head {
     display: flex;
@@ -1515,17 +2248,63 @@
     align-items: center;
     gap: 5px;
   }
+  .storyboard-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .storyboard-edit-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .storyboard-edit-bar label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+  }
+  .storyboard-edit-bar input {
+    width: 64px;
+    height: 22px;
+    padding: 2px 5px;
+    font-size: 11px;
+  }
+  .dim-x {
+    color: var(--text-dim);
+  }
+  .storyboard-path {
+    padding: 0 8px 5px;
+    color: var(--text-dim);
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .storyboard-canvas-wrap {
+    position: relative;
+    width: 100%;
+    max-height: 360px;
+    overflow: hidden;
+  }
   .storyboard canvas {
     display: block;
     width: 100%;
-    height: 132px;
-    cursor: crosshair;
+    height: 100%;
+    cursor: grab;
     background:
       linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
     background-color: #1d1f22;
     background-size: 24px 24px;
     touch-action: none;
+  }
+  .storyboard.editing canvas {
+    cursor: crosshair;
   }
   .composition-text {
     min-height: 86px;
@@ -1541,6 +2320,41 @@
     justify-content: flex-end;
     padding: 8px;
     border-top: 1px solid #4b4d52;
+  }
+  .output-actions button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .output-props {
+    display: grid;
+    gap: 7px;
+    padding: 8px;
+    border-top: 1px solid #4b4d52;
+    background: #242528;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .output-props label {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+  }
+  .output-props input {
+    min-width: 0;
+    height: 24px;
+    padding: 3px 6px;
+  }
+  .preset-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .preset-row button {
+    min-width: 0;
+    padding: 3px 5px;
+    font-size: 11px;
   }
   .draw-preview {
     position: absolute;

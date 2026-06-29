@@ -27,6 +27,11 @@
     Eyedropper,
     Shapes,
     TextT,
+    CommentNote,
+    Note,
+    Tag,
+    Textbox,
+    ArrowTrending,
     Hand,
     Search,
     ImageAdd,
@@ -106,6 +111,17 @@
         { id: 'type-mask-v', icon: TextT, label: 'Vertical Type Mask Tool', disabled: true },
       ],
     },
+    {
+      kind: 'group',
+      name: 'annotation',
+      members: [
+        { id: 'annotation-arrow', icon: ArrowTrending, label: 'Arrow' },
+        { id: 'annotation-note', icon: Note, label: 'Memo' },
+        { id: 'annotation-callout', icon: CommentNote, label: 'Callout' },
+        { id: 'annotation-badge', icon: Tag, label: 'Badge' },
+        { id: 'annotation-divider', icon: Textbox, label: 'Divider' },
+      ],
+    },
     { kind: 'tool', id: 'hand', key: 'H', icon: Hand },
     { kind: 'tool', id: 'zoom', key: 'Z', icon: Search }, // mode shows on the cursor
   ];
@@ -128,6 +144,8 @@
   );
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
+  const hasStoryboardEdit = $derived(hasWorkflow && workflow.storyboardEditing);
+  const hasDrawingSurface = $derived(hasDocument || hasStoryboardEdit);
   const enabled = $derived(hasDocument || hasWorkflow);
   const workflowSlots: WorkflowSlot[] = [
     { id: 'hand', label: 'Hand', icon: Hand, tooltip: 'Hand tool' },
@@ -140,13 +158,22 @@
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
   // Remembered active member per flyout group (Photoshop shows the last-used tool of a group).
-  let lastMember = $state<Record<string, string>>({ focus: 'blur', toning: 'dodge', type: 'text' });
+  let lastMember = $state<Record<string, string>>({
+    focus: 'blur',
+    toning: 'dodge',
+    type: 'text',
+    annotation: 'annotation-callout',
+  });
   const shownMember = (slot: GroupSlot): GroupMember => {
-    const active = slot.members.find((m) => m.id === editor.activeToolId);
+    const active = slot.name === 'annotation'
+      ? slot.members.find((m) => m.id === `annotation-${editor.annotationType}` && editor.activeToolId === 'annotation')
+      : slot.members.find((m) => m.id === editor.activeToolId);
     return active ?? slot.members.find((m) => m.id === lastMember[slot.name]) ?? slot.members[0];
   };
   const groupActive = (slot: GroupSlot): boolean =>
-    slot.members.some((m) => m.id === editor.activeToolId);
+    slot.name === 'annotation'
+      ? editor.activeToolId === 'annotation'
+      : slot.members.some((m) => m.id === editor.activeToolId);
 
   // One shared long-press flyout, keyed by slot name ('marquee' | group name).
   let openGroup = $state<string | null>(null);
@@ -154,7 +181,7 @@
   let longFired = false;
 
   function groupDown(e: PointerEvent, name: string) {
-    if (!hasDocument) return;
+    if (!hasDrawingSurface) return;
     if (e.button !== 0) return;
     longFired = false;
     pressTimer = window.setTimeout(() => {
@@ -167,7 +194,7 @@
   }
 
   function marqueeClick() {
-    if (!hasDocument) return;
+    if (!hasDrawingSurface) return;
     if (longFired) {
       longFired = false;
       return; // long-press already opened the flyout
@@ -176,30 +203,41 @@
     editor.setTool('marquee');
   }
   function chooseShape(shape: MarqueeShape) {
-    if (!hasDocument) return;
+    if (!hasDrawingSurface) return;
     editor.marqueeShape = shape;
     editor.setTool('marquee');
     openGroup = null;
   }
 
   function groupClick(slot: GroupSlot) {
-    if (!hasDocument) return;
+    if (!hasDrawingSurface) return;
     if (longFired) {
       longFired = false;
       return;
     }
     openGroup = null;
-    editor.setTool(shownMember(slot).id);
+    if (slot.name === 'annotation') {
+      const member = shownMember(slot);
+      editor.annotationType = member.id.replace('annotation-', '') as typeof editor.annotationType;
+      editor.setTool('annotation');
+    } else {
+      editor.setTool(shownMember(slot).id);
+    }
   }
   function chooseMember(slot: GroupSlot, m: GroupMember) {
-    if (!hasDocument) return;
+    if (!hasDrawingSurface) return;
     if (m.disabled) {
       editor.flash(`${m.label} is coming soon`);
       openGroup = null;
       return;
     }
     lastMember[slot.name] = m.id;
-    editor.setTool(m.id);
+    if (slot.name === 'annotation') {
+      editor.annotationType = m.id.replace('annotation-', '') as typeof editor.annotationType;
+      editor.setTool('annotation');
+    } else {
+      editor.setTool(m.id);
+    }
     openGroup = null;
   }
 </script>
@@ -211,7 +249,7 @@
 
 <div class="toolbar" class:disabled={!enabled}>
   <div class="tools">
-    {#if hasWorkflow}
+    {#if hasWorkflow && !hasStoryboardEdit}
       {#each workflowSlots as slot (slot.id)}
         <button
           class="tool"
@@ -229,7 +267,7 @@
         <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
           <button
             class="tool"
-            class:active={hasDocument && editor.activeToolId === 'marquee'}
+            class:active={hasDrawingSurface && editor.activeToolId === 'marquee'}
             use:tooltip={{ text: 'Marquee (M) — hold for shapes', placement: 'right' }}
             onclick={marqueeClick}
             onpointerdown={(e) => groupDown(e, 'marquee')}
@@ -241,17 +279,17 @@
             }}
             aria-label="Marquee"
             aria-haspopup="menu"
-            disabled={!hasDocument}
+            disabled={!hasDrawingSurface}
           >
             <Icon svg={currentMarquee.icon} rotate={currentMarquee.rotate ?? 0} size={20} />
             <span class="tri"></span>
           </button>
-          {#if hasDocument && openGroup === 'marquee'}
+          {#if hasDrawingSurface && openGroup === 'marquee'}
             <div class="flyout" role="menu">
               {#each marqueeItems as m (m.shape)}
                 <button class="flyout-item" role="menuitem" onclick={() => chooseShape(m.shape)}>
                   <span class="mark">
-                    {#if hasDocument && editor.marqueeShape === m.shape}
+                    {#if hasDrawingSurface && editor.marqueeShape === m.shape}
                       <Icon svg={Checkmark} size={12} />
                     {/if}
                   </span>
@@ -268,7 +306,7 @@
         <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
           <button
             class="tool"
-            class:active={hasDocument && groupActive(slot)}
+            class:active={hasDrawingSurface && groupActive(slot)}
             use:tooltip={{ text: `${shown.label} — hold for tools`, placement: 'right' }}
             onclick={() => groupClick(slot)}
             onpointerdown={(e) => groupDown(e, slot.name)}
@@ -280,12 +318,12 @@
             }}
             aria-label={shown.label}
             aria-haspopup="menu"
-            disabled={!hasDocument}
+            disabled={!hasDrawingSurface}
           >
             <Icon svg={shown.icon} size={20} />
             <span class="tri"></span>
           </button>
-          {#if hasDocument && openGroup === slot.name}
+          {#if hasDrawingSurface && openGroup === slot.name}
             <div class="flyout" role="menu">
               {#each slot.members as m (m.id)}
                 <button
@@ -295,7 +333,7 @@
                   onclick={() => chooseMember(slot, m)}
                 >
                   <span class="mark">
-                    {#if hasDocument && editor.activeToolId === m.id}
+                    {#if hasDrawingSurface && (editor.activeToolId === m.id || (slot.name === 'annotation' && editor.activeToolId === 'annotation' && m.id === `annotation-${editor.annotationType}`))}
                       <Icon svg={Checkmark} size={12} />
                     {/if}
                   </span>
@@ -310,11 +348,11 @@
       {:else}
         <button
           class="tool"
-          class:active={hasDocument && editor.activeToolId === slot.id}
+          class:active={hasDrawingSurface && editor.activeToolId === slot.id}
           use:tooltip={{ text: `${nameOf(slot.id)} (${slot.key})`, placement: 'right' }}
           onclick={() => editor.setTool(slot.id)}
           aria-label={nameOf(slot.id)}
-          disabled={!hasDocument}
+          disabled={!hasDrawingSurface}
         >
           <Icon svg={slot.icon} size={20} />
         </button>
@@ -328,7 +366,7 @@
         use:tooltip={{ text: 'Generate Image (AI)', placement: 'right' }}
         onclick={() => ui.open('aiGenerate')}
         aria-label="Generate Image (AI)"
-        disabled={!hasDocument}
+        disabled={!hasDrawingSurface}
       >
         <Icon svg={Sparkle} size={20} />
       </button>

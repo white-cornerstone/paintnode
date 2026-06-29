@@ -8,7 +8,7 @@ import { intersectMask } from '../selection';
 export class PaintTool implements Tool {
   readonly id: string;
   readonly name: string;
-  readonly cursor = 'none';
+  readonly cursor = 'crosshair';
   readonly usesBrushCursor = true;
   readonly editsPixels = true;
 

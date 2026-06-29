@@ -16,7 +16,7 @@ import {
   type ProjectState,
 } from '../integrations/desktop';
 
-const KEY = 'cxpaint.projectPath';
+const KEY = 'paintnode.projectPath';
 
 class ProjectStore {
   current = $state<ProjectState | null>(null);

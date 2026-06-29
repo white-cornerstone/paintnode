@@ -16,7 +16,7 @@
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  const KEY = 'cxpaint.decouple';
+  const KEY = 'paintnode.decouple';
   const DEFAULT_PROMPT =
     'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
 
@@ -302,7 +302,7 @@
     </div>
 
     <p class="hint">
-      Codex returns named workflow assets and a manifest. CX Paint saves transparent assets to the
+      Codex returns named workflow assets and a manifest. PaintNode saves transparent assets to the
       project, applies alpha masks when provided, and uses color-key cleanup only as a fallback.
     </p>
 

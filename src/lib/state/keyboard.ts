@@ -1,5 +1,5 @@
 import { editor } from './editor.svelte';
-import { openCommand, saveCopyOraCommand, saveOraCommand, exportPngCommand } from './commands';
+import { openCommand, saveActiveCopyCommand, saveActiveCommand, exportPngCommand } from './commands';
 import { ui } from './ui.svelte';
 
 const TOOL_KEYS: Record<string, string> = {
@@ -81,8 +81,8 @@ export function installKeyboard(): () => void {
           return;
         case 's':
           e.preventDefault();
-          if (e.shiftKey) void saveCopyOraCommand();
-          else void saveOraCommand();
+          if (e.shiftKey) void saveActiveCopyCommand();
+          else void saveActiveCommand();
           return;
         case 'o':
           e.preventDefault();
@@ -91,6 +91,10 @@ export function installKeyboard(): () => void {
         case 'e':
           e.preventDefault();
           void exportPngCommand();
+          return;
+        case 't':
+          e.preventDefault();
+          editor.beginFreeTransform();
           return;
         case '0':
           e.preventDefault();
@@ -129,12 +133,22 @@ export function installKeyboard(): () => void {
         editor.clearActive();
         return;
       case 'Enter':
+        if (editor.freeTransform) {
+          e.preventDefault();
+          editor.commitFreeTransform();
+          return;
+        }
         if (editor.activeToolId === 'crop' && editor.selection) {
           e.preventDefault();
           editor.cropToSelection();
         }
         return;
       case 'Escape':
+        if (editor.freeTransform) {
+          e.preventDefault();
+          editor.cancelFreeTransform();
+          return;
+        }
         if (editor.selection) editor.deselect();
         return;
       case '[':

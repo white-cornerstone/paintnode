@@ -16,8 +16,7 @@ use tauri::{AppHandle, Emitter};
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const RESULT_STABLE_DURATION: Duration = Duration::from_millis(900);
-const PROJECT_MANIFEST: &str = "cxpaint.project.json";
+const PROJECT_MANIFEST: &str = "paintnode.project.json";
 const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,7 +143,6 @@ struct CodexProgressPayload {
 
 struct CodexRunResult {
     output: Output,
-    completed_from_result_file: bool,
     thread_id: Option<String>,
 }
 
@@ -212,15 +210,17 @@ fn project_manifest_path(project_path: &Path) -> PathBuf {
 fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
     fs::create_dir_all(project_path.join("documents"))
         .map_err(|e| format!("Failed to create documents folder: {e}"))?;
+    fs::create_dir_all(project_path.join("storyboards"))
+        .map_err(|e| format!("Failed to create storyboards folder: {e}"))?;
     fs::create_dir_all(project_path.join("autosave"))
         .map_err(|e| format!("Failed to create autosave folder: {e}"))?;
     fs::create_dir_all(project_path.join("assets").join("generated"))
         .map_err(|e| format!("Failed to create generated assets folder: {e}"))?;
     fs::create_dir_all(project_path.join("assets").join("imported"))
         .map_err(|e| format!("Failed to create imported assets folder: {e}"))?;
-    fs::create_dir_all(project_path.join(".cxpaint").join("codex-runs"))
+    fs::create_dir_all(project_path.join(".paintnode").join("codex-runs"))
         .map_err(|e| format!("Failed to create Codex runs folder: {e}"))?;
-    fs::create_dir_all(project_path.join(".cxpaint").join("trash"))
+    fs::create_dir_all(project_path.join(".paintnode").join("trash"))
         .map_err(|e| format!("Failed to create project trash folder: {e}"))?;
     Ok(())
 }
@@ -229,7 +229,7 @@ fn default_project_name(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or("CX Paint Project")
+        .unwrap_or("PaintNode Project")
         .to_string()
 }
 
@@ -411,6 +411,7 @@ fn asset_view(project_path: &Path, asset: ProjectAsset) -> ProjectAssetView {
 fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
     let folders = [
         ("document", PathBuf::from("documents")),
+        ("storyboard", PathBuf::from("storyboards")),
         ("autosave", PathBuf::from("autosave")),
         ("generated", PathBuf::from("assets").join("generated")),
         ("imported", PathBuf::from("assets").join("imported")),
@@ -437,7 +438,7 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
             let mime = mime_for_path(&path)
                 .or_else(|| is_openraster_path(&path).then(|| "image/openraster".to_string()))
                 .or_else(|| {
-                    is_workflow.then(|| "application/vnd.cxpaint.workflow+json".to_string())
+                    is_workflow.then(|| "application/vnd.paintnode.workflow+json".to_string())
                 });
             files.push(ProjectFileView {
                 kind: if is_workflow {
@@ -658,83 +659,6 @@ fn file_has_png_signature(path: &Path) -> bool {
     file.read_exact(&mut signature).is_ok() && signature == *PNG_SIGNATURE
 }
 
-fn stable_png_size(
-    path: &Path,
-    last_size: &mut Option<u64>,
-    stable_since: &mut Option<Instant>,
-) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        *last_size = None;
-        *stable_since = None;
-        return false;
-    };
-
-    let size = metadata.len();
-    if size < PNG_SIGNATURE.len() as u64 || !file_has_png_signature(path) {
-        *last_size = Some(size);
-        *stable_since = None;
-        return false;
-    }
-
-    if *last_size == Some(size) {
-        let since = stable_since.get_or_insert_with(Instant::now);
-        since.elapsed() >= RESULT_STABLE_DURATION
-    } else {
-        *last_size = Some(size);
-        *stable_since = Some(Instant::now());
-        false
-    }
-}
-
-fn decode_png_string(value: &str) -> Option<Vec<u8>> {
-    let trimmed = value.trim();
-    let b64 = trimmed
-        .strip_prefix("data:image/png;base64,")
-        .or_else(|| trimmed.strip_prefix("data:image/x-png;base64,"))
-        .unwrap_or(trimmed);
-
-    if b64.len() < 32
-        || !b64
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_' | b'='))
-    {
-        return None;
-    }
-
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(b64))
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64))
-        .ok()?;
-    is_png(&decoded).then_some(decoded)
-}
-
-fn png_path_from_string(value: &str, job_path: &Path) -> Option<PathBuf> {
-    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
-    if trimmed.is_empty() || trimmed.len() > 4096 || !trimmed.to_ascii_lowercase().contains(".png")
-    {
-        return None;
-    }
-
-    let candidate = PathBuf::from(trimmed);
-    let absolute = if candidate.is_absolute() {
-        candidate
-    } else {
-        job_path.join(candidate)
-    };
-    file_has_png_signature(&absolute).then_some(absolute)
-}
-
-fn write_png_candidate(result_path: &Path, bytes: &[u8]) -> bool {
-    if !is_png(bytes) {
-        return false;
-    }
-    if let Some(parent) = result_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    fs::write(result_path, bytes).is_ok()
-}
-
 fn copy_png_candidate(candidate: &Path, result_path: &Path) -> bool {
     if candidate == result_path {
         return true;
@@ -746,82 +670,6 @@ fn copy_png_candidate(candidate: &Path, result_path: &Path) -> bool {
         let _ = fs::create_dir_all(parent);
     }
     fs::copy(candidate, result_path).is_ok()
-}
-
-fn materialize_png_from_json_value(
-    value: &serde_json::Value,
-    job_path: &Path,
-    result_path: &Path,
-) -> bool {
-    match value {
-        serde_json::Value::String(text) => {
-            if let Some(bytes) = decode_png_string(text) {
-                write_png_candidate(result_path, &bytes)
-            } else if let Some(path) = png_path_from_string(text, job_path) {
-                copy_png_candidate(&path, result_path)
-            } else {
-                false
-            }
-        }
-        serde_json::Value::Array(items) => items
-            .iter()
-            .any(|item| materialize_png_from_json_value(item, job_path, result_path)),
-        serde_json::Value::Object(map) => map
-            .values()
-            .any(|item| materialize_png_from_json_value(item, job_path, result_path)),
-        _ => false,
-    }
-}
-
-fn materialize_png_from_line(line: &str, job_path: &Path, result_path: &Path) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return materialize_png_from_json_value(&value, job_path, result_path);
-    }
-
-    if let Some(bytes) = decode_png_string(trimmed) {
-        return write_png_candidate(result_path, &bytes);
-    }
-
-    if let Some(path) = png_path_from_string(trimmed, job_path) {
-        return copy_png_candidate(&path, result_path);
-    }
-
-    false
-}
-
-fn find_png_file(root: &Path, result_path: &Path) -> Option<PathBuf> {
-    let mut stack = vec![(root.to_path_buf(), 0_usize)];
-    let mut checked = 0_usize;
-
-    while let Some((dir, depth)) = stack.pop() {
-        if depth > 6 || checked > 1000 {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path == result_path {
-                continue;
-            }
-            if path.is_dir() {
-                stack.push((path, depth + 1));
-                continue;
-            }
-            checked += 1;
-            if file_has_png_signature(&path) {
-                return Some(path);
-            }
-        }
-    }
-
-    None
 }
 
 fn find_newest_png_since(root: &Path, result_path: &Path, since: SystemTime) -> Option<PathBuf> {
@@ -843,6 +691,13 @@ fn find_newest_png_since(root: &Path, result_path: &Path, since: SystemTime) -> 
                 continue;
             }
             if path.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == "inputs")
+                {
+                    continue;
+                }
                 stack.push((path, depth + 1));
                 continue;
             }
@@ -909,65 +764,78 @@ where
     None
 }
 
-fn find_codex_cached_png(
+fn unique_child_path(dir: &Path, file_name: &str) -> PathBuf {
+    let safe_name =
+        safe_file_name(file_name).unwrap_or_else(|| format!("codex-generated-{}.png", now_id()));
+    let first = dir.join(&safe_name);
+    if !first.exists() {
+        return first;
+    }
+
+    let path = Path::new(&safe_name);
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(safe_stem)
+        .unwrap_or_else(|| "codex-generated".into());
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("png");
+    for index in 2..1000 {
+        let candidate = dir.join(format!("{stem}-{index}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    dir.join(format!("{stem}-{}.{}", now_id(), ext))
+}
+
+fn copy_codex_cached_png_in_roots_to_job<I>(
+    roots: I,
+    job_path: &Path,
     thread_id: Option<&str>,
     since: SystemTime,
-    result_path: &Path,
-) -> Option<PathBuf> {
-    find_codex_cached_png_in_roots(
+) -> Result<Option<(PathBuf, PathBuf)>, String>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let generated_dir = job_path.join("generated");
+    let exclude_path = generated_dir.join("__paintnode-result-placeholder.png");
+    let Some(candidate) = find_codex_cached_png_in_roots(roots, thread_id, since, &exclude_path)
+    else {
+        return Ok(None);
+    };
+
+    fs::create_dir_all(&generated_dir)
+        .map_err(|e| format!("Failed to create Codex generated image staging folder: {e}"))?;
+    let candidate_name = candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("codex-generated.png");
+    let staged_path = unique_child_path(&generated_dir, candidate_name);
+    if !copy_png_candidate(&candidate, &staged_path) {
+        return Err(format!(
+            "Failed to copy Codex generated image from {} to {}.",
+            candidate.display(),
+            staged_path.display()
+        ));
+    }
+    Ok(Some((candidate, staged_path)))
+}
+
+fn copy_codex_cached_png_to_job(
+    job_path: &Path,
+    thread_id: Option<&str>,
+    since: SystemTime,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    copy_codex_cached_png_in_roots_to_job(
         codex_generated_images_roots(),
+        job_path,
         thread_id,
         since,
-        result_path,
     )
-}
-
-fn recover_codex_cached_png(
-    result_path: &Path,
-    thread_id: Option<&str>,
-    since: SystemTime,
-) -> Option<PathBuf> {
-    let candidate = find_codex_cached_png(thread_id, since, result_path)?;
-    copy_png_candidate(&candidate, result_path).then_some(candidate)
-}
-
-fn recover_result_png(
-    job_path: &Path,
-    result_path: &Path,
-    output: Option<&Output>,
-    thread_id: Option<&str>,
-    codex_started_at: Option<SystemTime>,
-) -> Option<PathBuf> {
-    if file_has_png_signature(result_path) {
-        return Some(result_path.to_path_buf());
-    }
-
-    if let Some(candidate) = find_png_file(job_path, result_path) {
-        if copy_png_candidate(&candidate, result_path) {
-            return Some(candidate);
-        }
-    }
-
-    if let Some(output) = output {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if materialize_png_from_line(line, job_path, result_path) {
-                return Some(result_path.to_path_buf());
-            }
-        }
-        for line in String::from_utf8_lossy(&output.stderr).lines() {
-            if materialize_png_from_line(line, job_path, result_path) {
-                return Some(result_path.to_path_buf());
-            }
-        }
-    }
-
-    if let Some(since) = codex_started_at {
-        if let Some(candidate) = recover_codex_cached_png(result_path, thread_id, since) {
-            return Some(candidate);
-        }
-    }
-
-    None
 }
 
 fn png_data_url(bytes: &[u8]) -> Result<String, String> {
@@ -1200,8 +1068,6 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     app: AppHandle,
     run_id: String,
     is_stderr: bool,
-    job_path: PathBuf,
-    result_path: Option<PathBuf>,
     thread_id: Arc<Mutex<Option<String>>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -1224,17 +1090,6 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                     if let Some(message) = codex_progress_message(&text, is_stderr) {
                         emit_codex_progress(&app, &run_id, message);
                     }
-                    if let Some(result_path) = &result_path {
-                        if !file_has_png_signature(result_path)
-                            && materialize_png_from_line(&text, &job_path, result_path)
-                        {
-                            emit_codex_progress(
-                                &app,
-                                &run_id,
-                                "Recovered generated PNG from Codex output",
-                            );
-                        }
-                    }
                 }
                 Err(_) => break,
             }
@@ -1247,9 +1102,6 @@ fn run_codex_with_progress(
     timeout: Duration,
     app: AppHandle,
     run_id: String,
-    job_path: PathBuf,
-    early_result_path: Option<PathBuf>,
-    codex_started_at: SystemTime,
 ) -> Result<CodexRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -1269,8 +1121,6 @@ fn run_codex_with_progress(
             app.clone(),
             run_id.clone(),
             false,
-            job_path.clone(),
-            early_result_path.clone(),
             Arc::clone(&thread_id),
         ));
     }
@@ -1281,49 +1131,17 @@ fn run_codex_with_progress(
             app.clone(),
             run_id.clone(),
             true,
-            job_path.clone(),
-            early_result_path.clone(),
             Arc::clone(&thread_id),
         ));
     }
 
     let start = Instant::now();
-    let mut last_result_size = None;
-    let mut result_stable_since = None;
-    let mut completed_from_result_file = false;
-    let mut child_was_stopped = false;
     let status = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for command: {e}"))?
         {
             break status;
-        }
-
-        if let Some(result_path) = &early_result_path {
-            if !file_has_png_signature(result_path) {
-                let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-                let _ = recover_result_png(
-                    &job_path,
-                    result_path,
-                    None,
-                    current_thread_id.as_deref(),
-                    Some(codex_started_at),
-                );
-            }
-            if stable_png_size(result_path, &mut last_result_size, &mut result_stable_since) {
-                emit_codex_progress(
-                    &app,
-                    &run_id,
-                    "Generated PNG copied; importing into CX Paint",
-                );
-                completed_from_result_file = true;
-                child_was_stopped = true;
-                let _ = child.kill();
-                break child.wait().map_err(|e| {
-                    format!("Failed to finish Codex after the generated PNG was copied: {e}")
-                })?;
-            }
         }
 
         if start.elapsed() >= timeout {
@@ -1335,10 +1153,8 @@ fn run_codex_with_progress(
         thread::sleep(POLL_INTERVAL);
     };
 
-    if !child_was_stopped {
-        for reader in readers {
-            let _ = reader.join();
-        }
+    for reader in readers {
+        let _ = reader.join();
     }
 
     let stdout = stdout
@@ -1357,7 +1173,6 @@ fn run_codex_with_progress(
             stdout,
             stderr,
         },
-        completed_from_result_file,
         thread_id,
     })
 }
@@ -1422,7 +1237,7 @@ fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String
 
 fn codex_prompt(user_prompt: &str) -> String {
     format!(
-        r#"Use $imagegen to generate one raster PNG for CX Paint.
+        r#"Use $imagegen to generate one raster PNG for PaintNode.
 
 User image prompt:
 {user_prompt}
@@ -1468,7 +1283,7 @@ fn build_codex_command(
 
 fn decouple_codex_prompt(user_prompt: &str) -> String {
     format!(
-        r##"Use the attached `source.png` to create a CX Paint recomposition asset pack.
+        r##"Use the attached `source.png` to create a PaintNode recomposition asset pack.
 
 User guidance:
 {user_prompt}
@@ -1518,7 +1333,7 @@ Asset file requirements:
 - PNG only.
 - Prefer transparent-background PNGs with real alpha for object/character/prop assets.
 - If the asset PNG has a background but you can create a soft alpha mask, save the grayscale mask as a PNG and set `alphaMask` to that filename.
-- If you generate an object on a plain matte/green-screen background without an alpha mask, set `keyColor` to the exact matte color such as "#00ff00"; CX Paint will remove that color into alpha.
+- If you generate an object on a plain matte/green-screen background without an alpha mask, set `keyColor` to the exact matte color such as "#00ff00"; PaintNode will remove that color into alpha.
 - Choose a matte color that does not appear in the object. It does not need to be green.
 - For reusable assets, prefer tight crops with transparent or keyed backgrounds. Set `x` and `y` to 0 unless the image is intentionally a full-size environment plate.
 - Use manifest order from broad environment assets to foreground subject/prop assets.
@@ -1570,7 +1385,7 @@ fn workflow_compose_prompt(prompt: &str, source_names: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        r#"Use $imagegen to compose one new raster PNG for CX Paint from the attached workflow asset images.
+        r#"Use $imagegen to compose one new raster PNG for PaintNode from the attached workflow asset images.
 
 Connected workflow inputs:
 {sources}
@@ -1580,13 +1395,28 @@ Composition prompt:
 
 Requirements:
 - Treat every attached image as intentionally connected to the composition node.
-- Use all attached asset images as visual references/assets for identity, subject appearance, object design, and scene ingredients unless the prompt explicitly says to omit one.
-- If an attached image is named "Storyboard sketch", use it as the layout, placement, and annotation guide for the final image.
-- Create one coherent new image from the composition prompt.
+- The final PNG must visibly include every mandatory connected asset unless the prompt explicitly says to omit it.
+- This is a generative synthesis task, not a cut-and-paste compositing task: reason from the assets and prompt to create a new coherent photo/image.
+- Use the attached assets as visual references for identity, appearance, objects, environment, style, and layout. Reconstruct the final scene naturally instead of blindly pasting cropped source pixels together.
+- Do not satisfy the task by copying or lightly editing only one source image, especially a background/environment image. Do not make a collage, contact sheet, sticker-board, or obvious paste-up.
+- Unless the user explicitly asks for surreal or impossible results, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction.
+- If the user asks for an impossible or intentionally non-realistic composition, follow that request deliberately while still making the result visually coherent.
+- Use subject/person assets for the subject identity, pose, clothing, and body appearance; use prop/object assets for the object appearance; use environment assets for the setting.
+- If the prompt describes a person holding or interacting with a prop, the person and prop must both be visible and physically connected in the final image.
+- Human anatomy is a hard quality requirement: exactly two arms, two hands, one palm per hand, natural wrists, plausible fingers, and no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints.
+- For held props, show a clean believable grip: the holding hand should wrap or support the prop naturally, and the other hand should remain anatomically separate and match the requested pose.
+- If any attached image name starts with "Storyboard sketch", treat that image as the primary spatial plan, not as optional inspiration.
+- Storyboard sketches are rough semantic diagrams: preserve their relative placement, left/right ordering, scale relationships, body pose, gesture direction, prop positions, foreground/background zones, and major negative space. Do not copy the rough sketch style into the final image.
+- Preserve storyboard coordinate regions exactly enough for composition: a subject centered in the left third/left half of the storyboard must remain in that same left-side region in the final image; do not mirror, recenter, or shift it to the opposite side unless the prompt explicitly overrides the storyboard.
+- Respect canvas halves, thirds, and major dividers shown in the storyboard. Large empty areas in the storyboard should remain visually open in the final image.
+- If the storyboard and text differ, keep the text's subject/action meaning but follow the storyboard's composition and placement unless the text explicitly overrides the storyboard.
+- Before generating the image, internally audit the storyboard into a concrete composition plan: subject bounding box, face/head position, torso direction, arm/hand poses, held-object position, gesture direction, environment zones, important dividers, and empty-space balance.
+- Pass that concrete composition plan to image generation. Do not rely on a generic interpretation of the text prompt when the storyboard provides a more specific pose or layout.
+- Create one coherent new image from the composition prompt and the mandatory asset list.
 - Match perspective, lighting, scale, and contact shadows plausibly.
-- Do not make a collage or contact sheet.
-- Save or copy the final composed PNG to `result.png` in the current working directory.
-- Do not create, edit, or delete files outside the current working directory.
+- Before finishing, zoom in mentally on the face, arms, hands, fingers, and held objects. If the requested subject, prop/object, environment, or hand anatomy is wrong, regenerate/refine until it is acceptable.
+- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.
+- Do not create, edit, or delete files in the working directory.
 - Do not ask follow-up questions.
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
@@ -1663,7 +1493,7 @@ async fn generate_image(bin: String, args: Vec<String>, prompt: String) -> Resul
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let mut out_path = std::env::temp_dir();
-        out_path.push(format!("cxpaint-gen-{ts}.png"));
+        out_path.push(format!("paintnode-gen-{ts}.png"));
         let out_str = out_path.to_string_lossy().to_string();
 
         let final_args: Vec<String> = args
@@ -1722,18 +1552,16 @@ async fn generate_codex_image(
         let job_path = if let Some(project_dir) = &project_dir {
             ensure_project_dirs(project_dir)?;
             let run_dir = project_dir
-                .join(".cxpaint")
+                .join(".paintnode")
                 .join("codex-runs")
                 .join(format!("run-{}", now_id()));
             fs::create_dir_all(&run_dir)
                 .map_err(|e| format!("Failed to create Codex run folder: {e}"))?;
             run_dir
         } else {
-            temp_job = TempJobDir::new("cxpaint-codex")?;
+            temp_job = TempJobDir::new("paintnode-codex")?;
             temp_job.path().to_path_buf()
         };
-        let result_path = job_path.join("result.png");
-
         emit_codex_progress(&app, &run_id, "Starting local Codex");
         let codex_started_at = SystemTime::now();
         let mut command = build_codex_command(&codex_bin, &job_path, prompt.trim(), true);
@@ -1742,16 +1570,10 @@ async fn generate_codex_image(
             GENERATION_TIMEOUT,
             app.clone(),
             run_id.clone(),
-            job_path.clone(),
-            Some(result_path.clone()),
-            codex_started_at,
         )
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
-        if !run.completed_from_result_file
-            && !run.output.status.success()
-            && output_mentions_unsupported_json(&run.output)
-        {
+        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
             emit_codex_progress(
                 &app,
                 &run_id,
@@ -1763,44 +1585,23 @@ async fn generate_codex_image(
                 GENERATION_TIMEOUT,
                 app.clone(),
                 run_id.clone(),
-                job_path.clone(),
-                Some(result_path.clone()),
-                codex_started_at,
             )
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
 
-        if !run.completed_from_result_file && !run.output.status.success() {
+        if !run.output.status.success() {
             if let Some(message) = final_codex_agent_message(&run.output) {
                 return Err(format!("Codex did not generate an image.\n\n{message}"));
             }
             return Err(command_failure("Codex", &run.output));
         }
 
-        let recovered_source_path = if !file_has_png_signature(&result_path) {
-            recover_result_png(
-                &job_path,
-                &result_path,
-                Some(&run.output),
-                run.thread_id.as_deref(),
-                Some(codex_started_at),
-            )
-        } else {
-            find_codex_cached_png(run.thread_id.as_deref(), codex_started_at, &result_path)
-        };
-
-        if recovered_source_path.is_some()
-            && recovered_source_path.as_deref() != Some(result_path.as_path())
-        {
-            emit_codex_progress(&app, &run_id, "Recovered generated PNG; importing");
-        }
-
-        emit_codex_progress(&app, &run_id, "Reading copied PNG");
-        if !result_path.exists() {
+        let Some((recovered_source_path, staged_result_path)) =
+            copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
+        else {
             if let Some(message) = final_codex_agent_message(&run.output) {
                 return Err(format!(
-                    "Codex did not generate an image.\n\n{message}\n\nInternal copy path: {}",
-                    result_path.display()
+                    "Codex did not expose a generated image in its generated-images cache.\n\n{message}"
                 ));
             }
 
@@ -1811,22 +1612,21 @@ async fn generate_codex_image(
             } else if !stdout.is_empty() {
                 stdout
             } else {
-                "Codex completed without exposing a generated PNG that CX Paint could copy.".into()
+                "Codex completed without exposing a generated PNG that PaintNode could copy.".into()
             };
             return Err(format!(
-                "CX Paint could not find a new PNG in Codex's generated-images cache.\nInternal copy path: {}\n\n{detail}",
-                result_path.display()
+                "PaintNode could not find a new PNG in Codex's generated-images cache.\n\n{detail}"
             ));
-        }
+        };
 
-        let data_url = read_png_data_url(&result_path)?;
+        emit_codex_progress(&app, &run_id, "Reading copied PNG");
+        let data_url = read_png_data_url(&staged_result_path)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving generated image to the project");
-            let bytes = fs::read(&result_path)
+            let bytes = fs::read(&staged_result_path)
                 .map_err(|e| format!("Failed to read generated image for project storage: {e}"))?;
             let source_file_name = recovered_source_path
-                .as_ref()
-                .and_then(|path| path.file_name())
+                .file_name()
                 .and_then(|name| name.to_str())
                 .filter(|name| safe_file_name(name).is_some());
             let (id, relative_path) = if let Some(file_name) = source_file_name {
@@ -1897,14 +1697,14 @@ async fn decouple_codex_image(
         let job_path = if let Some(project_dir) = &project_dir {
             ensure_project_dirs(project_dir)?;
             let run_dir = project_dir
-                .join(".cxpaint")
+                .join(".paintnode")
                 .join("codex-runs")
                 .join(format!("decouple-{}", now_id()));
             fs::create_dir_all(&run_dir)
                 .map_err(|e| format!("Failed to create Codex decouple folder: {e}"))?;
             run_dir
         } else {
-            temp_job = TempJobDir::new("cxpaint-decouple")?;
+            temp_job = TempJobDir::new("paintnode-decouple")?;
             temp_job.path().to_path_buf()
         };
 
@@ -1913,7 +1713,6 @@ async fn decouple_codex_image(
             .map_err(|e| format!("Failed to write decouple source image: {e}"))?;
 
         emit_codex_progress(&app, &run_id, "Starting local Codex asset extraction");
-        let codex_started_at = SystemTime::now();
         let user_prompt = if prompt.trim().is_empty() {
             "Identify the main reusable elements and create a useful recomposition asset pack."
         } else {
@@ -1925,9 +1724,6 @@ async fn decouple_codex_image(
             GENERATION_TIMEOUT,
             app.clone(),
             run_id.clone(),
-            job_path.clone(),
-            None,
-            codex_started_at,
         )
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
@@ -1944,9 +1740,6 @@ async fn decouple_codex_image(
                 GENERATION_TIMEOUT,
                 app.clone(),
                 run_id.clone(),
-                job_path.clone(),
-                None,
-                codex_started_at,
             )
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
@@ -2097,19 +1890,22 @@ async fn compose_codex_workflow(
         let job_path = if let Some(project_dir) = &project_dir {
             ensure_project_dirs(project_dir)?;
             let run_dir = project_dir
-                .join(".cxpaint")
+                .join(".paintnode")
                 .join("codex-runs")
                 .join(format!("workflow-{}", now_id()));
             fs::create_dir_all(&run_dir)
                 .map_err(|e| format!("Failed to create Codex workflow folder: {e}"))?;
             run_dir
         } else {
-            temp_job = TempJobDir::new("cxpaint-workflow")?;
+            temp_job = TempJobDir::new("paintnode-workflow")?;
             temp_job.path().to_path_buf()
         };
 
         let mut source_names = Vec::new();
         let mut image_paths = Vec::new();
+        let input_dir = job_path.join("inputs");
+        fs::create_dir_all(&input_dir)
+            .map_err(|e| format!("Failed to create workflow input folder: {e}"))?;
         for (index, source) in sources.into_iter().enumerate() {
             if !is_png(&source.bytes) {
                 return Err(format!(
@@ -2122,14 +1918,13 @@ async fn compose_codex_workflow(
             } else {
                 source.name.chars().take(64).collect::<String>()
             };
-            let path = job_path.join(format!("{}-{}.png", index + 1, safe_stem(&name)));
+            let path = input_dir.join(format!("{}-{}.png", index + 1, safe_stem(&name)));
             fs::write(&path, &source.bytes)
                 .map_err(|e| format!("Failed to write workflow source image: {e}"))?;
             source_names.push(name);
             image_paths.push(path);
         }
 
-        let result_path = job_path.join("result.png");
         emit_codex_progress(&app, &run_id, "Starting local Codex workflow composition");
         let codex_started_at = SystemTime::now();
         let mut command = build_workflow_compose_codex_command(
@@ -2145,16 +1940,10 @@ async fn compose_codex_workflow(
             GENERATION_TIMEOUT,
             app.clone(),
             run_id.clone(),
-            job_path.clone(),
-            Some(result_path.clone()),
-            codex_started_at,
         )
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
-        if !run.completed_from_result_file
-            && !run.output.status.success()
-            && output_mentions_unsupported_json(&run.output)
-        {
+        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
             emit_codex_progress(
                 &app,
                 &run_id,
@@ -2173,56 +1962,46 @@ async fn compose_codex_workflow(
                 GENERATION_TIMEOUT,
                 app.clone(),
                 run_id.clone(),
-                job_path.clone(),
-                Some(result_path.clone()),
-                codex_started_at,
             )
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
 
-        if !run.completed_from_result_file && !run.output.status.success() {
+        if !run.output.status.success() {
             if let Some(message) = final_codex_agent_message(&run.output) {
                 return Err(format!("Codex did not compose an image.\n\n{message}"));
             }
             return Err(command_failure("Codex workflow composition", &run.output));
         }
 
-        let recovered_source_path = if !file_has_png_signature(&result_path) {
-            recover_result_png(
-                &job_path,
-                &result_path,
-                Some(&run.output),
-                run.thread_id.as_deref(),
-                Some(codex_started_at),
-            )
-        } else {
-            find_codex_cached_png(run.thread_id.as_deref(), codex_started_at, &result_path)
+        let Some((recovered_source_path, staged_result_path)) =
+            copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
+        else {
+            if let Some(message) = final_codex_agent_message(&run.output) {
+                return Err(format!(
+                    "Codex did not expose a composed image in its generated-images cache.\n\n{message}"
+                ));
+            }
+            return Err("PaintNode could not find a composed PNG in Codex's generated-images cache.".into());
         };
 
-        if recovered_source_path.is_some()
-            && recovered_source_path.as_deref() != Some(result_path.as_path())
-        {
-            emit_codex_progress(&app, &run_id, "Recovered composed PNG; importing");
-        }
-
         emit_codex_progress(&app, &run_id, "Reading composed PNG");
-        if !result_path.exists() {
+        if !staged_result_path.exists() {
             if let Some(message) = final_codex_agent_message(&run.output) {
                 return Err(format!(
                     "Codex did not expose a composed image.\n\n{message}\n\nInternal copy path: {}",
-                    result_path.display()
+                    staged_result_path.display()
                 ));
             }
             return Err(format!(
-                "CX Paint could not find a composed PNG at {}.",
-                result_path.display()
+                "PaintNode could not find a composed PNG at {}.",
+                staged_result_path.display()
             ));
         }
 
-        let data_url = read_png_data_url(&result_path)?;
+        let data_url = read_png_data_url(&staged_result_path)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving composed image to the project");
-            let bytes = fs::read(&result_path)
+            let bytes = fs::read(&staged_result_path)
                 .map_err(|e| format!("Failed to read composed image for project storage: {e}"))?;
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
@@ -2237,8 +2016,7 @@ async fn compose_codex_workflow(
                 created_at: now_id(),
                 prompt: Some(prompt.trim().into()),
                 source_file_name: recovered_source_path
-                    .as_ref()
-                    .and_then(|path| path.file_name())
+                    .file_name()
                     .and_then(|name| name.to_str())
                     .map(str::to_string),
                 width: None,
@@ -2265,7 +2043,7 @@ async fn compose_codex_workflow(
 async fn project_open_folder() -> Result<Option<ProjectState>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<ProjectState>, String> {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Open CX Paint Project Folder")
+            .set_title("Open PaintNode Project Folder")
             .pick_folder()
         else {
             return Ok(None);
@@ -2439,7 +2217,7 @@ async fn project_delete_asset(
         let asset = manifest.assets.remove(index);
         let source = project_dir.join(&asset.relative_path);
         if source.exists() {
-            let trash = project_dir.join(".cxpaint").join("trash").join(format!(
+            let trash = project_dir.join(".paintnode").join("trash").join(format!(
                 "{}-{}",
                 now_id(),
                 source
@@ -2645,6 +2423,13 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         None::<&str>,
     )?;
     let clear = MenuItem::with_id(app, "app:clear", "Clear", true, Some("Delete"))?;
+    let free_transform = MenuItem::with_id(
+        app,
+        "app:free-transform",
+        "Free Transform",
+        true,
+        Some("CmdOrCtrl+T"),
+    )?;
 
     let image_size = MenuItem::with_id(app, "app:image-size", "Image Size...", true, None::<&str>)?;
     let reveal_all = MenuItem::with_id(app, "app:reveal-all", "Reveal All", true, None::<&str>)?;
@@ -2758,18 +2543,13 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         Some("CmdOrCtrl+1"),
     )?;
-    let about = MenuItem::with_id(app, "app:about", "About CX Paint", true, None::<&str>)?;
-    let help_about = MenuItem::with_id(
-        app,
-        "app:help-about",
-        "About CX Paint",
-        true,
-        None::<&str>,
-    )?;
+    let about = MenuItem::with_id(app, "app:about", "About PaintNode", true, None::<&str>)?;
+    let help_about =
+        MenuItem::with_id(app, "app:help-about", "About PaintNode", true, None::<&str>)?;
 
     let app_menu = Submenu::with_items(
         app,
-        "CX Paint",
+        "PaintNode",
         true,
         &[
             &about,
@@ -2815,6 +2595,8 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &fill_fg,
             &fill_bg,
             &clear,
+            &PredefinedMenuItem::separator(app)?,
+            &free_transform,
         ],
     )?;
     let image = Submenu::with_items(
@@ -2942,7 +2724,7 @@ mod tests {
 
     #[test]
     fn ora_thumbnail_data_url_reads_embedded_thumbnail() {
-        let job = TempJobDir::new("cxpaint-ora-thumb-test").expect("temp dir");
+        let job = TempJobDir::new("paintnode-ora-thumb-test").expect("temp dir");
         let path = job.path().join("document.ora");
         let file = fs::File::create(&path).expect("ora file");
         let mut archive = zip::ZipWriter::new(file);
@@ -2965,7 +2747,7 @@ mod tests {
 
     #[test]
     fn ora_thumbnail_data_url_falls_back_to_merged_image() {
-        let job = TempJobDir::new("cxpaint-ora-merged-test").expect("temp dir");
+        let job = TempJobDir::new("paintnode-ora-merged-test").expect("temp dir");
         let path = job.path().join("document.ora");
         let file = fs::File::create(&path).expect("ora file");
         let mut archive = zip::ZipWriter::new(file);
@@ -2989,7 +2771,7 @@ mod tests {
     #[test]
     fn temp_job_dir_removes_directory_on_drop() {
         let path = {
-            let job = TempJobDir::new("cxpaint-test").expect("temp dir");
+            let job = TempJobDir::new("paintnode-test").expect("temp dir");
             let marker = job.path().join("marker.txt");
             fs::write(&marker, b"ok").expect("write marker");
             assert!(marker.exists());
@@ -3051,7 +2833,7 @@ mod tests {
     #[test]
     fn final_codex_agent_message_extracts_last_meaningful_message() {
         let stdout = r#"{"type":"item.completed","item":{"type":"agent_message","text":"I’m using the imagegen skill because this is a raster image generation request."}}
-{"type":"item.completed","item":{"type":"agent_message","text":"Generated one raster PNG for CX Paint and kept it in Codex’s generated-images cache."}}"#;
+{"type":"item.completed","item":{"type":"agent_message","text":"Generated one raster PNG for PaintNode and kept it in Codex’s generated-images cache."}}"#;
 
         let message = final_codex_agent_message_from_text(stdout, "")
             .expect("should extract final agent message");
@@ -3060,7 +2842,7 @@ mod tests {
 
     #[test]
     fn decouple_codex_command_delimits_image_args_before_prompt() {
-        let job = TempJobDir::new("cxpaint-decouple-command-test").expect("temp dir");
+        let job = TempJobDir::new("paintnode-decouple-command-test").expect("temp dir");
         let command = build_decouple_codex_command("codex", job.path(), "separate objects", true);
         let args = command
             .get_args()
@@ -3155,7 +2937,7 @@ mod tests {
 
     #[test]
     fn workflow_compose_command_delimits_variadic_image_args_before_prompt() {
-        let job = TempJobDir::new("cxpaint-workflow-command-test").expect("temp dir");
+        let job = TempJobDir::new("paintnode-workflow-command-test").expect("temp dir");
         let image_paths = vec![job.path().join("girl.png"), job.path().join("truck.png")];
         let names = vec!["girl".to_string(), "truck".to_string()];
         let command = build_workflow_compose_codex_command(
@@ -3194,8 +2976,26 @@ mod tests {
 
         assert!(prompt.contains("Connected workflow inputs"));
         assert!(prompt.contains("Treat every attached image as intentionally connected"));
-        assert!(prompt.contains("Use all attached asset images"));
-        assert!(prompt.contains("If an attached image is named \"Storyboard sketch\""));
+        assert!(
+            prompt.contains("The final PNG must visibly include every mandatory connected asset")
+        );
+        assert!(prompt.contains("This is a generative synthesis task"));
+        assert!(prompt.contains("Reconstruct the final scene naturally"));
+        assert!(prompt.contains(
+            "Do not satisfy the task by copying or lightly editing only one source image"
+        ));
+        assert!(prompt.contains("Unless the user explicitly asks for surreal or impossible"));
+        assert!(prompt.contains("Human anatomy is a hard quality requirement"));
+        assert!(prompt.contains("no duplicated palms"));
+        assert!(prompt.contains("treat that image as the primary spatial plan"));
+        assert!(prompt.contains("rough semantic diagrams"));
+        assert!(prompt.contains("left/right ordering"));
+        assert!(prompt.contains("subject centered in the left third/left half"));
+        assert!(prompt.contains("do not mirror, recenter, or shift it to the opposite side"));
+        assert!(prompt.contains("follow the storyboard's composition and placement"));
+        assert!(prompt.contains("internally audit the storyboard into a concrete composition plan"));
+        assert!(prompt.contains("arm/hand poses"));
+        assert!(prompt.contains("when the storyboard provides a more specific pose or layout"));
     }
 
     #[test]
@@ -3208,47 +3008,8 @@ mod tests {
     }
 
     #[test]
-    fn stable_png_size_waits_for_unchanged_png_file() {
-        let job = TempJobDir::new("cxpaint-stable-png-test").expect("temp dir");
-        let path = job.path().join("result.png");
-        fs::write(&path, ONE_PIXEL_PNG).expect("write png signature");
-
-        let mut last_size = None;
-        let mut stable_since = None;
-        assert!(!stable_png_size(&path, &mut last_size, &mut stable_since));
-
-        thread::sleep(RESULT_STABLE_DURATION + Duration::from_millis(50));
-        assert!(stable_png_size(&path, &mut last_size, &mut stable_since));
-    }
-
-    #[test]
-    fn materialize_png_from_json_data_url_writes_result_png() {
-        let job = TempJobDir::new("cxpaint-json-png-test").expect("temp dir");
-        let result_path = job.path().join("result.png");
-        let b64 = base64::engine::general_purpose::STANDARD.encode(ONE_PIXEL_PNG);
-        let line = format!(r#"{{"item":{{"result":"data:image/png;base64,{b64}"}}}}"#);
-
-        assert!(materialize_png_from_line(&line, job.path(), &result_path));
-        assert!(file_has_png_signature(&result_path));
-    }
-
-    #[test]
-    fn recover_result_png_copies_png_from_job_folder() {
-        let job = TempJobDir::new("cxpaint-recover-png-test").expect("temp dir");
-        let nested = job.path().join("images");
-        fs::create_dir_all(&nested).expect("nested dir");
-        fs::write(nested.join("generated.png"), ONE_PIXEL_PNG).expect("write generated png");
-
-        let result_path = job.path().join("result.png");
-        let recovered = recover_result_png(job.path(), &result_path, None, None, None)
-            .expect("should recover generated png");
-        assert_eq!(recovered, nested.join("generated.png"));
-        assert!(file_has_png_signature(&result_path));
-    }
-
-    #[test]
     fn write_asset_file_with_file_name_preserves_codex_file_name() {
-        let project = TempJobDir::new("cxpaint-project-name-test").expect("project dir");
+        let project = TempJobDir::new("paintnode-project-name-test").expect("project dir");
         let file_name = "ig_0f6db9989b73e69c016a3b96d9b9fc819582dae7e57bdcbc48.png";
 
         let (_id, relative_path) =
@@ -3267,7 +3028,7 @@ mod tests {
 
     #[test]
     fn autosave_document_overwrites_same_file_and_cleans_timestamped_versions() {
-        let project = TempJobDir::new("cxpaint-autosave-overwrite-test").expect("project dir");
+        let project = TempJobDir::new("paintnode-autosave-overwrite-test").expect("project dir");
         ensure_project_dirs(project.path()).expect("project dirs");
         let old_timestamped = project
             .path()
@@ -3291,7 +3052,7 @@ mod tests {
 
     #[test]
     fn find_newest_png_since_filters_old_cache_images() {
-        let cache = TempJobDir::new("cxpaint-cache-png-test").expect("cache dir");
+        let cache = TempJobDir::new("paintnode-cache-png-test").expect("cache dir");
         let old_dir = cache.path().join("old");
         let new_dir = cache.path().join("new");
         fs::create_dir_all(&old_dir).expect("old dir");
@@ -3310,7 +3071,7 @@ mod tests {
 
     #[test]
     fn find_codex_cached_png_requires_matching_thread_folder() {
-        let cache = TempJobDir::new("cxpaint-thread-cache-png-test").expect("cache dir");
+        let cache = TempJobDir::new("paintnode-thread-cache-png-test").expect("cache dir");
         let own_thread = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
         let other_thread = "019ef9e7-a111-7ccc-9000-c2d16354e958";
         let own_dir = cache.path().join(own_thread);
@@ -3351,5 +3112,37 @@ mod tests {
             &result_path,
         );
         assert!(no_thread.is_none());
+    }
+
+    #[test]
+    fn copy_codex_cached_png_to_job_preserves_cache_file_name() {
+        let cache = TempJobDir::new("paintnode-cache-copy-test").expect("cache dir");
+        let job = TempJobDir::new("paintnode-cache-copy-job-test").expect("job dir");
+        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let thread_dir = cache.path().join(thread_id);
+        fs::create_dir_all(&thread_dir).expect("thread dir");
+
+        let since = SystemTime::now();
+        thread::sleep(Duration::from_millis(20));
+        let source = thread_dir.join("ig_original_result_name.png");
+        fs::write(&source, ONE_PIXEL_PNG).expect("cache png");
+
+        let (found_source, staged_path) = copy_codex_cached_png_in_roots_to_job(
+            vec![cache.path().to_path_buf()],
+            job.path(),
+            Some(thread_id),
+            since,
+        )
+        .expect("copy should not fail")
+        .expect("generated png");
+
+        assert_eq!(found_source, source);
+        assert_eq!(
+            staged_path,
+            job.path()
+                .join("generated")
+                .join("ig_original_result_name.png")
+        );
+        assert!(file_has_png_signature(&staged_path));
     }
 }

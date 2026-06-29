@@ -41,6 +41,7 @@ import { LassoTool } from '../engine/tools/LassoTool';
 import { MagicWandTool } from '../engine/tools/MagicWandTool';
 import { CropTool } from '../engine/tools/CropTool';
 import { ShapeTool } from '../engine/tools/ShapeTool';
+import { AnnotationTool } from '../engine/tools/AnnotationTool';
 import { GradientTool } from '../engine/tools/GradientTool';
 import { TextTool } from '../engine/tools/TextTool';
 import { CloneStampTool } from '../engine/tools/CloneStampTool';
@@ -49,6 +50,7 @@ import { FocusTool } from '../engine/tools/FocusTool';
 import { ToningTool } from '../engine/tools/ToningTool';
 import { HandTool, ZoomTool } from '../engine/tools/NavTools';
 import { ui } from './ui.svelte';
+import { newAnnotation, type AnnotationItem, type AnnotationKind } from '../engine/annotations';
 
 export interface PlacedImageResult {
   oversized: boolean;
@@ -83,6 +85,21 @@ export interface TextEditSession {
   baseStyle: TextStyle;
 }
 
+export interface FreeTransformSession {
+  layerId: string;
+  layerName: string;
+  previewUrl: string;
+  source: HTMLCanvasElement;
+  sourceWidth: number;
+  sourceHeight: number;
+  centerX: number;
+  centerY: number;
+  scaleX: number;
+  scaleY: number;
+  rotation: number;
+  opacity: number;
+}
+
 export interface DocumentSession {
   id: string;
   doc: PaintDocument;
@@ -95,6 +112,16 @@ export interface DocumentSession {
   autosavePath: string | null;
   /** Remembered "embed fonts?" choice for this document (null = ask on next save). */
   embedFonts: boolean | null;
+}
+
+interface EmbeddedDocumentRestore {
+  doc: PaintDocument | null;
+  activeDocumentId: string | null;
+  selection: Selection | null;
+  history: History;
+  viewport: Viewport | null;
+  textEdit: TextEditSession | null;
+  rasterizePrompt: { layerId: string; name: string } | null;
 }
 
 export class EditorStore implements ToolHost {
@@ -119,6 +146,10 @@ export class EditorStore implements ToolHost {
   shapeType = $state<'rect' | 'ellipse' | 'line'>('rect');
   shapeFill = $state(true);
   shapeStrokeWidth = $state(4);
+  // Annotation tool
+  annotationType = $state<'arrow' | 'note' | 'callout' | 'badge' | 'divider'>('callout');
+  annotationText = $state('Note');
+  selectedAnnotationId = $state<string | null>(null);
   // Gradient tool
   gradientType = $state<'fg-bg' | 'fg-transparent'>('fg-bg');
   // Zoom tool mode (click zooms in or out); Alt inverts momentarily.
@@ -132,6 +163,8 @@ export class EditorStore implements ToolHost {
   altDown = $state(false);
   // Type tool: the active on-canvas text edit session (null = not editing).
   textEdit = $state<TextEditSession | null>(null);
+  // Interactive Free Transform session for the active layer.
+  freeTransform = $state<FreeTransformSession | null>(null);
   // Set when a pixel tool is used on a text layer — drives the "rasterize first?" prompt.
   rasterizePrompt = $state<{ layerId: string; name: string } | null>(null);
   // Remembered Type-tool defaults for the next new text layer.
@@ -146,6 +179,7 @@ export class EditorStore implements ToolHost {
   rev = $state(0);
 
   private activeStroke: ActiveStroke | null = null;
+  private embeddedRestore: EmbeddedDocumentRestore | null = null;
   private flashTimer = 0;
   readonly tools: Record<string, Tool> = {};
 
@@ -169,6 +203,7 @@ export class EditorStore implements ToolHost {
       new ToningTool(this, 'burn'),
       new ToningTool(this, 'sponge'),
       new ShapeTool(this),
+      new AnnotationTool(this),
       new TextTool(this),
       new EyedropperTool(this),
       new HandTool(this),
@@ -308,7 +343,52 @@ export class EditorStore implements ToolHost {
 
   // --- Tools / colors ---
   setTool(id: string): void {
-    if (this.tools[id]) this.activeToolId = id;
+    if (!this.tools[id]) return;
+    if (this.freeTransform) this.commitFreeTransform();
+    this.activeToolId = id;
+    if (id !== 'annotation') this.selectedAnnotationId = null;
+  }
+
+  beginEmbeddedDocument(doc: PaintDocument): void {
+    this.cancelFreeTransform();
+    if (!this.embeddedRestore) {
+      this.embeddedRestore = {
+        doc: this.doc,
+        activeDocumentId: this.activeDocumentId,
+        selection: this.selection,
+        history: this.history,
+        viewport: this.viewport,
+        textEdit: this.textEdit,
+        rasterizePrompt: this.rasterizePrompt,
+      };
+    }
+    this.doc = doc;
+    this.activeDocumentId = null;
+    this.selection = null;
+    this.activeStroke = null;
+    this.textEdit = null;
+    this.freeTransform = null;
+    this.rasterizePrompt = null;
+    this.attachHistory(new History(60));
+    this.notify();
+  }
+
+  endEmbeddedDocument(): void {
+    const restore = this.embeddedRestore;
+    if (!restore) return;
+    this.embeddedRestore = null;
+    this.doc = restore.doc;
+    this.activeDocumentId = restore.activeDocumentId;
+    this.selection = restore.selection;
+    this.activeStroke = null;
+    this.textEdit = restore.textEdit;
+    this.freeTransform = null;
+    this.rasterizePrompt = restore.rasterizePrompt;
+    this.viewport = restore.viewport;
+    this.attachHistory(restore.history);
+    this.notify();
+    this.viewport?.invalidateComposite();
+    this.viewport?.invalidate();
   }
   swapColors(): void {
     const fg = this.foreground;
@@ -417,6 +497,7 @@ export class EditorStore implements ToolHost {
   }
 
   setDocument(doc: PaintDocument): void {
+    this.cancelFreeTransform();
     ui.showDocument();
     const session = this.makeSession(doc);
     const currentId = this.activeDocumentId;
@@ -445,6 +526,7 @@ export class EditorStore implements ToolHost {
     if (!session) return;
     ui.showDocument();
     if (session.id === this.activeDocumentId) return;
+    this.cancelFreeTransform();
     const current = this.activeDocument;
     if (current) current.selection = this.selection;
     this.activeDocumentId = session.id;
@@ -463,6 +545,7 @@ export class EditorStore implements ToolHost {
     const idx = this.documents.findIndex((d) => d.id === id);
     if (idx < 0) return;
     const wasActive = this.activeDocumentId === id;
+    if (wasActive) this.cancelFreeTransform();
     const next = this.documents.slice();
     next.splice(idx, 1);
     this.documents = next;
@@ -476,6 +559,7 @@ export class EditorStore implements ToolHost {
         this.selection = null;
         this.activeStroke = null;
         this.textEdit = null;
+        this.cancelFreeTransform();
         this.rasterizePrompt = null;
         this.attachHistory(new History(60));
         this.viewport?.invalidateComposite();
@@ -534,6 +618,8 @@ export class EditorStore implements ToolHost {
       active: doc.activeLayerId,
       w: doc.width,
       h: doc.height,
+      annotations: doc.annotations.map((item) => ({ ...item })),
+      annotationsVisible: doc.annotationsVisible,
     });
     const before = snap();
     mutate();
@@ -543,6 +629,8 @@ export class EditorStore implements ToolHost {
       doc.height = s.h;
       doc.layers = s.layers.slice();
       doc.activeLayerId = s.active;
+      doc.annotations = s.annotations.map((item) => ({ ...item }));
+      doc.annotationsVisible = s.annotationsVisible;
       this.bump();
       this.invalidate();
       if (refit) this.viewport?.fitToView();
@@ -578,6 +666,162 @@ export class EditorStore implements ToolHost {
   }
 
   // --- Image transforms (undoable) ---
+  private cloneLayerExact(layer: Layer): Layer {
+    const copy = new Layer(layer.width, layer.height, layer.name, layer.id, layer.x, layer.y);
+    copy.opacity = layer.opacity;
+    copy.visible = layer.visible;
+    copy.blendMode = layer.blendMode;
+    copy.sourceAssetId = layer.sourceAssetId;
+    copy.sourcePath = layer.sourcePath;
+    copy.kind = layer.kind;
+    copy.text = layer.text ? cloneModel(layer.text) : null;
+    copy.ctx.drawImage(layer.canvas, 0, 0);
+    copy.pixelRev = layer.pixelRev;
+    return copy;
+  }
+
+  private replaceLayerSnapshot(snapshot: Layer, fallbackIndex: number): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const idx = doc.indexOf(snapshot.id);
+    const at = idx >= 0 ? idx : Math.max(0, Math.min(fallbackIndex, doc.layers.length - 1));
+    const next = doc.layers.slice();
+    next[at] = this.cloneLayerExact(snapshot);
+    doc.layers = next;
+    doc.activeLayerId = snapshot.id;
+    this.bump();
+    this.invalidate();
+  }
+
+  private alphaBounds(layer: Layer): Rect | null {
+    const { width, height } = layer;
+    const data = layer.ctx.getImageData(0, 0, width, height).data;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (data[(y * width + x) * 4 + 3] === 0) continue;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+    return maxX < minX ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+  }
+
+  beginFreeTransform(): void {
+    if (this.textEdit) this.commitActiveText();
+    if (this.freeTransform) return;
+    const layer = this.activeLayer;
+    if (!layer) {
+      this.flash('No active layer');
+      return;
+    }
+    const bounds = this.alphaBounds(layer);
+    if (!bounds) {
+      this.flash('Active layer is empty');
+      return;
+    }
+    const source = createCanvas(bounds.w, bounds.h);
+    ctx2d(source).drawImage(layer.canvas, bounds.x, bounds.y, bounds.w, bounds.h, 0, 0, bounds.w, bounds.h);
+    layer.suppressed = true;
+    this.freeTransform = {
+      layerId: layer.id,
+      layerName: layer.name,
+      previewUrl: source.toDataURL('image/png'),
+      source,
+      sourceWidth: bounds.w,
+      sourceHeight: bounds.h,
+      centerX: layer.x + bounds.x + bounds.w / 2,
+      centerY: layer.y + bounds.y + bounds.h / 2,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+      opacity: layer.opacity,
+    };
+    this.notify();
+    this.invalidate();
+  }
+
+  updateFreeTransform(patch: Partial<Pick<FreeTransformSession, 'centerX' | 'centerY' | 'scaleX' | 'scaleY' | 'rotation'>>): void {
+    const t = this.freeTransform;
+    if (!t) return;
+    this.freeTransform = {
+      ...t,
+      ...patch,
+      scaleX: Math.max(0.02, patch.scaleX ?? t.scaleX),
+      scaleY: Math.max(0.02, patch.scaleY ?? t.scaleY),
+    };
+  }
+
+  private transformedLayerBounds(t: FreeTransformSession): Rect {
+    const hw = (t.sourceWidth * t.scaleX) / 2;
+    const hh = (t.sourceHeight * t.scaleY) / 2;
+    const cos = Math.cos(t.rotation);
+    const sin = Math.sin(t.rotation);
+    const corners = [
+      [-hw, -hh],
+      [hw, -hh],
+      [hw, hh],
+      [-hw, hh],
+    ].map(([x, y]) => ({ x: t.centerX + x * cos - y * sin, y: t.centerY + x * sin + y * cos }));
+    const minX = Math.floor(Math.min(...corners.map((p) => p.x)));
+    const minY = Math.floor(Math.min(...corners.map((p) => p.y)));
+    const maxX = Math.ceil(Math.max(...corners.map((p) => p.x)));
+    const maxY = Math.ceil(Math.max(...corners.map((p) => p.y)));
+    return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
+  }
+
+  commitFreeTransform(): void {
+    const t = this.freeTransform;
+    const doc = this.doc;
+    if (!t || !doc) return;
+    const idx = doc.indexOf(t.layerId);
+    const layer = idx >= 0 ? doc.layers[idx] : null;
+    this.freeTransform = null;
+    if (!layer) return;
+    const before = this.cloneLayerExact(layer);
+    const bounds = this.transformedLayerBounds(t);
+    layer.suppressed = false;
+    layer.x = bounds.x;
+    layer.y = bounds.y;
+    layer.canvas.width = bounds.w;
+    layer.canvas.height = bounds.h;
+    layer.ctx.clearRect(0, 0, bounds.w, bounds.h);
+    layer.ctx.save();
+    layer.ctx.imageSmoothingEnabled = true;
+    layer.ctx.imageSmoothingQuality = 'high';
+    layer.ctx.translate(t.centerX - bounds.x, t.centerY - bounds.y);
+    layer.ctx.rotate(t.rotation);
+    layer.ctx.scale(t.scaleX, t.scaleY);
+    layer.ctx.drawImage(t.source, -t.sourceWidth / 2, -t.sourceHeight / 2);
+    layer.ctx.restore();
+    layer.kind = 'raster';
+    layer.text = null;
+    layer.touch();
+    const after = this.cloneLayerExact(layer);
+    this.history.push({
+      label: 'Free Transform',
+      undo: () => this.replaceLayerSnapshot(before, idx),
+      redo: () => this.replaceLayerSnapshot(after, idx),
+    });
+    this.bump();
+    this.invalidate();
+  }
+
+  cancelFreeTransform(): void {
+    const t = this.freeTransform;
+    this.freeTransform = null;
+    if (!t) return;
+    const layer = this.doc?.layers.find((l) => l.id === t.layerId);
+    if (layer) layer.suppressed = false;
+    this.notify();
+    this.invalidate();
+  }
+
   cropToSelection(): void {
     const doc = this.doc;
     const sel = this.selection;
@@ -734,6 +978,86 @@ export class EditorStore implements ToolHost {
   }
   reorderLayer(from: number, to: number): void {
     this.structural('Reorder Layer', () => this.doc!.reorder(from, to));
+  }
+
+  selectAnnotation(id: string | null): void {
+    const doc = this.doc;
+    if (id && !doc?.annotations.some((item) => item.id === id)) return;
+    this.selectedAnnotationId = id;
+    if (id) this.setTool('annotation');
+    this.bump();
+  }
+
+  addAnnotation(
+    kind: AnnotationKind,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    text = this.annotationText,
+    options: Partial<Pick<AnnotationItem, 'rotation' | 'flipX' | 'flipY' | 'color'>> = {},
+  ): AnnotationItem | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    let created: AnnotationItem | null = null;
+    let createdId: string | null = null;
+    this.structural('Add Annotation', () => {
+      created = newAnnotation({
+        kind,
+        text,
+        x,
+        y,
+        width,
+        height,
+        rotation: options.rotation,
+        flipX: options.flipX,
+        flipY: options.flipY,
+        color: options.color ?? this.foregroundCss,
+      });
+      doc.annotations = [...doc.annotations, created];
+      doc.annotationsVisible = true;
+      createdId = created.id;
+    });
+    this.selectedAnnotationId = createdId;
+    return created;
+  }
+
+  updateAnnotation(id: string, patch: Partial<Omit<AnnotationItem, 'id'>>): void {
+    const doc = this.doc;
+    if (!doc) return;
+    this.structural('Edit Annotation', () => {
+      doc.annotations = doc.annotations.map((item) => item.id === id ? { ...item, ...patch } : item);
+    });
+  }
+
+  deleteAnnotation(id: string): void {
+    const doc = this.doc;
+    if (!doc) return;
+    this.structural('Delete Annotation', () => {
+      doc.annotations = doc.annotations.filter((item) => item.id !== id);
+    });
+    if (this.selectedAnnotationId === id) this.selectedAnnotationId = null;
+  }
+
+  setAnnotationsVisible(visible: boolean): void {
+    const doc = this.doc;
+    if (!doc) return;
+    doc.annotationsVisible = visible;
+    this.bump();
+  }
+
+  rasterizeAnnotations(): void {
+    const doc = this.doc;
+    if (!doc || !doc.annotations.some((item) => item.visible)) return;
+    this.structural('Rasterize Annotations', () => {
+      const layer = new Layer(doc.width, doc.height, 'Annotations');
+      for (const item of doc.annotations) {
+        if (item.visible) this.drawAnnotationToContext(layer.ctx, item);
+      }
+      layer.touch();
+      doc.push(layer);
+      doc.annotations = [];
+    });
   }
 
   mergeDown(id: string): void {
@@ -1134,6 +1458,114 @@ export class EditorStore implements ToolHost {
     layer.touch();
     this.bump();
     this.invalidate();
+  }
+
+  private drawAnnotationToContext(ctx: CanvasRenderingContext2D, item: AnnotationItem): void {
+    ctx.save();
+    ctx.translate(item.x + item.width / 2, item.y + item.height / 2);
+    ctx.rotate(item.rotation);
+    ctx.scale(item.flipX ? -1 : 1, item.flipY ? -1 : 1);
+    ctx.strokeStyle = item.color;
+    ctx.fillStyle = item.color;
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const x0 = -item.width / 2;
+    const y0 = 0;
+    const x1 = item.width / 2;
+    const y1 = 0;
+    if (item.kind === 'arrow' || item.kind === 'divider') {
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      if (item.kind === 'arrow') {
+        const angle = Math.atan2(y1 - y0, x1 - x0);
+        const size = 18;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1 - Math.cos(angle - Math.PI / 6) * size, y1 - Math.sin(angle - Math.PI / 6) * size);
+        ctx.lineTo(x1 - Math.cos(angle + Math.PI / 6) * size, y1 - Math.sin(angle + Math.PI / 6) * size);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+    const w = Math.max(34, item.width);
+    const h = Math.max(26, item.height);
+    const x = -w / 2;
+    const y = -h / 2;
+    if (item.kind === 'badge') {
+      const r = Math.max(6, Math.min(16, h / 2));
+      const radius = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.lineTo(x + w - radius, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+      ctx.lineTo(x + w, y + h - radius);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+      ctx.lineTo(x + radius, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+      ctx.lineTo(x, y + radius);
+      ctx.quadraticCurveTo(x, y, x + radius, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#111111';
+      ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(x + 14, 0, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `700 ${Math.max(13, Math.min(22, h * 0.42))}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(item.text, 8, 0, Math.max(10, w - 30));
+      ctx.restore();
+      return;
+    }
+
+    if (item.kind === 'note') {
+      ctx.fillStyle = '#fff5a8';
+      ctx.strokeStyle = '#111111';
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 5);
+      ctx.fill();
+      ctx.stroke();
+      const fold = Math.min(28, w * 0.28, h * 0.42);
+      ctx.fillStyle = '#eadc73';
+      ctx.beginPath();
+      ctx.moveTo(x + w - fold, y + h);
+      ctx.lineTo(x + w, y + h - fold);
+      ctx.lineTo(x + w, y + h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.94)';
+      ctx.strokeStyle = '#111111';
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, item.kind === 'callout' ? 14 : 7);
+      ctx.fill();
+      ctx.stroke();
+      if (item.kind === 'callout') {
+        ctx.beginPath();
+        ctx.moveTo(x + 18, y + h - 1);
+        ctx.lineTo(x + 35, y + h + 18);
+        ctx.lineTo(x + 45, y + h - 1);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    ctx.fillStyle = '#111111';
+    ctx.font = `${Math.max(13, Math.min(24, h * 0.38))}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(item.text, x + 10, y + h / 2, Math.max(10, w - 20));
+    ctx.restore();
   }
 
   /** Insert an external image as a new, centered layer (undoable). */

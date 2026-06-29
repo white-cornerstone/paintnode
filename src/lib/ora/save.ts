@@ -33,12 +33,12 @@ function buildStackXml(
     const l = doc.layers[i];
     const src = srcMap.get(l.id)!;
     const textPath = textMap.get(l.id);
-    // Custom cx-* attributes; other ORA readers ignore them and use the rasterized PNG.
+    // Custom PaintNode attributes; other ORA readers ignore them and use the rasterized PNG.
     const extraAttrs = [
-      l.sourceAssetId ? `cx-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
-      l.sourcePath ? `cx-source-path="${escapeXml(l.sourcePath)}"` : '',
-      l.kind === 'text' ? `cx-layer-kind="text"` : '',
-      textPath ? `cx-text-data="${textPath}"` : '',
+      l.sourceAssetId ? `paintnode-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
+      l.sourcePath ? `paintnode-source-path="${escapeXml(l.sourcePath)}"` : '',
+      l.kind === 'text' ? `paintnode-layer-kind="text"` : '',
+      textPath ? `paintnode-text-data="${textPath}"` : '',
     ]
       .filter(Boolean)
       .join(' ');
@@ -107,6 +107,12 @@ export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = [
     });
     files['fonts/manifest.json'] = enc.encode(JSON.stringify(manifest));
   }
+
+  files['paintnode/annotations.json'] = enc.encode(JSON.stringify({
+    version: 1,
+    visible: doc.annotationsVisible,
+    annotations: doc.annotations,
+  }));
 
   const zipped = zipSync(files, { level: 6 });
   return new Blob([zipped], { type: 'image/openraster' });

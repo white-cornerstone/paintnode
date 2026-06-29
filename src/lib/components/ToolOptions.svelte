@@ -6,6 +6,8 @@
   const tool = $derived(editor.activeToolId);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
+  const hasStoryboardEdit = $derived(hasWorkflow && workflow.storyboardEditing);
+  const hasDrawingSurface = $derived(hasDocument || hasStoryboardEdit);
   // Tools that share the round-brush controls (size / hardness / strength).
   const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge'];
   const usesBrush = $derived(brushTools.includes(tool));
@@ -35,10 +37,11 @@
           ? 'Output'
           : 'None',
   );
+  const selectedOutput = $derived(workflow.selectedOutputNode());
 </script>
 
 <div class="options">
-  {#if hasWorkflow}
+  {#if hasWorkflow && !hasStoryboardEdit}
     <span class="tool-name">{workflowToolNames[workflow.tool]}</span>
     {#if workflow.tool === 'zoom'}
       <span class="divider"></span>
@@ -64,6 +67,21 @@
         oninput={(event) => workflow.setSelectedLabel(event.currentTarget.value)}
       />
     </label>
+    {#if workflow.selection?.kind === 'composition'}
+      <label class="opt">
+        Storyboard
+        <input type="number" min="64" class="num wide" value={workflow.storyboardWidth} oninput={(event) => workflow.setStoryboardSize(event.currentTarget.valueAsNumber, workflow.storyboardHeight)} />
+        <span class="unit">x</span>
+        <input type="number" min="64" class="num wide" value={workflow.storyboardHeight} oninput={(event) => workflow.setStoryboardSize(workflow.storyboardWidth, event.currentTarget.valueAsNumber)} />
+      </label>
+    {:else if workflow.selection?.kind === 'output' && selectedOutput}
+      <label class="opt">
+        Final
+        <input type="number" min="64" class="num wide" value={selectedOutput.finalWidth} oninput={(event) => workflow.setOutputFinalSize(selectedOutput.id, event.currentTarget.valueAsNumber, selectedOutput.finalHeight)} />
+        <span class="unit">x</span>
+        <input type="number" min="64" class="num wide" value={selectedOutput.finalHeight} oninput={(event) => workflow.setOutputFinalSize(selectedOutput.id, selectedOutput.finalWidth, event.currentTarget.valueAsNumber)} />
+      </label>
+    {/if}
     <div class="palette" aria-label="Node color palette">
       {#each nodePalettes as color (color)}
         <button
@@ -75,54 +93,73 @@
         ></button>
       {/each}
     </div>
-  {:else if hasDocument}
-    <span class="tool-name">{editor.activeTool.name}</span>
-    <span class="divider"></span>
+  {:else if hasDrawingSurface}
+    {#if editor.freeTransform}
+      <span class="tool-name">Free Transform</span>
+      <span class="divider"></span>
+      <div class="opt">
+        W
+        <span class="pill">{Math.round(editor.freeTransform.sourceWidth * editor.freeTransform.scaleX)}px</span>
+      </div>
+      <div class="opt">
+        H
+        <span class="pill">{Math.round(editor.freeTransform.sourceHeight * editor.freeTransform.scaleY)}px</span>
+      </div>
+      <div class="opt">
+        Angle
+        <span class="pill">{Math.round((editor.freeTransform.rotation * 180) / Math.PI)}°</span>
+      </div>
+      <button onclick={() => editor.cancelFreeTransform()}>Cancel</button>
+      <button class="primary-option" onclick={() => editor.commitFreeTransform()}>Done</button>
+      <span class="hint">Drag handles to scale, drag the round handle to rotate, press Enter to apply.</span>
+    {:else}
+      <span class="tool-name">{editor.activeTool.name}</span>
+      <span class="divider"></span>
 
-    {#if usesBrush}
-      <label class="opt">
-        Size
-        <input type="range" min="1" max="500" bind:value={editor.brushSize} />
-        <input type="number" min="1" max="2000" bind:value={editor.brushSize} class="num" />
-        <span class="unit">px</span>
-      </label>
-      <label class="opt">
-        Hardness
-        <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
-        <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
-      </label>
-      <label class="opt">
-        {strengthLabel}
-        <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
-        <span class="val">{Math.round(editor.brushOpacity * 100)}%</span>
-      </label>
-      {#if tool === 'clone'}
-        <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
-        <span class="hint">Alt-click to set the source, then paint.</span>
-      {:else if tool === 'dodge' || tool === 'burn'}
+      {#if usesBrush}
         <label class="opt">
-          Range
-          <select bind:value={editor.toneRange}>
-            <option value="shadows">Shadows</option>
-            <option value="midtones">Midtones</option>
-            <option value="highlights">Highlights</option>
-          </select>
+          Size
+          <input type="range" min="1" max="500" bind:value={editor.brushSize} />
+          <input type="number" min="1" max="2000" bind:value={editor.brushSize} class="num" />
+          <span class="unit">px</span>
         </label>
-        <span class="hint">Drag to {tool === 'dodge' ? 'lighten' : 'darken'} the {editor.toneRange}.</span>
-      {:else if tool === 'sponge'}
         <label class="opt">
-          Mode
-          <select bind:value={editor.spongeMode}>
-            <option value="saturate">Saturate</option>
-            <option value="desaturate">Desaturate</option>
-          </select>
+          Hardness
+          <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
+          <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
         </label>
-        <span class="hint">Drag to {editor.spongeMode === 'saturate' ? 'boost' : 'reduce'} saturation.</span>
-      {:else if tool === 'smudge'}
-        <span class="hint">Drag to push pixels along the stroke.</span>
-      {:else if tool === 'blur' || tool === 'sharpen'}
-        <span class="hint">Drag to {tool} pixels under the brush.</span>
-      {/if}
+        <label class="opt">
+          {strengthLabel}
+          <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
+          <span class="val">{Math.round(editor.brushOpacity * 100)}%</span>
+        </label>
+        {#if tool === 'clone'}
+          <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
+          <span class="hint">Alt-click to set the source, then paint.</span>
+        {:else if tool === 'dodge' || tool === 'burn'}
+          <label class="opt">
+            Range
+            <select bind:value={editor.toneRange}>
+              <option value="shadows">Shadows</option>
+              <option value="midtones">Midtones</option>
+              <option value="highlights">Highlights</option>
+            </select>
+          </label>
+          <span class="hint">Drag to {tool === 'dodge' ? 'lighten' : 'darken'} the {editor.toneRange}.</span>
+        {:else if tool === 'sponge'}
+          <label class="opt">
+            Mode
+            <select bind:value={editor.spongeMode}>
+              <option value="saturate">Saturate</option>
+              <option value="desaturate">Desaturate</option>
+            </select>
+          </label>
+          <span class="hint">Drag to {editor.spongeMode === 'saturate' ? 'boost' : 'reduce'} saturation.</span>
+        {:else if tool === 'smudge'}
+          <span class="hint">Drag to push pixels along the stroke.</span>
+        {:else if tool === 'blur' || tool === 'sharpen'}
+          <span class="hint">Drag to {tool} pixels under the brush.</span>
+        {/if}
     {:else if tool === 'marquee'}
       <label class="opt">
         Shape
@@ -183,6 +220,35 @@
         </label>
       {/if}
       <span class="hint">Drag to draw · Shift constrains</span>
+    {:else if tool === 'annotation'}
+      <label class="opt">
+        Type
+        <select bind:value={editor.annotationType}>
+          <option value="arrow">Arrow</option>
+          <option value="note">Memo</option>
+          <option value="callout">Callout</option>
+          <option value="badge">Badge</option>
+          <option value="divider">Divider</option>
+        </select>
+      </label>
+      <label class="opt">
+        Width
+        <input type="range" min="1" max="40" bind:value={editor.shapeStrokeWidth} />
+        <span class="val">{editor.shapeStrokeWidth}px</span>
+      </label>
+      {#if editor.annotationType !== 'arrow' && editor.annotationType !== 'divider'}
+        <label class="opt">
+          Text
+          <input class="annotation-text" bind:value={editor.annotationText} placeholder="annotation text" />
+        </label>
+      {/if}
+      {#if editor.doc}
+        <button onclick={() => editor.setAnnotationsVisible(!editor.doc!.annotationsVisible)}>
+          {editor.doc.annotationsVisible ? 'Hide' : 'Show'}
+        </button>
+        <button onclick={() => editor.rasterizeAnnotations()} disabled={!editor.doc.annotations.length}>Rasterize</button>
+      {/if}
+      <span class="hint">Drag to place an editable overlay annotation.</span>
     {:else if tool === 'gradient'}
       <label class="opt">
         Type
@@ -210,6 +276,7 @@
       <span class="hint">
         Click to zoom {editor.effectiveZoomMode} · hold Alt to invert · ⌘+ / ⌘−
       </span>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -248,6 +315,9 @@
   .num {
     width: 54px;
   }
+  .num.wide {
+    width: 70px;
+  }
   .val {
     width: 38px;
     color: var(--text);
@@ -268,8 +338,16 @@
     background: var(--bg-input);
     color: var(--text);
   }
+  .primary-option {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
   .node-name {
     width: 180px;
+  }
+  .annotation-text {
+    width: 210px;
   }
   .palette {
     display: inline-flex;

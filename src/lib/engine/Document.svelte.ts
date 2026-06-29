@@ -1,5 +1,6 @@
 import { Layer } from './Layer.svelte';
 import { uid } from './types';
+import { coerceAnnotations, type AnnotationItem } from './annotations';
 
 /**
  * A document: an ordered stack of layers (index 0 = bottom of the stack) plus the
@@ -12,6 +13,8 @@ export class PaintDocument {
   height = $state(1);
   layers = $state<Layer[]>([]);
   activeLayerId = $state<string | null>(null);
+  annotations = $state<AnnotationItem[]>([]);
+  annotationsVisible = $state(true);
 
   constructor(width: number, height: number, name = 'Untitled', id?: string) {
     this.id = id ?? uid('doc');
@@ -112,6 +115,8 @@ export class PaintDocument {
     const copy = new PaintDocument(this.width, this.height, this.name, uid('doc'));
     copy.layers = this.layers.map((l) => l.clone(l.name));
     copy.activeLayerId = copy.layers[copy.layers.length - 1]?.id ?? null;
+    copy.annotations = coerceAnnotations(this.annotations);
+    copy.annotationsVisible = this.annotationsVisible;
     return copy;
   }
 }

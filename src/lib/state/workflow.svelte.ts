@@ -1,6 +1,7 @@
 import type { ProjectAsset } from '../integrations/desktop';
 import { project } from './project.svelte';
 import { ui } from './ui.svelte';
+import { coerceAnnotations, type AnnotationItem } from '../engine/annotations';
 
 export interface WorkflowAssetNode {
   id: string;
@@ -22,9 +23,24 @@ export interface WorkflowConnection {
   to: string;
 }
 
+export interface WorkflowOutputNode {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  finalWidth: number;
+  finalHeight: number;
+  outputAssetId: string | null;
+  outputRelativePath: string | null;
+}
+
 export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
-export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output' };
+export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output'; id: string };
 export type WorkflowZoomMode = 'in' | 'out';
+export type StoryboardTool = 'brush' | 'eraser';
 
 export interface WorkflowFile {
   version: 1;
@@ -42,10 +58,17 @@ export interface WorkflowFile {
   outputColor?: string;
   outputX: number;
   outputY: number;
+  outputNodes?: WorkflowOutputNode[];
   panX?: number;
   panY?: number;
   zoom?: number;
   storyboardDataUrl: string | null;
+  storyboardWidth?: number;
+  storyboardHeight?: number;
+  storyboardOraPath?: string | null;
+  storyboardAnnotations?: string[];
+  storyboardAnnotationItems?: AnnotationItem[];
+  storyboardAnnotationsVisible?: boolean;
   nodes: WorkflowAssetNode[];
   connections?: WorkflowConnection[];
   outputAssetId: string | null;
@@ -62,6 +85,22 @@ function cleanWorkflowName(name: string): string {
   return trimmed || 'Untitled Workflow';
 }
 
+function defaultOutputNode(): WorkflowOutputNode {
+  return {
+    id: 'output',
+    name: '',
+    x: 895,
+    y: 96,
+    width: 210,
+    height: 232,
+    color: '#3a3c42',
+    finalWidth: 1024,
+    finalHeight: 1024,
+    outputAssetId: null,
+    outputRelativePath: null,
+  };
+}
+
 class WorkflowStore {
   active = $state(false);
   name = $state('Untitled Workflow');
@@ -69,6 +108,8 @@ class WorkflowStore {
   tool = $state<WorkflowTool>('hand');
   zoomMode = $state<WorkflowZoomMode>('in');
   selection = $state<WorkflowSelection | null>({ kind: 'composition' });
+  storyboardEditing = $state(false);
+  storyboardTool = $state<StoryboardTool>('brush');
   prompt = $state('');
   compositionName = $state('');
   compositionWidth = $state(340);
@@ -82,10 +123,17 @@ class WorkflowStore {
   outputColor = $state('#3a3c42');
   outputX = $state(895);
   outputY = $state(96);
+  outputNodes = $state<WorkflowOutputNode[]>([defaultOutputNode()]);
   panX = $state(0);
   panY = $state(0);
   zoom = $state(1);
   storyboardDataUrl = $state<string | null>(null);
+  storyboardWidth = $state(1024);
+  storyboardHeight = $state(768);
+  storyboardOraPath = $state<string | null>(null);
+  storyboardAnnotations = $state<string[]>([]);
+  storyboardAnnotationItems = $state<AnnotationItem[]>([]);
+  storyboardAnnotationsVisible = $state(true);
   nodes = $state<WorkflowAssetNode[]>([]);
   connections = $state<WorkflowConnection[]>([]);
   outputAssetId = $state<string | null>(null);
@@ -106,6 +154,8 @@ class WorkflowStore {
     this.tool = 'hand';
     this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
+    this.storyboardEditing = false;
+    this.storyboardTool = 'brush';
     this.prompt = '';
     this.compositionName = '';
     this.compositionWidth = 340;
@@ -119,12 +169,19 @@ class WorkflowStore {
     this.outputColor = '#3a3c42';
     this.outputX = 895;
     this.outputY = 96;
+    this.outputNodes = [defaultOutputNode()];
     this.panX = 0;
     this.panY = 0;
     this.zoom = 1;
     this.storyboardDataUrl = null;
+    this.storyboardWidth = 1024;
+    this.storyboardHeight = 768;
+    this.storyboardOraPath = null;
+    this.storyboardAnnotations = [];
+    this.storyboardAnnotationItems = [];
+    this.storyboardAnnotationsVisible = true;
     this.nodes = [];
-    this.connections = [];
+    this.connections = [{ id: id('connection'), from: 'composition', to: 'output' }];
     this.outputAssetId = null;
     this.outputRelativePath = null;
     this.rev = 0;
@@ -153,6 +210,18 @@ class WorkflowStore {
 
   setZoomMode(mode: WorkflowZoomMode): void {
     this.zoomMode = mode;
+  }
+
+  setStoryboardEditing(editing: boolean): void {
+    this.storyboardEditing = editing;
+    if (editing) {
+      this.selection = { kind: 'composition' };
+      this.tool = 'hand';
+    }
+  }
+
+  setStoryboardTool(tool: StoryboardTool): void {
+    this.storyboardTool = tool;
   }
 
   select(selection: WorkflowSelection | null): void {
@@ -239,14 +308,83 @@ class WorkflowStore {
   }
 
   moveOutput(x: number, y: number): void {
-    this.outputX = Math.round(x);
-    this.outputY = Math.round(y);
+    this.moveOutputNode('output', x, y);
+    this.outputX = this.outputNodes[0]?.x ?? Math.round(x);
+    this.outputY = this.outputNodes[0]?.y ?? Math.round(y);
     this.bump();
   }
 
   resizeOutput(width: number, height: number): void {
-    this.outputWidth = Math.max(170, Math.round(width));
-    this.outputHeight = Math.max(150, Math.round(height));
+    this.resizeOutputNode('output', width, height);
+    this.outputWidth = this.outputNodes[0]?.width ?? Math.max(170, Math.round(width));
+    this.outputHeight = this.outputNodes[0]?.height ?? Math.max(150, Math.round(height));
+    this.bump();
+  }
+
+  addOutputNode(x = this.outputX + 280, y = this.outputY, width = this.outputWidth, height = this.outputHeight): WorkflowOutputNode {
+    const base = defaultOutputNode();
+    const node: WorkflowOutputNode = {
+      ...base,
+      id: id('output'),
+      name: `Output ${this.outputNodes.length + 1}`,
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.max(190, Math.round(width)),
+      height: Math.max(190, Math.round(height)),
+    };
+    this.outputNodes = [...this.outputNodes, node];
+    this.connect('composition', node.id);
+    this.selection = { kind: 'output', id: node.id };
+    this.tool = 'hand';
+    return node;
+  }
+
+  removeOutputNode(id: string): void {
+    if (this.outputNodes.length <= 1) return;
+    this.outputNodes = this.outputNodes.filter((node) => node.id !== id);
+    this.connections = this.connections.filter((connection) => connection.from !== id && connection.to !== id);
+    if (this.selection?.kind === 'output' && this.selection.id === id) this.selection = { kind: 'output', id: this.outputNodes[0].id };
+    this.bump();
+  }
+
+  outputNode(id: string | null | undefined): WorkflowOutputNode | null {
+    return this.outputNodes.find((node) => node.id === id) ?? null;
+  }
+
+  selectedOutputNode(): WorkflowOutputNode | null {
+    if (this.selection?.kind === 'output') return this.outputNode(this.selection.id);
+    return this.outputNodes[0] ?? null;
+  }
+
+  moveOutputNode(id: string, x: number, y: number): void {
+    const node = this.outputNode(id);
+    if (!node) return;
+    node.x = Math.round(x);
+    node.y = Math.round(y);
+    if (id === 'output') {
+      this.outputX = node.x;
+      this.outputY = node.y;
+    }
+    this.bump();
+  }
+
+  resizeOutputNode(id: string, width: number, height: number): void {
+    const node = this.outputNode(id);
+    if (!node) return;
+    node.width = Math.max(190, Math.round(width));
+    node.height = Math.max(190, Math.round(height));
+    if (id === 'output') {
+      this.outputWidth = node.width;
+      this.outputHeight = node.height;
+    }
+    this.bump();
+  }
+
+  setOutputFinalSize(id: string, width: number, height: number): void {
+    const node = this.outputNode(id);
+    if (!node) return;
+    node.finalWidth = Math.max(64, Math.round(width));
+    node.finalHeight = Math.max(64, Math.round(height));
     this.bump();
   }
 
@@ -352,7 +490,7 @@ class WorkflowStore {
   }
 
   private workflowNodeExists(nodeId: string): boolean {
-    return nodeId === 'composition' || nodeId === 'output' || this.nodes.some((node) => node.id === nodeId);
+    return nodeId === 'composition' || this.outputNodes.some((node) => node.id === nodeId) || this.nodes.some((node) => node.id === nodeId);
   }
 
   setPrompt(prompt: string): void {
@@ -362,6 +500,35 @@ class WorkflowStore {
 
   setStoryboardDataUrl(dataUrl: string | null): void {
     this.storyboardDataUrl = dataUrl;
+    this.bump();
+  }
+
+  setStoryboardSize(width: number, height: number): void {
+    this.storyboardWidth = Math.max(64, Math.round(width));
+    this.storyboardHeight = Math.max(64, Math.round(height));
+    this.bump();
+  }
+
+  setStoryboardOraPath(path: string | null): void {
+    this.storyboardOraPath = path;
+    this.bump();
+  }
+
+  setStoryboardAnnotations(annotations: string[]): void {
+    this.storyboardAnnotations = annotations
+      .map((annotation) => annotation.trim())
+      .filter(Boolean)
+      .slice(0, 24);
+    this.bump();
+  }
+
+  setStoryboardAnnotationItems(items: AnnotationItem[]): void {
+    this.storyboardAnnotationItems = coerceAnnotations(items);
+    this.bump();
+  }
+
+  setStoryboardAnnotationsVisible(visible: boolean): void {
+    this.storyboardAnnotationsVisible = visible;
     this.bump();
   }
 
@@ -378,7 +545,7 @@ class WorkflowStore {
       return this.nodes.find((node) => node.id === selection.id)?.name ?? '';
     }
     if (selection?.kind === 'composition') return this.compositionName;
-    if (selection?.kind === 'output') return this.outputName;
+    if (selection?.kind === 'output') return this.outputNode(selection.id)?.name ?? '';
     return '';
   }
 
@@ -388,7 +555,7 @@ class WorkflowStore {
       return this.nodes.find((node) => node.id === selection.id)?.color ?? '#3a3c42';
     }
     if (selection?.kind === 'composition') return this.compositionColor;
-    if (selection?.kind === 'output') return this.outputColor;
+    if (selection?.kind === 'output') return this.outputNode(selection.id)?.color ?? '#3a3c42';
     return '#3a3c42';
   }
 
@@ -401,7 +568,10 @@ class WorkflowStore {
     } else if (selection?.kind === 'composition') {
       this.compositionName = name.trim();
     } else if (selection?.kind === 'output') {
-      this.outputName = name.trim();
+      const node = this.outputNode(selection.id);
+      if (!node) return;
+      node.name = name.trim();
+      if (node.id === 'output') this.outputName = node.name;
     } else {
       return;
     }
@@ -417,16 +587,26 @@ class WorkflowStore {
     } else if (selection?.kind === 'composition') {
       this.compositionColor = color;
     } else if (selection?.kind === 'output') {
-      this.outputColor = color;
+      const node = this.outputNode(selection.id);
+      if (!node) return;
+      node.color = color;
+      if (node.id === 'output') this.outputColor = color;
     } else {
       return;
     }
     this.bump();
   }
 
-  setOutput(asset: ProjectAsset | null): void {
-    this.outputAssetId = asset?.id ?? null;
-    this.outputRelativePath = asset?.relativePath ?? null;
+  setOutput(asset: ProjectAsset | null, outputId = this.selectedOutputNode()?.id ?? 'output'): void {
+    const node = this.outputNode(outputId);
+    if (node) {
+      node.outputAssetId = asset?.id ?? null;
+      node.outputRelativePath = asset?.relativePath ?? null;
+    }
+    if (outputId === 'output' || !node) {
+      this.outputAssetId = asset?.id ?? null;
+      this.outputRelativePath = asset?.relativePath ?? null;
+    }
     this.bump();
   }
 
@@ -447,10 +627,17 @@ class WorkflowStore {
       outputColor: this.outputColor,
       outputX: this.outputX,
       outputY: this.outputY,
+      outputNodes: this.outputNodes.map((node) => ({ ...node })),
       panX: this.panX,
       panY: this.panY,
       zoom: this.zoom,
       storyboardDataUrl: this.storyboardDataUrl,
+      storyboardWidth: this.storyboardWidth,
+      storyboardHeight: this.storyboardHeight,
+      storyboardOraPath: this.storyboardOraPath,
+      storyboardAnnotations: this.storyboardAnnotations,
+      storyboardAnnotationItems: this.storyboardAnnotationItems,
+      storyboardAnnotationsVisible: this.storyboardAnnotationsVisible,
       nodes: this.nodes.map((node) => ({ ...node })),
       connections: this.connections.map((connection) => ({ ...connection })),
       outputAssetId: this.outputAssetId,
@@ -466,13 +653,15 @@ class WorkflowStore {
     const text = new TextDecoder().decode(bytes);
     const parsed = JSON.parse(text) as Partial<WorkflowFile>;
     if (parsed.version !== 1 || !Array.isArray(parsed.nodes)) {
-      throw new Error('Workflow file is not a supported CX Paint workflow.');
+      throw new Error('Workflow file is not a supported PaintNode workflow.');
     }
     this.active = true;
     ui.showWorkflow();
     this.tool = 'hand';
     this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
+    this.storyboardEditing = false;
+    this.storyboardTool = 'brush';
     this.name = cleanWorkflowName(parsed.name ?? fallbackName);
     this.savedPath = savedPath;
     this.prompt = parsed.prompt ?? '';
@@ -488,10 +677,48 @@ class WorkflowStore {
     this.outputColor = parsed.outputColor ?? '#3a3c42';
     this.outputX = Number.isFinite(parsed.outputX) ? Math.round(parsed.outputX!) : 895;
     this.outputY = Number.isFinite(parsed.outputY) ? Math.round(parsed.outputY!) : 96;
+    const legacyOutput = defaultOutputNode();
+    legacyOutput.name = parsed.outputName ?? '';
+    legacyOutput.width = Number.isFinite(parsed.outputWidth) ? Math.max(190, Math.round(parsed.outputWidth!)) : 210;
+    legacyOutput.height = Number.isFinite(parsed.outputHeight) ? Math.max(190, Math.round(parsed.outputHeight!)) : 232;
+    legacyOutput.color = parsed.outputColor ?? '#3a3c42';
+    legacyOutput.x = this.outputX;
+    legacyOutput.y = this.outputY;
+    legacyOutput.outputAssetId = parsed.outputAssetId ?? null;
+    legacyOutput.outputRelativePath = parsed.outputRelativePath ?? null;
+    this.outputNodes = Array.isArray(parsed.outputNodes) && parsed.outputNodes.length
+      ? parsed.outputNodes.map((node, index) => ({
+        id: node.id || (index === 0 ? 'output' : id('output')),
+        name: node.name ?? (index === 0 ? '' : `Output ${index + 1}`),
+        x: Number.isFinite(node.x) ? Math.round(node.x) : legacyOutput.x + index * 280,
+        y: Number.isFinite(node.y) ? Math.round(node.y) : legacyOutput.y,
+        width: Number.isFinite(node.width) ? Math.max(190, Math.round(node.width)) : legacyOutput.width,
+        height: Number.isFinite(node.height) ? Math.max(190, Math.round(node.height)) : legacyOutput.height,
+        color: node.color || legacyOutput.color,
+        finalWidth: Number.isFinite(node.finalWidth) ? Math.max(64, Math.round(node.finalWidth)) : legacyOutput.finalWidth,
+        finalHeight: Number.isFinite(node.finalHeight) ? Math.max(64, Math.round(node.finalHeight)) : legacyOutput.finalHeight,
+        outputAssetId: node.outputAssetId ?? (index === 0 ? legacyOutput.outputAssetId : null),
+        outputRelativePath: node.outputRelativePath ?? (index === 0 ? legacyOutput.outputRelativePath : null),
+      }))
+      : [legacyOutput];
+    this.outputName = this.outputNodes[0]?.name ?? '';
+    this.outputWidth = this.outputNodes[0]?.width ?? legacyOutput.width;
+    this.outputHeight = this.outputNodes[0]?.height ?? legacyOutput.height;
+    this.outputColor = this.outputNodes[0]?.color ?? legacyOutput.color;
+    this.outputX = this.outputNodes[0]?.x ?? legacyOutput.x;
+    this.outputY = this.outputNodes[0]?.y ?? legacyOutput.y;
     this.panX = Number.isFinite(parsed.panX) ? Math.round(parsed.panX!) : 0;
     this.panY = Number.isFinite(parsed.panY) ? Math.round(parsed.panY!) : 0;
     this.zoom = Number.isFinite(parsed.zoom) ? Math.min(4, Math.max(0.2, Number(parsed.zoom!.toFixed(3)))) : 1;
     this.storyboardDataUrl = parsed.storyboardDataUrl ?? null;
+    this.storyboardWidth = Number.isFinite(parsed.storyboardWidth) ? Math.max(64, Math.round(parsed.storyboardWidth!)) : 1024;
+    this.storyboardHeight = Number.isFinite(parsed.storyboardHeight) ? Math.max(64, Math.round(parsed.storyboardHeight!)) : 768;
+    this.storyboardOraPath = parsed.storyboardOraPath ?? null;
+    this.storyboardAnnotations = Array.isArray(parsed.storyboardAnnotations)
+      ? parsed.storyboardAnnotations.map((annotation) => String(annotation).trim()).filter(Boolean).slice(0, 24)
+      : [];
+    this.storyboardAnnotationItems = coerceAnnotations(parsed.storyboardAnnotationItems);
+    this.storyboardAnnotationsVisible = parsed.storyboardAnnotationsVisible !== false;
     this.nodes = parsed.nodes.map((node, index) => ({
       id: node.id || id('asset'),
       assetId: node.assetId ?? null,
@@ -515,9 +742,13 @@ class WorkflowStore {
       this.connections = this.nodes
         .filter((node) => node.included)
         .map((node) => ({ id: id('connection'), from: node.id, to: 'composition' }));
+      this.connections = [
+        ...this.connections,
+        ...this.outputNodes.map((node) => ({ id: id('connection'), from: 'composition', to: node.id })),
+      ];
     }
-    this.outputAssetId = parsed.outputAssetId ?? null;
-    this.outputRelativePath = parsed.outputRelativePath ?? null;
+    this.outputAssetId = this.outputNodes[0]?.outputAssetId ?? parsed.outputAssetId ?? null;
+    this.outputRelativePath = this.outputNodes[0]?.outputRelativePath ?? parsed.outputRelativePath ?? null;
     this.rev = 0;
     this.savedRev = 0;
   }

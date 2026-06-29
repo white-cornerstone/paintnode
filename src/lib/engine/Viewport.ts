@@ -66,14 +66,24 @@ export class Viewport {
     this.checkerSrc = buildChecker();
   }
 
-  resize(): void {
+  resize(options: { cssWidth?: number; cssHeight?: number; renderNow?: boolean } = {}): void {
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
-    const h = Math.max(1, Math.floor(this.canvas.clientHeight * dpr));
+    const cssWidth = options.cssWidth ?? this.canvas.clientWidth;
+    const cssHeight = options.cssHeight ?? this.canvas.clientHeight;
+    const w = Math.max(1, Math.floor(cssWidth * dpr));
+    const h = Math.max(1, Math.floor(cssHeight * dpr));
     this.dpr = dpr;
+    let changed = false;
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;
       this.canvas.height = h;
+      changed = true;
+    }
+    if (options.renderNow && changed) {
+      if (this.rafId) cancelAnimationFrame(this.rafId);
+      this.rafId = 0;
+      this.render();
+      return;
     }
     this.invalidate();
   }

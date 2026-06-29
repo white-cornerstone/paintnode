@@ -1,5 +1,5 @@
 {
-  "name": "cx-paint",
+  "name": "paintnode",
   "version": "0.1.0",
   "private": true,
   "description": "A backend-free, Photoshop-like raster image editor for the web using the OpenRaster (.ora) format.",
@@ -30,6 +30,7 @@
     "@tauri-apps/api": "^2.11.1",
     "@xyflow/svelte": "^1.6.1",
     "@xyflow/system": "^0.0.78",
-    "fflate": "0.8.3"
+    "fflate": "0.8.3",
+    "roughjs": "^4.6.6"
   }
 }

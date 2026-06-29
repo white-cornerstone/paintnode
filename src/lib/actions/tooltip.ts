@@ -19,7 +19,7 @@ let current: HTMLElement | null = null;
 function ensureEl(): HTMLDivElement {
   if (tipEl) return tipEl;
   const el = document.createElement('div');
-  el.className = 'cx-tooltip';
+  el.className = 'paintnode-tooltip';
   el.setAttribute('role', 'tooltip');
   document.body.appendChild(el);
   tipEl = el;

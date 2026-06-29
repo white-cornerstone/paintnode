@@ -105,7 +105,7 @@ select {
 }
 
 /* Custom tooltip (rendered to <body> by use:tooltip) */
-.cx-tooltip {
+.paintnode-tooltip {
   position: fixed;
   top: 0;
   left: 0;
@@ -127,7 +127,7 @@ select {
     transform 90ms ease;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
-.cx-tooltip.visible {
+.paintnode-tooltip.visible {
   opacity: 1;
   transform: translateY(0);
 }

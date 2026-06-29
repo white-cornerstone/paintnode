@@ -5,6 +5,7 @@ import { clamp, oraToBlend } from '../engine/types';
 import { deserializeModel, type TextModel } from '../engine/text/model';
 import { fonts } from '../state/fonts.svelte';
 import { bytesToBitmap } from '../io';
+import { coerceAnnotations } from '../engine/annotations';
 
 /** Parse an OpenRaster (.ora) file into a PaintDocument. Nested group stacks are flattened. */
 export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
@@ -45,13 +46,13 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     const x = parseFloat(el.getAttribute('x') || '0') || 0;
     const y = parseFloat(el.getAttribute('y') || '0') || 0;
     const opacityRaw = parseFloat(el.getAttribute('opacity') || '1');
-    const sourceAssetId = el.getAttribute('cx-source-asset-id');
-    const sourcePath = el.getAttribute('cx-source-path');
+    const sourceAssetId = el.getAttribute('paintnode-source-asset-id');
+    const sourcePath = el.getAttribute('paintnode-source-path');
     // Editable text layer: parse the sidecar model. The PNG is still used for pixels
     // (it renders identically even when the original fonts are missing on this machine).
     let textModel: TextModel | null = null;
-    if (el.getAttribute('cx-layer-kind') === 'text') {
-      const textPath = el.getAttribute('cx-text-data');
+    if (el.getAttribute('paintnode-layer-kind') === 'text') {
+      const textPath = el.getAttribute('paintnode-text-data');
       if (textPath && files[textPath]) textModel = deserializeModel(strFromU8(files[textPath]));
     }
     const layer = new Layer(w, h, name);
@@ -106,6 +107,17 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
       }
     } catch {
       /* ignore a malformed font manifest */
+    }
+  }
+
+  const annotationBytes = files['paintnode/annotations.json'];
+  if (annotationBytes) {
+    try {
+      const raw = JSON.parse(strFromU8(annotationBytes)) as { visible?: boolean; annotations?: unknown };
+      doc.annotationsVisible = raw.visible !== false;
+      doc.annotations = coerceAnnotations(raw.annotations);
+    } catch {
+      /* ignore malformed PaintNode annotation metadata */
     }
   }
 
