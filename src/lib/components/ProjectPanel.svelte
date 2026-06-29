@@ -7,7 +7,7 @@
   import { workflow } from '../state/workflow.svelte';
   import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
   import { isDesktop } from '../integrations/desktop';
-  import { bytesToBitmap } from '../io';
+  import { bytesToBitmap, openFiles } from '../io';
   import { loadOra } from '../ora/load';
   import {
     ArchiveClock,
@@ -15,17 +15,22 @@
     AppsList,
     AppsListDetail,
     ArrowSync,
+    ChevronDown,
+    ChevronRight,
     Delete,
+    Dismiss,
     Document,
     Folder,
     FolderOpen,
     Image,
+    ImageAdd,
     Open,
     OpenFolder,
     Sparkle,
   } from '../icons';
 
   type ViewMode = 'list' | 'icon' | 'detail';
+  type ProjectSectionId = 'documents' | 'storyboards' | 'workflows' | 'autosave' | 'generated' | 'imported';
   type FileMenu = {
     file: ProjectFile;
     allowDelete: boolean;
@@ -38,10 +43,19 @@
   const desktop = isDesktop();
   let viewMode = $state<ViewMode>('list');
   let fileMenu = $state<FileMenu | null>(null);
+  let collapsedGroups = $state<Record<ProjectSectionId, boolean>>({
+    documents: false,
+    storyboards: false,
+    workflows: false,
+    autosave: false,
+    generated: false,
+    imported: false,
+  });
   const files = $derived(project.current?.files ?? []);
   const assets = $derived(project.current?.assets ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
   const documentFiles = $derived(files.filter((file) => file.kind === 'document'));
+  const storyboardFiles = $derived(files.filter((file) => file.kind === 'storyboard'));
   const workflowFiles = $derived(files.filter((file) => file.kind === 'workflow'));
   const autosaveFiles = $derived(files.filter((file) => file.kind === 'autosave'));
   const generatedFiles = $derived(files.filter((file) => file.kind === 'generated'));
@@ -89,6 +103,8 @@
   function kindLabel(file: ProjectFile): string {
     return file.kind === 'document'
       ? 'document'
+      : file.kind === 'storyboard'
+        ? 'storyboard'
       : file.kind === 'workflow'
         ? 'workflow'
       : file.kind === 'autosave'
@@ -204,6 +220,42 @@
       editor.flash('Delete asset failed: ' + ((e as Error)?.message ?? String(e)));
     }
   }
+
+  async function switchProject(): Promise<void> {
+    closeFileMenu();
+    await project.openFolder();
+  }
+
+  function closeProject(): void {
+    closeFileMenu();
+    project.clear();
+  }
+
+  function toggleGroup(id: ProjectSectionId): void {
+    collapsedGroups[id] = !collapsedGroups[id];
+  }
+
+  async function importExternalImages(): Promise<void> {
+    if (!project.path) return;
+    closeFileMenu();
+    const selected = await openFiles('image/png,image/jpeg,image/webp,image/gif', true);
+    if (!selected.length) return;
+    let imported = 0;
+    try {
+      for (const file of selected) {
+        const bmp = await createImageBitmap(file);
+        try {
+          await project.storeImportedFile(file, bmp.width, bmp.height);
+        } finally {
+          bmp.close();
+        }
+        imported += 1;
+      }
+      editor.flash(imported === 1 ? `Imported ${selected[0].name}` : `Imported ${imported} images`);
+    } catch (e) {
+      editor.flash('Import image failed: ' + ((e as Error)?.message ?? String(e)));
+    }
+  }
 </script>
 
 {#snippet fileThumb(file: ProjectFile, actionLabel: 'Open' | 'Place')}
@@ -279,7 +331,7 @@
 {/snippet}
 
 {#snippet fileGroup(
-  icon: string,
+  id: ProjectSectionId,
   title: string,
   groupFiles: ProjectFile[],
   actionLabel: 'Open' | 'Place',
@@ -288,34 +340,63 @@
 )}
   <section class="group">
     <div class="group-head">
-      <Icon svg={icon} size={14} />
-      <span>{title}</span>
+      <button
+        class="group-toggle"
+        aria-expanded={!collapsedGroups[id]}
+        aria-label={`${collapsedGroups[id] ? 'Expand' : 'Collapse'} ${title}`}
+        onclick={() => toggleGroup(id)}
+      >
+        <Icon svg={collapsedGroups[id] ? ChevronRight : ChevronDown} size={16} />
+        <Icon svg={collapsedGroups[id] ? Folder : FolderOpen} size={18} />
+        <span>{title}</span>
+      </button>
+      {#if title === 'Assets / Imported'}
+        <button
+          class="group-action"
+          aria-label="Import external images"
+          use:tooltip={{ text: 'Import external images', placement: 'left' }}
+          onclick={() => void importExternalImages()}
+          disabled={project.busy}
+        >
+          <Icon svg={ImageAdd} size={13} />
+        </button>
+      {/if}
       <small>{groupFiles.length}</small>
     </div>
-    {#if groupFiles.length === 0}
-      <p class="empty">{emptyText}</p>
-    {:else if viewMode === 'detail'}
-      <div class="detail-scroll">
-        <div class="detail-list" role="table" aria-label={title}>
-          <div class="detail-head" role="row">
-            <span role="columnheader">Name</span>
-            <span role="columnheader">Type</span>
-            <span role="columnheader">Size</span>
-            <span role="columnheader">Created</span>
-            <span role="columnheader">Modified</span>
-            <span role="columnheader" aria-label="Actions"></span>
+    {#if !collapsedGroups[id]}
+      {#if groupFiles.length === 0}
+        <div class="empty-block">
+          <p class="empty">{emptyText}</p>
+          {#if title === 'Assets / Imported'}
+            <button class="empty-action" onclick={() => void importExternalImages()} disabled={project.busy}>
+              <Icon svg={ImageAdd} size={14} />
+              Import images
+            </button>
+          {/if}
+        </div>
+      {:else if viewMode === 'detail'}
+        <div class="detail-scroll">
+          <div class="detail-list" role="table" aria-label={title}>
+            <div class="detail-head" role="row">
+              <span role="columnheader">Name</span>
+              <span role="columnheader">Type</span>
+              <span role="columnheader">Size</span>
+              <span role="columnheader">Created</span>
+              <span role="columnheader">Modified</span>
+              <span role="columnheader" aria-label="Actions"></span>
+            </div>
+            {#each groupFiles as file (file.relativePath)}
+              {@render detailRow(file, actionLabel, allowDelete)}
+            {/each}
           </div>
+        </div>
+      {:else}
+        <div class={viewMode === 'icon' ? 'file-grid' : 'file-list'} role="list">
           {#each groupFiles as file (file.relativePath)}
-            {@render detailRow(file, actionLabel, allowDelete)}
+            {@render fileTile(file, actionLabel, allowDelete)}
           {/each}
         </div>
-      </div>
-    {:else}
-      <div class={viewMode === 'icon' ? 'file-grid' : 'file-list'} role="list">
-        {#each groupFiles as file (file.relativePath)}
-          {@render fileTile(file, actionLabel, allowDelete)}
-        {/each}
-      </div>
+      {/if}
     {/if}
   </section>
 {/snippet}
@@ -328,6 +409,23 @@
 />
 
 <Panel title="Project" grow bind:collapsed>
+  {#snippet actions()}
+    {#if desktop && project.current}
+      <div class="panel-view-switch" role="group" aria-label="Project view mode">
+        {#each viewModes as mode}
+          <button
+            class:active={viewMode === mode.id}
+            aria-label={mode.label}
+            aria-pressed={viewMode === mode.id}
+            use:tooltip={{ text: mode.label, placement: 'bottom' }}
+            onclick={() => (viewMode = mode.id)}
+          >
+            <Icon svg={mode.icon} size={12} />
+          </button>
+        {/each}
+      </div>
+    {/if}
+  {/snippet}
   <div class="project">
     {#if !desktop}
       <p class="empty">Projects are available in the desktop app.</p>
@@ -343,19 +441,6 @@
           <span>{project.current.name}</span>
         </div>
         <div class="head-actions">
-          <div class="view-switch" role="group" aria-label="Project view mode">
-            {#each viewModes as mode}
-              <button
-                class:active={viewMode === mode.id}
-                aria-label={mode.label}
-                aria-pressed={viewMode === mode.id}
-                use:tooltip={{ text: mode.label, placement: 'bottom' }}
-                onclick={() => (viewMode = mode.id)}
-              >
-                <Icon svg={mode.icon} size={15} />
-              </button>
-            {/each}
-          </div>
           <button
             aria-label="Refresh project"
             use:tooltip={{ text: 'Refresh project', placement: 'left' }}
@@ -364,11 +449,26 @@
             <Icon svg={ArrowSync} size={15} />
           </button>
           <button
+            aria-label="Switch project folder"
+            use:tooltip={{ text: 'Switch project folder', placement: 'left' }}
+            onclick={() => void switchProject()}
+            disabled={project.busy}
+          >
+            <Icon svg={FolderOpen} size={15} />
+          </button>
+          <button
             aria-label="Reveal project folder"
             use:tooltip={{ text: 'Reveal project folder', placement: 'left' }}
             onclick={() => void project.reveal()}
           >
             <Icon svg={Open} size={15} />
+          </button>
+          <button
+            aria-label="Close project"
+            use:tooltip={{ text: 'Close project', placement: 'left' }}
+            onclick={closeProject}
+          >
+            <Icon svg={Dismiss} size={15} />
           </button>
         </div>
       </div>
@@ -378,18 +478,19 @@
       {/if}
 
       <div class="browser">
-        {@render fileGroup(Document, 'Documents', documentFiles, 'Open', false, 'Saved .ora files appear here.')}
-        {@render fileGroup(Sparkle, 'Workflows', workflowFiles, 'Open', false, 'Saved composition boards appear here.')}
-        {@render fileGroup(ArchiveClock, 'Autosave', autosaveFiles, 'Open', false, 'Timed recovery copies appear here.')}
+        {@render fileGroup('documents', 'Documents', documentFiles, 'Open', false, 'Saved .ora files appear here.')}
+        {@render fileGroup('storyboards', 'Storyboards', storyboardFiles, 'Open', false, 'Composition storyboard .ora files appear here.')}
+        {@render fileGroup('workflows', 'Workflows', workflowFiles, 'Open', false, 'Saved composition boards appear here.')}
+        {@render fileGroup('autosave', 'Autosave', autosaveFiles, 'Open', false, 'Timed recovery copies appear here.')}
         {@render fileGroup(
-          Image,
+          'generated',
           'Assets / Generated',
           generatedFiles,
           'Place',
           true,
           'AI-generated and extracted assets appear here.',
         )}
-        {@render fileGroup(Folder, 'Assets / Imported', importedFiles, 'Place', true, 'Placed source images appear here.')}
+        {@render fileGroup('imported', 'Assets / Imported', importedFiles, 'Place', true, 'Placed source images appear here.')}
       </div>
     {/if}
   </div>
@@ -459,25 +560,25 @@
     height: 24px;
     padding: 0;
   }
-  .view-switch {
+  .panel-view-switch {
     display: flex;
     flex: none;
-    padding: 2px;
+    padding: 1px;
     background: var(--bg-input);
     border: 1px solid var(--border-soft);
     border-radius: 4px;
   }
-  .view-switch button {
+  .panel-view-switch button {
     display: grid;
     place-items: center;
-    width: 26px;
-    height: 24px;
+    width: 21px;
+    height: 18px;
     padding: 0;
     color: var(--text-dim);
     background: transparent;
     border-color: transparent;
   }
-  .view-switch button.active {
+  .panel-view-switch button.active {
     color: var(--text-bright);
     background: var(--accent);
     border-color: var(--accent);
@@ -486,43 +587,105 @@
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 10px;
+    gap: 0;
     min-height: 0;
     overflow: auto;
     padding-right: 1px;
   }
   .group {
     display: flex;
+    flex: none;
     flex-direction: column;
-    gap: 6px;
+    gap: 0;
   }
   .group-head {
     position: sticky;
     top: 0;
     z-index: 1;
-    padding: 5px 0 3px;
+    min-height: 31px;
+    padding: 0 8px 0 10px;
     background: var(--bg-panel);
+    border-top: 1px solid transparent;
+    border-bottom: 1px solid color-mix(in srgb, var(--bg-panel) 82%, #000 18%);
     color: var(--text-bright);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
-    text-transform: uppercase;
+    text-transform: none;
   }
-  .group-head span {
+  .group-head:hover {
+    background: color-mix(in srgb, var(--bg-panel) 82%, var(--text-bright) 18%);
+  }
+  .group-toggle {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    gap: 7px;
+    min-width: 0;
+    min-height: 30px;
+    padding: 0;
+    background: transparent;
+    border-color: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+  }
+  .group-toggle:hover,
+  .group-toggle:focus-visible {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-bright);
+  }
+  .group-toggle span {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .group-head small {
-    margin-left: auto;
+  .group-action {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin-left: 4px;
+    padding: 0;
     color: var(--text-dim);
-    font-size: 10px;
+    background: transparent;
+    border-color: transparent;
+  }
+  .group-action:hover:not(:disabled) {
+    color: var(--text-bright);
+    background: var(--bg-input);
+    border-color: var(--border-soft);
+  }
+  .group-head small {
+    min-width: 18px;
+    margin-left: 8px;
+    color: var(--text-dim);
+    font-size: 11px;
     font-weight: 600;
+    text-align: right;
+  }
+  .empty-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 6px 0 9px 31px;
+  }
+  .empty-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    padding: 4px 8px;
+    color: var(--text-bright);
+    font-size: 12px;
   }
   .file-list {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    margin: 6px 0 9px 31px;
   }
   .file-row {
     display: grid;
@@ -539,6 +702,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
     gap: 7px;
+    margin: 6px 0 9px 31px;
   }
   .file-tile {
     display: grid;
@@ -564,7 +728,9 @@
   }
   .detail-scroll {
     max-width: 100%;
+    margin: 6px 0 9px 31px;
     overflow-x: auto;
+    overflow-y: hidden;
     background: var(--bg-input);
     border: 1px solid var(--border-soft);
     border-radius: 4px;

@@ -38,9 +38,12 @@ export { default as Dismiss } from '@fluentui/svg-icons/icons/dismiss_24_regular
 export { default as ArrowSwap } from '@fluentui/svg-icons/icons/arrow_swap_24_regular.svg?raw';
 export { default as Image } from '@fluentui/svg-icons/icons/image_24_regular.svg?raw';
 export { default as ImageAdd } from '@fluentui/svg-icons/icons/image_add_24_regular.svg?raw';
+export { default as ImageEdit } from '@fluentui/svg-icons/icons/image_edit_24_regular.svg?raw';
 export { default as Board } from '@fluentui/svg-icons/icons/board_24_regular.svg?raw';
 export { default as FolderAdd } from '@fluentui/svg-icons/icons/folder_add_24_regular.svg?raw';
 export { default as Copy } from '@fluentui/svg-icons/icons/copy_24_regular.svg?raw';
+export { default as DocumentSave } from '@fluentui/svg-icons/icons/document_save_24_regular.svg?raw';
+export { default as Edit } from '@fluentui/svg-icons/icons/edit_24_regular.svg?raw';
 export { default as ArchiveClock } from '@fluentui/svg-icons/icons/archive_clock_24_regular.svg?raw';
 export { default as Apps } from '@fluentui/svg-icons/icons/apps_24_regular.svg?raw';
 export { default as AppsList } from '@fluentui/svg-icons/icons/apps_list_24_regular.svg?raw';
@@ -52,6 +55,7 @@ export { default as OpenFolder } from '@fluentui/svg-icons/icons/open_folder_24_
 export { default as Open } from '@fluentui/svg-icons/icons/open_24_regular.svg?raw';
 export { default as ArrowSync } from '@fluentui/svg-icons/icons/arrow_sync_24_regular.svg?raw';
 export { default as Link } from '@fluentui/svg-icons/icons/link_24_regular.svg?raw';
+export { default as SlideSize } from '@fluentui/svg-icons/icons/slide_size_24_regular.svg?raw';
 export { default as ChevronDoubleLeft } from '@fluentui/svg-icons/icons/chevron_double_left_20_regular.svg?raw';
 export { default as ChevronDoubleRight } from '@fluentui/svg-icons/icons/chevron_double_right_20_regular.svg?raw';
 export { default as ChevronDown } from '@fluentui/svg-icons/icons/chevron_down_24_regular.svg?raw';
@@ -69,6 +73,11 @@ export { default as LineH } from '@fluentui/svg-icons/icons/line_horizontal_1_da
 export { default as Lasso } from '@fluentui/svg-icons/icons/lasso_24_regular.svg?raw';
 export { default as Shapes } from '@fluentui/svg-icons/icons/shapes_24_regular.svg?raw';
 export { default as TextT } from '@fluentui/svg-icons/icons/text_t_24_regular.svg?raw';
+export { default as CommentNote } from '@fluentui/svg-icons/icons/comment_note_24_regular.svg?raw';
+export { default as Note } from '@fluentui/svg-icons/icons/note_24_regular.svg?raw';
+export { default as Tag } from '@fluentui/svg-icons/icons/tag_24_regular.svg?raw';
+export { default as Textbox } from '@fluentui/svg-icons/icons/textbox_24_regular.svg?raw';
+export { default as ArrowTrending } from '@fluentui/svg-icons/icons/arrow_trending_24_regular.svg?raw';
 export { default as Gradient } from '@fluentui/svg-icons/icons/circle_half_fill_24_regular.svg?raw';
 export { default as Wand } from '@fluentui/svg-icons/icons/wand_24_regular.svg?raw';
 // Retouch brushes (Clone / Smudge / Blur / Sharpen / Dodge / Burn / Sponge)

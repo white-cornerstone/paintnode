@@ -32,8 +32,8 @@
     exportPngCommand,
     importImageCommand,
     openCommand,
-    saveCopyOraCommand,
-    saveOraCommand,
+    saveActiveCommand,
+    saveActiveCopyCommand,
   } from './lib/state/commands';
   import { editor } from './lib/state/editor.svelte';
   import { isDesktop } from './lib/integrations/desktop';
@@ -51,6 +51,7 @@
   let autoCollapsedIds = $state<PanelId[]>([]);
   let fittingPanels = false;
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
+  const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
 
   type PanelId = 'color' | 'layers';
   const panelOrder: PanelId[] = ['color', 'layers'];
@@ -181,10 +182,10 @@
         void importImageCommand();
         break;
       case 'app:save-ora':
-        void saveOraCommand();
+        void saveActiveCommand();
         break;
       case 'app:save-copy-ora':
-        void saveCopyOraCommand();
+        void saveActiveCopyCommand();
         break;
       case 'app:export-png':
         void exportPngCommand();
@@ -212,6 +213,9 @@
         break;
       case 'app:clear':
         editor.clearActive();
+        break;
+      case 'app:free-transform':
+        editor.beginFreeTransform();
         break;
       case 'app:image-size':
         ui.open('imageSize');
@@ -363,7 +367,7 @@
 <div class="app">
   {#if desktop}
     <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
-      <div class="desktop-title">CX Paint</div>
+      <div class="desktop-title">PaintNode</div>
     </div>
   {:else}
     <MenuBar />
@@ -381,7 +385,7 @@
             <CanvasView />
           {/if}
         </section>
-        {#if hasDocument}
+        {#if hasDrawingPanels}
           <aside class="right" class:collapsed={rightCollapsed}>
             {#if rightCollapsed}
               <div class="dock-rail">

@@ -3,8 +3,8 @@
   import { ui } from '../state/ui.svelte';
   import {
     openCommand,
-    saveOraCommand,
-    saveCopyOraCommand,
+    saveActiveCommand,
+    saveActiveCopyCommand,
     exportPngCommand,
     importImageCommand,
   } from '../state/commands';
@@ -35,8 +35,8 @@
         { label: 'Open…', shortcut: '⌘O', action: () => void openCommand() },
         { label: 'Place Image…', action: () => void importImageCommand() },
         { sep: true },
-        { label: 'Save', shortcut: '⌘S', action: () => void saveOraCommand() },
-        { label: 'Save a Copy…', shortcut: '⇧⌘S', action: () => void saveCopyOraCommand() },
+        { label: 'Save', shortcut: '⌘S', action: () => void saveActiveCommand() },
+        { label: 'Save a Copy…', shortcut: '⇧⌘S', action: () => void saveActiveCopyCommand() },
         { label: 'Export PNG…', shortcut: '⌘E', action: () => void exportPngCommand() },
       ],
     },
@@ -53,6 +53,13 @@
         { label: 'Fill with Foreground', action: () => editor.fillActive(editor.foreground) },
         { label: 'Fill with Background', action: () => editor.fillActive(editor.background) },
         { label: 'Clear', shortcut: 'Del', action: () => editor.clearActive() },
+        { sep: true },
+        {
+          label: 'Free Transform',
+          shortcut: '⌘T',
+          action: () => editor.beginFreeTransform(),
+          disabled: () => !editor.activeLayer || !!editor.freeTransform,
+        },
       ],
     },
     {
@@ -129,7 +136,7 @@
     },
     {
       label: 'Help',
-      items: [{ label: 'About CX Paint', action: () => ui.open('about') }],
+      items: [{ label: 'About PaintNode', action: () => ui.open('about') }],
     },
   ];
 
@@ -154,7 +161,7 @@
 <svelte:window onpointerdown={closeAll} />
 
 <nav class="menubar">
-  <div class="brand"><Icon svg={Image} size={15} /><span>CX&nbsp;Paint</span></div>
+  <div class="brand"><Icon svg={Image} size={15} /><span>PaintNode</span></div>
   {#each menus as menu, i (menu.label)}
     <div class="menu" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
       <button

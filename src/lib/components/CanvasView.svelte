@@ -4,34 +4,16 @@
   import { ui } from '../state/ui.svelte';
   import { openCommand, openDocumentFiles } from '../state/commands';
   import { workflow } from '../state/workflow.svelte';
-  import { isDesktop } from '../integrations/desktop';
   import { Viewport } from '../engine/Viewport';
   import { wheelZoomFactor } from '../engine/zoomGesture';
   import type { PointerInfo } from '../engine/tools/Tool';
-  import Icon from './Icon.svelte';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
-  import {
-    Add,
-    AddFilled,
-    ArrowMove,
-    Eyedropper,
-    EyedropperFilled,
-    Hand,
-    HandFilled,
-    PaintBucket,
-    PaintBucketFilled,
-    TextT,
-    ZoomIn,
-    ZoomOut,
-  } from '../icons';
-  import { getCurrentWindow, type CursorIcon } from '@tauri-apps/api/window';
+  import AnnotationOverlay from './AnnotationOverlay.svelte';
+  import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
 
   let canvasEl: HTMLCanvasElement;
   let containerEl: HTMLDivElement;
-  let vp: Viewport | undefined;
-  const desktop = isDesktop();
-  const appWindow = desktop ? getCurrentWindow() : null;
-
+  let vp = $state<Viewport | undefined>();
   // Bumped each render while editing text so the overlay tracks pan/zoom.
   let viewTick = $state(0);
   const overlayBox = $derived.by(() => {
@@ -53,75 +35,33 @@
   let scrollH = $state(1);
   let scrollLeftCss = $state(0);
   let scrollTopCss = $state(0);
-  let pointerClientX = $state(0);
-  let pointerClientY = $state(0);
+  let canvasCssW = $state(1);
+  let canvasCssH = $state(1);
+  let viewportFrame = $state(0);
   let panning = $state(false);
   let interacting = $state(false);
-  let pointerInViewport = $state(false);
   let dragOverEmpty = $state(false);
+  let annotationDraft = $state<AnnotationItem | null>(null);
+  let annotationDragStart: { x: number; y: number } | null = null;
+  type TransformHandle = 'move' | 'rotate' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+  type TransformDrag = {
+    handle: TransformHandle;
+    startDocX: number;
+    startDocY: number;
+    startCenterX: number;
+    startCenterY: number;
+    startScaleX: number;
+    startScaleY: number;
+    startRotation: number;
+    startAngle: number;
+  };
+  let transformDrag: TransformDrag | null = null;
   let syncingScroll = false;
   let last = { x: 0, y: 0 };
   const SCROLL_PAD = 80;
+  const RESIZE_SETTLE_MS = 90;
   let resizeFrame = 0;
-  let nativeCursor: { icon: CursorIcon; visible: boolean } | null = null;
-  type ToolCursor =
-    | 'move'
-    | 'marquee'
-    | 'lasso'
-    | 'crop'
-    | 'eyedropper'
-    | 'fill'
-    | 'gradient'
-    | 'shape'
-    | 'text'
-    | 'hand-open'
-    | 'hand-closed'
-    | 'zoom-in'
-    | 'zoom-out';
-
-  function cursorIconFor(cssCursor: string): CursorIcon {
-    switch (cssCursor) {
-      case 'crosshair':
-        return 'crosshair';
-      case 'move':
-        return 'move';
-      case 'text':
-        return 'text';
-      case 'grab':
-        return 'grab';
-      case 'grabbing':
-        return 'grabbing';
-      case 'zoom-in':
-        return 'zoomIn';
-      case 'zoom-out':
-        return 'zoomOut';
-      default:
-        return 'default';
-    }
-  }
-
-  function setNativeCursor(cssCursor: string, active: boolean): void {
-    if (!appWindow) return;
-    if (cssCursor.startsWith('url(')) {
-      if (nativeCursor?.visible === false) {
-        nativeCursor = { icon: 'default', visible: true };
-        void appWindow.setCursorVisible(true).catch(() => {
-          nativeCursor = null;
-        });
-      }
-      return;
-    }
-    const visible = active && cssCursor === 'none' ? false : true;
-    const icon = active && visible ? cursorIconFor(cssCursor) : 'default';
-    if (nativeCursor?.icon === icon && nativeCursor.visible === visible) return;
-    nativeCursor = { icon, visible };
-    void appWindow
-      .setCursorVisible(visible)
-      .then(() => appWindow.setCursorIcon(icon))
-      .catch(() => {
-        nativeCursor = null;
-      });
-  }
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 
   function pos(e: PointerEvent) {
     const r = canvasEl.getBoundingClientRect();
@@ -158,8 +98,7 @@
 
   function onPointerDown(e: PointerEvent) {
     if (!vp) return;
-    pointerClientX = e.clientX;
-    pointerClientY = e.clientY;
+    if (editor.freeTransform) return;
     // A click anywhere on the canvas commits the active text edit.
     if (editor.textEdit) {
       editor.commitActiveText();
@@ -182,14 +121,26 @@
       return;
     }
     if (e.button !== 0) return;
+    if (editor.activeToolId === 'annotation') {
+      const info = toInfo(e, cssX, cssY, 0, 0);
+      annotationDragStart = { x: info.x, y: info.y };
+      annotationDraft = annotationFromDrag({
+        kind: editor.annotationType,
+        text: editor.annotationText,
+        start: annotationDragStart,
+        end: { x: info.x, y: info.y },
+        color: editor.foregroundCss,
+      });
+      interacting = true;
+      return;
+    }
     interacting = true;
     editor.activeTool.pointerDown(toInfo(e, cssX, cssY, 0, 0));
   }
 
   function onPointerMove(e: PointerEvent) {
     if (!vp) return;
-    pointerClientX = e.clientX;
-    pointerClientY = e.clientY;
+    if (editor.freeTransform) return;
     const { cssX, cssY } = pos(e);
     const dxCss = cssX - last.x;
     const dyCss = cssY - last.y;
@@ -201,7 +152,19 @@
       vp.panBy(dxCss, dyCss);
       ui.zoom = vp.scale;
     } else if (interacting) {
-      editor.activeTool.pointerMove(toInfo(e, cssX, cssY, dxCss, dyCss));
+      if (annotationDraft) {
+        const info = toInfo(e, cssX, cssY, dxCss, dyCss);
+        annotationDraft = annotationFromDrag({
+          kind: annotationDraft.kind,
+          text: annotationDraft.text,
+          start: annotationDragStart ?? { x: annotationDraft.x, y: annotationDraft.y },
+          end: { x: info.x, y: info.y },
+          color: annotationDraft.color,
+          id: annotationDraft.id,
+        });
+      } else {
+        editor.activeTool.pointerMove(toInfo(e, cssX, cssY, dxCss, dyCss));
+      }
     } else if (vp.brushRadius > 0) {
       vp.invalidate();
     }
@@ -210,8 +173,7 @@
 
   function onPointerUp(e: PointerEvent) {
     if (!vp) return;
-    pointerClientX = e.clientX;
-    pointerClientY = e.clientY;
+    if (editor.freeTransform) return;
     try {
       canvasEl.releasePointerCapture(e.pointerId);
     } catch {
@@ -223,13 +185,23 @@
       return;
     }
     if (interacting) {
-      editor.activeTool.pointerUp(toInfo(e, cssX, cssY, cssX - last.x, cssY - last.y));
+      if (annotationDraft) {
+        editor.addAnnotation(annotationDraft.kind, annotationDraft.x, annotationDraft.y, annotationDraft.width, annotationDraft.height, annotationDraft.text, {
+          rotation: annotationDraft.rotation,
+          flipX: annotationDraft.flipX,
+          flipY: annotationDraft.flipY,
+          color: annotationDraft.color,
+        });
+        annotationDraft = null;
+        annotationDragStart = null;
+      } else {
+        editor.activeTool.pointerUp(toInfo(e, cssX, cssY, cssX - last.x, cssY - last.y));
+      }
       interacting = false;
     }
   }
 
   function onPointerLeave() {
-    pointerInViewport = false;
     if (!vp) return;
     if (!interacting && !panning) {
       vp.cursor = null;
@@ -253,6 +225,21 @@
     const docH = doc ? doc.height * vp.scale : 1;
     scrollW = Math.max(containerEl.clientWidth, Math.ceil(docW + SCROLL_PAD * 2));
     scrollH = Math.max(containerEl.clientHeight, Math.ceil(docH + SCROLL_PAD * 2));
+  }
+
+  function viewportSize(): { width: number; height: number } {
+    return {
+      width: Math.max(1, containerEl?.clientWidth ?? 1),
+      height: Math.max(1, containerEl?.clientHeight ?? 1),
+    };
+  }
+
+  function resizeViewport(renderNow = false): void {
+    if (!vp) return;
+    const size = viewportSize();
+    canvasCssW = size.width;
+    canvasCssH = size.height;
+    vp.resize({ cssWidth: size.width, cssHeight: size.height, renderNow });
   }
 
   function syncScrollToViewport() {
@@ -282,6 +269,150 @@
     vp.offsetX = scrollW > containerEl.clientWidth ? SCROLL_PAD - containerEl.scrollLeft : (containerEl.clientWidth - docW) / 2;
     vp.offsetY = scrollH > containerEl.clientHeight ? SCROLL_PAD - containerEl.scrollTop : (containerEl.clientHeight - docH) / 2;
     vp.invalidate();
+  }
+
+  function docFromClient(event: PointerEvent): { x: number; y: number } {
+    const rect = canvasEl.getBoundingClientRect();
+    return vp!.screenToDoc(event.clientX - rect.left, event.clientY - rect.top);
+  }
+
+  function screenPoint(x: number, y: number): { x: number; y: number } {
+    viewportFrame;
+    const p = vp!.docToScreen(x, y);
+    return { x: scrollLeftCss + p.x, y: scrollTopCss + p.y };
+  }
+
+  function freeTransformCorner(dx: number, dy: number): { x: number; y: number } | null {
+    const t = editor.freeTransform;
+    if (!t || !vp) return null;
+    const cos = Math.cos(t.rotation);
+    const sin = Math.sin(t.rotation);
+    const x = t.centerX + dx * t.scaleX * cos - dy * t.scaleY * sin;
+    const y = t.centerY + dx * t.scaleX * sin + dy * t.scaleY * cos;
+    return screenPoint(x, y);
+  }
+
+  function freeTransformPoints(): Record<Exclude<TransformHandle, 'move' | 'rotate'>, { x: number; y: number }> | null {
+    const t = editor.freeTransform;
+    if (!t || !vp) return null;
+    const hw = t.sourceWidth / 2;
+    const hh = t.sourceHeight / 2;
+    const nw = freeTransformCorner(-hw, -hh);
+    const n = freeTransformCorner(0, -hh);
+    const ne = freeTransformCorner(hw, -hh);
+    const e = freeTransformCorner(hw, 0);
+    const se = freeTransformCorner(hw, hh);
+    const s = freeTransformCorner(0, hh);
+    const sw = freeTransformCorner(-hw, hh);
+    const w = freeTransformCorner(-hw, 0);
+    if (!nw || !n || !ne || !e || !se || !s || !sw || !w) return null;
+    return { nw, n, ne, e, se, s, sw, w };
+  }
+
+  function freeTransformPreviewStyle(): string {
+    const t = editor.freeTransform;
+    if (!t || !vp) return '';
+    const p = screenPoint(t.centerX, t.centerY);
+    return [
+      `left:${p.x}px`,
+      `top:${p.y}px`,
+      `width:${t.sourceWidth * t.scaleX * vp.scale}px`,
+      `height:${t.sourceHeight * t.scaleY * vp.scale}px`,
+      `opacity:${t.opacity}`,
+      `transform:translate(-50%, -50%) rotate(${t.rotation}rad)`,
+    ].join(';');
+  }
+
+  function rotateHandlePoint(): { x: number; y: number } | null {
+    const pts = freeTransformPoints();
+    const t = editor.freeTransform;
+    if (!pts || !t || !vp) return null;
+    const dx = Math.cos(t.rotation - Math.PI / 2) * 34;
+    const dy = Math.sin(t.rotation - Math.PI / 2) * 34;
+    return { x: pts.n.x + dx, y: pts.n.y + dy };
+  }
+
+  function canvasEdgeStyle(): string {
+    const doc = editor.doc;
+    if (!doc || !vp) return '';
+    const topLeft = screenPoint(0, 0);
+    const bottomRight = screenPoint(doc.width, doc.height);
+    return [
+      `left:${topLeft.x}px`,
+      `top:${topLeft.y}px`,
+      `width:${bottomRight.x - topLeft.x}px`,
+      `height:${bottomRight.y - topLeft.y}px`,
+    ].join(';');
+  }
+
+  function updateTransformDrag(event: PointerEvent): void {
+    const t = editor.freeTransform;
+    if (!t || !transformDrag || !vp) return;
+    const point = docFromClient(event);
+    const start = transformDrag;
+    if (start.handle === 'move') {
+      editor.updateFreeTransform({
+        centerX: start.startCenterX + point.x - start.startDocX,
+        centerY: start.startCenterY + point.y - start.startDocY,
+      });
+      return;
+    }
+
+    if (start.handle === 'rotate') {
+      const angle = Math.atan2(point.y - start.startCenterY, point.x - start.startCenterX);
+      let rotation = start.startRotation + angle - start.startAngle;
+      if (event.shiftKey) rotation = Math.round(rotation / (Math.PI / 12)) * (Math.PI / 12);
+      editor.updateFreeTransform({ rotation });
+      return;
+    }
+
+    const cos = Math.cos(-start.startRotation);
+    const sin = Math.sin(-start.startRotation);
+    const dx = point.x - start.startCenterX;
+    const dy = point.y - start.startCenterY;
+    const localX = dx * cos - dy * sin;
+    const localY = dx * sin + dy * cos;
+    const hw = Math.max(1, t.sourceWidth / 2);
+    const hh = Math.max(1, t.sourceHeight / 2);
+    const hasX = start.handle.includes('e') || start.handle.includes('w');
+    const hasY = start.handle.includes('n') || start.handle.includes('s');
+    let scaleX = start.startScaleX;
+    let scaleY = start.startScaleY;
+    if (hasX) scaleX = Math.max(0.02, Math.abs(localX) / hw);
+    if (hasY) scaleY = Math.max(0.02, Math.abs(localY) / hh);
+    if (hasX && hasY && !event.shiftKey) {
+      const uniform = Math.max(scaleX, scaleY);
+      scaleX = uniform;
+      scaleY = uniform;
+    }
+    editor.updateFreeTransform({ scaleX, scaleY });
+  }
+
+  function startTransformDrag(event: PointerEvent, handle: TransformHandle): void {
+    const t = editor.freeTransform;
+    if (!t || !vp) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const point = docFromClient(event);
+    transformDrag = {
+      handle,
+      startDocX: point.x,
+      startDocY: point.y,
+      startCenterX: t.centerX,
+      startCenterY: t.centerY,
+      startScaleX: t.scaleX,
+      startScaleY: t.scaleY,
+      startRotation: t.rotation,
+      startAngle: Math.atan2(point.y - t.centerY, point.x - t.centerX),
+    };
+    const move = (next: PointerEvent) => updateTransformDrag(next);
+    const up = () => {
+      transformDrag = null;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   }
 
   function hasFileDrag(e: DragEvent): boolean {
@@ -318,23 +449,47 @@
       () => editor.getSelection(),
     );
     vp.onAfterRender = () => {
+      viewportFrame += 1;
       ui.zoom = vp!.scale;
       syncScrollToViewport();
       if (editor.textEdit) viewTick++;
     };
     editor.viewport = vp;
-    vp.resize();
+    resizeViewport(true);
     requestAnimationFrame(() => vp!.fitToView());
 
+    const commitResize = () => {
+      resizeFrame = 0;
+      resizeViewport(true);
+      syncScrollToViewport();
+    };
     const ro = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = undefined;
+        if (resizeFrame) cancelAnimationFrame(resizeFrame);
+        resizeFrame = requestAnimationFrame(commitResize);
+      }, RESIZE_SETTLE_MS);
+    });
+    ro.observe(containerEl);
+
+    let lastDpr = window.devicePixelRatio || 1;
+    const onWindowResize = () => {
+      const nextDpr = window.devicePixelRatio || 1;
+      if (nextDpr === lastDpr) return;
+      lastDpr = nextDpr;
+      if (resizeTimer) {
+        clearTimeout(resizeTimer);
+        resizeTimer = undefined;
+      }
       if (resizeFrame) return;
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = 0;
-        vp!.resize();
+        resizeViewport(true);
         syncScrollToViewport();
       });
-    });
-    ro.observe(containerEl);
+    };
+    window.addEventListener('resize', onWindowResize);
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -363,11 +518,14 @@
 
     return () => {
       ro.disconnect();
+      if (resizeTimer) clearTimeout(resizeTimer);
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      window.removeEventListener('resize', onWindowResize);
       containerEl.removeEventListener('wheel', onWheel);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       vp!.destroy();
+      vp!.onAfterRender = undefined;
       editor.viewport = null;
     };
   });
@@ -408,64 +566,12 @@
     vp.invalidate();
   });
 
-  const overlayCursor = $derived.by(() => {
-    if (!editor.doc) return null;
-    if (!pointerInViewport) return null;
-    if (panning || (editor.activeToolId === 'hand' && interacting)) return 'hand-closed';
-    if (spaceDown || editor.activeToolId === 'hand') return 'hand-open';
+  const cursorStyle = $derived.by(() => {
+    if (!editor.doc) return 'default';
+    if (panning || (editor.activeToolId === 'hand' && interacting)) return 'grabbing';
+    if (spaceDown || editor.activeToolId === 'hand') return 'grab';
     if (editor.activeToolId === 'zoom') return editor.effectiveZoomMode === 'out' ? 'zoom-out' : 'zoom-in';
-    if (editor.activeToolId === 'move') return 'move';
-    if (editor.activeToolId === 'marquee') return 'marquee';
-    if (editor.activeToolId === 'lasso') return 'lasso';
-    if (editor.activeToolId === 'crop') return 'crop';
-    if (editor.activeToolId === 'eyedropper') return 'eyedropper';
-    if (editor.activeToolId === 'fill') return 'fill';
-    if (editor.activeToolId === 'gradient') return 'gradient';
-    if (editor.activeToolId === 'shape') return 'shape';
-    if (editor.activeToolId === 'text') return 'text';
-    return null;
-  });
-  const cursorStyle = $derived(!editor.doc ? 'default' : overlayCursor ? 'none' : editor.activeTool.cursor);
-  const cursorPressed = $derived(!!overlayCursor && (interacting || panning));
-  const cursorIcon = $derived.by(() => {
-    switch (overlayCursor) {
-      case 'move':
-        return ArrowMove;
-      case 'marquee':
-      case 'lasso':
-      case 'crop':
-      case 'gradient':
-      case 'shape':
-        return cursorPressed ? AddFilled : Add;
-      case 'eyedropper':
-        return cursorPressed ? EyedropperFilled : Eyedropper;
-      case 'fill':
-        return cursorPressed ? PaintBucketFilled : PaintBucket;
-      case 'text':
-        return TextT;
-      case 'hand-open':
-      case 'hand-closed':
-        return cursorPressed ? HandFilled : Hand;
-      case 'zoom-in':
-        return ZoomIn;
-      case 'zoom-out':
-        return ZoomOut;
-      default:
-        return null;
-    }
-  });
-  const cursorIconSize = $derived(
-    overlayCursor === 'marquee' ||
-      overlayCursor === 'lasso' ||
-      overlayCursor === 'crop' ||
-      overlayCursor === 'gradient' ||
-      overlayCursor === 'shape'
-      ? 16
-      : 19,
-  );
-
-  $effect(() => {
-    setNativeCursor(cursorStyle, pointerInViewport);
+    return editor.activeTool.cursor;
   });
 </script>
 
@@ -474,11 +580,6 @@
   bind:this={containerEl}
   style="cursor:{cursorStyle}"
   role="presentation"
-  onpointerenter={(e) => {
-    pointerInViewport = true;
-    pointerClientX = e.clientX;
-    pointerClientY = e.clientY;
-  }}
   onpointerleave={onPointerLeave}
   ondragover={onWorkspaceDragOver}
   ondragleave={onWorkspaceDragLeave}
@@ -487,12 +588,64 @@
 >
   <canvas
     bind:this={canvasEl}
-    style="cursor:{cursorStyle}; transform:translate3d({scrollLeftCss}px, {scrollTopCss}px, 0)"
+    style="width:{canvasCssW}px; height:{canvasCssH}px; cursor:{cursorStyle}; transform:translate3d({scrollLeftCss}px, {scrollTopCss}px, 0)"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
+  {#if editor.doc && vp}
+    <AnnotationOverlay
+      annotations={[...editor.doc.annotations, ...(annotationDraft ? [annotationDraft] : [])]}
+      visible={editor.doc.annotationsVisible}
+      scale={vp.scale}
+      revision={viewportFrame}
+      selectedId={editor.selectedAnnotationId}
+      toScreen={(x, y) => {
+        const p = vp!.docToScreen(x, y);
+        return { x: scrollLeftCss + p.x, y: scrollTopCss + p.y };
+      }}
+      onSelect={(id) => editor.selectAnnotation(id)}
+      onUpdate={(id, patch) => editor.updateAnnotation(id, patch)}
+      onDelete={(id) => editor.deleteAnnotation(id)}
+    />
+  {/if}
+  {#if editor.freeTransform && vp}
+    {@const transformPoints = freeTransformPoints()}
+    {@const rotatePoint = rotateHandlePoint()}
+    {#if transformPoints && rotatePoint}
+      <img class="transform-preview" src={editor.freeTransform.previewUrl} alt="" style={freeTransformPreviewStyle()} />
+      <svg class="transform-lines" aria-hidden="true">
+        <polygon
+          class="transform-hit"
+          role="button"
+          tabindex="-1"
+          aria-label="Move transformed layer"
+          points={`${transformPoints.nw.x},${transformPoints.nw.y} ${transformPoints.ne.x},${transformPoints.ne.y} ${transformPoints.se.x},${transformPoints.se.y} ${transformPoints.sw.x},${transformPoints.sw.y}`}
+          onpointerdown={(event) => startTransformDrag(event, 'move')}
+        />
+        <polyline
+          points={`${transformPoints.nw.x},${transformPoints.nw.y} ${transformPoints.ne.x},${transformPoints.ne.y} ${transformPoints.se.x},${transformPoints.se.y} ${transformPoints.sw.x},${transformPoints.sw.y} ${transformPoints.nw.x},${transformPoints.nw.y}`}
+        />
+        <line x1={transformPoints.n.x} y1={transformPoints.n.y} x2={rotatePoint.x} y2={rotatePoint.y} />
+      </svg>
+      {#each Object.entries(transformPoints) as [handle, point] (handle)}
+        <button
+          class={`transform-handle ${handle}`}
+          style={`left:${point.x}px; top:${point.y}px`}
+          aria-label={`Scale ${handle}`}
+          onpointerdown={(event) => startTransformDrag(event, handle as TransformHandle)}
+        ></button>
+      {/each}
+      <button
+        class="transform-handle rotate"
+        style={`left:${rotatePoint.x}px; top:${rotatePoint.y}px`}
+        aria-label="Rotate layer"
+        onpointerdown={(event) => startTransformDrag(event, 'rotate')}
+      ></button>
+      <div class="canvas-edge-overlay" style={canvasEdgeStyle()} aria-hidden="true"></div>
+    {/if}
+  {/if}
   <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
   {#if !editor.doc}
     <div class="empty-workspace" class:dragover={dragOverEmpty}>
@@ -517,17 +670,6 @@
   {/if}
 </div>
 
-{#if overlayCursor && cursorIcon}
-  <div
-    class={`tool-cursor ${overlayCursor}`}
-    class:pressed={cursorPressed}
-    style="left:{pointerClientX}px; top:{pointerClientY}px"
-    aria-hidden="true"
-  >
-    <Icon svg={cursorIcon} size={cursorIconSize} />
-  </div>
-{/if}
-
 <style>
   .viewport {
     position: relative;
@@ -542,8 +684,6 @@
     left: 0;
     z-index: 1;
     display: block;
-    width: 100%;
-    height: 100%;
     touch-action: none;
   }
   .scroll-space {
@@ -551,6 +691,80 @@
     z-index: 0;
     pointer-events: none;
     cursor: inherit;
+  }
+  .transform-preview {
+    position: absolute;
+    z-index: 3;
+    display: block;
+    transform-origin: center;
+    image-rendering: auto;
+    pointer-events: none;
+  }
+  .transform-lines {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .transform-lines polyline,
+  .transform-lines line {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.25;
+    vector-effect: non-scaling-stroke;
+  }
+  .transform-hit {
+    fill: transparent;
+    pointer-events: fill;
+    cursor: move;
+  }
+  .transform-handle {
+    position: absolute;
+    z-index: 5;
+    width: 10px;
+    height: 10px;
+    padding: 0;
+    background: var(--bg-panel);
+    border: 1.5px solid var(--accent);
+    border-radius: 1px;
+    transform: translate(-50%, -50%);
+  }
+  .transform-handle:hover,
+  .transform-handle:focus-visible {
+    background: var(--accent);
+    border-color: var(--text-bright);
+  }
+  .transform-handle.n,
+  .transform-handle.s {
+    cursor: ns-resize;
+  }
+  .transform-handle.e,
+  .transform-handle.w {
+    cursor: ew-resize;
+  }
+  .transform-handle.nw,
+  .transform-handle.se {
+    cursor: nwse-resize;
+  }
+  .transform-handle.ne,
+  .transform-handle.sw {
+    cursor: nesw-resize;
+  }
+  .transform-handle.rotate {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    cursor: grab;
+  }
+  .canvas-edge-overlay {
+    position: absolute;
+    z-index: 6;
+    box-sizing: border-box;
+    border: 1px solid #000;
+    pointer-events: none;
   }
   .empty-workspace {
     position: absolute;
@@ -602,39 +816,5 @@
   }
   .empty-workspace.dragover .empty-drop {
     color: var(--accent);
-  }
-  .tool-cursor {
-    position: fixed;
-    z-index: 500;
-    width: 22px;
-    height: 22px;
-    display: grid;
-    place-items: center;
-    color: #050505;
-    pointer-events: none;
-    will-change: transform;
-  }
-  .tool-cursor :global(svg) {
-    filter: drop-shadow(0 1px 0 #fff) drop-shadow(1px 0 0 #fff) drop-shadow(0 -1px 0 #fff)
-      drop-shadow(-1px 0 0 #fff) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
-  }
-  .tool-cursor.zoom-in,
-  .tool-cursor.zoom-out,
-  .tool-cursor.hand-open,
-  .tool-cursor.hand-closed,
-  .tool-cursor.move {
-    transform: translate3d(-11px, -11px, 0);
-  }
-  .tool-cursor.marquee,
-  .tool-cursor.shape,
-  .tool-cursor.text {
-    transform: translate3d(-3px, -3px, 0);
-  }
-  .tool-cursor.lasso,
-  .tool-cursor.crop,
-  .tool-cursor.eyedropper,
-  .tool-cursor.gradient,
-  .tool-cursor.fill {
-    transform: translate3d(-5px, -5px, 0);
   }
 </style>

@@ -173,7 +173,7 @@
             <div>
               <div class="section-title">New Project Folder</div>
               <p>
-                Pick or create a folder for CX Paint documents, generated assets, imported assets,
+                Pick or create a folder for PaintNode documents, generated assets, imported assets,
                 autosaves, and workflow files.
               </p>
             </div>
@@ -231,7 +231,7 @@
           <div class="details-title">Project Details</div>
           <div class="summary">
             <span>{project.current?.name ?? 'No project selected'}</span>
-            <small>{project.path ?? 'Choose a folder to initialize a CX Paint project.'}</small>
+            <small>{project.path ?? 'Choose a folder to initialize a PaintNode project.'}</small>
           </div>
           {#if projectError}
             <div class="error">{projectError}</div>

@@ -23,6 +23,8 @@ export interface ToolHost {
   shapeType: 'rect' | 'ellipse' | 'line';
   shapeFill: boolean;
   shapeStrokeWidth: number;
+  annotationType: 'arrow' | 'note' | 'callout' | 'badge' | 'divider';
+  annotationText: string;
   gradientType: 'fg-bg' | 'fg-transparent';
   zoomMode: 'in' | 'out';
   /** Magic Wand: flood only the connected region (vs. every matching pixel). */

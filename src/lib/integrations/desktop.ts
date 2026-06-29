@@ -20,7 +20,7 @@ export interface GeneratorConfig {
 export interface CodexGeneratorConfig {
   /** Optional path to the local Codex binary. Empty uses the Rust-side defaults. */
   bin?: string;
-  /** Optional CX Paint project folder. Generated output is saved there when present. */
+  /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
   /** Per-request id used to filter Codex progress events. */
   runId?: string;
@@ -42,7 +42,7 @@ export interface ProjectAsset {
 }
 
 export interface ProjectFile {
-  kind: 'document' | 'autosave' | 'generated' | 'imported' | string;
+  kind: 'document' | 'storyboard' | 'autosave' | 'generated' | 'imported' | string;
   name: string;
   relativePath: string;
   createdAt: number;

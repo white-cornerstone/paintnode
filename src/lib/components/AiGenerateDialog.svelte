@@ -15,7 +15,7 @@
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  const KEY = 'cxpaint.generator';
+  const KEY = 'paintnode.generator';
   const DEFAULT_ARGS = '{prompt}\n--output\n{output}';
 
   function loadCfg(): { provider: Provider; codexBin: string; bin: string; argsText: string } {
@@ -80,6 +80,15 @@
     window.setTimeout(() => (copied = false), 1200);
   }
 
+  function promptWithCanvasSize(userPrompt: string): string {
+    const base = userPrompt.trim();
+    const doc = editor.doc;
+    if (!doc) return base;
+    return `${base}
+
+Canvas size requirement: generate the image to match the current PaintNode canvas exactly: ${doc.width}x${doc.height} pixels, landscape/portrait orientation and aspect ratio included. Do not crop, letterbox, pillarbox, or add extra margins beyond this canvas.`;
+  }
+
   async function run() {
     error = '';
     copied = false;
@@ -100,6 +109,8 @@
     } catch {
       /* ignore */
     }
+    const userPrompt = prompt.trim();
+    const generationPrompt = promptWithCanvasSize(userPrompt);
     busy = true;
     progress = provider === 'codex' ? 'Starting local Codex...' : 'Running local generator...';
     editor.flash(provider === 'codex' ? 'Generating with Codex...' : 'Generating image...');
@@ -119,7 +130,7 @@
     try {
       const generated =
         provider === 'codex'
-          ? await generateCodexImage({ bin: codexBin, projectPath: project.path, runId }, prompt.trim())
+          ? await generateCodexImage({ bin: codexBin, projectPath: project.path, runId }, generationPrompt)
           : null;
       if (generated?.asset) await project.refresh();
       const dataUrl =
@@ -132,15 +143,15 @@
               .map((s) => s.trim())
               .filter(Boolean),
           },
-          prompt.trim(),
+          generationPrompt,
         ));
       const blob = await (await fetch(dataUrl)).blob();
       const bmp = await createImageBitmap(blob);
       const customAsset =
         !generated && project.path
-          ? await project.storeGeneratedBlob(blob, `AI ${prompt.slice(0, 48) || 'generated'}.png`, prompt.trim(), bmp.width, bmp.height)
+          ? await project.storeGeneratedBlob(blob, `AI ${userPrompt.slice(0, 48) || 'generated'}.png`, generationPrompt, bmp.width, bmp.height)
           : null;
-      const oversized = editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${prompt.slice(0, 24)}`, {
+      const oversized = editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${userPrompt.slice(0, 24)}`, {
         assetId: generated?.asset?.id ?? customAsset?.id ?? null,
         path: generated?.asset?.relativePath ?? customAsset?.relativePath ?? null,
       }).oversized;
@@ -191,7 +202,7 @@
 
       <p class="hint">
         Uses your local Codex login. If this fails, run <code>codex login</code> in Terminal and try again.
-        CX Paint copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.
+        PaintNode copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.
       </p>
     {:else}
       <label class="dlg-field">

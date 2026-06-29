@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Project instructions for Claude Code working on **CX Paint**.
+Project instructions for Claude Code working on **PaintNode**.
 
 The full contributor & agent guidelines (commands, project layout, and coding conventions)
 live in **AGENTS.md**. Follow them. It is imported here so it always loads into context:

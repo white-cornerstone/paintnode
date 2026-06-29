@@ -3,9 +3,9 @@
   let { onClose }: { onClose: () => void } = $props();
 </script>
 
-<Modal title="About CX Paint" {onClose} width={420}>
+<Modal title="About PaintNode" {onClose} width={420}>
   <div class="about">
-    <h2>◆ CX Paint</h2>
+    <h2>◆ PaintNode</h2>
     <p>A backend-free, Photoshop-style raster image editor for the web.</p>
     <p>
       Documents use the open <strong>OpenRaster (.ora)</strong> format, so your layered files stay portable
