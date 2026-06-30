@@ -128,6 +128,27 @@
     }
   }
 
+  let peekedPanel = $state<PanelId | null>(null);
+
+  function expandRightPanels(): void {
+    peekedPanel = null;
+    rightCollapsed = false;
+  }
+
+  function collapseRightPanels(): void {
+    peekedPanel = null;
+    rightCollapsed = true;
+  }
+
+  function peekPanel(id: PanelId): void {
+    rightCollapsed = true;
+    peekedPanel = peekedPanel === id ? null : id;
+  }
+
+  function closePeekedPanel(): void {
+    peekedPanel = null;
+  }
+
   async function fitRightPanels(): Promise<void> {
     if (rightCollapsed || !panelStackEl || fittingPanels) return;
     fittingPanels = true;
@@ -362,6 +383,10 @@
     rightCollapsed;
     if (!rightCollapsed) requestAnimationFrame(() => void fitRightPanels());
   });
+
+  $effect(() => {
+    if (!rightCollapsed) peekedPanel = null;
+  });
 </script>
 
 <div class="app">
@@ -391,22 +416,53 @@
               <div class="dock-rail">
                 <button
                   class="panel-toggle expand"
-                  onclick={() => (rightCollapsed = false)}
+                  onclick={expandRightPanels}
                   use:tooltip={{ text: 'Expand panels', placement: 'left' }}
                   aria-label="Expand panels"
                 ><Icon svg={ChevronDoubleLeft} size={16} /></button>
-                <button class="rail-item" onclick={() => (rightCollapsed = false)} aria-label="Color">
+                <button
+                  class="rail-item"
+                  class:active={peekedPanel === 'color'}
+                  onclick={() => peekPanel('color')}
+                  aria-label="Color"
+                  aria-pressed={peekedPanel === 'color'}
+                >
                   <Icon svg={ColorPalette} size={18} /><span>Color</span>
                 </button>
-                <button class="rail-item" onclick={() => (rightCollapsed = false)} aria-label="Layers">
+                <button
+                  class="rail-item"
+                  class:active={peekedPanel === 'layers'}
+                  onclick={() => peekPanel('layers')}
+                  aria-label="Layers"
+                  aria-pressed={peekedPanel === 'layers'}
+                >
                   <Icon svg={Layers} size={18} /><span>Layers</span>
                 </button>
               </div>
+              {#if peekedPanel}
+                <div class="peek-popover" class:layers={peekedPanel === 'layers'}>
+                  <div class="peek-bar">
+                    <button
+                      class="panel-toggle"
+                      onclick={closePeekedPanel}
+                      use:tooltip={{ text: 'Hide panel', placement: 'left' }}
+                      aria-label="Hide panel"
+                    ><Icon svg={ChevronDoubleRight} size={16} /></button>
+                  </div>
+                  <div class="peek-content">
+                    {#if peekedPanel === 'color'}
+                      <ColorPanel collapsed={false} onToggle={(collapsed) => collapsed && closePeekedPanel()} />
+                    {:else}
+                      <LayersPanel collapsed={false} onToggle={(collapsed) => collapsed && closePeekedPanel()} />
+                    {/if}
+                  </div>
+                </div>
+              {/if}
             {:else}
               <div class="column-bar">
                 <button
                   class="panel-toggle"
-                  onclick={() => (rightCollapsed = true)}
+                  onclick={collapseRightPanels}
                   use:tooltip={{ text: 'Collapse panels', placement: 'left' }}
                   aria-label="Collapse panels"
                 ><Icon svg={ChevronDoubleRight} size={16} /></button>
@@ -554,7 +610,10 @@
     overflow: hidden;
   }
   .right.collapsed {
+    position: relative;
     width: 108px;
+    overflow: visible;
+    z-index: 20;
   }
   .column-bar {
     height: 26px;
@@ -628,5 +687,49 @@
   }
   .rail-item:hover {
     background: var(--bg-elevated);
+  }
+  .rail-item.active {
+    background: color-mix(in srgb, var(--bg-elevated) 72%, var(--accent) 28%);
+    color: var(--text-bright);
+  }
+  .peek-popover {
+    position: absolute;
+    top: 0;
+    right: 100%;
+    width: var(--rightpanel-w);
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    box-shadow: -8px 10px 22px rgba(0, 0, 0, 0.34);
+  }
+  .peek-popover.layers {
+    max-height: min(520px, 100%);
+  }
+  .peek-bar {
+    height: 26px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 6px;
+    background: var(--bg-panel-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .peek-content {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .peek-popover.layers .peek-content {
+    flex: 1;
+  }
+  .peek-content :global(.panel) {
+    border-bottom: 0;
+  }
+  .peek-popover.layers .peek-content :global(.panel) {
+    flex: 1;
   }
 </style>
