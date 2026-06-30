@@ -258,13 +258,19 @@
           onclick={() => workflow.setTool(slot.id)}
           aria-label={slot.label}
         >
-          <Icon svg={slot.icon} size={20} />
+          <Icon svg={slot.icon} size={16} />
         </button>
       {/each}
     {:else}
       {#each slots as slot, i (i)}
       {#if slot.kind === 'marquee'}
-        <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
+        <div
+          class="tool-wrap"
+          class:colLeft={i % 2 === 0}
+          class:colRight={i % 2 === 1}
+          role="presentation"
+          onpointerdown={(e) => e.stopPropagation()}
+        >
           <button
             class="tool"
             class:active={hasDrawingSurface && editor.activeToolId === 'marquee'}
@@ -281,7 +287,7 @@
             aria-haspopup="menu"
             disabled={!hasDrawingSurface}
           >
-            <Icon svg={currentMarquee.icon} rotate={currentMarquee.rotate ?? 0} size={20} />
+            <Icon svg={currentMarquee.icon} rotate={currentMarquee.rotate ?? 0} size={16} />
             <span class="tri"></span>
           </button>
           {#if hasDrawingSurface && openGroup === 'marquee'}
@@ -303,7 +309,13 @@
         </div>
       {:else if slot.kind === 'group'}
         {@const shown = shownMember(slot)}
-        <div class="tool-wrap" role="presentation" onpointerdown={(e) => e.stopPropagation()}>
+        <div
+          class="tool-wrap"
+          class:colLeft={i % 2 === 0}
+          class:colRight={i % 2 === 1}
+          role="presentation"
+          onpointerdown={(e) => e.stopPropagation()}
+        >
           <button
             class="tool"
             class:active={hasDrawingSurface && groupActive(slot)}
@@ -320,7 +332,7 @@
             aria-haspopup="menu"
             disabled={!hasDrawingSurface}
           >
-            <Icon svg={shown.icon} size={20} />
+            <Icon svg={shown.icon} size={16} />
             <span class="tri"></span>
           </button>
           {#if hasDrawingSurface && openGroup === slot.name}
@@ -354,7 +366,7 @@
           aria-label={nameOf(slot.id)}
           disabled={!hasDrawingSurface}
         >
-          <Icon svg={slot.icon} size={20} />
+          <Icon svg={slot.icon} size={16} />
         </button>
       {/if}
       {/each}
@@ -368,7 +380,7 @@
         aria-label="Generate Image (AI)"
         disabled={!hasDrawingSurface}
       >
-        <Icon svg={Sparkle} size={20} />
+        <Icon svg={Sparkle} size={16} />
       </button>
     {/if}
   </div>
@@ -421,18 +433,21 @@
     padding: 6px 0;
   }
   .tools {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+    display: grid;
+    grid-template-columns: repeat(2, 30px);
+    gap: 3px 4px;
+    justify-content: center;
+    align-content: start;
   }
   .tool-wrap {
     position: relative;
     display: flex;
+    width: 30px;
   }
   .tool {
     position: relative;
-    width: 34px;
-    height: 34px;
+    width: 30px;
+    height: 30px;
     display: grid;
     place-items: center;
     padding: 0;
@@ -466,9 +481,11 @@
     border-color: var(--accent);
   }
   .tool-divider {
+    grid-column: 1 / -1;
     width: 24px;
     height: 1px;
     background: var(--border-soft);
+    justify-self: center;
     margin: 5px 0;
   }
   .tool.ai {
@@ -500,6 +517,12 @@
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
     padding: 4px;
     z-index: 60;
+  }
+  .tool-wrap.colLeft .flyout {
+    left: calc(100% + 47px);
+  }
+  .tool-wrap.colRight .flyout {
+    left: calc(100% + 13px);
   }
   .flyout-item {
     display: flex;
@@ -545,7 +568,7 @@
 
   .colors {
     position: relative;
-    width: 38px;
+    width: 42px;
     height: 50px;
     /* centered in the dock with breathing room above/below (Photoshop-style) */
     margin: 12px auto 12px;
