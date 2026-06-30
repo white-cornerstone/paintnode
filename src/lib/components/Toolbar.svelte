@@ -429,7 +429,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     padding: 6px 0;
   }
   .tools {
@@ -570,8 +570,7 @@
     position: relative;
     width: 42px;
     height: 50px;
-    /* centered in the dock with breathing room above/below (Photoshop-style) */
-    margin: 12px auto 12px;
+    margin: 12px auto 0;
   }
   .swatch {
     position: absolute;
