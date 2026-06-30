@@ -16,25 +16,35 @@
   }: { collapsed?: boolean; onToggle?: (collapsed: boolean) => void } = $props();
 
   let editingId = $state<string | null>(null);
-  let dragFrom = $state<number | null>(null);
-  let dragOver = $state<number | null>(null);
+  let dragFromId = $state<string | null>(null);
+  let dragInsertSlot = $state<number | null>(null);
+  let pointerDrag = $state<{
+    pointerId: number;
+    layerId: string;
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+    offsetX: number;
+    offsetY: number;
+    width: number;
+    height: number;
+    dragging: boolean;
+  } | null>(null);
+  let suppressClick = $state(false);
   let annotationsExpanded = $state(true);
 
   // Display order: top of stack first.
   const rows = $derived(editor.doc ? [...editor.doc.layers].reverse() : []);
   const active = $derived(editor.activeLayer);
   const activeRasterLayer = $derived(editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId ? active : null);
-  const count = $derived(editor.doc?.layers.length ?? 0);
   const annotationCount = $derived(editor.doc?.annotations.length ?? 0);
+  const draggedLayer = $derived(dragFromId ? rows.find((layer) => layer.id === dragFromId) ?? null : null);
   const activeSourceAsset = $derived(
     activeRasterLayer?.sourceAssetId
       ? (project.current?.assets.find((asset) => asset.id === activeRasterLayer.sourceAssetId) ?? null)
       : null,
   );
-
-  function arrayIndex(displayIndex: number): number {
-    return count - 1 - displayIndex;
-  }
 
   function select(l: Layer) {
     editor.doc?.setActive(l.id);
@@ -85,11 +95,110 @@
     editingId = null;
   }
 
-  function onDrop(displayTo: number) {
-    if (dragFrom === null) return;
-    editor.reorderLayer(arrayIndex(dragFrom), arrayIndex(displayTo));
-    dragFrom = null;
-    dragOver = null;
+  function reorderDraggedLayer(displaySlot: number | null) {
+    const layers = editor.doc?.layers ?? [];
+    if (!dragFromId || displaySlot === null || layers.length === 0) return;
+
+    const from = layers.findIndex((layer) => layer.id === dragFromId);
+    const fromDisplay = rows.findIndex((layer) => layer.id === dragFromId);
+    if (from < 0 || fromDisplay < 0) return;
+
+    const displayAfterRemoval = Math.max(0, Math.min(displaySlot - (displaySlot > fromDisplay ? 1 : 0), rows.length - 1));
+    const to = layers.length - 1 - displayAfterRemoval;
+    if (from >= 0 && to >= 0) editor.reorderLayer(from, to);
+  }
+
+  function clearDrag() {
+    pointerDrag = null;
+    dragFromId = null;
+    dragInsertSlot = null;
+  }
+
+  function interactiveTarget(target: EventTarget | null): boolean {
+    return target instanceof HTMLElement && !!target.closest('button,input,select,textarea,[contenteditable="true"]');
+  }
+
+  function onLayerClick(e: MouseEvent, layer: Layer) {
+    if (suppressClick) {
+      e.preventDefault();
+      e.stopPropagation();
+      suppressClick = false;
+      return;
+    }
+    select(layer);
+  }
+
+  function onLayerPointerDown(e: PointerEvent, layer: Layer, displayIndex: number) {
+    if (e.button !== 0 || interactiveTarget(e.target)) return;
+    const row = e.currentTarget as HTMLElement;
+    const rect = row.getBoundingClientRect();
+    row.setPointerCapture(e.pointerId);
+    pointerDrag = {
+      pointerId: e.pointerId,
+      layerId: layer.id,
+      startX: e.clientX,
+      startY: e.clientY,
+      currentX: e.clientX,
+      currentY: e.clientY,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+      dragging: false,
+    };
+    dragFromId = layer.id;
+    dragInsertSlot = displayIndex;
+  }
+
+  function onLayerPointerMove(e: PointerEvent) {
+    if (!pointerDrag || pointerDrag.pointerId !== e.pointerId) return;
+
+    const distance = Math.hypot(e.clientX - pointerDrag.startX, e.clientY - pointerDrag.startY);
+    if (!pointerDrag.dragging && distance < 4) return;
+
+    pointerDrag = { ...pointerDrag, currentX: e.clientX, currentY: e.clientY, dragging: true };
+    e.preventDefault();
+    dragInsertSlot = hitTestInsertSlot(e);
+  }
+
+  function previewStyle(drag: NonNullable<typeof pointerDrag>): string {
+    const x = drag.currentX - drag.offsetX;
+    const y = drag.currentY - drag.offsetY;
+    return `left: ${x}px; top: ${y}px; width: ${drag.width}px; height: ${drag.height}px;`;
+  }
+
+  function onLayerPointerUp(e: PointerEvent) {
+    if (!pointerDrag || pointerDrag.pointerId !== e.pointerId) return;
+
+    const row = e.currentTarget as HTMLElement;
+    if (row.hasPointerCapture(e.pointerId)) row.releasePointerCapture(e.pointerId);
+
+    if (pointerDrag.dragging) {
+      e.preventDefault();
+      e.stopPropagation();
+      suppressClick = true;
+      reorderDraggedLayer(dragInsertSlot);
+      setTimeout(() => {
+        suppressClick = false;
+      });
+    }
+
+    clearDrag();
+  }
+
+  function hitTestInsertSlot(e: PointerEvent): number | null {
+    if (!editor.doc || rows.length === 0) return null;
+    const list = (e.currentTarget as HTMLElement).closest('.list');
+    if (!list) return null;
+
+    const layerRows = Array.from(list.querySelectorAll<HTMLElement>('.layer[data-layer-id]'));
+    if (layerRows.length === 0) return null;
+
+    for (let i = 0; i < layerRows.length; i++) {
+      const rect = layerRows[i].getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) return i;
+    }
+    return layerRows.length;
   }
 </script>
 
@@ -200,22 +309,18 @@
       <div
         class="layer"
         class:active={editor.doc?.activeLayerId === l.id && editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId}
-        class:dragover={dragOver === i}
+        class:dragging={dragFromId === l.id}
+        class:insert-before={dragInsertSlot === i}
+        class:insert-after={dragInsertSlot === rows.length && i === rows.length - 1}
         role="button"
+        data-layer-id={l.id}
         tabindex="0"
-        draggable="true"
-        onclick={() => select(l)}
+        onclick={(e) => onLayerClick(e, l)}
         onkeydown={(e) => (e.key === 'Enter' ? select(l) : null)}
-        ondragstart={() => (dragFrom = i)}
-        ondragover={(e) => {
-          e.preventDefault();
-          dragOver = i;
-        }}
-        ondragleave={() => (dragOver === i ? (dragOver = null) : null)}
-        ondrop={(e) => {
-          e.preventDefault();
-          onDrop(i);
-        }}
+        onpointerdown={(e) => onLayerPointerDown(e, l, i)}
+        onpointermove={onLayerPointerMove}
+        onpointerup={onLayerPointerUp}
+        onpointercancel={clearDrag}
       >
         <button
           class="eye"
@@ -312,6 +417,27 @@
   </footer>
 </Panel>
 
+{#if pointerDrag?.dragging && draggedLayer}
+  <div class="layer-drag-preview" style={previewStyle(pointerDrag)} aria-hidden="true">
+    <button class="eye" class:off={!draggedLayer.visible} tabindex="-1">
+      <Icon svg={draggedLayer.visible ? Eye : EyeOff} size={17} />
+    </button>
+
+    <div class="thumb-wrap">
+      <LayerThumb layer={draggedLayer} />
+      {#if draggedLayer.kind === 'text'}
+        <span class="type-badge">
+          <Icon svg={TextT} size={11} />
+        </span>
+      {/if}
+    </div>
+
+    <div class="name">
+      <span>{draggedLayer.name}</span>
+    </div>
+  </div>
+{/if}
+
 <style>
   .props {
     padding: 8px;
@@ -349,6 +475,7 @@
     padding: 5px 8px;
     border-bottom: 1px solid var(--border);
     cursor: pointer;
+    touch-action: none;
   }
   .layer:hover {
     background: var(--bg-panel-2);
@@ -356,8 +483,31 @@
   .layer.active {
     background: var(--accent-dim);
   }
-  .layer.dragover {
+  .layer.insert-before {
     box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .layer.insert-after {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .layer.dragging {
+    cursor: grabbing;
+    opacity: 0.38;
+  }
+  .layer-drag-preview {
+    position: fixed;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-panel-2) 92%, var(--accent) 8%);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
+    color: var(--text);
+    opacity: 0.62;
+    pointer-events: none;
+    transform: translate3d(0, 0, 0);
   }
   .eye {
     flex: none;
