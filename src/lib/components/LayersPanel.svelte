@@ -33,11 +33,15 @@
   } | null>(null);
   let suppressClick = $state(false);
   let annotationsExpanded = $state(true);
+  let opacityOpen = $state(false);
+  let opacityDraft = $state<string | null>(null);
+  let opacityControl: HTMLDivElement | null = null;
 
   // Display order: top of stack first.
   const rows = $derived(editor.doc ? [...editor.doc.layers].reverse() : []);
   const active = $derived(editor.activeLayer);
   const activeRasterLayer = $derived(editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId ? active : null);
+  const activeOpacityPercent = $derived(Math.round((activeRasterLayer?.opacity ?? 1) * 100));
   const annotationCount = $derived(editor.doc?.annotations.length ?? 0);
   const draggedLayer = $derived(dragFromId ? rows.find((layer) => layer.id === dragFromId) ?? null : null);
   const activeSourceAsset = $derived(
@@ -74,11 +78,37 @@
     l.visible = !l.visible;
     editor.invalidate();
   }
+  function clampPercent(p: number): number {
+    if (!Number.isFinite(p)) return activeOpacityPercent;
+    return Math.max(0, Math.min(100, Math.round(p)));
+  }
   function setOpacity(p: number) {
     if (activeRasterLayer) {
-      activeRasterLayer.opacity = p / 100;
+      activeRasterLayer.opacity = clampPercent(p) / 100;
       editor.invalidate();
     }
+  }
+  function setOpacityFromInput(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    opacityDraft = input.value;
+    if (Number.isFinite(input.valueAsNumber)) setOpacity(input.valueAsNumber);
+  }
+  function finishOpacityInput(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    if (Number.isFinite(input.valueAsNumber)) setOpacity(input.valueAsNumber);
+    opacityDraft = null;
+  }
+  function startOpacityInput(e: Event) {
+    opacityDraft = String(activeOpacityPercent);
+    (e.currentTarget as HTMLInputElement).select();
+  }
+  function closeOpacityOnOutside(e: PointerEvent) {
+    if (!opacityOpen) return;
+    if (opacityControl?.contains(e.target as Node)) return;
+    opacityOpen = false;
+  }
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') opacityOpen = false;
   }
   function setBlend(e: Event) {
     if (activeRasterLayer) {
@@ -202,30 +232,70 @@
   }
 </script>
 
+<svelte:window onpointerdown={closeOpacityOnOutside} onkeydown={onWindowKeydown} />
+
 <Panel title="Layers" grow bind:collapsed {onToggle}>
   <div class="props">
-    <select
-      class="blend"
-      value={activeRasterLayer?.blendMode ?? 'source-over'}
-      onchange={setBlend}
-      disabled={!activeRasterLayer}
-      title="Blend mode"
-    >
-      {#each BLEND_MODES as m (m.value)}
-        <option value={m.value}>{m.label}</option>
-      {/each}
-    </select>
-    <div class="opacity">
-      <span>Opacity</span>
-      <input
-        type="range"
-        min="0"
-        max="100"
-        value={Math.round((activeRasterLayer?.opacity ?? 1) * 100)}
-        oninput={(e) => setOpacity(+(e.currentTarget as HTMLInputElement).value)}
+    <div class="layer-settings">
+      <select
+        class="blend"
+        aria-label="Blend mode"
+        value={activeRasterLayer?.blendMode ?? 'source-over'}
+        onchange={setBlend}
         disabled={!activeRasterLayer}
-      />
-      <span class="pct">{Math.round((activeRasterLayer?.opacity ?? 1) * 100)}%</span>
+      >
+        {#each BLEND_MODES as m (m.value)}
+          <option value={m.value}>{m.label}</option>
+        {/each}
+      </select>
+      <label class="opacity-label" for="layer-opacity">Opacity:</label>
+      <div class="opacity-control" bind:this={opacityControl}>
+        <div class="opacity-value" class:disabled={!activeRasterLayer}>
+          <input
+            id="layer-opacity"
+            type="number"
+            min="0"
+            max="100"
+            step="1"
+            value={opacityDraft ?? activeOpacityPercent}
+            oninput={setOpacityFromInput}
+            onblur={finishOpacityInput}
+            onfocus={startOpacityInput}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+              if (e.key === 'Escape') {
+                opacityDraft = null;
+                e.currentTarget.blur();
+              }
+            }}
+            disabled={!activeRasterLayer}
+          />
+          <span aria-hidden="true">%</span>
+        </div>
+        <button
+          class="opacity-toggle"
+          aria-label="Open opacity slider"
+          aria-haspopup="dialog"
+          aria-expanded={opacityOpen}
+          use:tooltip={{ text: 'Opacity slider', placement: 'left' }}
+          onclick={() => (opacityOpen = !opacityOpen)}
+          disabled={!activeRasterLayer}
+        >
+          <Icon svg={ChevronDown} size={14} />
+        </button>
+        {#if opacityOpen && activeRasterLayer}
+          <div class="opacity-popover" role="dialog" aria-label="Opacity slider">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={activeOpacityPercent}
+              oninput={(e) => setOpacity(+(e.currentTarget as HTMLInputElement).value)}
+              aria-label="Layer opacity"
+            />
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -441,27 +511,90 @@
 <style>
   .props {
     padding: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
     border-bottom: 1px solid var(--border);
+  }
+  .layer-settings {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(90px, 1fr) auto auto;
+    align-items: center;
+    gap: 6px;
   }
   .blend {
     width: 100%;
+    min-width: 0;
+    height: 28px;
   }
-  .opacity {
+  .opacity-label {
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .opacity-control {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    flex: none;
+  }
+  .opacity-value {
     display: flex;
     align-items: center;
-    gap: 8px;
-    color: var(--text-dim);
-  }
-  .opacity input {
-    flex: 1;
-  }
-  .pct {
-    width: 38px;
-    text-align: right;
+    width: 58px;
+    height: 28px;
+    padding: 0 5px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-soft);
+    border-right: 0;
+    border-radius: 3px 0 0 3px;
     color: var(--text);
+  }
+  .opacity-value.disabled {
+    opacity: 0.4;
+  }
+  .opacity-value input {
+    min-width: 0;
+    width: 100%;
+    height: 24px;
+    padding: 0;
+    color: inherit;
+    text-align: right;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+  }
+  .opacity-value input:focus {
+    outline: none;
+  }
+  .opacity-value input::-webkit-outer-spin-button,
+  .opacity-value input::-webkit-inner-spin-button {
+    margin: 0;
+    appearance: none;
+  }
+  .opacity-value span {
+    flex: none;
+    margin-left: 1px;
+  }
+  .opacity-toggle {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 28px;
+    padding: 0;
+    border-radius: 0 3px 3px 0;
+  }
+  .opacity-popover {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 6px);
+    right: 0;
+    width: 238px;
+    padding: 14px 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  }
+  .opacity-popover input {
+    display: block;
+    width: 100%;
   }
   .list {
     flex: 1;
