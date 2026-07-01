@@ -61,3 +61,18 @@ export function openFiles(accept: string, multiple = true): Promise<File[]> {
     input.click();
   });
 }
+
+export function hasFileDrag(dataTransfer: DataTransfer | null | undefined): boolean {
+  if (!dataTransfer) return false;
+  if (Array.from(dataTransfer.types ?? []).includes('Files')) return true;
+  return Array.from(dataTransfer.items ?? []).some((item) => item.kind === 'file');
+}
+
+export function filesFromDataTransfer(dataTransfer: DataTransfer | null | undefined): File[] {
+  if (!dataTransfer) return [];
+  const itemFiles = Array.from(dataTransfer.items ?? [])
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+  return itemFiles.length ? itemFiles : Array.from(dataTransfer.files ?? []);
+}

@@ -3,6 +3,7 @@
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { openCommand, openDocumentFiles } from '../state/commands';
+  import { filesFromDataTransfer, hasFileDrag } from '../io';
   import { workflow } from '../state/workflow.svelte';
   import { Viewport } from '../engine/Viewport';
   import { wheelZoomFactor } from '../engine/zoomGesture';
@@ -415,12 +416,8 @@
     window.addEventListener('pointerup', up);
   }
 
-  function hasFileDrag(e: DragEvent): boolean {
-    return Array.from(e.dataTransfer?.types ?? []).includes('Files');
-  }
-
   function onWorkspaceDragOver(e: DragEvent): void {
-    if (editor.doc || !hasFileDrag(e)) return;
+    if (editor.doc || !hasFileDrag(e.dataTransfer)) return;
     e.preventDefault();
     dragOverEmpty = true;
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
@@ -437,7 +434,7 @@
     if (editor.doc) return;
     e.preventDefault();
     dragOverEmpty = false;
-    const files = Array.from(e.dataTransfer?.files ?? []);
+    const files = filesFromDataTransfer(e.dataTransfer);
     if (files.length) await openDocumentFiles(files);
   }
 
@@ -581,6 +578,7 @@
   style="cursor:{cursorStyle}"
   role="presentation"
   onpointerleave={onPointerLeave}
+  ondragenter={onWorkspaceDragOver}
   ondragover={onWorkspaceDragOver}
   ondragleave={onWorkspaceDragLeave}
   ondrop={onWorkspaceDrop}

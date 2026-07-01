@@ -10,7 +10,8 @@ import { project } from './project.svelte';
 import { fonts } from './fonts.svelte';
 import { ui } from './ui.svelte';
 import { workflow } from './workflow.svelte';
-import { isDesktop } from '../integrations/desktop';
+import { isDesktop, readNativeDroppedFile } from '../integrations/desktop';
+import { fileDocumentSourceKey, nativePathDocumentSourceKey, type DocumentSourceKey } from './documentSource';
 
 /** Distinct font families used by the document's text layers. */
 function textFamilies(doc: PaintDocument): string[] {
@@ -53,14 +54,38 @@ async function resolveEmbed(
   return pref ? embeddable : [];
 }
 
-const isOra = (file: File): boolean =>
+const isOra = (file: { name: string; type?: string | null }): boolean =>
   /\.ora$/i.test(file.name) || file.type === 'image/openraster';
 
-const isRasterImage = (file: File): boolean =>
-  file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+const isRasterImage = (file: { name: string; type?: string | null }): boolean =>
+  file.type?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
 
-async function openImageAsDocument(file: File): Promise<void> {
-  const bmp = await createImageBitmap(file);
+interface OpenableDocumentFile {
+  name: string;
+  type?: string | null;
+  size: number;
+  lastModified: number;
+  sourceKey: DocumentSourceKey;
+  savedPath?: string | null;
+  arrayBuffer: () => Promise<ArrayBuffer>;
+}
+
+type OpenFileResult = 'opened' | 'focused';
+
+function fileToOpenable(file: File): OpenableDocumentFile {
+  return {
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    lastModified: file.lastModified,
+    sourceKey: fileDocumentSourceKey(file),
+    arrayBuffer: () => file.arrayBuffer(),
+  };
+}
+
+async function openImageAsDocument(file: OpenableDocumentFile): Promise<void> {
+  const blob = new Blob([await file.arrayBuffer()], { type: file.type ?? 'image/png' });
+  const bmp = await createImageBitmap(blob);
   const doc = new PaintDocument(bmp.width, bmp.height, file.name.replace(/\.[^.]+$/, ''));
   const layer = new Layer(bmp.width, bmp.height, 'Layer 1');
   layer.ctx.drawImage(bmp, 0, 0);
@@ -68,28 +93,75 @@ async function openImageAsDocument(file: File): Promise<void> {
   bmp.close();
   doc.layers = [layer];
   doc.activeLayerId = layer.id;
-  editor.openDocument(doc);
+  editor.openDocument(doc, true, file.sourceKey);
 }
 
-async function openDocumentFile(file: File): Promise<void> {
+async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenFileResult> {
+  if (editor.focusDocumentBySource(file.sourceKey)) return 'focused';
+
   if (isOra(file)) {
     const doc = await loadOra(await file.arrayBuffer());
     doc.name = file.name.replace(/\.ora$/i, '');
-    editor.openDocument(doc);
+    const session = editor.openDocument(doc, true, file.sourceKey);
+    if (file.savedPath) session.savedPath = file.savedPath;
   } else {
     await openImageAsDocument(file);
   }
+  return 'opened';
 }
 
 export async function openDocumentFiles(files: Iterable<File>): Promise<void> {
-  const supported = Array.from(files).filter((file) => isOra(file) || isRasterImage(file));
+  await openDocumentFileInputs(Array.from(files).map(fileToOpenable));
+}
+
+async function openDocumentFileInputs(files: OpenableDocumentFile[]): Promise<void> {
+  const supported = files.filter((file) => isOra(file) || isRasterImage(file));
   if (!supported.length) {
     editor.flash('No supported image or .ora files');
     return;
   }
   try {
-    for (const file of supported) await openDocumentFile(file);
-    editor.flash(supported.length === 1 ? `Opened ${supported[0].name}` : `Opened ${supported.length} files`);
+    let opened = 0;
+    let focused = 0;
+    for (const file of supported) {
+      const result = await openDocumentFile(file);
+      if (result === 'opened') opened++;
+      else focused++;
+    }
+    if (opened && focused) {
+      editor.flash(`Opened ${opened} file${opened === 1 ? '' : 's'}; focused ${focused} already open`);
+    } else if (focused) {
+      editor.flash(
+        supported.length === 1 ? `${supported[0].name} is already open` : `Focused ${focused} already-open files`,
+      );
+    } else {
+      editor.flash(supported.length === 1 ? `Opened ${supported[0].name}` : `Opened ${opened} files`);
+    }
+  } catch (e) {
+    editor.flash('Open failed: ' + (e as Error).message);
+  }
+}
+
+export async function openDocumentPaths(paths: Iterable<string>): Promise<void> {
+  try {
+    const files: OpenableDocumentFile[] = [];
+    for (const path of paths) {
+      const sourceKey = nativePathDocumentSourceKey(path);
+      if (!sourceKey) continue;
+      const dropped = await readNativeDroppedFile(path);
+      const bytes = dropped.bytes;
+      files.push({
+        name: dropped.name,
+        type: dropped.mime ?? '',
+        size: dropped.size,
+        lastModified: dropped.modifiedAt,
+        sourceKey,
+        savedPath: dropped.path,
+        arrayBuffer: async () =>
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      });
+    }
+    await openDocumentFileInputs(files);
   } catch (e) {
     editor.flash('Open failed: ' + (e as Error).message);
   }

@@ -2,25 +2,95 @@
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { Dismiss } from '../icons';
+  import { filesFromDataTransfer, hasFileDrag } from '../io';
+  import { openDocumentFiles, saveOraCommand } from '../state/commands';
   import { editor, type DocumentSession } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
+
+  let dragOverTabs = $state(false);
+
+  function documentName(session: DocumentSession): string {
+    return session.doc.name || 'Untitled';
+  }
+
+  function documentNameWithMarker(session: DocumentSession): string {
+    const dirty = editor.hasUnsavedChanges(session) ? ' *' : '';
+    return `${documentName(session)}${dirty}`;
+  }
 
   function label(session: DocumentSession): string {
     const zoom =
       ui.activeSurface === 'document' && editor.activeDocumentId === session.id
         ? Math.round((editor.viewport?.scale ?? 1) * 100)
         : 100;
-    const dirty = editor.hasUnsavedChanges(session) ? ' *' : '';
-    return `${session.doc.name || 'Untitled'}${dirty} @ ${zoom}%`;
+    return `${documentNameWithMarker(session)} @ ${zoom}%`;
+  }
+
+  function documentTooltip(session: DocumentSession): string {
+    return documentNameWithMarker(session);
   }
 
   function workflowLabel(): string {
     return `${workflow.name || 'Untitled Workflow'}${workflow.dirty ? ' *' : ''}`;
   }
+
+  function onTabsDragOver(event: DragEvent): void {
+    if (!hasFileDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    dragOverTabs = true;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  }
+
+  function onTabsDragLeave(event: DragEvent): void {
+    const root = event.currentTarget as HTMLElement;
+    const next = event.relatedTarget as Node | null;
+    if (next && root.contains(next)) return;
+    dragOverTabs = false;
+  }
+
+  async function onTabsDrop(event: DragEvent): Promise<void> {
+    if (!hasFileDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    dragOverTabs = false;
+    const files = filesFromDataTransfer(event.dataTransfer);
+    if (files.length) await openDocumentFiles(files);
+  }
+
+  async function closeDocumentTab(session: DocumentSession): Promise<void> {
+    if (!editor.hasUnsavedChanges(session)) {
+      editor.closeDocument(session.id);
+      return;
+    }
+
+    editor.switchDocument(session.id);
+    const choice = await ui.askSaveChanges({
+      kind: 'document',
+      name: documentName(session),
+      index: 1,
+      total: 1,
+    });
+    if (choice === 'cancel') return;
+    if (choice === 'save') {
+      await saveOraCommand();
+      const updated = editor.documents.find((documentSession) => documentSession.id === session.id);
+      if (updated && editor.hasUnsavedChanges(updated)) return;
+    }
+    editor.closeDocument(session.id);
+  }
 </script>
 
-<div class="doc-tabs" role="tablist" aria-label="Open documents">
+<div
+  class="doc-tabs"
+  class:dragover={dragOverTabs}
+  role="tablist"
+  aria-label="Open documents"
+  tabindex="-1"
+  ondragenter={onTabsDragOver}
+  ondragover={onTabsDragOver}
+  ondragleave={onTabsDragLeave}
+  ondrop={onTabsDrop}
+>
   {#each editor.documentTabs as session (session.id)}
     <div
       class="tab"
@@ -31,6 +101,8 @@
         class="tab-main"
         role="tab"
         aria-selected={ui.activeSurface === 'document' && editor.activeDocumentId === session.id}
+        aria-label={label(session)}
+        use:tooltip={{ text: documentTooltip(session), placement: 'bottom' }}
         onclick={() => editor.switchDocument(session.id)}
       >
         <span>{label(session)}</span>
@@ -41,7 +113,7 @@
         use:tooltip={{ text: `Close ${session.doc.name || 'document'}`, placement: 'bottom' }}
         onclick={(e) => {
           e.stopPropagation();
-          editor.closeDocument(session.id);
+          void closeDocumentTab(session);
         }}
       >
         <Icon svg={Dismiss} size={13} />
@@ -54,6 +126,8 @@
         class="tab-main"
         role="tab"
         aria-selected={ui.activeSurface === 'workflow'}
+        aria-label={workflowLabel()}
+        use:tooltip={{ text: workflowLabel(), placement: 'bottom' }}
         onclick={() => workflow.show()}
       >
         <span>{workflowLabel()}</span>
@@ -84,11 +158,15 @@
     background: #262626;
     border-bottom: 1px solid var(--border);
   }
+  .doc-tabs.dragover {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
   .tab {
     display: flex;
     align-items: center;
-    min-width: 140px;
-    max-width: 260px;
+    flex: 0 1 max-content;
+    min-width: 128px;
+    max-width: 100%;
     border-right: 1px solid var(--border);
     background: var(--bg-panel);
     color: var(--text-dim);

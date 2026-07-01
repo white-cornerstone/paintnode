@@ -51,6 +51,7 @@ import { ToningTool } from '../engine/tools/ToningTool';
 import { HandTool, ZoomTool } from '../engine/tools/NavTools';
 import { ui } from './ui.svelte';
 import { newAnnotation, type AnnotationItem, type AnnotationKind } from '../engine/annotations';
+import { projectDocumentSourceKey, type DocumentSourceKey } from './documentSource';
 
 export interface PlacedImageResult {
   oversized: boolean;
@@ -110,6 +111,8 @@ export interface DocumentSession {
   autosavedRevision: number;
   savedPath: string | null;
   autosavePath: string | null;
+  sourceKey: DocumentSourceKey | null;
+  hasSavedBaseline: boolean;
   /** Remembered "embed fonts?" choice for this document (null = ask on next save). */
   embedFonts: boolean | null;
 }
@@ -265,7 +268,11 @@ export class EditorStore implements ToolHost {
     };
   }
 
-  private makeSession(doc: PaintDocument): DocumentSession {
+  private makeSession(
+    doc: PaintDocument,
+    sourceKey: DocumentSourceKey | null = null,
+    hasSavedBaseline = sourceKey !== null,
+  ): DocumentSession {
     return {
       id: doc.id,
       doc,
@@ -276,8 +283,17 @@ export class EditorStore implements ToolHost {
       autosavedRevision: 0,
       savedPath: null,
       autosavePath: null,
+      sourceKey,
+      hasSavedBaseline,
       embedFonts: null,
     };
+  }
+
+  private documentMatchesSource(session: DocumentSession, sourceKey: DocumentSourceKey): boolean {
+    return (
+      session.sourceKey === sourceKey ||
+      (session.savedPath ? projectDocumentSourceKey(session.savedPath) === sourceKey : false)
+    );
   }
 
   private notify(markDocumentChanged = false): void {
@@ -502,14 +518,36 @@ export class EditorStore implements ToolHost {
   }
 
   // --- Documents ---
-  openDocument(doc: PaintDocument, focus = true): void {
-    const session = this.makeSession(doc);
+  openDocument(
+    doc: PaintDocument,
+    focus = true,
+    sourceKey: DocumentSourceKey | null = null,
+    hasSavedBaseline = sourceKey !== null,
+  ): DocumentSession {
+    if (sourceKey) {
+      const existing = this.documents.find((d) => this.documentMatchesSource(d, sourceKey));
+      if (existing) {
+        if (focus) this.switchDocument(existing.id);
+        return existing;
+      }
+    }
+
+    const session = this.makeSession(doc, sourceKey, hasSavedBaseline);
     this.documents = [...this.documents, session];
     if (focus) {
       ui.showDocument();
       this.switchDocument(session.id);
     }
     else if (!this.activeDocumentId) this.switchDocument(session.id);
+    return session;
+  }
+
+  focusDocumentBySource(sourceKey: DocumentSourceKey | null): DocumentSession | null {
+    if (!sourceKey) return null;
+    const session = this.documents.find((d) => this.documentMatchesSource(d, sourceKey));
+    if (!session) return null;
+    this.switchDocument(session.id);
+    return session;
   }
 
   setDocument(doc: PaintDocument): void {
@@ -591,6 +629,7 @@ export class EditorStore implements ToolHost {
     const session = this.activeDocument;
     if (!session) return;
     session.savedPath = relativePath;
+    session.hasSavedBaseline = true;
     session.savedRevision = session.revision;
     this.notify();
   }
@@ -612,7 +651,7 @@ export class EditorStore implements ToolHost {
   }
 
   hasUnsavedChanges(session: DocumentSession): boolean {
-    return session.revision !== session.savedRevision;
+    return !session.hasSavedBaseline || session.revision !== session.savedRevision;
   }
 
   needsAutosave(session: DocumentSession): boolean {
