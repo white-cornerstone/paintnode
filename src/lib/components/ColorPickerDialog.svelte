@@ -12,6 +12,7 @@
   const FIELD_SIZE = 236;
   const SLIDER_WIDTH = 24;
   const SLIDER_HEIGHT = 236;
+  const DIALOG_WIDTH = 580;
 
   let {
     target,
@@ -66,7 +67,7 @@
   });
 
   onMount(() => {
-    const w = Math.min(630, window.innerWidth - 32);
+    const w = Math.min(DIALOG_WIDTH, window.innerWidth - 32);
     dialogX = Math.max(16, Math.round((window.innerWidth - w) / 2));
     dialogY = Math.max(48, Math.round(window.innerHeight * 0.18));
   });
@@ -78,6 +79,7 @@
     s;
     v;
     lab;
+    webSafeOnly;
     untrack(drawPickerCanvases);
   });
 
@@ -214,7 +216,7 @@
     const nextX = drag.dialogX + clientX - drag.startX;
     const nextY = drag.dialogY + clientY - drag.startY;
     const rect = dialogEl?.getBoundingClientRect();
-    const width = rect?.width ?? 630;
+    const width = rect?.width ?? DIALOG_WIDTH;
     const height = rect?.height ?? 430;
     dialogX = clamp(Math.round(nextX), 8, Math.max(8, window.innerWidth - width - 8));
     dialogY = clamp(Math.round(nextY), 8, Math.max(8, window.innerHeight - height - 8));
@@ -349,6 +351,10 @@
     return labToRgb({ ...lab, b: (1 - y) * 255 - 128 });
   }
 
+  function pickerDisplayColor(rgb: RGB): RGB {
+    return webSafeOnly ? nearestWebSafe(rgb) : rgb;
+  }
+
   function drawPickerCanvases(): void {
     drawColorField();
     drawColorSlider();
@@ -362,7 +368,7 @@
       const yValue = yIndex / (FIELD_SIZE - 1);
       for (let xIndex = 0; xIndex < FIELD_SIZE; xIndex += 1) {
         const xValue = xIndex / (FIELD_SIZE - 1);
-        const rgb = colorFromField(xValue, yValue);
+        const rgb = pickerDisplayColor(colorFromField(xValue, yValue));
         const index = (yIndex * FIELD_SIZE + xIndex) * 4;
         image.data[index] = clamp(Math.round(rgb.r), 0, 255);
         image.data[index + 1] = clamp(Math.round(rgb.g), 0, 255);
@@ -378,7 +384,7 @@
     if (!ctx) return;
     const image = ctx.createImageData(SLIDER_WIDTH, SLIDER_HEIGHT);
     for (let yIndex = 0; yIndex < SLIDER_HEIGHT; yIndex += 1) {
-      const rgb = colorFromSlider(yIndex / (SLIDER_HEIGHT - 1));
+      const rgb = pickerDisplayColor(colorFromSlider(yIndex / (SLIDER_HEIGHT - 1)));
       for (let xIndex = 0; xIndex < SLIDER_WIDTH; xIndex += 1) {
         const index = (yIndex * SLIDER_WIDTH + xIndex) * 4;
         image.data[index] = clamp(Math.round(rgb.r), 0, 255);
@@ -549,7 +555,7 @@
   }
   .picker-dialog {
     position: fixed;
-    width: 630px;
+    width: 580px;
     max-width: calc(100vw - 34px);
     z-index: 140;
     overflow: hidden;
@@ -577,10 +583,10 @@
   }
   .dialog-body {
     display: grid;
-    grid-template-columns: 236px 24px 104px 76px 132px;
-    grid-template-rows: 150px 86px 87px;
+    grid-template-columns: 236px 24px 118px 6px 132px;
+    grid-template-rows: 150px 77px 92px;
     grid-template-areas:
-      'cube hue preview actions actions'
+      'cube hue preview . actions'
       'cube hue hsb fieldstack fieldstack'
       'web  hue hsb fieldstack fieldstack';
     column-gap: 8px;
@@ -637,12 +643,14 @@
     grid-area: preview;
     position: relative;
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: 64px;
+    justify-content: start;
     justify-items: center;
+    padding-left: 14px;
     align-self: start;
-    color: #e8e8e8;
+    color: #d6d6d6;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 400;
   }
   .preview-chip {
     width: 64px;
@@ -655,7 +663,7 @@
   .color-warnings {
     position: absolute;
     top: 62px;
-    right: -14px;
+    left: 86px;
     display: grid;
     gap: 7px;
   }
@@ -705,12 +713,13 @@
   }
   .hsb-rgb {
     grid-area: hsb;
+    margin-left: 14px;
   }
   .lab {
     grid-area: lab;
   }
   .cmyk {
-    margin-top: 8px;
+    margin-top: 4px;
   }
   .field-stack {
     grid-area: fieldstack;
@@ -722,21 +731,36 @@
     grid-template-columns: 13px 17px 50px 9px;
     align-items: center;
     gap: 4px;
-    color: #efefef;
+    color: #d6d6d6;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 400;
   }
   .lab .color-row {
     grid-template-columns: 13px 17px 50px;
   }
   .cmyk label {
     display: grid;
-    grid-template-columns: 17px 50px 12px;
+    grid-template-columns: 13px 17px 50px 12px;
     align-items: center;
     gap: 4px;
-    color: #efefef;
+    color: #d6d6d6;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 400;
+  }
+  .cmyk b {
+    grid-column: 2;
+  }
+  .cmyk input {
+    grid-column: 3;
+  }
+  .cmyk em {
+    grid-column: 4;
+  }
+  .color-row b,
+  .hex b,
+  .cmyk b {
+    color: #dddddd;
+    font-weight: 400;
   }
   .hex {
     grid-template-columns: 16px 84px;
@@ -769,14 +793,16 @@
     background: #4c4c4c;
     color: #fff;
     font: inherit;
+    font-weight: 400;
   }
   .hex input:focus {
     outline: 1px solid #1686ff;
     border-color: #1686ff;
   }
   em {
-    color: #eee;
+    color: #d6d6d6;
     font-style: normal;
+    font-weight: 400;
   }
   .web-only {
     grid-area: web;
@@ -784,7 +810,7 @@
     grid-template-columns: 22px auto;
     width: max-content;
     align-self: start;
-    margin: 14px 0 0;
+    margin: 4px 0 0;
   }
   .web-only input {
     width: 14px;
