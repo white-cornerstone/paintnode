@@ -26,6 +26,7 @@
   import GaussianBlurDialog from './lib/components/GaussianBlurDialog.svelte';
   import AiGenerateDialog from './lib/components/AiGenerateDialog.svelte';
   import AiDecoupleDialog from './lib/components/AiDecoupleDialog.svelte';
+  import StockImagesDialog from './lib/components/StockImagesDialog.svelte';
   import FontEmbedDialog from './lib/components/FontEmbedDialog.svelte';
   import RasterizeTypeDialog from './lib/components/RasterizeTypeDialog.svelte';
   import SaveChangesDialog from './lib/components/SaveChangesDialog.svelte';
@@ -713,6 +714,8 @@
   <AiGenerateDialog onClose={() => ui.close()} />
 {:else if ui.dialog === 'aiDecouple'}
   <AiDecoupleDialog onClose={() => ui.close()} />
+{:else if ui.dialog === 'stockImages'}
+  <StockImagesDialog onClose={() => ui.close()} />
 {/if}
 
 {#if ui.fontEmbed}

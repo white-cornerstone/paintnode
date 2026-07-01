@@ -49,6 +49,19 @@
     { id: 'intersect', label: 'Intersect', icon: SquareMultiple },
   ];
   let activeTip = $state<string | null>(null);
+
+  function closeTipOnOutsidePointer(event: PointerEvent): void {
+    if (!activeTip) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('.tip-host')) return;
+    activeTip = null;
+  }
+
+  $effect(() => {
+    if (!activeTip) return;
+    document.addEventListener('pointerdown', closeTipOnOutsidePointer, true);
+    return () => document.removeEventListener('pointerdown', closeTipOnOutsidePointer, true);
+  });
 </script>
 
 {#snippet selectionModeButtons()}
