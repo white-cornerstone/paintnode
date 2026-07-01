@@ -81,9 +81,25 @@
     bg = preset.bg;
   }
 
+  function chooseImagePreset(preset: ImagePreset): void {
+    if (selectedImageId === preset.id) {
+      createImage();
+      return;
+    }
+    pickImagePreset(preset);
+  }
+
   function pickWorkflowPreset(preset: WorkflowPreset): void {
     selectedWorkflowId = preset.id;
     workflowName = preset.name === 'Blank Workflow' ? 'Untitled Workflow' : preset.name;
+  }
+
+  function chooseWorkflowPreset(preset: WorkflowPreset): void {
+    if (selectedWorkflowId === preset.id) {
+      createWorkflow();
+      return;
+    }
+    pickWorkflowPreset(preset);
   }
 
   function createImage(): void {
@@ -119,7 +135,27 @@
       projectBusy = false;
     }
   }
+
+  function createCurrent(): void {
+    if (tab === 'image') {
+      createImage();
+    } else if (tab === 'workflow') {
+      createWorkflow();
+    } else {
+      void createProject();
+    }
+  }
+
+  function onDialogKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (event.target instanceof HTMLTextAreaElement) return;
+    if (event.target instanceof HTMLButtonElement && !event.target.classList.contains('preset-tile')) return;
+    event.preventDefault();
+    createCurrent();
+  }
 </script>
+
+<svelte:window onkeydown={onDialogKeydown} />
 
 <Modal title="New" {onClose} width={980}>
   <div class="new-dialog">
@@ -144,7 +180,7 @@
               <button
                 class="preset-tile"
                 class:selected={selectedImageId === preset.id}
-                onclick={() => pickImagePreset(preset)}
+                onclick={() => chooseImagePreset(preset)}
               >
                 <Icon svg={ImageAdd} size={44} />
                 <span>{preset.name}</span>
@@ -159,7 +195,7 @@
               <button
                 class="preset-tile"
                 class:selected={selectedWorkflowId === preset.id}
-                onclick={() => pickWorkflowPreset(preset)}
+                onclick={() => chooseWorkflowPreset(preset)}
               >
                 <Icon svg={Board} size={44} />
                 <span>{preset.name}</span>

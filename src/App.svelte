@@ -54,6 +54,7 @@
   import { project } from './lib/state/project.svelte';
   import { ui } from './lib/state/ui.svelte';
   import { workflow } from './lib/state/workflow.svelte';
+  import { runEditableMenuAction } from './lib/state/editing';
 
   type LazyComponentModule<Props extends Record<string, unknown> = Record<string, never>> = {
     default: Component<Props>;
@@ -294,6 +295,8 @@
   }
 
   function runAppMenuAction(id: string): void {
+    if (runEditableMenuAction(id)) return;
+
     const activeId = () => editor.activeLayer?.id;
     switch (id) {
       case 'app:new':

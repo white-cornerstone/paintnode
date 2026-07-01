@@ -1,5 +1,6 @@
 import { editor } from './editor.svelte';
 import { openCommand, saveActiveCopyCommand, saveActiveCommand, exportPngCommand } from './commands';
+import { isTypingTarget } from './editing';
 import { ui } from './ui.svelte';
 
 const TOOL_KEYS: Record<string, string> = {
@@ -21,21 +22,10 @@ const TOOL_KEYS: Record<string, string> = {
   z: 'zoom',
 };
 
-function isTyping(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el) return false;
-  return (
-    el.tagName === 'INPUT' ||
-    el.tagName === 'TEXTAREA' ||
-    el.tagName === 'SELECT' ||
-    el.isContentEditable
-  );
-}
-
 /** Install global keyboard shortcuts. Returns a cleanup function. */
 export function installKeyboard(): () => void {
   const onKey = (e: KeyboardEvent) => {
-    if (isTyping(e.target)) return;
+    if (isTypingTarget(e.target)) return;
     const k = e.key.toLowerCase();
     const vp = editor.viewport;
 
