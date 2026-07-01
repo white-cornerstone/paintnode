@@ -3,6 +3,7 @@ import type { ActiveStroke } from './compositor';
 import type { Selection } from './selection';
 import { compositeLayers } from './compositor';
 import { clamp, createCanvas, ctx2d } from './types';
+import { clampViewportOffset } from './viewportBounds';
 
 export const MIN_ZOOM = 0.02;
 export const MAX_ZOOM = 64;
@@ -79,6 +80,7 @@ export class Viewport {
       this.canvas.height = h;
       changed = true;
     }
+    this.clampPan();
     if (options.renderNow && changed) {
       if (this.rafId) cancelAnimationFrame(this.rafId);
       this.rafId = 0;
@@ -135,6 +137,7 @@ export class Viewport {
     this.scale = next;
     this.offsetX = cx - before.x * next;
     this.offsetY = cy - before.y * next;
+    this.clampPan();
     this.invalidate();
   }
 
@@ -143,8 +146,13 @@ export class Viewport {
   }
 
   panBy(dxCss: number, dyCss: number): void {
-    this.offsetX += dxCss;
-    this.offsetY += dyCss;
+    this.setPan(this.offsetX + dxCss, this.offsetY + dyCss);
+  }
+
+  setPan(offsetX: number, offsetY: number): void {
+    this.offsetX = offsetX;
+    this.offsetY = offsetY;
+    this.clampPan();
     this.invalidate();
   }
 
@@ -157,6 +165,7 @@ export class Viewport {
     this.scale = scale;
     this.offsetX = (this.viewWidthCss - doc.width * scale) / 2;
     this.offsetY = (this.viewHeightCss - doc.height * scale) / 2;
+    this.clampPan();
     this.invalidate();
   }
 
@@ -165,7 +174,15 @@ export class Viewport {
     if (!doc) return;
     this.offsetX = (this.viewWidthCss - doc.width * this.scale) / 2;
     this.offsetY = (this.viewHeightCss - doc.height * this.scale) / 2;
+    this.clampPan();
     this.invalidate();
+  }
+
+  private clampPan(): void {
+    const doc = this.getDoc();
+    if (!doc) return;
+    this.offsetX = clampViewportOffset(this.offsetX, this.viewWidthCss, doc.width * this.scale);
+    this.offsetY = clampViewportOffset(this.offsetY, this.viewHeightCss, doc.height * this.scale);
   }
 
   render(): void {

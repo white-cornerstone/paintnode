@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { Component } from 'svelte';
   import MenuBar from './lib/components/MenuBar.svelte';
   import Toolbar from './lib/components/Toolbar.svelte';
   import ToolOptions from './lib/components/ToolOptions.svelte';
   import DocumentTabs from './lib/components/DocumentTabs.svelte';
   import CanvasView from './lib/components/CanvasView.svelte';
-  import WorkflowBoard from './lib/components/WorkflowBoard.svelte';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import ColorPanel from './lib/components/ColorPanel.svelte';
   import SwatchesPanel from './lib/components/SwatchesPanel.svelte';
@@ -18,18 +18,6 @@
   import PathsPanel from './lib/components/PathsPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
-  import NewDocumentDialog from './lib/components/NewDocumentDialog.svelte';
-  import AboutDialog from './lib/components/AboutDialog.svelte';
-  import ImageSizeDialog from './lib/components/ImageSizeDialog.svelte';
-  import BrightnessContrastDialog from './lib/components/BrightnessContrastDialog.svelte';
-  import HueSaturationDialog from './lib/components/HueSaturationDialog.svelte';
-  import GaussianBlurDialog from './lib/components/GaussianBlurDialog.svelte';
-  import AiGenerateDialog from './lib/components/AiGenerateDialog.svelte';
-  import AiDecoupleDialog from './lib/components/AiDecoupleDialog.svelte';
-  import StockImagesDialog from './lib/components/StockImagesDialog.svelte';
-  import FontEmbedDialog from './lib/components/FontEmbedDialog.svelte';
-  import RasterizeTypeDialog from './lib/components/RasterizeTypeDialog.svelte';
-  import SaveChangesDialog from './lib/components/SaveChangesDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -66,6 +54,28 @@
   import { project } from './lib/state/project.svelte';
   import { ui } from './lib/state/ui.svelte';
   import { workflow } from './lib/state/workflow.svelte';
+
+  type LazyComponentModule<Props extends Record<string, unknown> = Record<string, never>> = {
+    default: Component<Props>;
+  };
+  type LazyComponentLoader<Props extends Record<string, unknown> = Record<string, never>> = () => Promise<
+    LazyComponentModule<Props>
+  >;
+  type CloseableDialogProps = { onClose: () => void };
+
+  const loadWorkflowBoard: LazyComponentLoader = () => import('./lib/components/WorkflowBoard.svelte');
+  const loadNewDocumentDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/NewDocumentDialog.svelte');
+  const loadAboutDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AboutDialog.svelte');
+  const loadImageSizeDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/ImageSizeDialog.svelte');
+  const loadBrightnessContrastDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/BrightnessContrastDialog.svelte');
+  const loadHueSaturationDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/HueSaturationDialog.svelte');
+  const loadGaussianBlurDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/GaussianBlurDialog.svelte');
+  const loadAiGenerateDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
+  const loadAiDecoupleDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
+  const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
+  const loadFontEmbedDialog: LazyComponentLoader = () => import('./lib/components/FontEmbedDialog.svelte');
+  const loadRasterizeTypeDialog: LazyComponentLoader = () => import('./lib/components/RasterizeTypeDialog.svelte');
+  const loadSaveChangesDialog: LazyComponentLoader = () => import('./lib/components/SaveChangesDialog.svelte');
 
   const desktop = isDesktop();
   const appWindow = desktop ? getCurrentWindow() : null;
@@ -591,6 +601,20 @@
   </div>
 {/snippet}
 
+{#snippet lazyComponent(loader: LazyComponentLoader)}
+  {#await loader() then module}
+    {@const LazyComponent = module.default}
+    <LazyComponent />
+  {/await}
+{/snippet}
+
+{#snippet lazyDialog(loader: LazyComponentLoader<CloseableDialogProps>)}
+  {#await loader() then module}
+    {@const Dialog = module.default}
+    <Dialog onClose={() => ui.close()} />
+  {/await}
+{/snippet}
+
 <div class="app">
   {#if desktop}
     <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
@@ -607,7 +631,7 @@
         <section class="center">
           <DocumentTabs />
           {#if ui.activeSurface === 'workflow' && workflow.active}
-            <WorkflowBoard />
+            {@render lazyComponent(loadWorkflowBoard)}
           {:else}
             <CanvasView />
           {/if}
@@ -699,35 +723,35 @@
 </div>
 
 {#if ui.dialog === 'new'}
-  <NewDocumentDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadNewDocumentDialog)}
 {:else if ui.dialog === 'about'}
-  <AboutDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadAboutDialog)}
 {:else if ui.dialog === 'imageSize'}
-  <ImageSizeDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadImageSizeDialog)}
 {:else if ui.dialog === 'brightnessContrast'}
-  <BrightnessContrastDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadBrightnessContrastDialog)}
 {:else if ui.dialog === 'hueSaturation'}
-  <HueSaturationDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadHueSaturationDialog)}
 {:else if ui.dialog === 'gaussianBlur'}
-  <GaussianBlurDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadGaussianBlurDialog)}
 {:else if ui.dialog === 'aiGenerate'}
-  <AiGenerateDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadAiGenerateDialog)}
 {:else if ui.dialog === 'aiDecouple'}
-  <AiDecoupleDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadAiDecoupleDialog)}
 {:else if ui.dialog === 'stockImages'}
-  <StockImagesDialog onClose={() => ui.close()} />
+  {@render lazyDialog(loadStockImagesDialog)}
 {/if}
 
 {#if ui.fontEmbed}
-  <FontEmbedDialog />
+  {@render lazyComponent(loadFontEmbedDialog)}
 {/if}
 
 {#if editor.rasterizePrompt}
-  <RasterizeTypeDialog />
+  {@render lazyComponent(loadRasterizeTypeDialog)}
 {/if}
 
 {#if ui.saveChanges}
-  <SaveChangesDialog />
+  {@render lazyComponent(loadSaveChangesDialog)}
 {/if}
 
 <style>

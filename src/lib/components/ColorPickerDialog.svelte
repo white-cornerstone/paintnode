@@ -15,6 +15,7 @@
   const SLIDER_WIDTH = 24;
   const SLIDER_HEIGHT = 236;
   const DIALOG_WIDTH = 580;
+  const DIALOG_Z_INDEX = 2100;
 
   let {
     target,
@@ -466,7 +467,7 @@
 <div
   class="picker-dialog"
   bind:this={dialogEl}
-  style={`left:${dialogX}px; top:${dialogY}px`}
+  style={`left:${dialogX}px; top:${dialogY}px; --dialog-z-index:${DIALOG_Z_INDEX}`}
   role="dialog"
   aria-modal="true"
   aria-label={title}
@@ -567,7 +568,7 @@
     position: fixed;
     width: 580px;
     max-width: calc(100vw - 34px);
-    z-index: 140;
+    z-index: var(--dialog-z-index);
     overflow: hidden;
     border: 1px solid #242424;
     border-radius: 10px;

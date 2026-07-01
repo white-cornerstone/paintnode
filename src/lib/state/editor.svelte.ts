@@ -228,7 +228,6 @@ export class EditorStore implements ToolHost {
     ]) {
       this.tools[t.id] = t;
     }
-    this.openDocument(PaintDocument.blank(1280, 800, 'Untitled'), false);
   }
 
   // --- Derived state ---
