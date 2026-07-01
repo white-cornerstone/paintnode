@@ -7,6 +7,7 @@
   import { workflow } from '../state/workflow.svelte';
   import { Viewport } from '../engine/Viewport';
   import { wheelZoomFactor } from '../engine/zoomGesture';
+  import { viewportOffsetBounds } from '../engine/viewportBounds';
   import type { PointerInfo } from '../engine/tools/Tool';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
@@ -284,10 +285,33 @@
   function updateScrollSpace() {
     if (!vp || !containerEl) return;
     const doc = editor.doc;
-    const docW = doc ? doc.width * vp.scale : 1;
-    const docH = doc ? doc.height * vp.scale : 1;
-    scrollW = Math.max(containerEl.clientWidth, Math.ceil(docW + SCROLL_PAD * 2));
-    scrollH = Math.max(containerEl.clientHeight, Math.ceil(docH + SCROLL_PAD * 2));
+    if (!doc) {
+      scrollW = containerEl.clientWidth;
+      scrollH = containerEl.clientHeight;
+      return;
+    }
+    const docW = doc.width * vp.scale;
+    const docH = doc.height * vp.scale;
+    const boundsX = viewportOffsetBounds(containerEl.clientWidth, docW);
+    const boundsY = viewportOffsetBounds(containerEl.clientHeight, docH);
+    scrollW = Math.max(
+      containerEl.clientWidth,
+      Math.ceil(containerEl.clientWidth + boundsX.max - boundsX.min + SCROLL_PAD * 2),
+    );
+    scrollH = Math.max(
+      containerEl.clientHeight,
+      Math.ceil(containerEl.clientHeight + boundsY.max - boundsY.min + SCROLL_PAD * 2),
+    );
+  }
+
+  function scrollOriginForX(docW: number): number {
+    if (!containerEl) return SCROLL_PAD;
+    return SCROLL_PAD + viewportOffsetBounds(containerEl.clientWidth, docW).max;
+  }
+
+  function scrollOriginForY(docH: number): number {
+    if (!containerEl) return SCROLL_PAD;
+    return SCROLL_PAD + viewportOffsetBounds(containerEl.clientHeight, docH).max;
   }
 
   function viewportSize(): { width: number; height: number } {
@@ -310,8 +334,11 @@
     updateScrollSpace();
     const maxLeft = Math.max(0, scrollW - containerEl.clientWidth);
     const maxTop = Math.max(0, scrollH - containerEl.clientHeight);
-    const nextLeft = Math.max(0, Math.min(maxLeft, SCROLL_PAD - vp.offsetX));
-    const nextTop = Math.max(0, Math.min(maxTop, SCROLL_PAD - vp.offsetY));
+    const doc = editor.doc;
+    const docW = doc ? doc.width * vp.scale : 1;
+    const docH = doc ? doc.height * vp.scale : 1;
+    const nextLeft = doc ? Math.max(0, Math.min(maxLeft, scrollOriginForX(docW) - vp.offsetX)) : 0;
+    const nextTop = doc ? Math.max(0, Math.min(maxTop, scrollOriginForY(docH) - vp.offsetY)) : 0;
     syncingScroll = true;
     containerEl.scrollLeft = nextLeft;
     containerEl.scrollTop = nextTop;
@@ -329,9 +356,10 @@
     if (!doc) return;
     const docW = doc.width * vp.scale;
     const docH = doc.height * vp.scale;
-    vp.offsetX = scrollW > containerEl.clientWidth ? SCROLL_PAD - containerEl.scrollLeft : (containerEl.clientWidth - docW) / 2;
-    vp.offsetY = scrollH > containerEl.clientHeight ? SCROLL_PAD - containerEl.scrollTop : (containerEl.clientHeight - docH) / 2;
-    vp.invalidate();
+    vp.setPan(
+      scrollW > containerEl.clientWidth ? scrollOriginForX(docW) - containerEl.scrollLeft : (containerEl.clientWidth - docW) / 2,
+      scrollH > containerEl.clientHeight ? scrollOriginForY(docH) - containerEl.scrollTop : (containerEl.clientHeight - docH) / 2,
+    );
   }
 
   function docFromClient(event: PointerEvent): { x: number; y: number } {
@@ -343,6 +371,11 @@
     viewportFrame;
     const p = vp!.docToScreen(x, y);
     return { x: scrollLeftCss + p.x, y: scrollTopCss + p.y };
+  }
+
+  function fixedPoint(x: number, y: number): { x: number; y: number } {
+    viewportFrame;
+    return vp!.docToScreen(x, y);
   }
 
   function freeTransformCorner(dx: number, dy: number): { x: number; y: number } | null {
@@ -413,8 +446,8 @@
     if (!doc || !vp || !containerEl) return null;
     viewportFrame;
     const viewportRect = containerEl.getBoundingClientRect();
-    const topLeft = screenPoint(0, 0);
-    const bottomRight = screenPoint(doc.width, doc.height);
+    const topLeft = fixedPoint(0, 0);
+    const bottomRight = fixedPoint(doc.width, doc.height);
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
     const selection = editor.selection;
@@ -430,7 +463,7 @@
     }
 
     if (selection) {
-      const p = screenPoint(selection.bounds.x + selection.bounds.w / 2, selection.bounds.y + selection.bounds.h);
+      const p = fixedPoint(selection.bounds.x + selection.bounds.w / 2, selection.bounds.y + selection.bounds.h);
       return {
         x: viewportRect.left + p.x,
         y: viewportRect.top + p.y + 14,
