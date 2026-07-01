@@ -132,6 +132,11 @@
     edits: 'properties',
     structure: 'layers',
   });
+  let collapsedPanelGroups = $state<Record<PanelGroupId, boolean>>({
+    presets: false,
+    edits: false,
+    structure: false,
+  });
 
   type NativeDropPosition = { x: number; y: number };
   type NativeDropPayload = {
@@ -151,6 +156,22 @@
   function activatePanel(id: PanelId): void {
     const group = groupForPanel(id);
     activePanelByGroup[group.id] = id;
+    collapsedPanelGroups[group.id] = false;
+  }
+
+  function clickExpandedPanelTab(group: PanelGroupDef, id: PanelId): void {
+    const isActive = activePanel(group) === id;
+    activePanelByGroup[group.id] = id;
+    collapsedPanelGroups[group.id] = isActive ? !collapsedPanelGroups[group.id] : false;
+  }
+
+  function clickPeekPanelTab(group: PanelGroupDef, id: PanelId): void {
+    if (activePanel(group) === id) {
+      closePeekedPanel();
+      return;
+    }
+    activePanelByGroup[group.id] = id;
+    peekedPanel = id;
   }
 
   let peekedPanel = $state<PanelId | null>(null);
@@ -581,12 +602,14 @@
 {#snippet panelTabGroup(group: PanelGroupDef, closePeeked = false)}
   <div class="panel-tabs" role="tablist" aria-label="Panel group">
     {#each group.panels as panel (panel.id)}
+      {@const isActive = activePanel(group) === panel.id}
       <button
         class="panel-tab"
-        class:active={activePanel(group) === panel.id}
+        class:active={isActive}
         role="tab"
-        aria-selected={activePanel(group) === panel.id}
-        onclick={() => activatePanel(panel.id)}
+        aria-selected={isActive}
+        aria-expanded={closePeeked ? peekedPanel === panel.id : isActive && !collapsedPanelGroups[group.id]}
+        onclick={() => (closePeeked ? clickPeekPanelTab(group, panel.id) : clickExpandedPanelTab(group, panel.id))}
       >
         {panel.title}
       </button>
@@ -684,11 +707,18 @@
               </div>
               <div class="panel-stack">
                 {#each panelGroups as group, groupIndex}
-                  <div class="panel-group" class:separated={groupIndex > 0} class:grow={group.grow}>
+                  <div
+                    class="panel-group"
+                    class:separated={groupIndex > 0}
+                    class:grow={group.grow}
+                    class:collapsed={collapsedPanelGroups[group.id]}
+                  >
                     {@render panelTabGroup(group)}
-                    <div class="tab-content">
-                      {@render rightPanel(activePanel(group), false, () => undefined)}
-                    </div>
+                    {#if !collapsedPanelGroups[group.id]}
+                      <div class="tab-content">
+                        {@render rightPanel(activePanel(group), false, () => undefined)}
+                      </div>
+                    {/if}
                   </div>
                 {/each}
               </div>
@@ -883,6 +913,9 @@
   .panel-group.grow {
     flex: 1 1 180px;
   }
+  .panel-group.grow.collapsed {
+    flex: none;
+  }
   .panel-group.separated {
     border-top: 1px solid color-mix(in srgb, var(--border) 82%, #000 18%);
   }
@@ -1068,6 +1101,9 @@
   }
   .peek-content :global(.panel) {
     border-bottom: 0;
+  }
+  .peek-content :global(.panel-head) {
+    display: none;
   }
   .peek-popover.layers .peek-content :global(.panel) {
     flex: 1;
