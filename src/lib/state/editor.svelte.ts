@@ -8,9 +8,12 @@ import type { RGB, Rect } from '../engine/types';
 import { clampRect, createCanvas, ctx2d } from '../engine/types';
 import type { Selection } from '../engine/selection';
 import {
+  moveSelection as moveSelectionMask,
   selectAllSelection,
   invertSelection as invertSelectionMask,
   intersectMask,
+  selectionContainsPoint,
+  type SelectionMode,
 } from '../engine/selection';
 import { rgbToCss } from '../engine/color';
 import {
@@ -117,6 +120,15 @@ export interface DocumentSession {
   embedFonts: boolean | null;
 }
 
+interface LayerStackSnapshot {
+  layers: Layer[];
+  activeLayerId: string | null;
+}
+
+interface SelectionContentMoveSession {
+  before: LayerStackSnapshot;
+}
+
 interface EmbeddedDocumentRestore {
   doc: PaintDocument | null;
   activeDocumentId: string | null;
@@ -142,6 +154,7 @@ export class EditorStore implements ToolHost {
   brushOpacity = $state(1);
   tolerance = $state(24);
   selection = $state<Selection | null>(null);
+  selectionMode = $state<SelectionMode>('new');
   marqueeShape = $state<'rect' | 'ellipse' | 'row' | 'column'>('rect');
   clipboard = $state<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
 
@@ -183,6 +196,7 @@ export class EditorStore implements ToolHost {
 
   private activeStroke: ActiveStroke | null = null;
   private embeddedRestore: EmbeddedDocumentRestore | null = null;
+  private selectionContentMove: SelectionContentMoveSession | null = null;
   private flashTimer = 0;
   readonly tools: Record<string, Tool> = {};
 
@@ -317,6 +331,15 @@ export class EditorStore implements ToolHost {
     const session = this.activeDocument;
     if (session) session.selection = sel;
     this.viewport?.invalidate();
+  }
+  selectionContainsPoint(x: number, y: number): boolean {
+    return !!this.selection && selectionContainsPoint(this.selection, x, y);
+  }
+  moveSelection(dx: number, dy: number): void {
+    const doc = this.doc;
+    const sel = this.selection;
+    if (!doc || !sel) return;
+    this.setSelection(moveSelectionMask(sel, dx, dy, doc.width, doc.height));
   }
   getSelection(): Selection | null {
     return this.selection;
@@ -733,6 +756,89 @@ export class EditorStore implements ToolHost {
     copy.ctx.drawImage(layer.canvas, 0, 0);
     copy.pixelRev = layer.pixelRev;
     return copy;
+  }
+
+  private layerStackSnapshot(): LayerStackSnapshot {
+    const doc = this.doc!;
+    return {
+      layers: doc.layers.map((layer) => this.cloneLayerExact(layer)),
+      activeLayerId: doc.activeLayerId,
+    };
+  }
+
+  private restoreLayerStack(snapshot: LayerStackSnapshot): void {
+    const doc = this.doc;
+    if (!doc) return;
+    doc.layers = snapshot.layers.map((layer) => this.cloneLayerExact(layer));
+    doc.activeLayerId = snapshot.activeLayerId;
+    this.bump();
+    this.invalidate();
+  }
+
+  beginMoveSelectedContent(): boolean {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    const sel = this.selection;
+    if (!doc || !layer || !sel) return false;
+    if (layer.kind !== 'raster') {
+      this.flash('Rasterize the active layer before moving selected pixels');
+      return false;
+    }
+
+    const bounds = clampRect(sel.bounds, doc.width, doc.height);
+    if (!bounds) return false;
+    const before = this.layerStackSnapshot();
+    const lifted = createCanvas(bounds.w, bounds.h);
+    const liftedCtx = ctx2d(lifted);
+    liftedCtx.drawImage(layer.canvas, layer.x - bounds.x, layer.y - bounds.y);
+    liftedCtx.globalCompositeOperation = 'destination-in';
+    liftedCtx.drawImage(sel.mask, -bounds.x, -bounds.y);
+    liftedCtx.globalCompositeOperation = 'source-over';
+
+    const mask = this.selectionMaskForLayer(layer);
+    if (!mask) return false;
+    layer.ctx.save();
+    layer.ctx.globalCompositeOperation = 'destination-out';
+    layer.ctx.drawImage(mask, 0, 0);
+    layer.ctx.restore();
+    layer.touch();
+
+    const floating = new Layer(bounds.w, bounds.h, `${layer.name} selection`, undefined, bounds.x, bounds.y);
+    floating.ctx.drawImage(lifted, 0, 0);
+    floating.touch();
+    doc.insertAboveActive(floating);
+    this.selectionContentMove = { before };
+    this.invalidate();
+    return true;
+  }
+
+  moveActiveLayerBy(dx: number, dy: number): void {
+    const layer = this.activeLayer;
+    if (!layer) return;
+    layer.x = Math.round(layer.x + dx);
+    layer.y = Math.round(layer.y + dy);
+    this.invalidate();
+  }
+
+  commitMoveSelectedContent(): void {
+    const session = this.selectionContentMove;
+    if (!session || !this.doc) return;
+    this.selectionContentMove = null;
+    const after = this.layerStackSnapshot();
+    this.history.push({
+      label: 'Move Selected Pixels',
+      undo: () => this.restoreLayerStack(session.before),
+      redo: () => this.restoreLayerStack(after),
+    });
+    this.bump();
+    this.invalidate();
+  }
+
+  cancelMoveSelectedContent(): void {
+    const session = this.selectionContentMove;
+    if (!session) return;
+    this.selectionContentMove = null;
+    this.restoreLayerStack(session.before);
   }
 
   private replaceLayerSnapshot(snapshot: Layer, fallbackIndex: number): void {

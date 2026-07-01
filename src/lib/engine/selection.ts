@@ -17,6 +17,8 @@ export interface Selection {
   outline: Path2D;
 }
 
+export type SelectionMode = 'new' | 'add' | 'subtract' | 'intersect';
+
 function blankMask(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
   const canvas = createCanvas(w, h);
   return { canvas, ctx: ctx2d(canvas) };
@@ -107,6 +109,45 @@ export function invertSelection(sel: Selection, w: number, h: number): Selection
 
 const ALPHA_ON = 128;
 
+interface BoundaryPoint {
+  x: number;
+  y: number;
+}
+
+interface BoundaryEdge {
+  from: string;
+  to: string;
+  point: BoundaryPoint;
+}
+
+const pointKey = (x: number, y: number): string => `${x},${y}`;
+
+function stitchOutline(edges: BoundaryEdge[]): Path2D {
+  const byStart = new Map<string, BoundaryEdge[]>();
+  for (const edge of edges) {
+    const list = byStart.get(edge.from);
+    if (list) list.push(edge);
+    else byStart.set(edge.from, [edge]);
+  }
+
+  const used = new Set<BoundaryEdge>();
+  const outline = new Path2D();
+  for (const edge of edges) {
+    if (used.has(edge)) continue;
+    const [sx, sy] = edge.from.split(',').map(Number);
+    outline.moveTo(sx, sy);
+    let current: BoundaryEdge | undefined = edge;
+    while (current && !used.has(current)) {
+      used.add(current);
+      outline.lineTo(current.point.x, current.point.y);
+      const next: BoundaryEdge | undefined = byStart.get(current.to)?.find((candidate) => !used.has(candidate));
+      current = next;
+    }
+    outline.closePath();
+  }
+  return outline;
+}
+
 /**
  * Derive a Selection (bounds + marching-ants outline) from a raster `mask` (opaque = selected).
  * The outline is the exact pixel boundary, built from the edges between selected and
@@ -133,17 +174,20 @@ export function maskToSelection(mask: HTMLCanvasElement, w: number, h: number): 
   }
   if (maxX < minX) return null; // nothing selected
 
-  const outline = new Path2D();
+  const edges: BoundaryEdge[] = [];
+  const addEdge = (x1: number, y1: number, x2: number, y2: number) => {
+    edges.push({ from: pointKey(x1, y1), to: pointKey(x2, y2), point: { x: x2, y: y2 } });
+  };
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
       if (!on(x, y)) continue;
-      if (!on(x - 1, y)) { outline.moveTo(x, y); outline.lineTo(x, y + 1); }
-      if (!on(x + 1, y)) { outline.moveTo(x + 1, y); outline.lineTo(x + 1, y + 1); }
-      if (!on(x, y - 1)) { outline.moveTo(x, y); outline.lineTo(x + 1, y); }
-      if (!on(x, y + 1)) { outline.moveTo(x, y + 1); outline.lineTo(x + 1, y + 1); }
+      if (!on(x, y - 1)) addEdge(x, y, x + 1, y);
+      if (!on(x + 1, y)) addEdge(x + 1, y, x + 1, y + 1);
+      if (!on(x, y + 1)) addEdge(x + 1, y + 1, x, y + 1);
+      if (!on(x - 1, y)) addEdge(x, y + 1, x, y);
     }
   }
-  return { mask, bounds: { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 }, outline };
+  return { mask, bounds: { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 }, outline: stitchOutline(edges) };
 }
 
 /**
@@ -254,6 +298,62 @@ export function subtractFromSelection(
   ctx.drawImage(base.mask, 0, 0);
   ctx.globalCompositeOperation = 'destination-out';
   ctx.drawImage(sub.mask, 0, 0);
+  return maskToSelection(c, w, h);
+}
+
+/** Keep only the overlap between two selections (Shift+Alt/Option intersect). */
+export function intersectSelection(
+  base: Selection | null,
+  hit: Selection,
+  w: number,
+  h: number,
+): Selection | null {
+  if (!base) return null;
+  const c = createCanvas(w, h);
+  const ctx = ctx2d(c);
+  ctx.drawImage(base.mask, 0, 0);
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(hit.mask, 0, 0);
+  return maskToSelection(c, w, h);
+}
+
+export function combineSelection(
+  base: Selection | null,
+  hit: Selection | null,
+  mode: SelectionMode,
+  w: number,
+  h: number,
+): Selection | null {
+  if (!hit) return mode === 'new' ? null : base;
+  if (mode === 'add') return addToSelection(base, hit, w, h);
+  if (mode === 'subtract') return subtractFromSelection(base, hit, w, h);
+  if (mode === 'intersect') return intersectSelection(base, hit, w, h);
+  return hit;
+}
+
+export function selectionModeFromModifiers(
+  baseMode: SelectionMode,
+  event: Pick<MouseEvent, 'altKey' | 'shiftKey'>,
+): SelectionMode {
+  if (event.shiftKey && event.altKey) return 'intersect';
+  if (event.altKey) return 'subtract';
+  if (event.shiftKey) return 'add';
+  return baseMode;
+}
+
+export function selectionContainsPoint(sel: Selection, x: number, y: number): boolean {
+  const px = Math.floor(x);
+  const py = Math.floor(y);
+  if (px < sel.bounds.x || py < sel.bounds.y || px >= sel.bounds.x + sel.bounds.w || py >= sel.bounds.y + sel.bounds.h) {
+    return false;
+  }
+  const data = ctx2d(sel.mask).getImageData(px, py, 1, 1).data;
+  return data[3] >= ALPHA_ON;
+}
+
+export function moveSelection(sel: Selection, dx: number, dy: number, w: number, h: number): Selection | null {
+  const c = createCanvas(w, h);
+  ctx2d(c).drawImage(sel.mask, Math.round(dx), Math.round(dy));
   return maskToSelection(c, w, h);
 }
 

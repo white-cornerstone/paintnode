@@ -1,6 +1,15 @@
 import type { Tool, ToolHost, PointerInfo } from './Tool';
 import { clamp } from '../types';
-import { rectSelection, ellipseSelection, rowSelection, colSelection } from '../selection';
+import {
+  combineSelection,
+  rectSelection,
+  ellipseSelection,
+  rowSelection,
+  colSelection,
+  selectionModeFromModifiers,
+  type Selection,
+  type SelectionMode,
+} from '../selection';
 
 /** Marquee — rectangular / elliptical / single-row / single-column (shape from options bar). */
 export class MarqueeTool implements Tool {
@@ -11,19 +20,23 @@ export class MarqueeTool implements Tool {
   private startX = 0;
   private startY = 0;
   private dragging = false;
+  private baseSelection: Selection | null = null;
+  private mode: SelectionMode = 'new';
 
   constructor(private host: ToolHost) {}
 
   pointerDown(e: PointerInfo): void {
     const doc = this.host.doc;
     if (!doc) return;
+    this.baseSelection = this.host.selection;
+    this.mode = selectionModeFromModifiers(this.host.selectionMode, e);
     const shape = this.host.marqueeShape;
     if (shape === 'row') {
-      this.host.setSelection(rowSelection(e.y, doc.width, doc.height));
+      this.host.setSelection(combineSelection(this.baseSelection, rowSelection(e.y, doc.width, doc.height), this.mode, doc.width, doc.height));
       return;
     }
     if (shape === 'column') {
-      this.host.setSelection(colSelection(e.x, doc.width, doc.height));
+      this.host.setSelection(combineSelection(this.baseSelection, colSelection(e.x, doc.width, doc.height), this.mode, doc.width, doc.height));
       return;
     }
     this.startX = clamp(e.x, 0, doc.width);
@@ -41,7 +54,7 @@ export class MarqueeTool implements Tool {
     let ry = Math.min(this.startY, y);
     let rw = Math.abs(x - this.startX);
     let rh = Math.abs(y - this.startY);
-    if (e.shiftKey) {
+    if (e.shiftKey && this.mode === 'new' && !this.baseSelection) {
       const s = Math.max(rw, rh);
       rx = x < this.startX ? this.startX - s : this.startX;
       ry = y < this.startY ? this.startY - s : this.startY;
@@ -49,7 +62,7 @@ export class MarqueeTool implements Tool {
       rh = s;
     }
     if (rw < 1 || rh < 1) {
-      this.host.setSelection(null);
+      this.host.setSelection(this.mode === 'new' ? null : this.baseSelection);
       return;
     }
     const rect = { x: rx, y: ry, w: rw, h: rh };
@@ -57,10 +70,11 @@ export class MarqueeTool implements Tool {
       this.host.marqueeShape === 'ellipse'
         ? ellipseSelection(rect, doc.width, doc.height)
         : rectSelection(rect, doc.width, doc.height);
-    this.host.setSelection(sel);
+    this.host.setSelection(combineSelection(this.baseSelection, sel, this.mode, doc.width, doc.height));
   }
 
   pointerUp(): void {
     this.dragging = false;
+    this.baseSelection = null;
   }
 }

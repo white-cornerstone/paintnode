@@ -62,6 +62,15 @@ export { default as ChevronDown } from '@fluentui/svg-icons/icons/chevron_down_2
 export { default as ChevronRight } from '@fluentui/svg-icons/icons/chevron_right_24_regular.svg?raw';
 export { default as LineHorizontal3 } from '@fluentui/svg-icons/icons/line_horizontal_3_24_regular.svg?raw';
 export { default as Globe } from '@fluentui/svg-icons/icons/globe_24_regular.svg?raw';
+export { default as Info } from '@fluentui/svg-icons/icons/info_24_regular.svg?raw';
+export { default as MoreHorizontal } from '@fluentui/svg-icons/icons/more_horizontal_24_regular.svg?raw';
+export { default as Pin } from '@fluentui/svg-icons/icons/pin_24_regular.svg?raw';
+export { default as PinOff } from '@fluentui/svg-icons/icons/pin_off_24_regular.svg?raw';
+export { default as ArrowReset } from '@fluentui/svg-icons/icons/arrow_reset_24_regular.svg?raw';
+export { default as ImageGlobe } from '@fluentui/svg-icons/icons/image_globe_24_regular.svg?raw';
+export { default as Settings } from '@fluentui/svg-icons/icons/settings_24_regular.svg?raw';
+export { default as Video } from '@fluentui/svg-icons/icons/video_24_regular.svg?raw';
+export { default as SquareHintSparkles } from '@fluentui/svg-icons/icons/square_hint_sparkles_24_regular.svg?raw';
 
 // Panel rail
 export { default as ColorPalette } from '@fluentui/svg-icons/icons/color_24_regular.svg?raw';

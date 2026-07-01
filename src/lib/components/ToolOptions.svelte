@@ -2,6 +2,10 @@
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow, type WorkflowTool } from '../state/workflow.svelte';
+  import type { SelectionMode } from '../engine/selection';
+  import Icon from './Icon.svelte';
+  import { tooltip } from '../actions/tooltip';
+  import { Add, Dismiss, Info, MarqueeRect, SquareMultiple } from '../icons';
 
   const tool = $derived(editor.activeToolId);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
@@ -38,7 +42,47 @@
           : 'None',
   );
   const selectedOutput = $derived(workflow.selectedOutputNode());
+  const selectionModes: { id: SelectionMode; label: string; icon: string }[] = [
+    { id: 'new', label: 'New', icon: MarqueeRect },
+    { id: 'add', label: 'Add', icon: Add },
+    { id: 'subtract', label: 'Subtract', icon: Dismiss },
+    { id: 'intersect', label: 'Intersect', icon: SquareMultiple },
+  ];
+  let activeTip = $state<string | null>(null);
 </script>
+
+{#snippet selectionModeButtons()}
+  <div class="seg mode-seg" role="group" aria-label="Selection mode">
+    {#each selectionModes as mode (mode.id)}
+      <button
+        class:on={editor.selectionMode === mode.id}
+        aria-label={`${mode.label} selection`}
+        aria-pressed={editor.selectionMode === mode.id}
+        use:tooltip={{ text: `${mode.label} selection`, placement: 'bottom' }}
+        onclick={() => (editor.selectionMode = mode.id)}
+      >
+        <Icon svg={mode.icon} size={14} />
+      </button>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet toolInfo(id: string, text: string)}
+  <div class="tip-host">
+    <button
+      class="info-button"
+      aria-label="Tool help"
+      aria-expanded={activeTip === id}
+      use:tooltip={{ text: 'Tool help', placement: 'bottom' }}
+      onclick={() => (activeTip = activeTip === id ? null : id)}
+    >
+      <Icon svg={Info} size={15} />
+    </button>
+    {#if activeTip === id}
+      <div class="tip-popover" role="status">{text}</div>
+    {/if}
+  </div>
+{/snippet}
 
 <div class="options">
   {#if hasWorkflow && !hasStoryboardEdit}
@@ -111,7 +155,7 @@
       </div>
       <button onclick={() => editor.cancelFreeTransform()}>Cancel</button>
       <button class="primary-option" onclick={() => editor.commitFreeTransform()}>Done</button>
-      <span class="hint">Drag handles to scale, drag the round handle to rotate, press Enter to apply.</span>
+      {@render toolInfo('transform', 'Drag handles to scale, drag the round handle to rotate, press Enter to apply.')}
     {:else}
       <span class="tool-name">{editor.activeTool.name}</span>
       <span class="divider"></span>
@@ -135,7 +179,7 @@
         </label>
         {#if tool === 'clone'}
           <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
-          <span class="hint">Alt-click to set the source, then paint.</span>
+          {@render toolInfo('clone', 'Alt-click to set the source, then paint.')}
         {:else if tool === 'dodge' || tool === 'burn'}
           <label class="opt">
             Range
@@ -145,7 +189,7 @@
               <option value="highlights">Highlights</option>
             </select>
           </label>
-          <span class="hint">Drag to {tool === 'dodge' ? 'lighten' : 'darken'} the {editor.toneRange}.</span>
+          {@render toolInfo(tool, `Drag to ${tool === 'dodge' ? 'lighten' : 'darken'} the ${editor.toneRange}.`)}
         {:else if tool === 'sponge'}
           <label class="opt">
             Mode
@@ -154,13 +198,14 @@
               <option value="desaturate">Desaturate</option>
             </select>
           </label>
-          <span class="hint">Drag to {editor.spongeMode === 'saturate' ? 'boost' : 'reduce'} saturation.</span>
+          {@render toolInfo('sponge', `Drag to ${editor.spongeMode === 'saturate' ? 'boost' : 'reduce'} saturation.`)}
         {:else if tool === 'smudge'}
-          <span class="hint">Drag to push pixels along the stroke.</span>
+          {@render toolInfo('smudge', 'Drag to push pixels along the stroke.')}
         {:else if tool === 'blur' || tool === 'sharpen'}
-          <span class="hint">Drag to {tool} pixels under the brush.</span>
+          {@render toolInfo(tool, `Drag to ${tool} pixels under the brush.`)}
         {/if}
     {:else if tool === 'marquee'}
+      {@render selectionModeButtons()}
       <label class="opt">
         Shape
         <select bind:value={editor.marqueeShape}>
@@ -173,13 +218,15 @@
       <button onclick={() => editor.selectAll()}>Select All</button>
       <button onclick={() => editor.deselect()} disabled={!editor.selection}>Deselect</button>
       <button onclick={() => editor.invertSelection()} disabled={!editor.selection}>Invert</button>
-      <span class="hint">Drag to select · Shift = square/circle</span>
+      {@render toolInfo('marquee', 'Shift adds. Option subtracts. Shift+Option intersects. Command-drag moves selected pixels.')}
     {:else if tool === 'lasso'}
+      {@render selectionModeButtons()}
       <button onclick={() => editor.selectAll()}>Select All</button>
       <button onclick={() => editor.deselect()} disabled={!editor.selection}>Deselect</button>
       <button onclick={() => editor.invertSelection()} disabled={!editor.selection}>Invert</button>
-      <span class="hint">Drag to draw a freeform selection</span>
+      {@render toolInfo('lasso', 'Drag to draw a freeform selection. Shift adds. Option subtracts. Shift+Option intersects.')}
     {:else if tool === 'magicwand'}
+      {@render selectionModeButtons()}
       <label class="opt">
         Tolerance
         <input type="range" min="0" max="255" bind:value={editor.tolerance} />
@@ -188,18 +235,18 @@
       <label class="opt"><input type="checkbox" bind:checked={editor.magicContiguous} /> Contiguous</label>
       <button onclick={() => editor.deselect()} disabled={!editor.selection}>Deselect</button>
       <button onclick={() => editor.invertSelection()} disabled={!editor.selection}>Invert</button>
-      <span class="hint">Click to select by color · Shift adds · Alt subtracts</span>
+      {@render toolInfo('magicwand', 'Click to select by color. Shift adds. Option subtracts. Shift+Option intersects.')}
     {:else if tool === 'crop'}
       <button onclick={() => editor.cropToSelection()} disabled={!editor.selection}>Apply (↵)</button>
       <button onclick={() => editor.deselect()} disabled={!editor.selection}>Reset</button>
-      <span class="hint">Drag to set the crop box, then Apply or press Enter.</span>
+      {@render toolInfo('crop', 'Drag to set the crop box, then Apply or press Enter.')}
     {:else if tool === 'fill'}
       <label class="opt">
         Tolerance
         <input type="range" min="0" max="255" bind:value={editor.tolerance} />
         <input type="number" min="0" max="255" bind:value={editor.tolerance} class="num" />
       </label>
-      <span class="hint">Click to flood-fill with the foreground color.</span>
+      {@render toolInfo('fill', 'Click to flood-fill with the foreground color.')}
     {:else if tool === 'shape'}
       <label class="opt">
         Shape
@@ -219,7 +266,7 @@
           <span class="val">{editor.shapeStrokeWidth}px</span>
         </label>
       {/if}
-      <span class="hint">Drag to draw · Shift constrains</span>
+      {@render toolInfo('shape', 'Drag to draw. Shift constrains proportions or angle.')}
     {:else if tool === 'annotation'}
       <label class="opt">
         Type
@@ -248,7 +295,7 @@
         </button>
         <button onclick={() => editor.rasterizeAnnotations()} disabled={!editor.doc.annotations.length}>Rasterize</button>
       {/if}
-      <span class="hint">Drag to place an editable overlay annotation.</span>
+      {@render toolInfo('annotation', 'Drag to place an editable overlay annotation.')}
     {:else if tool === 'gradient'}
       <label class="opt">
         Type
@@ -257,15 +304,15 @@
           <option value="fg-transparent">Foreground → Transparent</option>
         </select>
       </label>
-      <span class="hint">Drag to set direction · Shift constrains</span>
+      {@render toolInfo('gradient', 'Drag to set direction. Shift constrains the angle.')}
     {:else if tool === 'text'}
-      <span class="hint">Click to add text, or click existing text to edit · Esc to commit</span>
+      {@render toolInfo('text', 'Click to add text, or click existing text to edit. Esc commits the edit.')}
     {:else if tool === 'eyedropper'}
-      <span class="hint">Click or drag to sample a color into the foreground.</span>
+      {@render toolInfo('eyedropper', 'Click or drag to sample a color into the foreground.')}
     {:else if tool === 'move'}
-      <span class="hint">Drag to move the active layer's pixels.</span>
+      {@render toolInfo('move', "Drag to move the active layer's pixels.")}
     {:else if tool === 'hand'}
-      <span class="hint">Drag to pan. Tip: hold Space with any tool to pan.</span>
+      {@render toolInfo('hand', 'Drag to pan. Tip: hold Space with any tool to pan.')}
     {:else if tool === 'zoom'}
       <div class="seg">
         <button class:on={editor.effectiveZoomMode === 'in'} onclick={() => (editor.zoomMode = 'in')}>Zoom In</button>
@@ -273,9 +320,7 @@
       </div>
       <button onclick={() => editor.viewport?.fitToView()}>Fit Screen</button>
       <button onclick={() => editor.viewport?.setZoom(1)}>100%</button>
-      <span class="hint">
-        Click to zoom {editor.effectiveZoomMode} · hold Alt to invert · ⌘+ / ⌘−
-      </span>
+      {@render toolInfo('zoom', `Click to zoom ${editor.effectiveZoomMode}. Hold Alt to invert. Use Command+Plus / Command+Minus for keyboard zoom.`)}
       {/if}
     {/if}
   {/if}
@@ -283,6 +328,8 @@
 
 <style>
   .options {
+    position: relative;
+    z-index: 30;
     height: var(--options-h);
     display: flex;
     align-items: center;
@@ -290,7 +337,7 @@
     padding: 0 12px;
     background: var(--bg-panel);
     border-bottom: 1px solid var(--border);
-    overflow: hidden;
+    overflow: visible;
     white-space: nowrap;
   }
   .tool-name {
@@ -325,10 +372,6 @@
   }
   .unit {
     color: var(--text-dim);
-  }
-  .hint {
-    color: var(--text-dim);
-    font-style: italic;
   }
   .pill {
     min-width: 86px;
@@ -374,16 +417,55 @@
     overflow: hidden;
   }
   .seg button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
     border: none;
     border-radius: 0;
     background: var(--bg-elevated);
     padding: 4px 10px;
   }
-  .seg button:first-child {
+  .mode-seg button {
+    width: 34px;
+    padding: 4px 0;
+  }
+  .seg button:not(:last-child) {
     border-right: 1px solid var(--border-soft);
   }
   .seg button.on {
     background: var(--accent);
     color: #fff;
+  }
+  .tip-host {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+  .info-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 24px;
+    padding: 0;
+  }
+  .tip-popover {
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 50%;
+    z-index: 40;
+    width: max-content;
+    max-width: min(360px, 70vw);
+    padding: 8px 10px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+    background: var(--bg-elevated);
+    box-shadow: 0 10px 22px rgb(0 0 0 / 35%);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: normal;
+    transform: translateX(-50%);
   }
 </style>

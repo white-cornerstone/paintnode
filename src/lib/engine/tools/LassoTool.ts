@@ -1,6 +1,13 @@
 import type { Tool, ToolHost, PointerInfo } from './Tool';
 import { clamp } from '../types';
-import { lassoSelection, type Point } from '../selection';
+import {
+  combineSelection,
+  lassoSelection,
+  selectionModeFromModifiers,
+  type Point,
+  type Selection,
+  type SelectionMode,
+} from '../selection';
 
 /** Freeform lasso — drag to trace a selection outline; released to close the shape. */
 export class LassoTool implements Tool {
@@ -10,6 +17,8 @@ export class LassoTool implements Tool {
 
   private points: Point[] = [];
   private drawing = false;
+  private baseSelection: Selection | null = null;
+  private mode: SelectionMode = 'new';
 
   constructor(private host: ToolHost) {}
 
@@ -21,6 +30,8 @@ export class LassoTool implements Tool {
   pointerDown(e: PointerInfo): void {
     if (!this.host.doc) return;
     this.drawing = true;
+    this.baseSelection = this.host.selection;
+    this.mode = selectionModeFromModifiers(this.host.selectionMode, e);
     this.points = [];
     this.add(e);
   }
@@ -30,7 +41,8 @@ export class LassoTool implements Tool {
     this.add(e);
     // Throttle live preview rebuilds (each rebuilds a doc-size mask).
     if (this.points.length >= 3 && this.points.length % 3 === 0) {
-      this.host.setSelection(lassoSelection(this.points, this.host.doc.width, this.host.doc.height));
+      const hit = lassoSelection(this.points, this.host.doc.width, this.host.doc.height);
+      this.host.setSelection(combineSelection(this.baseSelection, hit, this.mode, this.host.doc.width, this.host.doc.height));
     }
   }
 
@@ -39,9 +51,9 @@ export class LassoTool implements Tool {
     this.drawing = false;
     const doc = this.host.doc;
     if (!doc) return;
-    this.host.setSelection(
-      this.points.length >= 3 ? lassoSelection(this.points, doc.width, doc.height) : null,
-    );
+    const hit = this.points.length >= 3 ? lassoSelection(this.points, doc.width, doc.height) : null;
+    this.host.setSelection(combineSelection(this.baseSelection, hit, this.mode, doc.width, doc.height));
     this.points = [];
+    this.baseSelection = null;
   }
 }

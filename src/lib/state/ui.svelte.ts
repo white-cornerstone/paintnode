@@ -29,6 +29,8 @@ class UiState {
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
   activeSurface = $state<'document' | 'workflow'>('document');
+  contextualTaskBarVisible = $state(true);
+  contextualTaskBarResetToken = $state(0);
 
   // Font-embed prompt shown on save when text uses imported (embeddable) fonts.
   fontEmbed = $state<FontEmbedPrompt | null>(null);
@@ -47,6 +49,16 @@ class UiState {
   }
   showWorkflow(): void {
     this.activeSurface = 'workflow';
+  }
+  showContextualTaskBar(): void {
+    this.contextualTaskBarVisible = true;
+  }
+  hideContextualTaskBar(): void {
+    this.contextualTaskBarVisible = false;
+  }
+  resetContextualTaskBarPosition(): void {
+    this.contextualTaskBarVisible = true;
+    this.contextualTaskBarResetToken += 1;
   }
 
   /** Show the embed prompt and resolve with the user's choice. */
