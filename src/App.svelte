@@ -45,7 +45,6 @@
     Grid,
     Layers,
     Library,
-    LineHorizontal3,
     Options,
   } from './lib/icons';
   import { installKeyboard } from './lib/state/keyboard';
@@ -388,8 +387,6 @@
       >
         <Icon svg={ChevronDoubleRight} size={16} />
       </button>
-    {:else}
-      <span class="panel-menu" aria-hidden="true"><Icon svg={LineHorizontal3} size={16} /></span>
     {/if}
   </div>
 {/snippet}
@@ -660,12 +657,12 @@
     display: flex;
     flex: none;
     align-items: flex-end;
-    min-height: 37px;
+    min-height: 32px;
     overflow-x: hidden;
     overflow-y: hidden;
     background: color-mix(in srgb, var(--bg-panel-2) 88%, #000 12%);
     border-bottom: 1px solid var(--border);
-    padding-top: 4px;
+    padding-top: 2px;
     scrollbar-width: none;
   }
   .panel-tabs::-webkit-scrollbar {
@@ -673,11 +670,11 @@
   }
   .panel-tab {
     position: relative;
-    flex: 1 1 0;
+    flex: 0 1 auto;
     min-width: 0;
-    height: 33px;
+    height: 30px;
     margin-bottom: -1px;
-    padding: 0 6px;
+    padding: 0 7px;
     background: color-mix(in srgb, var(--bg-panel-2) 86%, #000 14%);
     border: 1px solid var(--border);
     border-left: 0;
@@ -686,7 +683,7 @@
     color: color-mix(in srgb, var(--text) 72%, #000 28%);
     font-size: 11px;
     font-weight: 700;
-    line-height: 32px;
+    line-height: 29px;
     text-align: center;
     text-overflow: ellipsis;
     overflow: hidden;
@@ -700,12 +697,12 @@
     color: var(--text-bright);
   }
   .panel-tab.active {
-    height: 37px;
+    height: 32px;
     background: var(--bg-panel);
     border-top-color: color-mix(in srgb, var(--border) 74%, #fff 16%);
     border-bottom-color: var(--bg-panel);
     color: var(--text-bright);
-    line-height: 36px;
+    line-height: 31px;
     z-index: 1;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
@@ -723,6 +720,7 @@
     flex: 0 0 26px;
     place-items: center;
     align-self: stretch;
+    margin-left: auto;
     color: var(--text-dim);
     border-left: 1px solid var(--border);
   }

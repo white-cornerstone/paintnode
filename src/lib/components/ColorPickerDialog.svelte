@@ -6,6 +6,8 @@
   import { hexToRgb, hsvToRgb, rgbToCss, rgbToHex, rgbToHsv } from '../engine/color';
   import { editor } from '../state/editor.svelte';
   import { tooltip } from '../actions/tooltip';
+  import Icon from './Icon.svelte';
+  import { Globe } from '../icons';
 
   type ColorComponent = 'h' | 's' | 'v' | 'r' | 'g' | 'blue' | 'l' | 'a' | 'labB';
 
@@ -499,13 +501,21 @@
       <span>current</span>
       {#if showWebSafeWarning}
         <div class="color-warnings">
-          <span class="cube-mark" aria-hidden="true"></span>
+          <button
+            class="web-safe-globe"
+            type="button"
+            aria-label={`Select nearest web safe color ${rgbToHex(webSafeSuggestion)}`}
+            use:tooltip={{ text: 'click to select web safe color', placement: 'right' }}
+            onclick={selectWebSafeSuggestion}
+          >
+            <Icon svg={Globe} size={15} />
+          </button>
           <button
             class="web-safe-swatch"
             type="button"
             style={`background:${rgbToCss(webSafeSuggestion)}`}
             aria-label={`Select nearest web safe color ${rgbToHex(webSafeSuggestion)}`}
-            use:tooltip={{ text: 'Click to select web safe color', placement: 'right' }}
+            use:tooltip={{ text: 'click to select web safe color', placement: 'right' }}
             onclick={selectWebSafeSuggestion}
           ></button>
         </div>
@@ -665,16 +675,33 @@
     top: 62px;
     left: 86px;
     display: grid;
+    justify-items: center;
     gap: 7px;
   }
-  .cube-mark,
   .web-safe-swatch {
     width: 14px;
     height: 14px;
     border: 2px solid #dedede;
   }
-  .cube-mark {
-    transform: rotate(45deg) scale(0.82);
+  .web-safe-globe {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    appearance: none;
+    background: transparent;
+    color: #dedede;
+    cursor: pointer;
+    line-height: 0;
+  }
+  .web-safe-globe:hover {
+    color: #fff;
+  }
+  .web-safe-globe :global(.paintnode-icon),
+  .web-safe-globe :global(svg) {
+    pointer-events: none;
   }
   .web-safe-swatch {
     padding: 0;

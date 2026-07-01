@@ -61,6 +61,7 @@ export { default as ChevronDoubleRight } from '@fluentui/svg-icons/icons/chevron
 export { default as ChevronDown } from '@fluentui/svg-icons/icons/chevron_down_24_regular.svg?raw';
 export { default as ChevronRight } from '@fluentui/svg-icons/icons/chevron_right_24_regular.svg?raw';
 export { default as LineHorizontal3 } from '@fluentui/svg-icons/icons/line_horizontal_3_24_regular.svg?raw';
+export { default as Globe } from '@fluentui/svg-icons/icons/globe_24_regular.svg?raw';
 
 // Panel rail
 export { default as ColorPalette } from '@fluentui/svg-icons/icons/color_24_regular.svg?raw';
