@@ -31,6 +31,12 @@ DOM/canvas- and component-level coverage needs a browser environment and is not 
 
 ## Guidelines
 
+### Visual design
+
+Follow `design.md` for app-wide typography, dialog sizing, and dense desktop UI conventions.
+New panels and modal dialogs should match the documented 12px PaintNode UI type scale unless
+they render canvas/document content that intentionally needs a different font.
+
 ### Icons — use Fluent System Icons only
 
 All UI icons **MUST** come from Microsoft **Fluent System Icons**, via the

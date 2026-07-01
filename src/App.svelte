@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { tick } from 'svelte';
   import { onMount } from 'svelte';
   import MenuBar from './lib/components/MenuBar.svelte';
   import Toolbar from './lib/components/Toolbar.svelte';
@@ -9,6 +8,14 @@
   import WorkflowBoard from './lib/components/WorkflowBoard.svelte';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import ColorPanel from './lib/components/ColorPanel.svelte';
+  import SwatchesPanel from './lib/components/SwatchesPanel.svelte';
+  import GradientsPanel from './lib/components/GradientsPanel.svelte';
+  import PatternsPanel from './lib/components/PatternsPanel.svelte';
+  import PropertiesPanel from './lib/components/PropertiesPanel.svelte';
+  import AdjustmentsPanel from './lib/components/AdjustmentsPanel.svelte';
+  import LibrariesPanel from './lib/components/LibrariesPanel.svelte';
+  import ChannelsPanel from './lib/components/ChannelsPanel.svelte';
+  import PathsPanel from './lib/components/PathsPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import NewDocumentDialog from './lib/components/NewDocumentDialog.svelte';
@@ -25,7 +32,22 @@
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { ChevronDoubleLeft, ChevronDoubleRight, ColorPalette, Folder, Layers } from './lib/icons';
+  import {
+    Branch,
+    Channel,
+    ChevronDoubleLeft,
+    ChevronDoubleRight,
+    ColorBackground,
+    ColorFill,
+    ColorPalette,
+    DataHistogram,
+    Folder,
+    Grid,
+    Layers,
+    Library,
+    LineHorizontal3,
+    Options,
+  } from './lib/icons';
   import { installKeyboard } from './lib/state/keyboard';
   import {
     autosaveOpenDocuments,
@@ -45,87 +67,69 @@
   const appWindow = desktop ? getCurrentWindow() : null;
   let rightCollapsed = $state(false);
   let projectCollapsed = $state(false);
-  let colorCollapsed = $state(false);
-  let layersCollapsed = $state(false);
-  let panelStackEl = $state<HTMLDivElement>();
-  let autoCollapsedIds = $state<PanelId[]>([]);
-  let fittingPanels = false;
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
 
-  type PanelId = 'color' | 'layers';
-  const panelOrder: PanelId[] = ['color', 'layers'];
-  const collapseOrder: PanelId[] = ['layers', 'color'];
-  const expandOrder: PanelId[] = ['color', 'layers'];
-  const restoreBlockedAtHeight = new Map<PanelId, number>();
+  type PanelId =
+    | 'color'
+    | 'swatches'
+    | 'gradients'
+    | 'patterns'
+    | 'properties'
+    | 'adjustments'
+    | 'libraries'
+    | 'layers'
+    | 'channels'
+    | 'paths';
+  type PanelDef = { id: PanelId; title: string; icon: string; grow?: boolean };
+  type PanelGroupId = 'presets' | 'edits' | 'structure';
+  type PanelGroupDef = { id: PanelGroupId; panels: PanelDef[]; grow?: boolean };
+  const panelGroups: PanelGroupDef[] = [
+    {
+      id: 'presets',
+      panels: [
+        { id: 'color', title: 'Color', icon: ColorPalette },
+        { id: 'swatches', title: 'Swatches', icon: Grid },
+        { id: 'gradients', title: 'Gradients', icon: ColorFill },
+        { id: 'patterns', title: 'Patterns', icon: ColorBackground },
+      ],
+    },
+    {
+      id: 'edits',
+      panels: [
+        { id: 'properties', title: 'Properties', icon: Options },
+        { id: 'adjustments', title: 'Adjustments', icon: DataHistogram },
+        { id: 'libraries', title: 'Libraries', icon: Library },
+      ],
+    },
+    {
+      id: 'structure',
+      grow: true,
+      panels: [
+        { id: 'layers', title: 'Layers', icon: Layers, grow: true },
+        { id: 'channels', title: 'Channels', icon: Channel },
+        { id: 'paths', title: 'Paths', icon: Branch },
+      ],
+    },
+  ];
+  let activePanelByGroup = $state<Record<PanelGroupId, PanelId>>({
+    presets: 'color',
+    edits: 'properties',
+    structure: 'layers',
+  });
 
-  function isPanelCollapsed(id: PanelId): boolean {
-    if (id === 'color') return colorCollapsed;
-    return layersCollapsed;
+  function groupForPanel(id: PanelId): PanelGroupDef {
+    return panelGroups.find((group) => group.panels.some((panel) => panel.id === id)) ?? panelGroups[0];
   }
 
-  function setPanelCollapsed(id: PanelId, collapsed: boolean): void {
-    if (id === 'color') colorCollapsed = collapsed;
-    else layersCollapsed = collapsed;
+  function activePanel(group: PanelGroupDef): PanelId {
+    const active = activePanelByGroup[group.id];
+    return group.panels.some((panel) => panel.id === active) ? active : group.panels[0].id;
   }
 
-  function rememberAutoCollapsed(id: PanelId): void {
-    if (!autoCollapsedIds.includes(id)) autoCollapsedIds = [...autoCollapsedIds, id];
-  }
-
-  function forgetAutoCollapsed(id: PanelId): void {
-    autoCollapsedIds = autoCollapsedIds.filter((existing) => existing !== id);
-  }
-
-  function panelStackOverflows(): boolean {
-    return !!panelStackEl && panelStackEl.scrollHeight > panelStackEl.clientHeight + 1;
-  }
-
-  function afterLayout(): Promise<void> {
-    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-  }
-
-  function collapseNeighborsFor(id: PanelId): PanelId[] {
-    const index = panelOrder.indexOf(id);
-    const below = panelOrder.slice(index + 1);
-    const above = panelOrder.slice(0, index).reverse();
-    return [...below, ...above];
-  }
-
-  async function expandPanel(id: PanelId): Promise<void> {
-    if (rightCollapsed) rightCollapsed = false;
-    if (!panelStackEl || fittingPanels) {
-      setPanelCollapsed(id, false);
-      forgetAutoCollapsed(id);
-      return;
-    }
-
-    fittingPanels = true;
-    try {
-      setPanelCollapsed(id, false);
-      forgetAutoCollapsed(id);
-      for (const neighbor of collapseNeighborsFor(id)) {
-        await tick();
-        await afterLayout();
-        if (!panelStackOverflows()) break;
-        if (!isPanelCollapsed(neighbor)) {
-          setPanelCollapsed(neighbor, true);
-          rememberAutoCollapsed(neighbor);
-        }
-      }
-    } finally {
-      fittingPanels = false;
-    }
-  }
-
-  function requestPanelCollapsed(id: PanelId, collapsed: boolean): void {
-    if (collapsed) {
-      setPanelCollapsed(id, true);
-      forgetAutoCollapsed(id);
-      requestAnimationFrame(() => void fitRightPanels());
-    } else {
-      void expandPanel(id);
-    }
+  function activatePanel(id: PanelId): void {
+    const group = groupForPanel(id);
+    activePanelByGroup[group.id] = id;
   }
 
   let peekedPanel = $state<PanelId | null>(null);
@@ -142,52 +146,12 @@
 
   function peekPanel(id: PanelId): void {
     rightCollapsed = true;
+    activatePanel(id);
     peekedPanel = peekedPanel === id ? null : id;
   }
 
   function closePeekedPanel(): void {
     peekedPanel = null;
-  }
-
-  async function fitRightPanels(): Promise<void> {
-    if (rightCollapsed || !panelStackEl || fittingPanels) return;
-    fittingPanels = true;
-    try {
-      for (let i = 0; i < 8; i++) {
-        await tick();
-        await afterLayout();
-
-        if (panelStackOverflows()) {
-          const expandedCount = panelOrder.filter((id) => !isPanelCollapsed(id)).length;
-          if (expandedCount <= 1) break;
-          const next = collapseOrder.find((id) => !isPanelCollapsed(id));
-          if (!next) break;
-          setPanelCollapsed(next, true);
-          rememberAutoCollapsed(next);
-          continue;
-        }
-
-        const h = panelStackEl.clientHeight;
-        const restore = expandOrder.find((id) => {
-          const blockedAt = restoreBlockedAtHeight.get(id) ?? -Infinity;
-          return autoCollapsedIds.includes(id) && h > blockedAt + 8;
-        });
-        if (!restore) break;
-        setPanelCollapsed(restore, false);
-        forgetAutoCollapsed(restore);
-        await tick();
-        await afterLayout();
-        if (panelStackOverflows()) {
-          setPanelCollapsed(restore, true);
-          rememberAutoCollapsed(restore);
-          restoreBlockedAtHeight.set(restore, panelStackEl.clientHeight);
-          break;
-        }
-        restoreBlockedAtHeight.delete(restore);
-      }
-    } finally {
-      fittingPanels = false;
-    }
   }
 
   function runAppMenuAction(id: string): void {
@@ -360,34 +324,75 @@
     const disposeKeyboard = installKeyboard();
     void project.restore();
     const autosave = window.setInterval(() => void autosaveOpenDocuments(), 60_000);
-    const resizeObserver = new ResizeObserver(() => void fitRightPanels());
     let unlistenMenu: UnlistenFn | null = null;
     if (desktop) {
       void listen<string>('app-menu', (event) => runAppMenuAction(event.payload)).then((unlisten) => {
         unlistenMenu = unlisten;
       });
     }
-    if (panelStackEl) resizeObserver.observe(panelStackEl);
-    requestAnimationFrame(() => void fitRightPanels());
     return () => {
       unlistenMenu?.();
-      resizeObserver.disconnect();
       window.clearInterval(autosave);
       disposeKeyboard();
     };
   });
 
   $effect(() => {
-    colorCollapsed;
-    layersCollapsed;
-    rightCollapsed;
-    if (!rightCollapsed) requestAnimationFrame(() => void fitRightPanels());
-  });
-
-  $effect(() => {
     if (!rightCollapsed) peekedPanel = null;
   });
 </script>
+
+{#snippet rightPanel(id: PanelId, collapsed: boolean, onToggle: (collapsed: boolean) => void)}
+  {#if id === 'color'}
+    <ColorPanel {collapsed} {onToggle} />
+  {:else if id === 'swatches'}
+    <SwatchesPanel {collapsed} {onToggle} />
+  {:else if id === 'gradients'}
+    <GradientsPanel {collapsed} {onToggle} />
+  {:else if id === 'patterns'}
+    <PatternsPanel {collapsed} {onToggle} />
+  {:else if id === 'properties'}
+    <PropertiesPanel {collapsed} {onToggle} />
+  {:else if id === 'adjustments'}
+    <AdjustmentsPanel {collapsed} {onToggle} />
+  {:else if id === 'libraries'}
+    <LibrariesPanel {collapsed} {onToggle} />
+  {:else if id === 'layers'}
+    <LayersPanel {collapsed} {onToggle} />
+  {:else if id === 'channels'}
+    <ChannelsPanel {collapsed} {onToggle} />
+  {:else if id === 'paths'}
+    <PathsPanel {collapsed} {onToggle} />
+  {/if}
+{/snippet}
+
+{#snippet panelTabGroup(group: PanelGroupDef, closePeeked = false)}
+  <div class="panel-tabs" role="tablist" aria-label="Panel group">
+    {#each group.panels as panel (panel.id)}
+      <button
+        class="panel-tab"
+        class:active={activePanel(group) === panel.id}
+        role="tab"
+        aria-selected={activePanel(group) === panel.id}
+        onclick={() => activatePanel(panel.id)}
+      >
+        {panel.title}
+      </button>
+    {/each}
+    {#if closePeeked}
+      <button
+        class="panel-menu close"
+        onclick={closePeekedPanel}
+        use:tooltip={{ text: 'Hide panel group', placement: 'left' }}
+        aria-label="Hide panel group"
+      >
+        <Icon svg={ChevronDoubleRight} size={16} />
+      </button>
+    {:else}
+      <span class="panel-menu" aria-hidden="true"><Icon svg={LineHorizontal3} size={16} /></span>
+    {/if}
+  </div>
+{/snippet}
 
 <div class="app">
   {#if desktop}
@@ -420,41 +425,27 @@
                   use:tooltip={{ text: 'Expand panels', placement: 'left' }}
                   aria-label="Expand panels"
                 ><Icon svg={ChevronDoubleLeft} size={16} /></button>
-                <button
-                  class="rail-item"
-                  class:active={peekedPanel === 'color'}
-                  onclick={() => peekPanel('color')}
-                  aria-label="Color"
-                  aria-pressed={peekedPanel === 'color'}
-                >
-                  <Icon svg={ColorPalette} size={18} /><span>Color</span>
-                </button>
-                <button
-                  class="rail-item"
-                  class:active={peekedPanel === 'layers'}
-                  onclick={() => peekPanel('layers')}
-                  aria-label="Layers"
-                  aria-pressed={peekedPanel === 'layers'}
-                >
-                  <Icon svg={Layers} size={18} /><span>Layers</span>
-                </button>
+                {#each panelGroups as group, groupIndex}
+                  <div class="rail-group" class:separated={groupIndex > 0}>
+                    {#each group.panels as panel (panel.id)}
+                      <button
+                        class="rail-item"
+                        class:active={peekedPanel === panel.id}
+                        onclick={() => peekPanel(panel.id)}
+                        aria-label={panel.title}
+                        aria-pressed={peekedPanel === panel.id}
+                      >
+                        <Icon svg={panel.icon} size={18} /><span>{panel.title}</span>
+                      </button>
+                    {/each}
+                  </div>
+                {/each}
               </div>
               {#if peekedPanel}
-                <div class="peek-popover" class:layers={peekedPanel === 'layers'}>
-                  <div class="peek-bar">
-                    <button
-                      class="panel-toggle"
-                      onclick={closePeekedPanel}
-                      use:tooltip={{ text: 'Hide panel', placement: 'left' }}
-                      aria-label="Hide panel"
-                    ><Icon svg={ChevronDoubleRight} size={16} /></button>
-                  </div>
+                <div class="peek-popover" class:layers={groupForPanel(peekedPanel).id === 'structure'}>
+                  {@render panelTabGroup(groupForPanel(peekedPanel), true)}
                   <div class="peek-content">
-                    {#if peekedPanel === 'color'}
-                      <ColorPanel collapsed={false} onToggle={(collapsed) => collapsed && closePeekedPanel()} />
-                    {:else}
-                      <LayersPanel collapsed={false} onToggle={(collapsed) => collapsed && closePeekedPanel()} />
-                    {/if}
+                    {@render rightPanel(activePanel(groupForPanel(peekedPanel)), false, (collapsed) => collapsed && closePeekedPanel())}
                   </div>
                 </div>
               {/if}
@@ -467,15 +458,15 @@
                   aria-label="Collapse panels"
                 ><Icon svg={ChevronDoubleRight} size={16} /></button>
               </div>
-              <div class="panel-stack" bind:this={panelStackEl}>
-                <ColorPanel
-                  bind:collapsed={colorCollapsed}
-                  onToggle={(collapsed) => requestPanelCollapsed('color', collapsed)}
-                />
-                <LayersPanel
-                  bind:collapsed={layersCollapsed}
-                  onToggle={(collapsed) => requestPanelCollapsed('layers', collapsed)}
-                />
+              <div class="panel-stack">
+                {#each panelGroups as group, groupIndex}
+                  <div class="panel-group" class:separated={groupIndex > 0} class:grow={group.grow}>
+                    {@render panelTabGroup(group)}
+                    <div class="tab-content">
+                      {@render rightPanel(activePanel(group), false, () => undefined)}
+                    </div>
+                  </div>
+                {/each}
               </div>
             {/if}
           </aside>
@@ -611,7 +602,7 @@
   }
   .right.collapsed {
     position: relative;
-    width: 108px;
+    width: 132px;
     overflow: visible;
     z-index: 20;
   }
@@ -649,7 +640,121 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .panel-group {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg-panel);
+  }
+  .panel-group.grow {
+    flex: 1 1 180px;
+  }
+  .panel-group.separated {
+    border-top: 1px solid color-mix(in srgb, var(--border) 82%, #000 18%);
+  }
+  .panel-tabs {
+    display: flex;
+    flex: none;
+    align-items: flex-end;
+    min-height: 37px;
+    overflow-x: hidden;
+    overflow-y: hidden;
+    background: color-mix(in srgb, var(--bg-panel-2) 88%, #000 12%);
+    border-bottom: 1px solid var(--border);
+    padding-top: 4px;
+    scrollbar-width: none;
+  }
+  .panel-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .panel-tab {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    height: 33px;
+    margin-bottom: -1px;
+    padding: 0 6px;
+    background: color-mix(in srgb, var(--bg-panel-2) 86%, #000 14%);
+    border: 1px solid var(--border);
+    border-left: 0;
+    border-right: 1px solid var(--border);
+    border-radius: 0;
+    color: color-mix(in srgb, var(--text) 72%, #000 28%);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 32px;
+    text-align: center;
+    text-overflow: ellipsis;
     overflow: hidden;
+    white-space: nowrap;
+  }
+  .panel-tab:first-child {
+    border-left: 0;
+  }
+  .panel-tab:hover {
+    background: color-mix(in srgb, var(--bg-panel-2) 78%, #fff 6%);
+    color: var(--text-bright);
+  }
+  .panel-tab.active {
+    height: 37px;
+    background: var(--bg-panel);
+    border-top-color: color-mix(in srgb, var(--border) 74%, #fff 16%);
+    border-bottom-color: var(--bg-panel);
+    color: var(--text-bright);
+    line-height: 36px;
+    z-index: 1;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .panel-tab.active::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: var(--bg-panel);
+  }
+  .panel-menu {
+    display: grid;
+    flex: 0 0 26px;
+    place-items: center;
+    align-self: stretch;
+    color: var(--text-dim);
+    border-left: 1px solid var(--border);
+  }
+  .panel-menu.close {
+    padding: 0;
+    background: transparent;
+    border-top: 0;
+    border-right: 0;
+    border-bottom: 0;
+    border-radius: 0;
+  }
+  .panel-menu.close:hover {
+    color: var(--text-bright);
+    background: var(--bg-elevated);
+  }
+  .tab-content {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: auto;
+  }
+  .panel-group.grow .tab-content {
+    flex: 1;
+  }
+  .tab-content :global(.panel) {
+    border-bottom: 0;
+  }
+  .tab-content :global(.panel-head) {
+    display: none;
+  }
+  .tab-content :global(.panel.grow) {
+    flex: 1;
   }
   .panel-toggle {
     display: grid;
@@ -673,6 +778,14 @@
     align-self: flex-end;
     margin: 4px 5px 4px 0;
   }
+  .rail-group {
+    display: flex;
+    flex-direction: column;
+    padding: 3px 0;
+  }
+  .rail-group.separated {
+    border-top: 1px solid color-mix(in srgb, var(--border) 82%, #000 18%);
+  }
   .rail-item {
     display: flex;
     align-items: center;
@@ -684,6 +797,12 @@
     color: var(--text);
     text-align: left;
     cursor: pointer;
+  }
+  .rail-item span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .rail-item:hover {
     background: var(--bg-elevated);
@@ -706,16 +825,6 @@
   }
   .peek-popover.layers {
     max-height: min(520px, 100%);
-  }
-  .peek-bar {
-    height: 26px;
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 0 6px;
-    background: var(--bg-panel-2);
-    border-bottom: 1px solid var(--border);
   }
   .peek-content {
     min-height: 0;
