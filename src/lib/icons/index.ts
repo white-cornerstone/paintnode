@@ -60,9 +60,18 @@ export { default as ChevronDoubleLeft } from '@fluentui/svg-icons/icons/chevron_
 export { default as ChevronDoubleRight } from '@fluentui/svg-icons/icons/chevron_double_right_20_regular.svg?raw';
 export { default as ChevronDown } from '@fluentui/svg-icons/icons/chevron_down_24_regular.svg?raw';
 export { default as ChevronRight } from '@fluentui/svg-icons/icons/chevron_right_24_regular.svg?raw';
+export { default as LineHorizontal3 } from '@fluentui/svg-icons/icons/line_horizontal_3_24_regular.svg?raw';
 
 // Panel rail
 export { default as ColorPalette } from '@fluentui/svg-icons/icons/color_24_regular.svg?raw';
+export { default as ColorFill } from '@fluentui/svg-icons/icons/color_fill_24_regular.svg?raw';
+export { default as ColorBackground } from '@fluentui/svg-icons/icons/color_background_24_regular.svg?raw';
+export { default as DataHistogram } from '@fluentui/svg-icons/icons/data_histogram_24_regular.svg?raw';
+export { default as Grid } from '@fluentui/svg-icons/icons/grid_24_regular.svg?raw';
+export { default as Library } from '@fluentui/svg-icons/icons/library_24_regular.svg?raw';
+export { default as Channel } from '@fluentui/svg-icons/icons/channel_24_regular.svg?raw';
+export { default as Branch } from '@fluentui/svg-icons/icons/branch_24_regular.svg?raw';
+export { default as Options } from '@fluentui/svg-icons/icons/options_24_regular.svg?raw';
 export { default as Layers } from '@fluentui/svg-icons/icons/layer_24_regular.svg?raw';
 
 // Tools

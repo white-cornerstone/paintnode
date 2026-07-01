@@ -308,6 +308,22 @@ export class EditorStore implements ToolHost {
   setForeground(rgb: RGB): void {
     this.foreground = rgb;
   }
+  setBackground(rgb: RGB): void {
+    this.background = rgb;
+  }
+  sampleCompositeColorAtClient(clientX: number, clientY: number): RGB | null {
+    const doc = this.doc;
+    const viewport = this.viewport;
+    if (!doc || !viewport) return null;
+    const rect = viewport.canvas.getBoundingClientRect();
+    const p = viewport.screenToDoc(clientX - rect.left, clientY - rect.top);
+    const x = Math.floor(p.x);
+    const y = Math.floor(p.y);
+    if (x < 0 || y < 0 || x >= doc.width || y >= doc.height) return null;
+    const flat = compositeToCanvas(doc);
+    const data = ctx2d(flat).getImageData(x, y, 1, 1).data;
+    return { r: data[0], g: data[1], b: data[2] };
+  }
   beginText(x: number, y: number): void {
     const doc = this.doc;
     if (!doc) return;
@@ -1230,6 +1246,69 @@ export class EditorStore implements ToolHost {
     layer.touch();
     const after = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     this.history.push(pixelCommand(layer, before, after, 'Fill'));
+    this.bump();
+    this.invalidate();
+  }
+  fillActivePattern(kind: 'checker' | 'lines' | 'diagonal' | 'dots'): void {
+    const layer = this.activeLayer;
+    if (!layer) {
+      this.flash('No active layer');
+      return;
+    }
+    const tile = createCanvas(24, 24);
+    const tc = ctx2d(tile);
+    tc.fillStyle = '#303236';
+    tc.fillRect(0, 0, tile.width, tile.height);
+    tc.fillStyle = '#69707a';
+    if (kind === 'checker') {
+      for (let y = 0; y < tile.height; y += 12) {
+        for (let x = 0; x < tile.width; x += 12) {
+          tc.fillRect(x, y, 6, 6);
+          tc.fillRect(x + 6, y + 6, 6, 6);
+        }
+      }
+    } else if (kind === 'lines') {
+      for (let x = 0; x < tile.width; x += 6) tc.fillRect(x, 0, 2, tile.height);
+    } else if (kind === 'diagonal') {
+      tc.lineWidth = 2;
+      tc.strokeStyle = '#69707a';
+      for (let x = -tile.width; x < tile.width * 2; x += 8) {
+        tc.beginPath();
+        tc.moveTo(x, tile.height);
+        tc.lineTo(x + tile.width, 0);
+        tc.stroke();
+      }
+    } else {
+      tc.fillStyle = '#7e8790';
+      for (let y = 4; y < tile.height; y += 8) {
+        for (let x = 4; x < tile.width; x += 8) {
+          tc.beginPath();
+          tc.arc(x, y, 2, 0, Math.PI * 2);
+          tc.fill();
+        }
+      }
+    }
+    const pattern = layer.ctx.createPattern(tile, 'repeat');
+    if (!pattern) return;
+    const region = this.editRegion(layer);
+    const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    const mask = this.selectionMaskForLayer(layer);
+    layer.ctx.save();
+    layer.ctx.globalCompositeOperation = 'source-over';
+    if (mask) {
+      const tmp = createCanvas(layer.width, layer.height);
+      const c = ctx2d(tmp);
+      c.fillStyle = pattern;
+      c.fillRect(0, 0, layer.width, layer.height);
+      layer.ctx.drawImage(intersectMask(tmp, mask), 0, 0);
+    } else {
+      layer.ctx.fillStyle = pattern;
+      layer.ctx.fillRect(0, 0, layer.width, layer.height);
+    }
+    layer.ctx.restore();
+    layer.touch();
+    const after = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    this.history.push(pixelCommand(layer, before, after, 'Pattern Fill'));
     this.bump();
     this.invalidate();
   }
