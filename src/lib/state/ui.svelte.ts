@@ -7,7 +7,8 @@ export type DialogId =
   | 'hueSaturation'
   | 'gaussianBlur'
   | 'aiGenerate'
-  | 'aiDecouple';
+  | 'aiDecouple'
+  | 'stockImages';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';

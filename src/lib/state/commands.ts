@@ -199,6 +199,33 @@ export async function importImageCommand(): Promise<void> {
   }
 }
 
+export async function placeImageBlob(
+  blob: Blob,
+  name: string,
+  source?: { path?: string | null; attribution?: string | null },
+): Promise<void> {
+  if (!editor.doc) return;
+  try {
+    const file = new File([blob], name, { type: blob.type || 'image/jpeg' });
+    const bmp = await createImageBitmap(file);
+    const asset = await project.storeImportedFile(file, bmp.width, bmp.height);
+    const placed = editor.placeImage(bmp, bmp.width, bmp.height, name.replace(/\.[^.]+$/, ''), {
+      assetId: asset?.id ?? null,
+      path: asset?.relativePath ?? source?.path ?? null,
+    });
+    bmp.close();
+    editor.flash(
+      placed.oversized
+        ? `Placed ${name} full-size; use Move or Image > Reveal All to show hidden edges`
+        : source?.attribution
+          ? `Placed ${name} from ${source.attribution}`
+          : `Placed ${name}`,
+    );
+  } catch (e) {
+    editor.flash('Import failed: ' + (e as Error).message);
+  }
+}
+
 async function documentBytes(doc: PaintDocument, embed: EmbeddedFont[] = []): Promise<Uint8Array> {
   const blob = await saveOra(doc, embed);
   return new Uint8Array(await blob.arrayBuffer());

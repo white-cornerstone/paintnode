@@ -79,9 +79,9 @@
       { id: 'add-from-device', label: 'Add from device', icon: ImageAdd, run: () => void importImageCommand() },
       {
         id: 'add-stock',
-        label: 'Add free stock images',
+        label: 'Add open-license images',
         icon: ImageGlobe,
-        run: () => editor.flash('Free stock image search is coming soon'),
+        run: () => ui.open('stockImages'),
       },
     ];
   });
