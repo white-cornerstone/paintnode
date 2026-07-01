@@ -99,6 +99,15 @@ export interface SavedDocumentResult {
   name: string;
 }
 
+export interface NativeDroppedFile {
+  path: string;
+  name: string;
+  bytes: Uint8Array;
+  size: number;
+  modifiedAt: number;
+  mime?: string | null;
+}
+
 /**
  * Run the configured local image-generator via the Tauri Rust bridge and return a PNG data URL.
  * Only works in the desktop app; throws in the browser.
@@ -268,4 +277,15 @@ export async function writeProjectDocumentPath(args: {
     path: args.path,
     bytes: Array.from(args.bytes),
   });
+}
+
+export async function quitApplication(): Promise<void> {
+  if (!isDesktop()) throw new Error('Native quit is only available in the desktop app.');
+  return invoke<void>('quit_app');
+}
+
+export async function readNativeDroppedFile(path: string): Promise<NativeDroppedFile> {
+  if (!isDesktop()) throw new Error('Native file drops are only available in the desktop app.');
+  const result = await invoke<Omit<NativeDroppedFile, 'bytes'> & { bytes: number[] }>('read_dropped_file', { path });
+  return { ...result, bytes: new Uint8Array(result.bytes) };
 }

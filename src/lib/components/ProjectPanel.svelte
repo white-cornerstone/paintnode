@@ -5,6 +5,7 @@
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { workflow } from '../state/workflow.svelte';
+  import { projectDocumentSourceKey } from '../state/documentSource';
   import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
   import { isDesktop } from '../integrations/desktop';
   import { bytesToBitmap, openFiles } from '../io';
@@ -163,10 +164,16 @@
   async function openFile(file: ProjectFile) {
     try {
       if (isOra(file)) {
+        const sourceKey = projectDocumentSourceKey(file.relativePath);
+        if (editor.focusDocumentBySource(sourceKey)) {
+          editor.flash(`${file.name} is already open`);
+          return;
+        }
+
         const bytes = await project.readFile(file);
         const doc = await loadOra(bufferFrom(bytes));
         doc.name = file.name.replace(/\.ora$/i, '');
-        editor.openDocument(doc);
+        editor.openDocument(doc, true, sourceKey);
         editor.markSaved(file.relativePath);
         editor.flash(`Opened ${file.name}`);
         return;

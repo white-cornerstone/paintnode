@@ -160,6 +160,17 @@ struct SavedDocumentResult {
     name: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDroppedFile {
+    path: String,
+    name: String,
+    bytes: Vec<u8>,
+    size: u64,
+    modified_at: u128,
+    mime: Option<String>,
+}
+
 struct TempJobDir {
     path: PathBuf,
 }
@@ -2200,6 +2211,58 @@ async fn project_read_file(project_path: String, relative_path: String) -> Resul
 }
 
 #[tauri::command]
+async fn read_dropped_file(path: String) -> Result<NativeDroppedFile, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<NativeDroppedFile, String> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err("Dropped file path is empty.".into());
+        }
+
+        let path = PathBuf::from(trimmed);
+        if !path.is_file() {
+            return Err(format!("Dropped path is not a file: {}", path.display()));
+        }
+
+        let metadata = fs::metadata(&path).map_err(|e| {
+            format!(
+                "Failed to read dropped file metadata at {}: {e}",
+                path.display()
+            )
+        })?;
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let bytes = fs::read(&path)
+            .map_err(|e| format!("Failed to read dropped file at {}: {e}", path.display()))?;
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("untitled")
+            .to_string();
+
+        Ok(NativeDroppedFile {
+            path: path.to_string_lossy().to_string(),
+            name,
+            bytes,
+            size: metadata.len(),
+            modified_at,
+            mime: mime_for_path(&path),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
 async fn project_delete_asset(
     project_path: String,
     asset_id: String,
@@ -2386,6 +2449,8 @@ async fn project_save_document_as(
 fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let new = MenuItem::with_id(app, "app:new", "New...", true, Some("CmdOrCtrl+N"))?;
     let open = MenuItem::with_id(app, "app:open", "Open...", true, Some("CmdOrCtrl+O"))?;
+    let close_document =
+        MenuItem::with_id(app, "app:close-document", "Close Document", true, Some("CmdOrCtrl+W"))?;
     let place = MenuItem::with_id(app, "app:place-image", "Place Image...", true, None::<&str>)?;
     let save = MenuItem::with_id(app, "app:save-ora", "Save", true, Some("CmdOrCtrl+S"))?;
     let save_copy = MenuItem::with_id(
@@ -2546,6 +2611,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let about = MenuItem::with_id(app, "app:about", "About PaintNode", true, None::<&str>)?;
     let help_about =
         MenuItem::with_id(app, "app:help-about", "About PaintNode", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "app:quit", "Quit PaintNode", true, Some("CmdOrCtrl+Q"))?;
 
     let app_menu = Submenu::with_items(
         app,
@@ -2560,7 +2626,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::hide_others(app, None)?,
             &PredefinedMenuItem::show_all(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, None)?,
+            &quit,
         ],
     )?;
 
@@ -2577,7 +2643,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &save_copy,
             &export,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &close_document,
         ],
     )?;
     let edit = Submenu::with_items(
@@ -2691,6 +2757,8 @@ pub fn run() {
             project_reveal,
             project_reveal_file,
             project_read_file,
+            read_dropped_file,
+            quit_app,
             project_delete_asset,
             project_write_document,
             project_write_document_path,

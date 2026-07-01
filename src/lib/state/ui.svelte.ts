@@ -10,10 +10,18 @@ export type DialogId =
   | 'aiDecouple';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
+export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
 
 export interface FontEmbedPrompt {
   embeddable: string[];
   missing: string[];
+}
+
+export interface SaveChangesPrompt {
+  name: string;
+  kind: 'document' | 'workflow';
+  index: number;
+  total: number;
 }
 
 class UiState {
@@ -25,6 +33,8 @@ class UiState {
   // Font-embed prompt shown on save when text uses imported (embeddable) fonts.
   fontEmbed = $state<FontEmbedPrompt | null>(null);
   private fontEmbedResolver: ((v: FontEmbedChoice) => void) | null = null;
+  saveChanges = $state<SaveChangesPrompt | null>(null);
+  private saveChangesResolver: ((v: SaveChangesChoice) => void) | null = null;
 
   open(id: DialogId): void {
     this.dialog = id;
@@ -50,6 +60,19 @@ class UiState {
     this.fontEmbed = null;
     const resolve = this.fontEmbedResolver;
     this.fontEmbedResolver = null;
+    resolve?.(choice);
+  }
+
+  askSaveChanges(prompt: SaveChangesPrompt): Promise<SaveChangesChoice> {
+    return new Promise((resolve) => {
+      this.saveChangesResolver = resolve;
+      this.saveChanges = prompt;
+    });
+  }
+  resolveSaveChanges(choice: SaveChangesChoice): void {
+    this.saveChanges = null;
+    const resolve = this.saveChangesResolver;
+    this.saveChangesResolver = null;
     resolve?.(choice);
   }
 }

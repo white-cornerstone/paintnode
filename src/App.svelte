@@ -28,6 +28,7 @@
   import AiDecoupleDialog from './lib/components/AiDecoupleDialog.svelte';
   import FontEmbedDialog from './lib/components/FontEmbedDialog.svelte';
   import RasterizeTypeDialog from './lib/components/RasterizeTypeDialog.svelte';
+  import SaveChangesDialog from './lib/components/SaveChangesDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -53,11 +54,14 @@
     exportPngCommand,
     importImageCommand,
     openCommand,
+    openDocumentPaths,
+    saveOraCommand,
     saveActiveCommand,
     saveActiveCopyCommand,
+    saveWorkflowCommand,
   } from './lib/state/commands';
-  import { editor } from './lib/state/editor.svelte';
-  import { isDesktop } from './lib/integrations/desktop';
+  import { editor, type DocumentSession } from './lib/state/editor.svelte';
+  import { isDesktop, quitApplication } from './lib/integrations/desktop';
   import { project } from './lib/state/project.svelte';
   import { ui } from './lib/state/ui.svelte';
   import { workflow } from './lib/state/workflow.svelte';
@@ -117,6 +121,12 @@
     structure: 'layers',
   });
 
+  type NativeDropPosition = { x: number; y: number };
+  type NativeDropPayload = {
+    paths?: string[];
+    position?: NativeDropPosition;
+  };
+
   function groupForPanel(id: PanelId): PanelGroupDef {
     return panelGroups.find((group) => group.panels.some((panel) => panel.id === id)) ?? panelGroups[0];
   }
@@ -132,6 +142,12 @@
   }
 
   let peekedPanel = $state<PanelId | null>(null);
+  let quitGuardRunning = false;
+  let quitApproved = false;
+
+  type UnsavedWorkItem =
+    | { kind: 'document'; id: string; name: string }
+    | { kind: 'workflow'; name: string };
 
   function expandRightPanels(): void {
     peekedPanel = null;
@@ -151,6 +167,119 @@
 
   function closePeekedPanel(): void {
     peekedPanel = null;
+  }
+
+  function documentDisplayName(session: DocumentSession): string {
+    return session.doc.name || 'Untitled';
+  }
+
+  function unsavedWorkItems(): UnsavedWorkItem[] {
+    const items: UnsavedWorkItem[] = editor.documents
+      .filter((session) => editor.hasUnsavedChanges(session))
+      .map((session) => ({ kind: 'document', id: session.id, name: documentDisplayName(session) }));
+    if (workflow.active && workflow.dirty) {
+      items.push({ kind: 'workflow', name: workflow.name || 'Untitled Workflow' });
+    }
+    return items;
+  }
+
+  function hasUnsavedWork(): boolean {
+    return unsavedWorkItems().length > 0;
+  }
+
+  async function saveDocumentForClose(id: string): Promise<boolean> {
+    const session = editor.documents.find((documentSession) => documentSession.id === id);
+    if (!session) return true;
+    editor.switchDocument(id);
+    await saveOraCommand();
+    const updated = editor.documents.find((documentSession) => documentSession.id === id);
+    return !updated || !editor.hasUnsavedChanges(updated);
+  }
+
+  async function closeDocumentWithPrompt(session: DocumentSession): Promise<void> {
+    if (!editor.hasUnsavedChanges(session)) {
+      editor.closeDocument(session.id);
+      return;
+    }
+
+    editor.switchDocument(session.id);
+    const choice = await ui.askSaveChanges({
+      kind: 'document',
+      name: documentDisplayName(session),
+      index: 1,
+      total: 1,
+    });
+    if (choice === 'cancel') return;
+    if (choice === 'save') {
+      const saved = await saveDocumentForClose(session.id);
+      if (!saved) return;
+    }
+    editor.closeDocument(session.id);
+  }
+
+  async function closeActiveDocument(): Promise<void> {
+    if (ui.activeSurface === 'workflow') {
+      workflow.close();
+      return;
+    }
+    const session = editor.activeDocument;
+    if (!session) return;
+    await closeDocumentWithPrompt(session);
+  }
+
+  async function saveWorkflowForClose(): Promise<boolean> {
+    workflow.show();
+    await saveWorkflowCommand();
+    return !workflow.dirty;
+  }
+
+  async function confirmUnsavedWorkBeforeClose(items = unsavedWorkItems()): Promise<boolean> {
+    const total = items.length;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
+      if (item.kind === 'document') {
+        const session = editor.documents.find((documentSession) => documentSession.id === item.id);
+        if (!session || !editor.hasUnsavedChanges(session)) continue;
+        editor.switchDocument(item.id);
+      } else if (!workflow.active || !workflow.dirty) {
+        continue;
+      } else {
+        workflow.show();
+      }
+
+      const choice = await ui.askSaveChanges({
+        kind: item.kind,
+        name: item.name,
+        index: index + 1,
+        total,
+      });
+      if (choice === 'cancel') return false;
+      if (choice === 'discard') continue;
+
+      const saved = item.kind === 'document' ? await saveDocumentForClose(item.id) : await saveWorkflowForClose();
+      if (!saved) return false;
+    }
+    return true;
+  }
+
+  async function requestApplicationClose(): Promise<void> {
+    if (quitGuardRunning) return;
+    quitGuardRunning = true;
+    quitApproved = false;
+    try {
+      const canClose = await confirmUnsavedWorkBeforeClose();
+      if (!canClose) {
+        quitGuardRunning = false;
+        return;
+      }
+      quitApproved = true;
+      if (desktop) await quitApplication();
+      else window.close();
+    } catch (error) {
+      quitApproved = false;
+      quitGuardRunning = false;
+      editor.flash('Quit failed: ' + (error as Error).message);
+    }
   }
 
   function runAppMenuAction(id: string): void {
@@ -173,6 +302,9 @@
         break;
       case 'app:export-png':
         void exportPngCommand();
+        break;
+      case 'app:close-document':
+        void closeActiveDocument();
         break;
       case 'app:undo':
         editor.undo();
@@ -298,6 +430,9 @@
       case 'app:help-about':
         ui.open('about');
         break;
+      case 'app:quit':
+        void requestApplicationClose();
+        break;
     }
   }
 
@@ -319,18 +454,75 @@
     };
   }
 
+  function nativeDropPaths(payload: unknown): string[] {
+    if (Array.isArray(payload)) return payload.filter((path): path is string => typeof path === 'string');
+    const paths = (payload as NativeDropPayload | null)?.paths;
+    return Array.isArray(paths) ? paths.filter((path): path is string => typeof path === 'string') : [];
+  }
+
+  function nativeDropPosition(payload: unknown): NativeDropPosition | null {
+    if (!payload || Array.isArray(payload)) return null;
+    const position = (payload as NativeDropPayload).position;
+    return typeof position?.x === 'number' && typeof position.y === 'number' ? position : null;
+  }
+
+  function shouldOpenNativeDrop(payload: unknown): boolean {
+    const position = nativeDropPosition(payload);
+    if (!position) return true;
+    const target = document.elementFromPoint(position.x, position.y) as HTMLElement | null;
+    if (!target) return false;
+    return !editor.doc || !!target.closest('.doc-tabs, .empty-workspace');
+  }
+
+  async function handleNativeFileDrop(payload: unknown): Promise<void> {
+    const paths = nativeDropPaths(payload);
+    if (!paths.length || !shouldOpenNativeDrop(payload)) return;
+    await openDocumentPaths(paths);
+  }
+
   onMount(() => {
     const disposeKeyboard = installKeyboard();
     void project.restore();
     const autosave = window.setInterval(() => void autosaveOpenDocuments(), 60_000);
     let unlistenMenu: UnlistenFn | null = null;
+    let unlistenClose: UnlistenFn | null = null;
+    const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
       void listen<string>('app-menu', (event) => runAppMenuAction(event.payload)).then((unlisten) => {
         unlistenMenu = unlisten;
       });
+      if (appWindow) {
+        void appWindow.onCloseRequested(async (event) => {
+          if (quitApproved) return;
+          if (quitGuardRunning) {
+            event.preventDefault();
+            return;
+          }
+          if (!hasUnsavedWork()) return;
+          event.preventDefault();
+          await requestApplicationClose();
+        }).then((unlisten) => {
+          unlistenClose = unlisten;
+        });
+      }
+      void listen<unknown>('tauri://drag-drop', (event) => void handleNativeFileDrop(event.payload)).then((unlisten) => {
+        unlistenNativeDrops.push(unlisten);
+      });
+      void listen<unknown>('tauri://file-drop', (event) => void handleNativeFileDrop(event.payload)).then((unlisten) => {
+        unlistenNativeDrops.push(unlisten);
+      });
     }
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (quitApproved || !hasUnsavedWork()) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
     return () => {
       unlistenMenu?.();
+      unlistenClose?.();
+      unlistenNativeDrops.forEach((unlisten) => unlisten());
+      window.removeEventListener('beforeunload', onBeforeUnload);
       window.clearInterval(autosave);
       disposeKeyboard();
     };
@@ -522,6 +714,10 @@
 
 {#if editor.rasterizePrompt}
   <RasterizeTypeDialog />
+{/if}
+
+{#if ui.saveChanges}
+  <SaveChangesDialog />
 {/if}
 
 <style>
