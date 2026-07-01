@@ -132,6 +132,16 @@
         { label: 'Zoom Out', shortcut: '⌘-', action: () => vp()?.zoomBy(1 / 1.25) },
         { label: 'Fit on Screen', shortcut: '⌘0', action: () => vp()?.fitToView() },
         { label: 'Actual Pixels (100%)', shortcut: '⌘1', action: () => vp()?.setZoom(1) },
+        { sep: true },
+        {
+          label: 'Show Contextual Task Bar',
+          action: () => ui.showContextualTaskBar(),
+          disabled: () => ui.contextualTaskBarVisible,
+        },
+        {
+          label: 'Reset Contextual Task Bar Position',
+          action: () => ui.resetContextualTaskBarPosition(),
+        },
       ],
     },
     {

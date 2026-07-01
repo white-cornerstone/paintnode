@@ -517,12 +517,19 @@
       event.preventDefault();
       event.returnValue = '';
     };
+    const showPropertiesPanel = () => {
+      ui.showDocument();
+      activatePanel('properties');
+      expandRightPanels();
+    };
     window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('paintnode:show-properties-panel', showPropertiesPanel);
     return () => {
       unlistenMenu?.();
       unlistenClose?.();
       unlistenNativeDrops.forEach((unlisten) => unlisten());
       window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('paintnode:show-properties-panel', showPropertiesPanel);
       window.clearInterval(autosave);
       disposeKeyboard();
     };

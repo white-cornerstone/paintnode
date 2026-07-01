@@ -4,7 +4,7 @@ import type { Viewport } from '../Viewport';
 import type { History } from '../history';
 import type { ActiveStroke } from '../compositor';
 import type { RGB } from '../types';
-import type { Selection } from '../selection';
+import type { Selection, SelectionMode } from '../selection';
 
 /** Everything a tool needs from the editor, kept as a narrow interface to avoid coupling. */
 export interface ToolHost {
@@ -19,6 +19,7 @@ export interface ToolHost {
   brushOpacity: number;
   tolerance: number;
   selection: Selection | null;
+  selectionMode: SelectionMode;
   marqueeShape: 'rect' | 'ellipse' | 'row' | 'column';
   shapeType: 'rect' | 'ellipse' | 'line';
   shapeFill: boolean;

@@ -1,9 +1,8 @@
 import type { Tool, ToolHost, PointerInfo } from './Tool';
 import {
   magicWandSelection,
-  addToSelection,
-  subtractFromSelection,
-  type Selection,
+  combineSelection,
+  selectionModeFromModifiers,
 } from '../selection';
 
 /**
@@ -43,10 +42,8 @@ export class MagicWandTool implements Tool {
     );
     if (!hit) return;
 
-    let next: Selection | null = hit;
-    if (e.shiftKey) next = addToSelection(this.host.selection, hit, doc.width, doc.height);
-    else if (e.altKey) next = subtractFromSelection(this.host.selection, hit, doc.width, doc.height);
-    this.host.setSelection(next);
+    const mode = selectionModeFromModifiers(this.host.selectionMode, e);
+    this.host.setSelection(combineSelection(this.host.selection, hit, mode, doc.width, doc.height));
   }
 
   pointerMove(): void {}

@@ -10,6 +10,7 @@
   import type { PointerInfo } from '../engine/tools/Tool';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
+  import ContextualTaskBar from './ContextualTaskBar.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
 
   let canvasEl: HTMLCanvasElement;
@@ -56,7 +57,17 @@
     startRotation: number;
     startAngle: number;
   };
-  let transformDrag: TransformDrag | null = null;
+  let transformDrag = $state<TransformDrag | null>(null);
+  type SelectionDrag = {
+    kind: 'selection' | 'content';
+    lastDocX: number;
+    lastDocY: number;
+    moved: boolean;
+  };
+  let selectionDrag = $state<SelectionDrag | null>(null);
+  let pendingSelectionClickDeselect:
+    | { startDocX: number; startDocY: number; moved: boolean }
+    | null = null;
   let syncingScroll = false;
   let last = { x: 0, y: 0 };
   const SCROLL_PAD = 80;
@@ -122,8 +133,31 @@
       return;
     }
     if (e.button !== 0) return;
+    const info = toInfo(e, cssX, cssY, 0, 0);
+    const selectionTool = editor.activeToolId === 'marquee' || editor.activeToolId === 'lasso' || editor.activeToolId === 'magicwand';
+    const insideSelection = selectionTool && editor.selectionContainsPoint(info.x, info.y);
+    if (insideSelection) {
+      e.preventDefault();
+      interacting = true;
+      if (e.metaKey && editor.beginMoveSelectedContent()) {
+        selectionDrag = { kind: 'content', lastDocX: info.x, lastDocY: info.y, moved: false };
+      } else {
+        selectionDrag = { kind: 'selection', lastDocX: info.x, lastDocY: info.y, moved: false };
+      }
+      return;
+    }
+    if (
+      selectionTool &&
+      editor.selection &&
+      !e.shiftKey &&
+      !e.altKey &&
+      !e.metaKey
+    ) {
+      pendingSelectionClickDeselect = { startDocX: info.x, startDocY: info.y, moved: false };
+    } else {
+      pendingSelectionClickDeselect = null;
+    }
     if (editor.activeToolId === 'annotation') {
-      const info = toInfo(e, cssX, cssY, 0, 0);
       annotationDragStart = { x: info.x, y: info.y };
       annotationDraft = annotationFromDrag({
         kind: editor.annotationType,
@@ -136,7 +170,7 @@
       return;
     }
     interacting = true;
-    editor.activeTool.pointerDown(toInfo(e, cssX, cssY, 0, 0));
+    editor.activeTool.pointerDown(info);
   }
 
   function onPointerMove(e: PointerEvent) {
@@ -152,6 +186,17 @@
     if (panning) {
       vp.panBy(dxCss, dyCss);
       ui.zoom = vp.scale;
+    } else if (selectionDrag) {
+      const info = toInfo(e, cssX, cssY, dxCss, dyCss);
+      const dx = info.x - selectionDrag.lastDocX;
+      const dy = info.y - selectionDrag.lastDocY;
+      if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+        selectionDrag.moved = true;
+        if (selectionDrag.kind === 'content') editor.moveActiveLayerBy(dx, dy);
+        editor.moveSelection(dx, dy);
+        selectionDrag.lastDocX = info.x;
+        selectionDrag.lastDocY = info.y;
+      }
     } else if (interacting) {
       if (annotationDraft) {
         const info = toInfo(e, cssX, cssY, dxCss, dyCss);
@@ -164,6 +209,13 @@
           id: annotationDraft.id,
         });
       } else {
+        if (pendingSelectionClickDeselect) {
+          const info = toInfo(e, cssX, cssY, dxCss, dyCss);
+          const moved =
+            Math.abs(info.x - pendingSelectionClickDeselect.startDocX) > 2 / vp.scale ||
+            Math.abs(info.y - pendingSelectionClickDeselect.startDocY) > 2 / vp.scale;
+          if (moved) pendingSelectionClickDeselect.moved = true;
+        }
         editor.activeTool.pointerMove(toInfo(e, cssX, cssY, dxCss, dyCss));
       }
     } else if (vp.brushRadius > 0) {
@@ -186,7 +238,13 @@
       return;
     }
     if (interacting) {
-      if (annotationDraft) {
+      if (selectionDrag) {
+        if (selectionDrag.kind === 'content') {
+          if (selectionDrag.moved) editor.commitMoveSelectedContent();
+          else editor.cancelMoveSelectedContent();
+        }
+        selectionDrag = null;
+      } else if (annotationDraft) {
         editor.addAnnotation(annotationDraft.kind, annotationDraft.x, annotationDraft.y, annotationDraft.width, annotationDraft.height, annotationDraft.text, {
           rotation: annotationDraft.rotation,
           flipX: annotationDraft.flipX,
@@ -197,7 +255,11 @@
         annotationDragStart = null;
       } else {
         editor.activeTool.pointerUp(toInfo(e, cssX, cssY, cssX - last.x, cssY - last.y));
+        if (pendingSelectionClickDeselect && !pendingSelectionClickDeselect.moved) {
+          editor.deselect();
+        }
       }
+      pendingSelectionClickDeselect = null;
       interacting = false;
     }
   }
@@ -344,6 +406,47 @@
       `width:${bottomRight.x - topLeft.x}px`,
       `height:${bottomRight.y - topLeft.y}px`,
     ].join(';');
+  }
+
+  function contextualTaskBarAnchor(): { x: number; y: number; viewportWidth: number; viewportHeight: number; key: string } | null {
+    const doc = editor.doc;
+    if (!doc || !vp || !containerEl) return null;
+    viewportFrame;
+    const viewportRect = containerEl.getBoundingClientRect();
+    const topLeft = screenPoint(0, 0);
+    const bottomRight = screenPoint(doc.width, doc.height);
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const selection = editor.selection;
+
+    if (editor.freeTransform) {
+      return {
+        x: viewportRect.left + (topLeft.x + bottomRight.x) / 2,
+        y: viewportRect.top + Math.min(bottomRight.y + 14, containerEl.clientHeight - 52),
+        viewportWidth,
+        viewportHeight,
+        key: `transform:${editor.freeTransform.layerId}`,
+      };
+    }
+
+    if (selection) {
+      const p = screenPoint(selection.bounds.x + selection.bounds.w / 2, selection.bounds.y + selection.bounds.h);
+      return {
+        x: viewportRect.left + p.x,
+        y: viewportRect.top + p.y + 14,
+        viewportWidth,
+        viewportHeight,
+        key: `selection:${selection.bounds.x}:${selection.bounds.y}:${selection.bounds.w}:${selection.bounds.h}`,
+      };
+    }
+
+    return {
+      x: viewportRect.left + (topLeft.x + bottomRight.x) / 2,
+      y: viewportRect.top + bottomRight.y + 28,
+      viewportWidth,
+      viewportHeight,
+      key: `canvas:${doc.width}:${doc.height}`,
+    };
   }
 
   function updateTransformDrag(event: PointerEvent): void {
@@ -665,6 +768,12 @@
   {/if}
   {#if editor.textEdit && overlayBox}
     <TextEditorOverlay box={overlayBox} />
+  {/if}
+  {#if !editor.textEdit && !interacting && !panning && !annotationDraft && !transformDrag && !selectionDrag}
+    {@const taskBarAnchor = contextualTaskBarAnchor()}
+    {#if taskBarAnchor}
+      <ContextualTaskBar anchor={taskBarAnchor} />
+    {/if}
   {/if}
 </div>
 
