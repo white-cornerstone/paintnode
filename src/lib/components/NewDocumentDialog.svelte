@@ -4,6 +4,7 @@
   import { editor } from '../state/editor.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { project } from '../state/project.svelte';
+  import { settings } from '../state/settings.svelte';
   import { clamp } from '../engine/types';
   import { isDesktop } from '../integrations/desktop';
   import { Board, FolderAdd, ImageAdd } from '../icons';
@@ -31,6 +32,14 @@
   let tab = $state<Tab>('image');
 
   const imagePresets: ImagePreset[] = [
+    {
+      id: 'default',
+      name: 'Default Canvas',
+      meta: `${settings.value.workspace.defaultCanvasWidth} x ${settings.value.workspace.defaultCanvasHeight} px`,
+      width: settings.value.workspace.defaultCanvasWidth,
+      height: settings.value.workspace.defaultCanvasHeight,
+      bg: settings.value.workspace.defaultBackground,
+    },
     { id: 'desktop', name: 'Desktop Canvas', meta: '1280 x 800 px', width: 1280, height: 800, bg: 'transparent' },
     { id: 'hd', name: 'HD Screen', meta: '1920 x 1080 px', width: 1920, height: 1080, bg: 'transparent' },
     { id: 'square', name: 'Square Image', meta: '1024 x 1024 px', width: 1024, height: 1024, bg: 'transparent' },
@@ -81,9 +90,25 @@
     bg = preset.bg;
   }
 
+  function chooseImagePreset(preset: ImagePreset): void {
+    if (selectedImageId === preset.id) {
+      createImage();
+      return;
+    }
+    pickImagePreset(preset);
+  }
+
   function pickWorkflowPreset(preset: WorkflowPreset): void {
     selectedWorkflowId = preset.id;
     workflowName = preset.name === 'Blank Workflow' ? 'Untitled Workflow' : preset.name;
+  }
+
+  function chooseWorkflowPreset(preset: WorkflowPreset): void {
+    if (selectedWorkflowId === preset.id) {
+      createWorkflow();
+      return;
+    }
+    pickWorkflowPreset(preset);
   }
 
   function createImage(): void {
@@ -119,7 +144,27 @@
       projectBusy = false;
     }
   }
+
+  function createCurrent(): void {
+    if (tab === 'image') {
+      createImage();
+    } else if (tab === 'workflow') {
+      createWorkflow();
+    } else {
+      void createProject();
+    }
+  }
+
+  function onDialogKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (event.target instanceof HTMLTextAreaElement) return;
+    if (event.target instanceof HTMLButtonElement && !event.target.classList.contains('preset-tile')) return;
+    event.preventDefault();
+    createCurrent();
+  }
 </script>
+
+<svelte:window onkeydown={onDialogKeydown} />
 
 <Modal title="New" {onClose} width={980}>
   <div class="new-dialog">
@@ -144,7 +189,7 @@
               <button
                 class="preset-tile"
                 class:selected={selectedImageId === preset.id}
-                onclick={() => pickImagePreset(preset)}
+                onclick={() => chooseImagePreset(preset)}
               >
                 <Icon svg={ImageAdd} size={44} />
                 <span>{preset.name}</span>
@@ -159,7 +204,7 @@
               <button
                 class="preset-tile"
                 class:selected={selectedWorkflowId === preset.id}
-                onclick={() => pickWorkflowPreset(preset)}
+                onclick={() => chooseWorkflowPreset(preset)}
               >
                 <Icon svg={Board} size={44} />
                 <span>{preset.name}</span>

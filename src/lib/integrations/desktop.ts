@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { CodexModelId, ReasoningEffort, ServiceTier } from '../state/settings';
 
 /** True when running inside the Tauri desktop shell (vs. a plain browser tab). */
 export function isDesktop(): boolean {
@@ -24,6 +25,19 @@ export interface CodexGeneratorConfig {
   projectPath?: string | null;
   /** Per-request id used to filter Codex progress events. */
   runId?: string;
+  /** Codex model selected in PaintNode settings. */
+  model: CodexModelId;
+  /** Reasoning effort selected in PaintNode settings. */
+  reasoningEffort?: ReasoningEffort | null;
+  /** Speed tier selected in PaintNode settings. */
+  serviceTier?: ServiceTier | null;
+}
+
+export interface CodexDetectionResult {
+  found: boolean;
+  path: string | null;
+  version: string | null;
+  error: string | null;
 }
 
 export interface ProjectAsset {
@@ -64,6 +78,8 @@ export interface ProjectState {
 export interface GeneratedImageResult {
   dataUrl: string;
   asset?: ProjectAsset | null;
+  assets?: ProjectAsset[];
+  maskDataUrl?: string | null;
 }
 
 export interface WorkflowSourceImage {
@@ -119,6 +135,26 @@ export async function generateImage(config: GeneratorConfig, prompt: string): Pr
   return invoke<string>('generate_image', { bin: config.bin, args: config.args, prompt });
 }
 
+function codexInvokeConfig(config: CodexGeneratorConfig) {
+  return {
+    bin: config.bin?.trim() ? config.bin.trim() : null,
+    projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
+    runId: config.runId?.trim() ? config.runId.trim() : null,
+    model: config.model,
+    reasoningEffort: config.reasoningEffort ?? null,
+    serviceTier: config.serviceTier ?? 'default',
+  };
+}
+
+export async function detectCodex(bin?: string): Promise<CodexDetectionResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex detection is only available in the desktop app.');
+  }
+  return invoke<CodexDetectionResult>('detect_codex', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
 /**
  * Run local Codex headlessly through the Tauri Rust bridge and return a PNG data URL.
  * Codex auth is owned by the user's local Codex installation.
@@ -133,7 +169,65 @@ export async function generateCodexImage(
   const bin = config.bin?.trim() ? config.bin.trim() : null;
   const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
   const runId = config.runId?.trim() ? config.runId.trim() : `codex-${Date.now()}`;
-  return invoke<GeneratedImageResult>('generate_codex_image', { bin, prompt, projectPath, runId });
+  return invoke<GeneratedImageResult>('generate_codex_image', {
+    ...codexInvokeConfig({ ...config, runId }),
+    bin,
+    prompt,
+    projectPath,
+    runId,
+  });
+}
+
+export async function generateCodexFillImage(
+  config: CodexGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex generative fill is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `fill-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_codex_fill_image', {
+    ...codexInvokeConfig({ ...config, runId }),
+    bin,
+    prompt,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    runId,
+  });
+}
+
+export async function generateCodexRetouchImage(
+  config: CodexGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  referencePng: Uint8Array | null | undefined,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex AI retouch is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `retouch-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_codex_retouch_image', {
+    ...codexInvokeConfig({ ...config, runId }),
+    bin,
+    prompt,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    referencePng: referencePng ? Array.from(referencePng) : null,
+    runId,
+  });
 }
 
 export async function decoupleCodexImage(
@@ -149,6 +243,7 @@ export async function decoupleCodexImage(
   const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
   const runId = config.runId?.trim() ? config.runId.trim() : `decouple-${Date.now()}`;
   return invoke<DecoupleImageResult>('decouple_codex_image', {
+    ...codexInvokeConfig({ ...config, runId }),
     bin,
     prompt,
     projectPath,
@@ -170,6 +265,7 @@ export async function composeCodexWorkflow(
   const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
   const runId = config.runId?.trim() ? config.runId.trim() : `workflow-${Date.now()}`;
   return invoke<GeneratedImageResult>('compose_codex_workflow', {
+    ...codexInvokeConfig({ ...config, runId }),
     bin,
     prompt,
     projectPath,

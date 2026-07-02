@@ -7,8 +7,12 @@
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, LinkDismiss, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
   import type { AnnotationItem } from '../engine/annotations';
+
+  type LayerPanelRow =
+    | { kind: 'layer'; layer: Layer; parent?: undefined }
+    | { kind: 'linked-mask'; layer: Layer; parent: Layer };
 
   let {
     collapsed = $bindable(false),
@@ -37,13 +41,27 @@
   let opacityDraft = $state<string | null>(null);
   let opacityControl: HTMLDivElement | null = null;
 
-  // Display order: top of stack first.
-  const rows = $derived(editor.doc ? [...editor.doc.layers].reverse() : []);
+  function buildLayerRows(layers: Layer[]): LayerPanelRow[] {
+    const linkedMaskIds = new Set(layers.map((layer) => layer.maskLayerId).filter((id): id is string => !!id));
+    const rows: LayerPanelRow[] = [];
+    for (const layer of [...layers].reverse()) {
+      const isLinkedMask = layer.kind === 'ai-retouch-mask' && linkedMaskIds.has(layer.id);
+      if (isLinkedMask) continue;
+      rows.push({ kind: 'layer', layer });
+      const mask = layer.maskLayerId ? layers.find((item) => item.id === layer.maskLayerId && item.kind === 'ai-retouch-mask') : null;
+      if (mask) rows.push({ kind: 'linked-mask', layer: mask, parent: layer });
+    }
+    return rows;
+  }
+
+  // Display order: top of stack first, with linked masks nested under their parent result.
+  const rows = $derived(editor.doc ? buildLayerRows(editor.doc.layers) : []);
+  const reorderRows = $derived(rows.filter((row) => row.kind === 'layer'));
   const active = $derived(editor.activeLayer);
   const activeRasterLayer = $derived(editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId ? active : null);
   const activeOpacityPercent = $derived(Math.round((activeRasterLayer?.opacity ?? 1) * 100));
   const annotationCount = $derived(editor.doc?.annotations.length ?? 0);
-  const draggedLayer = $derived(dragFromId ? rows.find((layer) => layer.id === dragFromId) ?? null : null);
+  const draggedLayer = $derived(dragFromId ? rows.find((row) => row.layer.id === dragFromId)?.layer ?? null : null);
   const activeSourceAsset = $derived(
     activeRasterLayer?.sourceAssetId
       ? (project.current?.assets.find((asset) => asset.id === activeRasterLayer.sourceAssetId) ?? null)
@@ -75,8 +93,7 @@
     return text ? `${type}: ${text}` : type;
   }
   function toggleVisible(l: Layer) {
-    l.visible = !l.visible;
-    editor.invalidate();
+    editor.toggleLayerVisible(l);
   }
   function clampPercent(p: number): number {
     if (!Number.isFinite(p)) return activeOpacityPercent;
@@ -84,8 +101,7 @@
   }
   function setOpacity(p: number) {
     if (activeRasterLayer) {
-      activeRasterLayer.opacity = clampPercent(p) / 100;
-      editor.invalidate();
+      editor.setLayerOpacity(activeRasterLayer, clampPercent(p) / 100);
     }
   }
   function setOpacityFromInput(e: Event) {
@@ -112,8 +128,7 @@
   }
   function setBlend(e: Event) {
     if (activeRasterLayer) {
-      activeRasterLayer.blendMode = (e.target as HTMLSelectElement).value as Layer['blendMode'];
-      editor.invalidate();
+      editor.setLayerBlendMode(activeRasterLayer, (e.target as HTMLSelectElement).value as Layer['blendMode']);
     }
   }
   function startRename(l: Layer) {
@@ -124,18 +139,35 @@
     if (v) l.name = v;
     editingId = null;
   }
+  function rowKey(row: LayerPanelRow): string {
+    return `${row.kind}:${row.layer.id}`;
+  }
+  function reorderIndex(row: LayerPanelRow): number {
+    return row.kind === 'layer' ? reorderRows.findIndex((item) => item.layer.id === row.layer.id) : -1;
+  }
+  function linkedMaskLabel(row: LayerPanelRow): string {
+    return row.kind === 'linked-mask' ? `Linked mask for ${row.parent.name}` : 'AI retouch mask layer';
+  }
+  function linkedMaskToggleLabel(row: LayerPanelRow): string {
+    if (row.kind !== 'linked-mask') return '';
+    return row.parent.maskEnabled ? `Disable linked mask for ${row.parent.name}` : `Enable linked mask for ${row.parent.name}`;
+  }
 
   function reorderDraggedLayer(displaySlot: number | null) {
     const layers = editor.doc?.layers ?? [];
     if (!dragFromId || displaySlot === null || layers.length === 0) return;
 
     const from = layers.findIndex((layer) => layer.id === dragFromId);
-    const fromDisplay = rows.findIndex((layer) => layer.id === dragFromId);
+    const fromDisplay = reorderRows.findIndex((row) => row.layer.id === dragFromId);
     if (from < 0 || fromDisplay < 0) return;
 
-    const displayAfterRemoval = Math.max(0, Math.min(displaySlot - (displaySlot > fromDisplay ? 1 : 0), rows.length - 1));
-    const to = layers.length - 1 - displayAfterRemoval;
-    if (from >= 0 && to >= 0) editor.reorderLayer(from, to);
+    const afterRemoval = reorderRows.filter((row) => row.layer.id !== dragFromId);
+    const targetSlot = Math.max(0, Math.min(displaySlot - (displaySlot > fromDisplay ? 1 : 0), afterRemoval.length));
+    const remainingLayers = layers.filter((layer) => layer.id !== dragFromId);
+    const targetRow = targetSlot >= afterRemoval.length ? afterRemoval.at(-1) : afterRemoval[targetSlot];
+    const targetIndex = targetRow ? remainingLayers.findIndex((layer) => layer.id === targetRow.layer.id) : -1;
+    const to = !targetRow ? remainingLayers.length : targetSlot >= afterRemoval.length ? targetIndex : targetIndex + 1;
+    if (to >= 0) editor.reorderLayer(from, to);
   }
 
   function clearDrag() {
@@ -145,7 +177,7 @@
   }
 
   function interactiveTarget(target: EventTarget | null): boolean {
-    return target instanceof HTMLElement && !!target.closest('button,input,select,textarea,[contenteditable="true"]');
+    return target instanceof Element && !!target.closest('button,input,select,textarea,[contenteditable="true"]');
   }
 
   function onLayerClick(e: MouseEvent, layer: Layer) {
@@ -158,11 +190,15 @@
     select(layer);
   }
 
-  function onLayerPointerDown(e: PointerEvent, layer: Layer, displayIndex: number) {
+  function onLayerPointerDown(e: PointerEvent, item: LayerPanelRow) {
     if (e.button !== 0 || interactiveTarget(e.target)) return;
-    const row = e.currentTarget as HTMLElement;
-    const rect = row.getBoundingClientRect();
-    row.setPointerCapture(e.pointerId);
+    if (item.kind !== 'layer') return;
+    const displayIndex = reorderIndex(item);
+    if (displayIndex < 0) return;
+    const layer = item.layer;
+    const rowEl = e.currentTarget as HTMLElement;
+    const rect = rowEl.getBoundingClientRect();
+    rowEl.setPointerCapture(e.pointerId);
     pointerDrag = {
       pointerId: e.pointerId,
       layerId: layer.id,
@@ -217,11 +253,11 @@
   }
 
   function hitTestInsertSlot(e: PointerEvent): number | null {
-    if (!editor.doc || rows.length === 0) return null;
+    if (!editor.doc || reorderRows.length === 0) return null;
     const list = (e.currentTarget as HTMLElement).closest('.list');
     if (!list) return null;
 
-    const layerRows = Array.from(list.querySelectorAll<HTMLElement>('.layer[data-layer-id]'));
+    const layerRows = Array.from(list.querySelectorAll<HTMLElement>('.layer[data-reorderable="true"]'));
     if (layerRows.length === 0) return null;
 
     for (let i = 0; i < layerRows.length; i++) {
@@ -375,63 +411,87 @@
         {/each}
       {/if}
     {/if}
-    {#each rows as l, i (l.id)}
+    {#each rows as row (rowKey(row))}
       <div
         class="layer"
-        class:active={editor.doc?.activeLayerId === l.id && editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId}
-        class:dragging={dragFromId === l.id}
-        class:insert-before={dragInsertSlot === i}
-        class:insert-after={dragInsertSlot === rows.length && i === rows.length - 1}
+        class:linked-mask-row={row.kind === 'linked-mask'}
+        class:linked-parent-row={row.kind === 'layer' && !!editor.doc?.linkedMaskFor(row.layer)}
+        class:active={editor.doc?.activeLayerId === row.layer.id && editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId}
+        class:dragging={dragFromId === row.layer.id}
+        class:insert-before={row.kind === 'layer' && dragInsertSlot === reorderIndex(row)}
+        class:insert-after={row.kind === 'layer' && dragInsertSlot === reorderRows.length && reorderIndex(row) === reorderRows.length - 1}
         role="button"
-        data-layer-id={l.id}
+        data-layer-id={row.layer.id}
+        data-reorderable={row.kind === 'layer'}
         tabindex="0"
-        onclick={(e) => onLayerClick(e, l)}
-        onkeydown={(e) => (e.key === 'Enter' ? select(l) : null)}
-        onpointerdown={(e) => onLayerPointerDown(e, l, i)}
+        onclick={(e) => onLayerClick(e, row.layer)}
+        onkeydown={(e) => (e.key === 'Enter' ? select(row.layer) : null)}
+        onpointerdown={(e) => onLayerPointerDown(e, row)}
         onpointermove={onLayerPointerMove}
         onpointerup={onLayerPointerUp}
         onpointercancel={clearDrag}
       >
+        {#if row.kind === 'linked-mask'}
+          <button
+            class="linked-toggle"
+            class:disabled-mask={!row.parent.maskEnabled}
+            use:tooltip={{ text: linkedMaskToggleLabel(row), placement: 'right' }}
+            aria-label={linkedMaskToggleLabel(row)}
+            onclick={(e) => {
+              e.stopPropagation();
+              editor.toggleLayerMaskEnabled(row.parent);
+            }}
+          >
+            <Icon svg={row.parent.maskEnabled ? Link : LinkDismiss} size={13} />
+          </button>
+        {/if}
         <button
           class="eye"
-          class:off={!l.visible}
-          use:tooltip={{ text: l.visible ? 'Hide layer' : 'Show layer', placement: 'right' }}
+          class:off={!row.layer.visible}
+          use:tooltip={{ text: row.layer.visible ? (row.kind === 'linked-mask' ? 'Hide linked mask overlay' : 'Hide layer') : (row.kind === 'linked-mask' ? 'Show linked mask overlay' : 'Show layer'), placement: 'right' }}
           aria-label="Toggle visibility"
           onclick={(e) => {
             e.stopPropagation();
-            toggleVisible(l);
+            toggleVisible(row.layer);
           }}
         >
-          <Icon svg={l.visible ? Eye : EyeOff} size={17} />
+          <Icon svg={row.layer.visible ? Eye : EyeOff} size={row.kind === 'linked-mask' ? 15 : 17} />
         </button>
 
         <div class="thumb-wrap">
-          <LayerThumb layer={l} />
-          {#if l.kind === 'text'}
+          <LayerThumb layer={row.layer} compact={row.kind === 'linked-mask'} />
+          {#if row.layer.kind === 'text'}
             <span
               class="type-badge"
               use:tooltip={{ text: 'Editable type layer', placement: 'right' }}
             >
               <Icon svg={TextT} size={11} />
             </span>
+          {:else if row.layer.kind === 'ai-retouch-mask'}
+            <span
+              class="type-badge mask-badge"
+              use:tooltip={{ text: linkedMaskLabel(row), placement: 'right' }}
+            >
+              <Icon svg={PaintBrushSparkle} size={11} />
+            </span>
           {/if}
         </div>
 
         <div class="name">
-          {#if editingId === l.id}
+          {#if editingId === row.layer.id}
             <!-- svelte-ignore a11y_autofocus -->
             <input
               type="text"
-              value={l.name}
+              value={row.layer.name}
               autofocus
-              onblur={(e) => commitRename(l, e)}
+              onblur={(e) => commitRename(row.layer, e)}
               onkeydown={(e) => {
                 if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 if (e.key === 'Escape') editingId = null;
               }}
             />
           {:else}
-            <span ondblclick={() => startRename(l)} role="textbox" tabindex="-1">{l.name}</span>
+            <span ondblclick={() => startRename(row.layer)} role="textbox" tabindex="-1">{row.layer.name}</span>
           {/if}
         </div>
       </div>
@@ -498,6 +558,10 @@
       {#if draggedLayer.kind === 'text'}
         <span class="type-badge">
           <Icon svg={TextT} size={11} />
+        </span>
+      {:else if draggedLayer.kind === 'ai-retouch-mask'}
+        <span class="type-badge mask-badge">
+          <Icon svg={PaintBrushSparkle} size={11} />
         </span>
       {/if}
     </div>
@@ -616,6 +680,18 @@
   .layer.active {
     background: var(--accent-dim);
   }
+  .layer.linked-parent-row {
+    border-bottom-color: color-mix(in srgb, var(--border) 70%, transparent);
+  }
+  .layer.linked-mask-row {
+    min-height: 32px;
+    gap: 6px;
+    padding: 4px 8px 4px 14px;
+    background: color-mix(in srgb, var(--bg-panel) 88%, #000 12%);
+  }
+  .layer.linked-mask-row.active {
+    background: var(--accent-dim);
+  }
   .layer.insert-before {
     box-shadow: inset 0 2px 0 var(--accent);
   }
@@ -667,6 +743,20 @@
   .eye.off {
     color: var(--text-dim);
     opacity: 0.5;
+  }
+  .linked-toggle {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .linked-toggle.disabled-mask {
+    color: var(--danger);
   }
   .thumb-wrap {
     position: relative;
@@ -736,6 +826,9 @@
     border: 1px solid var(--border);
     border-radius: 3px;
     color: var(--text-bright);
+  }
+  .mask-badge {
+    color: #58f29a;
   }
   .name {
     flex: 1;

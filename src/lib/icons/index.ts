@@ -21,6 +21,10 @@ export { default as Search } from '@fluentui/svg-icons/icons/search_24_regular.s
 export { default as ZoomIn } from '@fluentui/svg-icons/icons/zoom_in_24_regular.svg?raw';
 export { default as ZoomOut } from '@fluentui/svg-icons/icons/zoom_out_24_regular.svg?raw';
 export { default as Sparkle } from '@fluentui/svg-icons/icons/sparkle_24_regular.svg?raw';
+export { default as PaintBrushSparkle } from '@fluentui/svg-icons/icons/paint_brush_sparkle_24_regular.svg?raw';
+export { default as EraserTool } from '@fluentui/svg-icons/icons/eraser_tool_24_regular.svg?raw';
+export { default as Patch } from '@fluentui/svg-icons/icons/patch_24_regular.svg?raw';
+export { default as ArrowTrendingSparkle } from '@fluentui/svg-icons/icons/arrow_trending_sparkle_24_regular.svg?raw';
 
 export { default as Eye } from '@fluentui/svg-icons/icons/eye_24_regular.svg?raw';
 export { default as EyeOff } from '@fluentui/svg-icons/icons/eye_off_24_regular.svg?raw';
@@ -55,6 +59,7 @@ export { default as OpenFolder } from '@fluentui/svg-icons/icons/open_folder_24_
 export { default as Open } from '@fluentui/svg-icons/icons/open_24_regular.svg?raw';
 export { default as ArrowSync } from '@fluentui/svg-icons/icons/arrow_sync_24_regular.svg?raw';
 export { default as Link } from '@fluentui/svg-icons/icons/link_24_regular.svg?raw';
+export { default as LinkDismiss } from '@fluentui/svg-icons/icons/link_dismiss_24_regular.svg?raw';
 export { default as SlideSize } from '@fluentui/svg-icons/icons/slide_size_24_regular.svg?raw';
 export { default as ChevronDoubleLeft } from '@fluentui/svg-icons/icons/chevron_double_left_20_regular.svg?raw';
 export { default as ChevronDoubleRight } from '@fluentui/svg-icons/icons/chevron_double_right_20_regular.svg?raw';

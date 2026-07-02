@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
+  import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
   import { openCommand, openDocumentFiles } from '../state/commands';
   import { filesFromDataTransfer, hasFileDrag } from '../io';
@@ -31,6 +32,10 @@
   $effect(() => {
     editor.textEdit;
     viewTick = performance.now();
+  });
+  $effect(() => {
+    settings.value.workspace.showTransparencyChecker;
+    vp?.invalidate();
   });
 
   let spaceDown = $state(false);
@@ -462,6 +467,18 @@
       };
     }
 
+    const retouchBounds = editor.getActiveAiRetouchMaskBounds();
+    if (editor.activeAiRetouchMaskLayer && retouchBounds) {
+      const p = fixedPoint(retouchBounds.x + retouchBounds.w / 2, retouchBounds.y + retouchBounds.h);
+      return {
+        x: viewportRect.left + p.x,
+        y: viewportRect.top + p.y + 14,
+        viewportWidth,
+        viewportHeight,
+        key: `ai-retouch-mask:${editor.activeAiRetouchMaskLayer.id}:${retouchBounds.x}:${retouchBounds.y}:${retouchBounds.w}:${retouchBounds.h}`,
+      };
+    }
+
     if (selection) {
       const p = fixedPoint(selection.bounds.x + selection.bounds.w / 2, selection.bounds.y + selection.bounds.h);
       return {
@@ -580,6 +597,8 @@
       () => editor.doc,
       () => editor.getActiveStroke(),
       () => editor.getSelection(),
+      () => editor.getAiRetouchPreview(),
+      () => settings.value.workspace.showTransparencyChecker,
     );
     vp.onAfterRender = () => {
       viewportFrame += 1;

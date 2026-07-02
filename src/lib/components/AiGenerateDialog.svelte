@@ -6,43 +6,29 @@
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
-  import { isDesktop, generateCodexImage, generateImage } from '../integrations/desktop';
+  import { settings } from '../state/settings.svelte';
+  import { DEFAULT_CUSTOM_GENERATOR_ARGS, type AiProvider } from '../state/settings';
+  import {
+    isDesktop,
+    generateCodexFillImage,
+    generateCodexImage,
+    generateImage,
+    writeProjectDocumentPath,
+    type ProjectAsset,
+  } from '../integrations/desktop';
   import { Copy } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type Provider = 'codex' | 'custom';
+  type Provider = AiProvider;
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  const KEY = 'paintnode.generator';
-  const DEFAULT_ARGS = '{prompt}\n--output\n{output}';
 
-  function loadCfg(): { provider: Provider; codexBin: string; bin: string; argsText: string } {
-    try {
-      const raw = localStorage.getItem(KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const provider = parsed.provider ?? (parsed.bin ? 'custom' : 'codex');
-        return {
-          provider: provider === 'custom' ? 'custom' : 'codex',
-          codexBin: '',
-          bin: '',
-          argsText: DEFAULT_ARGS,
-          ...parsed,
-        };
-      }
-    } catch {
-      /* ignore */
-    }
-    return { provider: 'codex', codexBin: '', bin: '', argsText: DEFAULT_ARGS };
-  }
-  const init = loadCfg();
-
-  let provider = $state<Provider>(init.provider);
-  let codexBin = $state(init.codexBin);
-  let bin = $state(init.bin);
-  let argsText = $state(init.argsText);
+  let provider = $state<Provider>(settings.value.ai.provider);
+  let codexBin = $state(settings.value.ai.codexBin);
+  let bin = $state(settings.value.ai.customBin);
+  let argsText = $state(settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   let prompt = $state('');
   let busy = $state(false);
   let error = $state('');
@@ -89,6 +75,37 @@
 Canvas size requirement: generate the image to match the current PaintNode canvas exactly: ${doc.width}x${doc.height} pixels, landscape/portrait orientation and aspect ratio included. Do not crop, letterbox, pillarbox, or add extra margins beyond this canvas.`;
   }
 
+  function defaultFillPrompt(): string {
+    return 'Naturally extend the existing image into the masked transparent area, matching the original scene, perspective, lighting, color, grain, and camera style.';
+  }
+
+  function textBytes(text: string): Uint8Array {
+    return new TextEncoder().encode(text);
+  }
+
+  async function saveFillDebugInputs(fillInput: Awaited<ReturnType<typeof editor.prepareGenerativeFillInput>>, generationPrompt: string): Promise<string | null> {
+    if (!settings.value.workspace.keepAiRunInputs || !fillInput || !project.path) return null;
+    const dir = `.paintnode/codex-runs/fill-inputs-${Date.now()}`;
+    await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: fillInput.sourcePng });
+    await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: fillInput.editTargetPng });
+    await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/mask.png`, bytes: fillInput.maskPng });
+    await writeProjectDocumentPath({
+      projectPath: project.path,
+      path: `${dir}/prompt.txt`,
+      bytes: textBytes(generationPrompt),
+    });
+    return dir;
+  }
+
+  async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('Unable to encode generated fill preview.'));
+      }, 'image/png');
+    });
+  }
+
   async function run() {
     error = '';
     copied = false;
@@ -100,20 +117,21 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       error = 'Enter the generator command.';
       return;
     }
-    if (!prompt.trim()) {
+    const hasSelection = !!editor.selection;
+    if (!prompt.trim() && !hasSelection) {
       error = 'Enter a prompt.';
       return;
     }
-    try {
-      localStorage.setItem(KEY, JSON.stringify({ provider, codexBin, bin, argsText }));
-    } catch {
-      /* ignore */
+    if (provider === 'custom' && hasSelection) {
+      error = 'Mask-guided generative fill is currently available with Local Codex only.';
+      return;
     }
+    settings.update({ ai: { provider, codexBin, customBin: bin, customArgsText: argsText } });
     const userPrompt = prompt.trim();
-    const generationPrompt = promptWithCanvasSize(userPrompt);
     busy = true;
-    progress = provider === 'codex' ? 'Starting local Codex...' : 'Running local generator...';
-    editor.flash(provider === 'codex' ? 'Generating with Codex...' : 'Generating image...');
+    let fillDebugDir: string | null = null;
+    progress = provider === 'codex' ? 'Preparing Codex request...' : 'Running local generator...';
+    editor.flash(hasSelection ? 'Preparing generative fill...' : provider === 'codex' ? 'Generating with Codex...' : 'Generating image...');
     clearProgressListener();
     const runId = provider === 'codex' ? createRunId() : '';
     if (provider === 'codex') {
@@ -128,9 +146,40 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       }
     }
     try {
+      const fillInput = hasSelection ? await editor.prepareGenerativeFillInput() : null;
+      if (hasSelection && !fillInput) throw new Error('The current selection has no editable pixels.');
+      const generationPrompt = fillInput ? userPrompt || defaultFillPrompt() : promptWithCanvasSize(userPrompt);
+      fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt) : null;
+      if (fillDebugDir) progress = `Saved fill inputs: ${fillDebugDir}`;
+      if (fillInput) progress = fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...';
       const generated =
         provider === 'codex'
-          ? await generateCodexImage({ bin: codexBin, projectPath: project.path, runId }, generationPrompt)
+          ? fillInput
+            ? await generateCodexFillImage(
+                {
+                  bin: codexBin,
+                  projectPath: null,
+                  runId,
+                  model: settings.value.ai.model,
+                  reasoningEffort: settings.value.ai.reasoningEffort,
+                  serviceTier: settings.value.ai.serviceTier,
+                },
+                fillInput.sourcePng,
+                fillInput.editTargetPng,
+                fillInput.maskPng,
+                generationPrompt,
+              )
+            : await generateCodexImage(
+                {
+                  bin: codexBin,
+                  projectPath: project.path,
+                  runId,
+                  model: settings.value.ai.model,
+                  reasoningEffort: settings.value.ai.reasoningEffort,
+                  serviceTier: settings.value.ai.serviceTier,
+                },
+                generationPrompt,
+              )
           : null;
       if (generated?.asset) await project.refresh();
       const dataUrl =
@@ -147,21 +196,45 @@ Canvas size requirement: generate the image to match the current PaintNode canva
         ));
       const blob = await (await fetch(dataUrl)).blob();
       const bmp = await createImageBitmap(blob);
+      let fillAsset: ProjectAsset | null = null;
+      if (fillInput && project.path) {
+        const composite = editor.renderGenerativeFillComposite(bmp, bmp.width, bmp.height, fillInput.mask, fillInput.source);
+        if (!composite) throw new Error('Unable to prepare the generated fill preview.');
+        const compositeBlob = await canvasToBlob(composite);
+        fillAsset = await project.storeGeneratedBlob(
+          compositeBlob,
+          `Generative fill ${generationPrompt.slice(0, 48) || 'outpaint'}.png`,
+          generationPrompt,
+          composite.width,
+          composite.height,
+        );
+      }
       const customAsset =
-        !generated && project.path
+        !fillInput && !generated && project.path
           ? await project.storeGeneratedBlob(blob, `AI ${userPrompt.slice(0, 48) || 'generated'}.png`, generationPrompt, bmp.width, bmp.height)
           : null;
-      const oversized = editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${userPrompt.slice(0, 24)}`, {
-        assetId: generated?.asset?.id ?? customAsset?.id ?? null,
-        path: generated?.asset?.relativePath ?? customAsset?.relativePath ?? null,
-      }).oversized;
+      const sourceMeta = {
+        assetId: fillAsset?.id ?? generated?.asset?.id ?? customAsset?.id ?? null,
+        path: fillAsset?.relativePath ?? generated?.asset?.relativePath ?? customAsset?.relativePath ?? null,
+      };
+      const oversized = fillInput
+        ? false
+        : editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${userPrompt.slice(0, 24)}`, sourceMeta).oversized;
+      if (fillInput) {
+        editor.insertGenerativeFill(bmp, bmp.width, bmp.height, fillInput.mask, `Generative fill: ${generationPrompt.slice(0, 24)}`, sourceMeta);
+      }
       bmp.close();
       editor.flash(
-        oversized ? 'Image generated full-size; use Move or Image > Reveal All to show hidden edges' : 'Image generated',
+        fillInput
+          ? 'Generative fill added'
+          : oversized
+            ? 'Image generated full-size; use Move or Image > Reveal All to show hidden edges'
+            : 'Image generated',
       );
       onClose();
     } catch (e) {
-      error = (e as Error)?.message ?? String(e);
+      const message = (e as Error)?.message ?? String(e);
+      error = fillDebugDir ? `${message}\n\nFill input files were saved at:\n${fillDebugDir}` : message;
       editor.flash('Generation failed');
     } finally {
       busy = false;

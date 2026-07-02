@@ -2,10 +2,28 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { clamp, oraToBlend } from '../engine/types';
+import { AI_RETOUCH_TOOL_ORDER, type AiRetouchMaskMetadata } from '../engine/aiRetouch';
 import { deserializeModel, type TextModel } from '../engine/text/model';
 import { fonts } from '../state/fonts.svelte';
 import { bytesToBitmap } from '../io';
 import { coerceAnnotations } from '../engine/annotations';
+
+function coerceAiRetouchMetadata(raw: unknown): AiRetouchMaskMetadata | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Partial<AiRetouchMaskMetadata>;
+  if (!value.toolId || !AI_RETOUCH_TOOL_ORDER.includes(value.toolId)) return null;
+  return {
+    toolId: value.toolId,
+    promptSeed: typeof value.promptSeed === 'string' ? value.promptSeed : '',
+    patchMode: value.patchMode === 'destination' ? 'destination' : value.patchMode === 'source' ? 'source' : undefined,
+    moveMode: value.moveMode === 'extend' ? 'extend' : value.moveMode === 'move' ? 'move' : undefined,
+    pupilSize: typeof value.pupilSize === 'number' ? value.pupilSize : undefined,
+    darkenAmount: typeof value.darkenAmount === 'number' ? value.darkenAmount : undefined,
+    healingSource: value.healingSource ?? null,
+    referenceRect: value.referenceRect ?? null,
+    destinationRect: value.destinationRect ?? null,
+  };
+}
 
 /** Parse an OpenRaster (.ora) file into a PaintDocument. Nested group stacks are flattened. */
 export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
@@ -46,39 +64,64 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     const x = parseFloat(el.getAttribute('x') || '0') || 0;
     const y = parseFloat(el.getAttribute('y') || '0') || 0;
     const opacityRaw = parseFloat(el.getAttribute('opacity') || '1');
+    const layerId = el.getAttribute('paintnode-layer-id') || undefined;
     const sourceAssetId = el.getAttribute('paintnode-source-asset-id');
     const sourcePath = el.getAttribute('paintnode-source-path');
+    const maskLayerId = el.getAttribute('paintnode-mask-layer-id');
+    const maskEnabled = el.getAttribute('paintnode-mask-enabled') !== 'false';
+    const layerKind = el.getAttribute('paintnode-layer-kind');
     // Editable text layer: parse the sidecar model. The PNG is still used for pixels
     // (it renders identically even when the original fonts are missing on this machine).
     let textModel: TextModel | null = null;
-    if (el.getAttribute('paintnode-layer-kind') === 'text') {
+    if (layerKind === 'text') {
       const textPath = el.getAttribute('paintnode-text-data');
       if (textPath && files[textPath]) textModel = deserializeModel(strFromU8(files[textPath]));
     }
-    const layer = new Layer(w, h, name);
+    let aiRetouch: AiRetouchMaskMetadata | null = null;
+    if (layerKind === 'ai-retouch-mask') {
+      const retouchPath = el.getAttribute('paintnode-ai-retouch-data');
+      if (retouchPath && files[retouchPath]) {
+        try {
+          aiRetouch = coerceAiRetouchMetadata(JSON.parse(strFromU8(files[retouchPath])));
+        } catch {
+          aiRetouch = null;
+        }
+      }
+    }
+    const layer = new Layer(w, h, name, layerId);
     layer.x = x;
     layer.y = y;
     layer.sourceAssetId = sourceAssetId;
     layer.sourcePath = sourcePath;
+    layer.maskLayerId = maskLayerId;
+    layer.maskEnabled = maskEnabled;
     layer.opacity = clamp(Number.isNaN(opacityRaw) ? 1 : opacityRaw, 0, 1);
     layer.visible = (el.getAttribute('visibility') || 'visible') !== 'hidden';
     layer.blendMode = oraToBlend(el.getAttribute('composite-op'));
     if (textModel) {
       layer.kind = 'text';
       layer.text = textModel;
+    } else if (aiRetouch) {
+      layer.kind = 'ai-retouch-mask';
+      layer.aiRetouch = aiRetouch;
     }
 
     if (src && files[src]) {
       const bmp = await bytesToBitmap(files[src]);
-      const loaded = new Layer(bmp.width, bmp.height, name, undefined, x, y);
+      const loaded = new Layer(bmp.width, bmp.height, name, layerId, x, y);
       loaded.sourceAssetId = sourceAssetId;
       loaded.sourcePath = sourcePath;
+      loaded.maskLayerId = maskLayerId;
+      loaded.maskEnabled = maskEnabled;
       loaded.opacity = layer.opacity;
       loaded.visible = layer.visible;
       loaded.blendMode = layer.blendMode;
       if (textModel) {
         loaded.kind = 'text';
         loaded.text = textModel;
+      } else if (aiRetouch) {
+        loaded.kind = 'ai-retouch-mask';
+        loaded.aiRetouch = aiRetouch;
       }
       loaded.ctx.drawImage(bmp, 0, 0);
       bmp.close();

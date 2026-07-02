@@ -146,7 +146,11 @@
     },
     {
       label: 'Help',
-      items: [{ label: 'About PaintNode', action: () => ui.open('about') }],
+      items: [
+        { label: 'Settings…', shortcut: '⌘,', action: () => ui.open('settings') },
+        { sep: true },
+        { label: 'About PaintNode', action: () => ui.open('about') },
+      ],
     },
   ];
 

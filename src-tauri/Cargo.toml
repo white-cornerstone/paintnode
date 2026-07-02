@@ -24,5 +24,6 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }

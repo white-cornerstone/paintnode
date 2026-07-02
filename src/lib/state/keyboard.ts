@@ -1,6 +1,8 @@
 import { editor } from './editor.svelte';
 import { openCommand, saveActiveCopyCommand, saveActiveCommand, exportPngCommand } from './commands';
+import { isTypingTarget } from './editing';
 import { ui } from './ui.svelte';
+import { nextAiRetouchTool } from '../engine/aiRetouch';
 
 const TOOL_KEYS: Record<string, string> = {
   v: 'move',
@@ -21,21 +23,10 @@ const TOOL_KEYS: Record<string, string> = {
   z: 'zoom',
 };
 
-function isTyping(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el) return false;
-  return (
-    el.tagName === 'INPUT' ||
-    el.tagName === 'TEXTAREA' ||
-    el.tagName === 'SELECT' ||
-    el.isContentEditable
-  );
-}
-
 /** Install global keyboard shortcuts. Returns a cleanup function. */
 export function installKeyboard(): () => void {
   const onKey = (e: KeyboardEvent) => {
-    if (isTyping(e.target)) return;
+    if (isTypingTarget(e.target)) return;
     const k = e.key.toLowerCase();
     const vp = editor.viewport;
 
@@ -118,6 +109,12 @@ export function installKeyboard(): () => void {
     }
 
     const hasDocumentSurface = ui.activeSurface === 'document' && !!editor.doc;
+
+    if (hasDocumentSurface && k === 'j') {
+      const next = e.shiftKey ? nextAiRetouchTool(editor.lastAiRetouchTool) : editor.lastAiRetouchTool;
+      editor.setTool(next);
+      return;
+    }
 
     if (hasDocumentSurface && k in TOOL_KEYS) {
       editor.setTool(TOOL_KEYS[k]);
