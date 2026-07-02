@@ -64,6 +64,7 @@ export interface ProjectState {
 export interface GeneratedImageResult {
   dataUrl: string;
   asset?: ProjectAsset | null;
+  assets?: ProjectAsset[];
 }
 
 export interface WorkflowSourceImage {

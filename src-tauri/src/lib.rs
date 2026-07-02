@@ -82,6 +82,7 @@ struct ProjectFileView {
 struct GeneratedImageResult {
     data_url: String,
     asset: Option<ProjectAssetView>,
+    assets: Vec<ProjectAssetView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -658,6 +659,51 @@ fn add_asset(project_path: &Path, asset: ProjectAsset) -> Result<ProjectAssetVie
     Ok(asset_view(project_path, asset))
 }
 
+fn safe_png_source_file_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name != "result.png")
+        .filter(|name| safe_file_name(name).is_some())
+        .map(str::to_string)
+}
+
+fn ai_retouch_asset_name(prompt: &str, source_file_name: Option<&str>) -> String {
+    source_file_name.map(str::to_string).unwrap_or_else(|| {
+        let prompt = prompt.trim();
+        let suffix = if prompt.is_empty() {
+            "result".into()
+        } else {
+            prompt.chars().take(48).collect::<String>()
+        };
+        format!("AI Retouch: {suffix}")
+    })
+}
+
+fn store_generated_png_asset(
+    project_dir: &Path,
+    bytes: &[u8],
+    name: String,
+    prompt: Option<String>,
+    source_file_name: Option<String>,
+) -> Result<ProjectAssetView, String> {
+    let (id, relative_path) = write_asset_file(project_dir, "generated", &name, "png", bytes)?;
+    add_asset(
+        project_dir,
+        ProjectAsset {
+            id,
+            kind: "generated".into(),
+            name,
+            relative_path,
+            created_at: now_id(),
+            prompt,
+            source_file_name,
+            width: None,
+            height: None,
+            mime: Some("image/png".into()),
+        },
+    )
+}
+
 fn is_png(bytes: &[u8]) -> bool {
     bytes.starts_with(PNG_SIGNATURE)
 }
@@ -699,9 +745,15 @@ fn copy_png_candidate(candidate: &Path, result_path: &Path) -> bool {
     fs::copy(candidate, result_path).is_ok()
 }
 
-fn find_newest_png_since(root: &Path, result_path: &Path, since: SystemTime) -> Option<PathBuf> {
+#[derive(Clone, Debug)]
+struct CodexCachedPng {
+    modified: SystemTime,
+    path: PathBuf,
+}
+
+fn find_pngs_since(root: &Path, result_path: &Path, since: SystemTime) -> Vec<CodexCachedPng> {
     let cutoff = since.checked_sub(Duration::from_secs(3)).unwrap_or(since);
-    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    let mut matches = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0_usize)];
     let mut checked = 0_usize;
 
@@ -738,17 +790,23 @@ fn find_newest_png_since(root: &Path, result_path: &Path, since: SystemTime) -> 
             if modified.duration_since(cutoff).is_err() {
                 continue;
             }
-            let is_newer = newest
-                .as_ref()
-                .map(|(current, _)| modified.duration_since(*current).is_ok())
-                .unwrap_or(true);
-            if is_newer {
-                newest = Some((modified, path));
-            }
+            matches.push(CodexCachedPng { modified, path });
         }
     }
 
-    newest.map(|(_, path)| path)
+    matches.sort_by(|a, b| {
+        a.modified
+            .cmp(&b.modified)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    matches
+}
+
+fn find_newest_png_since(root: &Path, result_path: &Path, since: SystemTime) -> Option<PathBuf> {
+    find_pngs_since(root, result_path, since)
+        .into_iter()
+        .last()
+        .map(|candidate| candidate.path)
 }
 
 fn codex_generated_images_roots() -> Vec<PathBuf> {
@@ -789,6 +847,42 @@ where
         }
     }
     None
+}
+
+fn find_codex_cached_pngs_in_roots<I>(
+    roots: I,
+    thread_id: Option<&str>,
+    since: SystemTime,
+    result_path: &Path,
+) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let Some(thread_id) = thread_id.map(str::trim) else {
+        return Vec::new();
+    };
+    if thread_id.is_empty()
+        || thread_id.contains('/')
+        || thread_id.contains('\\')
+        || thread_id.contains("..")
+    {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    for root in roots {
+        let thread_root = root.join(thread_id);
+        matches.extend(find_pngs_since(&thread_root, result_path, since));
+    }
+    matches.sort_by(|a, b| {
+        a.modified
+            .cmp(&b.modified)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    matches
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect()
 }
 
 fn unique_child_path(dir: &Path, file_name: &str) -> PathBuf {
@@ -850,6 +944,57 @@ where
         ));
     }
     Ok(Some((candidate, staged_path)))
+}
+
+fn copy_codex_cached_pngs_in_roots_to_job<I>(
+    roots: I,
+    job_path: &Path,
+    thread_id: Option<&str>,
+    since: SystemTime,
+) -> Result<Vec<(PathBuf, PathBuf)>, String>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let generated_dir = job_path.join("generated");
+    let exclude_path = generated_dir.join("__paintnode-result-placeholder.png");
+    let candidates = find_codex_cached_pngs_in_roots(roots, thread_id, since, &exclude_path);
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    fs::create_dir_all(&generated_dir)
+        .map_err(|e| format!("Failed to create Codex generated image staging folder: {e}"))?;
+
+    let mut copied = Vec::new();
+    for candidate in candidates {
+        let candidate_name = candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("codex-generated.png");
+        let staged_path = unique_child_path(&generated_dir, candidate_name);
+        if !copy_png_candidate(&candidate, &staged_path) {
+            return Err(format!(
+                "Failed to copy Codex generated image from {} to {}.",
+                candidate.display(),
+                staged_path.display()
+            ));
+        }
+        copied.push((candidate, staged_path));
+    }
+    Ok(copied)
+}
+
+fn copy_codex_cached_pngs_to_job(
+    job_path: &Path,
+    thread_id: Option<&str>,
+    since: SystemTime,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    copy_codex_cached_pngs_in_roots_to_job(
+        codex_generated_images_roots(),
+        job_path,
+        thread_id,
+        since,
+    )
 }
 
 fn copy_codex_cached_png_to_job(
@@ -1826,7 +1971,8 @@ async fn generate_codex_image(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        Ok(GeneratedImageResult { data_url, asset })
+        let assets = asset.iter().cloned().collect();
+        Ok(GeneratedImageResult { data_url, asset, assets })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2013,7 +2159,8 @@ async fn generate_codex_fill_image(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        Ok(GeneratedImageResult { data_url, asset })
+        let assets = asset.iter().cloned().collect();
+        Ok(GeneratedImageResult { data_url, asset, assets })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2152,21 +2299,24 @@ async fn generate_codex_retouch_image(
             return Err(command_failure("Codex AI retouch", &run.output));
         }
 
+        let cached_results =
+            copy_codex_cached_pngs_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?;
         let requested_result_path = job_path.join("result.png");
         let (recovered_source_path, staged_result_path) = if requested_result_path.exists() {
             (requested_result_path.clone(), requested_result_path)
         } else {
-            let Some((recovered_source_path, staged_result_path)) =
-                copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
-            else {
+            if let Some((recovered_source_path, staged_result_path)) =
+                cached_results.last().cloned()
+            {
+                (recovered_source_path, staged_result_path)
+            } else {
                 if let Some(message) = final_codex_agent_message(&run.output) {
                     return Err(format!(
                         "Codex did not create result.png or expose an AI retouch image in its generated-images cache.\n\n{message}"
                     ));
                 }
                 return Err("PaintNode could not find result.png or an AI retouch PNG in Codex's generated-images cache.".into());
-            };
-            (recovered_source_path, staged_result_path)
+            }
         };
 
         let result_dimensions = png_dimensions(&staged_result_path)?;
@@ -2182,35 +2332,45 @@ async fn generate_codex_retouch_image(
 
         emit_codex_progress(&app, &run_id, "Reading AI retouch PNG");
         let data_url = read_png_data_url(&staged_result_path)?;
+        let mut assets = Vec::new();
         let asset = if let Some(project_dir) = project_dir {
-            emit_codex_progress(&app, &run_id, "Saving AI retouch to the project");
+            emit_codex_progress(&app, &run_id, "Saving AI retouch assets to the project");
             let bytes = fs::read(&staged_result_path)
                 .map_err(|e| format!("Failed to read AI retouch for project storage: {e}"))?;
-            let source_file_name = recovered_source_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| *name != "result.png")
-                .filter(|name| safe_file_name(name).is_some());
-            let (id, relative_path) = if let Some(file_name) = source_file_name {
-                write_asset_file_with_file_name(&project_dir, "generated", file_name, &bytes)?
-            } else {
-                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?
-            };
-            let asset = ProjectAsset {
-                id,
-                kind: "generated".into(),
-                name: source_file_name
-                    .map(str::to_string)
-                    .unwrap_or_else(|| prompt.trim().chars().take(48).collect::<String>()),
-                relative_path,
-                created_at: now_id(),
-                prompt: Some(prompt.trim().into()),
-                source_file_name: source_file_name.map(str::to_string),
-                width: None,
-                height: None,
-                mime: Some("image/png".into()),
-            };
-            Some(add_asset(&project_dir, asset)?)
+            let source_file_name = safe_png_source_file_name(&recovered_source_path);
+            let name = ai_retouch_asset_name(prompt.trim(), source_file_name.as_deref());
+            let primary_asset = store_generated_png_asset(
+                &project_dir,
+                &bytes,
+                name,
+                Some(prompt.trim().into()),
+                source_file_name,
+            )?;
+            assets.push(primary_asset.clone());
+
+            for (cached_source_path, cached_staged_path) in cached_results {
+                if cached_staged_path == staged_result_path {
+                    continue;
+                }
+                let bytes = fs::read(&cached_staged_path).map_err(|e| {
+                    format!(
+                        "Failed to read additional AI retouch asset at {}: {e}",
+                        cached_staged_path.display()
+                    )
+                })?;
+                let source_file_name = safe_png_source_file_name(&cached_source_path);
+                let name = ai_retouch_asset_name(prompt.trim(), source_file_name.as_deref());
+                let asset = store_generated_png_asset(
+                    &project_dir,
+                    &bytes,
+                    name,
+                    Some(prompt.trim().into()),
+                    source_file_name,
+                )?;
+                assets.push(asset);
+            }
+
+            Some(primary_asset)
         } else {
             None
         };
@@ -2220,7 +2380,7 @@ async fn generate_codex_retouch_image(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        Ok(GeneratedImageResult { data_url, asset })
+        Ok(GeneratedImageResult { data_url, asset, assets })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2595,7 +2755,8 @@ async fn compose_codex_workflow(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        Ok(GeneratedImageResult { data_url, asset })
+        let assets = asset.iter().cloned().collect();
+        Ok(GeneratedImageResult { data_url, asset, assets })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -3812,6 +3973,65 @@ mod tests {
     }
 
     #[test]
+    fn find_codex_cached_pngs_returns_all_thread_pngs_in_order() {
+        let cache = TempJobDir::new("paintnode-thread-cache-all-png-test").expect("cache dir");
+        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let thread_dir = cache.path().join(thread_id);
+        let nested_dir = thread_dir.join("nested");
+        let inputs_dir = thread_dir.join("inputs");
+        fs::create_dir_all(&nested_dir).expect("nested dir");
+        fs::create_dir_all(&inputs_dir).expect("inputs dir");
+
+        let since = SystemTime::now();
+        thread::sleep(Duration::from_millis(20));
+        let first = thread_dir.join("first.png");
+        fs::write(&first, ONE_PIXEL_PNG).expect("first png");
+        thread::sleep(Duration::from_millis(20));
+        let second = nested_dir.join("second.png");
+        fs::write(&second, ONE_PIXEL_PNG).expect("second png");
+        fs::write(inputs_dir.join("ignored-input.png"), ONE_PIXEL_PNG).expect("input png");
+        fs::write(thread_dir.join("not-a-real.png"), b"not png").expect("invalid png");
+        fs::write(thread_dir.join("notes.txt"), b"hello").expect("text file");
+
+        let result_path = cache.path().join("result.png");
+        let found = find_codex_cached_pngs_in_roots(
+            vec![cache.path().to_path_buf()],
+            Some(thread_id),
+            since,
+            &result_path,
+        );
+
+        assert_eq!(found, vec![first, second]);
+    }
+
+    #[test]
+    fn find_codex_cached_pngs_ignores_old_or_unsafe_thread_inputs() {
+        let cache = TempJobDir::new("paintnode-thread-cache-safe-png-test").expect("cache dir");
+        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let thread_dir = cache.path().join(thread_id);
+        fs::create_dir_all(&thread_dir).expect("thread dir");
+        fs::write(thread_dir.join("old.png"), ONE_PIXEL_PNG).expect("old png");
+
+        let future_since = SystemTime::now() + Duration::from_secs(30);
+        let result_path = cache.path().join("result.png");
+        let old_matches = find_codex_cached_pngs_in_roots(
+            vec![cache.path().to_path_buf()],
+            Some(thread_id),
+            future_since,
+            &result_path,
+        );
+        assert!(old_matches.is_empty());
+
+        let unsafe_matches = find_codex_cached_pngs_in_roots(
+            vec![cache.path().to_path_buf()],
+            Some("../outside"),
+            SystemTime::UNIX_EPOCH,
+            &result_path,
+        );
+        assert!(unsafe_matches.is_empty());
+    }
+
+    #[test]
     fn copy_codex_cached_png_to_job_preserves_cache_file_name() {
         let cache = TempJobDir::new("paintnode-cache-copy-test").expect("cache dir");
         let job = TempJobDir::new("paintnode-cache-copy-job-test").expect("job dir");
@@ -3841,5 +4061,36 @@ mod tests {
                 .join("ig_original_result_name.png")
         );
         assert!(file_has_png_signature(&staged_path));
+    }
+
+    #[test]
+    fn copy_codex_cached_pngs_to_job_copies_each_generated_png() {
+        let cache = TempJobDir::new("paintnode-cache-copy-all-test").expect("cache dir");
+        let job = TempJobDir::new("paintnode-cache-copy-all-job-test").expect("job dir");
+        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let thread_dir = cache.path().join(thread_id);
+        fs::create_dir_all(&thread_dir).expect("thread dir");
+
+        let since = SystemTime::now();
+        thread::sleep(Duration::from_millis(20));
+        let first = thread_dir.join("first.png");
+        fs::write(&first, ONE_PIXEL_PNG).expect("first png");
+        thread::sleep(Duration::from_millis(20));
+        let second = thread_dir.join("second.png");
+        fs::write(&second, ONE_PIXEL_PNG).expect("second png");
+
+        let copied = copy_codex_cached_pngs_in_roots_to_job(
+            vec![cache.path().to_path_buf()],
+            job.path(),
+            Some(thread_id),
+            since,
+        )
+        .expect("copy should not fail");
+
+        assert_eq!(copied.len(), 2);
+        assert_eq!(copied[0].0, first);
+        assert_eq!(copied[1].0, second);
+        assert!(file_has_png_signature(&copied[0].1));
+        assert!(file_has_png_signature(&copied[1].1));
     }
 }

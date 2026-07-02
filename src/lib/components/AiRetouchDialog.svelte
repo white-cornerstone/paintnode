@@ -142,7 +142,8 @@
         bytes.referencePng,
         prompt.trim(),
       );
-      if (generated.asset) await project.refresh();
+      const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
+      if (generated.asset || savedAssetCount > 0) await project.refresh();
       const blob = await (await fetch(generated.dataUrl)).blob();
       const bmp = await createImageBitmap(blob);
       editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
@@ -150,7 +151,11 @@
         path: generated.asset?.relativePath ?? null,
       });
       bmp.close();
-      editor.flash('AI retouch added');
+      editor.flash(
+        savedAssetCount > 0
+          ? `AI retouch added; ${savedAssetCount} generated asset${savedAssetCount === 1 ? '' : 's'} saved`
+          : 'AI retouch added',
+      );
       onClose();
     } catch (e) {
       const message = (e as Error)?.message ?? String(e);
