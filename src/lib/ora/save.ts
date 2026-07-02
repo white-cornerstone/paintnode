@@ -37,8 +37,10 @@ function buildStackXml(
     const retouchPath = retouchMap.get(l.id);
     // Custom PaintNode attributes; other ORA readers ignore them and use the rasterized PNG.
     const extraAttrs = [
+      `paintnode-layer-id="${escapeXml(l.id)}"`,
       l.sourceAssetId ? `paintnode-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
       l.sourcePath ? `paintnode-source-path="${escapeXml(l.sourcePath)}"` : '',
+      l.maskLayerId ? `paintnode-mask-layer-id="${escapeXml(l.maskLayerId)}"` : '',
       l.kind !== 'raster' ? `paintnode-layer-kind="${escapeXml(l.kind)}"` : '',
       textPath ? `paintnode-text-data="${textPath}"` : '',
       retouchPath ? `paintnode-ai-retouch-data="${retouchPath}"` : '',

@@ -16,6 +16,8 @@ use tauri::{AppHandle, Emitter};
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const AI_RETOUCH_MASK_GROW_RADIUS: u32 = 16;
+const AI_RETOUCH_MASK_FEATHER_RADIUS: u32 = 8;
 const PROJECT_MANIFEST: &str = "paintnode.project.json";
 const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 
@@ -83,6 +85,7 @@ struct GeneratedImageResult {
     data_url: String,
     asset: Option<ProjectAssetView>,
     assets: Vec<ProjectAssetView>,
+    mask_data_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -142,9 +145,16 @@ struct CodexProgressPayload {
     message: String,
 }
 
+#[derive(Debug)]
 struct CodexRunResult {
     output: Output,
     thread_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct CodexImageRunResult {
+    run: CodexRunResult,
+    image_cached_before_exit: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -724,6 +734,132 @@ fn png_dimensions(path: &Path) -> Result<(u32, u32), String> {
         .ok_or_else(|| format!("PNG dimensions are invalid at {}.", path.display()))
 }
 
+fn decode_png_rgba(bytes: &[u8], label: &str) -> Result<image::RgbaImage, String> {
+    if !is_png(bytes) {
+        return Err(format!("{label} is not a PNG image."));
+    }
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to decode {label} PNG: {e}"))?;
+    Ok(image.to_rgba8())
+}
+
+fn encode_rgba_png(image: image::RgbaImage, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode {label} PNG: {e}"))?;
+    Ok(bytes.into_inner())
+}
+
+fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
+    let [r, g, b, a] = mask_pixel.0;
+    let luminance = (u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19 + 128) / 256;
+    ((luminance * u32::from(a) + 127) / 255) as u8
+}
+
+fn box_blur_coverage(coverage: &[u8], width: u32, height: u32, radius: u32) -> Vec<u8> {
+    if radius == 0 {
+        return coverage.to_vec();
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let r = radius as usize;
+    let mut horizontal = vec![0_u8; coverage.len()];
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let x0 = x.saturating_sub(r);
+            let x1 = (x + r).min(w - 1);
+            let mut sum = 0_u32;
+            for sx in x0..=x1 {
+                sum += u32::from(coverage[row + sx]);
+            }
+            horizontal[row + x] = (sum / (x1 - x0 + 1) as u32) as u8;
+        }
+    }
+
+    let mut out = vec![0_u8; coverage.len()];
+    for y in 0..h {
+        let y0 = y.saturating_sub(r);
+        let y1 = (y + r).min(h - 1);
+        for x in 0..w {
+            let mut sum = 0_u32;
+            for sy in y0..=y1 {
+                sum += u32::from(horizontal[sy * w + x]);
+            }
+            out[y * w + x] = (sum / (y1 - y0 + 1) as u32) as u8;
+        }
+    }
+    out
+}
+
+fn ai_retouch_editable_mask_png(
+    source_png: &[u8],
+    mask_png: &[u8],
+    grow_radius: u32,
+    feather_radius: u32,
+) -> Result<Vec<u8>, String> {
+    let source_dimensions = png_dimensions_from_bytes(source_png)
+        .ok_or_else(|| "AI retouch source PNG dimensions are invalid.".to_string())?;
+    let mask = decode_png_rgba(mask_png, "AI retouch mask")?;
+    if mask.dimensions() != source_dimensions {
+        return Err(format!(
+            "AI retouch mask must match source dimensions. Source is {}x{}, mask is {}x{}.",
+            source_dimensions.0,
+            source_dimensions.1,
+            mask.width(),
+            mask.height()
+        ));
+    }
+
+    let width = source_dimensions.0;
+    let height = source_dimensions.1;
+    let mut original = vec![0_u8; (width * height) as usize];
+    let mut covered = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let i = (y * width + x) as usize;
+            let coverage = mask_pixel_coverage(mask.get_pixel(x, y));
+            original[i] = coverage;
+            if coverage > 0 {
+                covered.push((x, y, coverage));
+            }
+        }
+    }
+
+    let mut grown = original.clone();
+    let radius_sq = grow_radius.saturating_mul(grow_radius);
+    for (x, y, coverage) in covered {
+        let x0 = x.saturating_sub(grow_radius);
+        let y0 = y.saturating_sub(grow_radius);
+        let x1 = (x + grow_radius).min(width - 1);
+        let y1 = (y + grow_radius).min(height - 1);
+        for yy in y0..=y1 {
+            let dy = yy.abs_diff(y);
+            for xx in x0..=x1 {
+                let dx = xx.abs_diff(x);
+                if dx.saturating_mul(dx) + dy.saturating_mul(dy) > radius_sq {
+                    continue;
+                }
+                let i = (yy * width + xx) as usize;
+                grown[i] = grown[i].max(coverage);
+            }
+        }
+    }
+
+    let blurred = box_blur_coverage(&grown, width, height, feather_radius);
+    let mut out = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let i = (y * width + x) as usize;
+            let coverage = blurred[i].max(original[i]);
+            out.put_pixel(x, y, image::Rgba([255, 255, 255, coverage]));
+        }
+    }
+
+    encode_rgba_png(out, "AI retouch editable mask")
+}
+
 fn file_has_png_signature(path: &Path) -> bool {
     let Ok(mut file) = fs::File::open(path) else {
         return false;
@@ -883,6 +1019,35 @@ where
         .into_iter()
         .map(|candidate| candidate.path)
         .collect()
+}
+
+fn png_file_looks_stable(path: &Path) -> bool {
+    let Ok(first) = fs::metadata(path) else {
+        return false;
+    };
+    thread::sleep(Duration::from_millis(250));
+    let Ok(second) = fs::metadata(path) else {
+        return false;
+    };
+    first.len() == second.len() && file_has_png_signature(path) && png_dimensions(path).is_ok()
+}
+
+fn find_ready_codex_cached_png(
+    thread_id: Option<&str>,
+    since: SystemTime,
+    expected_dimensions: (u32, u32),
+) -> Option<PathBuf> {
+    let exclude_path = Path::new("__paintnode-result-placeholder.png");
+    let candidates = find_codex_cached_pngs_in_roots(
+        codex_generated_images_roots(),
+        thread_id,
+        since,
+        exclude_path,
+    );
+    candidates.into_iter().rev().find(|candidate| {
+        png_dimensions(candidate).ok() == Some(expected_dimensions)
+            && png_file_looks_stable(candidate)
+    })
 }
 
 fn unique_child_path(dir: &Path, file_name: &str) -> PathBuf {
@@ -1349,6 +1514,131 @@ fn run_codex_with_progress(
     })
 }
 
+fn run_codex_with_progress_until_cached_png(
+    command: &mut Command,
+    timeout: Duration,
+    app: AppHandle,
+    run_id: String,
+    cache_since: SystemTime,
+    expected_dimensions: (u32, u32),
+) -> Result<CodexImageRunResult, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to launch command: {e}"))?;
+
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let thread_id = Arc::new(Mutex::new(None::<String>));
+    let mut readers = Vec::new();
+
+    if let Some(stream) = child.stdout.take() {
+        readers.push(spawn_output_reader(
+            stream,
+            Arc::clone(&stdout),
+            app.clone(),
+            run_id.clone(),
+            false,
+            Arc::clone(&thread_id),
+        ));
+    }
+    if let Some(stream) = child.stderr.take() {
+        readers.push(spawn_output_reader(
+            stream,
+            Arc::clone(&stderr),
+            app.clone(),
+            run_id.clone(),
+            true,
+            Arc::clone(&thread_id),
+        ));
+    }
+
+    let start = Instant::now();
+    let mut image_cached_before_exit = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("Failed to wait for command: {e}"))?
+        {
+            break status;
+        }
+
+        let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
+        if find_ready_codex_cached_png(
+            current_thread_id.as_deref(),
+            cache_since,
+            expected_dimensions,
+        )
+        .is_some()
+        {
+            image_cached_before_exit = true;
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Codex image generated; applying PaintNode retouch mask",
+            );
+            let _ = child.kill();
+            break child
+                .wait()
+                .map_err(|e| format!("Failed to stop Codex after image generation: {e}"))?;
+        }
+
+        if start.elapsed() >= timeout {
+            let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
+            if find_ready_codex_cached_png(
+                current_thread_id.as_deref(),
+                cache_since,
+                expected_dimensions,
+            )
+            .is_some()
+            {
+                image_cached_before_exit = true;
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    "Codex timed out after image generation; applying PaintNode retouch mask",
+                );
+                let _ = child.kill();
+                break child
+                    .wait()
+                    .map_err(|e| format!("Failed to stop Codex after image generation: {e}"))?;
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Generation timed out. Codex may still be busy, or the local command may be waiting for input.".into());
+        }
+
+        thread::sleep(POLL_INTERVAL);
+    };
+
+    for reader in readers {
+        let _ = reader.join();
+    }
+
+    let stdout = stdout
+        .lock()
+        .map(|bytes| bytes.clone())
+        .unwrap_or_else(|_| Vec::new());
+    let stderr = stderr
+        .lock()
+        .map(|bytes| bytes.clone())
+        .unwrap_or_else(|_| Vec::new());
+    let thread_id = thread_id.lock().ok().and_then(|id| id.clone());
+
+    Ok(CodexImageRunResult {
+        run: CodexRunResult {
+            output: Output {
+                status,
+                stdout,
+                stderr,
+            },
+            thread_id,
+        },
+        image_cached_before_exit,
+    })
+}
+
 fn output_tail(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim();
@@ -1681,21 +1971,21 @@ User retouch prompt:
 
 Requirements:
 - Use `edit_target.png` as the canvas geometry. Do not create a crop, zoom, new framing, or aspect-ratio change.
-- Generate exactly one full-canvas PNG with the exact same pixel dimensions as `source.png` and `edit_target.png`.
-- Save the final exact-size PNG as `result.png` in the current working directory. This file is required.
-- Treat `result.png` as an in-place retouch of `edit_target.png`, not as a new composition.
-- Preserve protected/black-mask pixels from `source.png` visually unchanged.
+- Generate exactly one full-canvas PNG candidate with the exact same pixel dimensions as `source.png` and `edit_target.png`.
+- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.
+- Do not create, edit, copy, verify, or delete files in the working directory.
+- PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, and black-mask/protected pixels will be discarded and preserved from `source.png` by the app.
+- You do not need to copy the generated PNG to `result.png`, composite the mask, restore protected pixels, crop, resize, write helper scripts, or prove exact pixel preservation. Those are deterministic PaintNode responsibilities.
+- Treat the generated candidate as an in-place retouch of `edit_target.png`, not as a new composition.
 - The visible original content inside the white mask is the thing to repair/remove, not protected content.
 - Change only the masked retouch area, with any edge blending kept subtle and registered.
 - For text, logos, painted marks, signs, glare, or surface blemishes, remove only the foreground mark and reconstruct the continuous underlying surface. Do not cover it with a flat rectangle, paint swatch, or unrelated color block.
 - Match the surrounding scene, perspective, lighting, focus, color, texture, grain, and camera style.
 - Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, or mask visualization.
-- Use the normal Codex image-generation flow for the visual retouch. You may use deterministic scripting only to copy, crop, pad, or resize the generated image into `result.png` with the required exact dimensions.
-- Do not create, edit, or delete files in the working directory except `result.png`.
 - Do not ask follow-up questions.
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
-Final response should be one short sentence confirming `result.png` was created."#
+Final response should be one short sentence confirming the AI retouch image was generated."#
     )
 }
 
@@ -1972,7 +2262,12 @@ async fn generate_codex_image(
 
         emit_codex_progress(&app, &run_id, "Done");
         let assets = asset.iter().cloned().collect();
-        Ok(GeneratedImageResult { data_url, asset, assets })
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2160,7 +2455,12 @@ async fn generate_codex_fill_image(
 
         emit_codex_progress(&app, &run_id, "Done");
         let assets = asset.iter().cloned().collect();
-        Ok(GeneratedImageResult { data_url, asset, assets })
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2262,15 +2562,20 @@ async fn generate_codex_retouch_image(
         let codex_started_at = SystemTime::now();
         let mut command =
             build_ai_retouch_codex_command(&codex_bin, &job_path, prompt.trim(), has_reference, true);
-        let mut run = run_codex_with_progress(
+        let mut image_run = run_codex_with_progress_until_cached_png(
             &mut command,
             GENERATION_TIMEOUT,
             app.clone(),
             run_id.clone(),
+            codex_started_at,
+            source_dimensions,
         )
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
-        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
+        if !image_run.image_cached_before_exit
+            && !image_run.run.output.status.success()
+            && output_mentions_unsupported_json(&image_run.run.output)
+        {
             emit_codex_progress(
                 &app,
                 &run_id,
@@ -2283,41 +2588,44 @@ async fn generate_codex_retouch_image(
                 has_reference,
                 false,
             );
-            run = run_codex_with_progress(
+            image_run = run_codex_with_progress_until_cached_png(
                 &mut fallback,
                 GENERATION_TIMEOUT,
                 app.clone(),
                 run_id.clone(),
+                codex_started_at,
+                source_dimensions,
             )
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
 
-        if !run.output.status.success() {
-            if let Some(message) = final_codex_agent_message(&run.output) {
+        if !image_run.image_cached_before_exit && !image_run.run.output.status.success() {
+            if let Some(message) = final_codex_agent_message(&image_run.run.output) {
                 return Err(format!("Codex did not generate an AI retouch image.\n\n{message}"));
             }
-            return Err(command_failure("Codex AI retouch", &run.output));
+            return Err(command_failure("Codex AI retouch", &image_run.run.output));
         }
 
         let cached_results =
-            copy_codex_cached_pngs_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?;
+            copy_codex_cached_pngs_to_job(&job_path, image_run.run.thread_id.as_deref(), codex_started_at)?;
         let requested_result_path = job_path.join("result.png");
-        let (recovered_source_path, staged_result_path) = if requested_result_path.exists() {
-            (requested_result_path.clone(), requested_result_path)
-        } else {
-            if let Some((recovered_source_path, staged_result_path)) =
-                cached_results.last().cloned()
+        let (recovered_source_path, staged_result_path) =
+            if let Some((recovered_source_path, staged_result_path)) = cached_results.last().cloned()
             {
                 (recovered_source_path, staged_result_path)
+            } else if requested_result_path.exists() {
+                (requested_result_path.clone(), requested_result_path)
             } else {
-                if let Some(message) = final_codex_agent_message(&run.output) {
+                if let Some(message) = final_codex_agent_message(&image_run.run.output) {
                     return Err(format!(
-                        "Codex did not create result.png or expose an AI retouch image in its generated-images cache.\n\n{message}"
+                        "Codex did not expose an AI retouch image in its generated-images cache.\n\n{message}"
                     ));
                 }
-                return Err("PaintNode could not find result.png or an AI retouch PNG in Codex's generated-images cache.".into());
-            }
-        };
+                return Err(
+                    "PaintNode could not find an AI retouch PNG in Codex's generated-images cache."
+                        .into(),
+                );
+            };
 
         let result_dimensions = png_dimensions(&staged_result_path)?;
         if result_dimensions != source_dimensions {
@@ -2330,45 +2638,29 @@ async fn generate_codex_retouch_image(
             ));
         }
 
-        emit_codex_progress(&app, &run_id, "Reading AI retouch PNG");
-        let data_url = read_png_data_url(&staged_result_path)?;
+        emit_codex_progress(&app, &run_id, "Preparing editable AI retouch mask");
+        let generated_bytes = fs::read(&staged_result_path)
+            .map_err(|e| format!("Failed to read AI retouch candidate: {e}"))?;
+        let mask_data_url = Some(png_data_url(&ai_retouch_editable_mask_png(
+            &source_png,
+            &mask_png,
+            AI_RETOUCH_MASK_GROW_RADIUS,
+            AI_RETOUCH_MASK_FEATHER_RADIUS,
+        )?)?);
+        let data_url = png_data_url(&generated_bytes)?;
         let mut assets = Vec::new();
         let asset = if let Some(project_dir) = project_dir {
-            emit_codex_progress(&app, &run_id, "Saving AI retouch assets to the project");
-            let bytes = fs::read(&staged_result_path)
-                .map_err(|e| format!("Failed to read AI retouch for project storage: {e}"))?;
+            emit_codex_progress(&app, &run_id, "Saving full AI retouch candidate to the project");
             let source_file_name = safe_png_source_file_name(&recovered_source_path);
             let name = ai_retouch_asset_name(prompt.trim(), source_file_name.as_deref());
             let primary_asset = store_generated_png_asset(
                 &project_dir,
-                &bytes,
+                &generated_bytes,
                 name,
                 Some(prompt.trim().into()),
                 source_file_name,
             )?;
             assets.push(primary_asset.clone());
-
-            for (cached_source_path, cached_staged_path) in cached_results {
-                if cached_staged_path == staged_result_path {
-                    continue;
-                }
-                let bytes = fs::read(&cached_staged_path).map_err(|e| {
-                    format!(
-                        "Failed to read additional AI retouch asset at {}: {e}",
-                        cached_staged_path.display()
-                    )
-                })?;
-                let source_file_name = safe_png_source_file_name(&cached_source_path);
-                let name = ai_retouch_asset_name(prompt.trim(), source_file_name.as_deref());
-                let asset = store_generated_png_asset(
-                    &project_dir,
-                    &bytes,
-                    name,
-                    Some(prompt.trim().into()),
-                    source_file_name,
-                )?;
-                assets.push(asset);
-            }
 
             Some(primary_asset)
         } else {
@@ -2380,7 +2672,12 @@ async fn generate_codex_retouch_image(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        Ok(GeneratedImageResult { data_url, asset, assets })
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url,
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2756,7 +3053,12 @@ async fn compose_codex_workflow(
 
         emit_codex_progress(&app, &run_id, "Done");
         let assets = asset.iter().cloned().collect();
-        Ok(GeneratedImageResult { data_url, asset, assets })
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -3509,6 +3811,51 @@ mod tests {
         assert!(err.contains("not a valid PNG"));
     }
 
+    fn test_rgba_png(width: u32, height: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba(pixels[(y * width + x) as usize])
+        });
+        encode_rgba_png(image, "test image").expect("test png")
+    }
+
+    #[test]
+    fn ai_retouch_editable_mask_png_grows_and_feathers_mask() {
+        let source = test_rgba_png(7, 1, &[[0, 0, 0, 255]; 7]);
+        let mask = test_rgba_png(
+            7,
+            1,
+            &[
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [255, 255, 255, 255],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+        );
+
+        let result = ai_retouch_editable_mask_png(&source, &mask, 1, 1).expect("editable mask");
+        let layer = decode_png_rgba(&result, "result").expect("decoded mask");
+
+        assert_eq!(layer.get_pixel(3, 0).0[3], 255);
+        assert!(layer.get_pixel(2, 0).0[3] > 0);
+        assert!(layer.get_pixel(4, 0).0[3] > 0);
+        assert_eq!(layer.get_pixel(0, 0).0[3], 0);
+        assert_eq!(layer.get_pixel(6, 0).0[3], 0);
+    }
+
+    #[test]
+    fn ai_retouch_editable_mask_png_rejects_size_mismatch() {
+        let source = test_rgba_png(2, 1, &[[1, 2, 3, 255], [4, 5, 6, 255]]);
+        let mask = test_rgba_png(1, 1, &[[255, 255, 255, 255]]);
+
+        let err = ai_retouch_editable_mask_png(&source, &mask, 1, 1)
+            .expect_err("size mismatch should fail");
+
+        assert!(err.contains("Source is 2x1, mask is 1x1"));
+    }
+
     #[test]
     fn ora_thumbnail_data_url_reads_embedded_thumbnail() {
         let job = TempJobDir::new("paintnode-ora-thumb-test").expect("temp dir");
@@ -3819,6 +4166,10 @@ mod tests {
         assert_eq!(args[image_idx + 5], "--");
         assert!(args[image_idx + 6].contains("Use $imagegen to perform one AI retouch edit"));
         assert!(args[image_idx + 6].contains("User retouch prompt:\nremove glare"));
+        assert!(args[image_idx + 6].contains("PaintNode will apply `mask.png` after you finish"));
+        assert!(args[image_idx + 6].contains("Those are deterministic PaintNode responsibilities"));
+        assert!(args[image_idx + 6].contains("generated image in Codex's generated-images cache"));
+        assert!(!args[image_idx + 6].contains("Save the final exact-size PNG as `result.png`"));
     }
 
     #[test]

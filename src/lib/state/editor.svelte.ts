@@ -955,6 +955,7 @@ export class EditorStore implements ToolHost {
       source,
       editTarget,
       mask,
+      maskLayerId: layer.id,
       reference,
       gesture,
     };
@@ -1245,6 +1246,7 @@ export class EditorStore implements ToolHost {
       nl.blendMode = l.blendMode;
       nl.sourceAssetId = l.sourceAssetId;
       nl.sourcePath = l.sourcePath;
+      nl.maskLayerId = l.maskLayerId;
       nl.kind = l.kind;
       nl.text = l.text ? cloneModel(l.text) : null;
       nl.aiRetouch = l.aiRetouch ? structuredClone(l.aiRetouch) : null;
@@ -1271,6 +1273,7 @@ export class EditorStore implements ToolHost {
     copy.blendMode = layer.blendMode;
     copy.sourceAssetId = layer.sourceAssetId;
     copy.sourcePath = layer.sourcePath;
+    copy.maskLayerId = layer.maskLayerId;
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
     copy.aiRetouch = layer.aiRetouch ? structuredClone(layer.aiRetouch) : null;
@@ -2371,22 +2374,39 @@ export class EditorStore implements ToolHost {
     sw: number,
     sh: number,
     sourceMeta: LayerSourceMeta = {},
+    maskSource: CanvasImageSource | null = null,
+    maskSw = 0,
+    maskSh = 0,
   ): string | null {
     const doc = this.doc;
     if (!doc) return null;
-    const fill = this.generativeFillLayerCanvas(source, sw, sh, request.mask);
-    if (!fill) return null;
+    if (sw !== doc.width || sh !== doc.height) return null;
+    if (maskSource && (maskSw !== doc.width || maskSh !== doc.height)) return null;
+    const maskLayer = doc.layers.find((layer) => layer.id === request.maskLayerId && layer.kind === 'ai-retouch-mask') ?? null;
 
-    let layerId: string | null = null;
-    this.structural('AI Retouch', () => {
-      const layer = new Layer(doc.width, doc.height, `AI Retouch: ${request.toolName}`, undefined, 0, 0);
-      layer.sourceAssetId = sourceMeta.assetId ?? null;
-      layer.sourcePath = sourceMeta.path ?? null;
-      layer.ctx.drawImage(fill, 0, 0);
-      layer.touch();
-      doc.insertAboveActive(layer);
-      layerId = layer.id;
+    const before = this.layerStackSnapshot();
+    if (maskLayer && maskSource) {
+      maskLayer.ctx.clearRect(0, 0, maskLayer.width, maskLayer.height);
+      maskLayer.ctx.drawImage(maskSource, 0, 0, maskSw, maskSh, 0, 0, doc.width, doc.height);
+      maskLayer.touch();
+    }
+    const layer = new Layer(doc.width, doc.height, `AI Retouch: ${request.toolName}`, undefined, 0, 0);
+    layer.sourceAssetId = sourceMeta.assetId ?? null;
+    layer.sourcePath = sourceMeta.path ?? null;
+    layer.maskLayerId = maskLayer?.id ?? null;
+    layer.ctx.drawImage(source, 0, 0);
+    layer.touch();
+    doc.insertAboveActive(layer);
+
+    const layerId = layer.id;
+    const after = this.layerStackSnapshot();
+    this.history.push({
+      label: 'AI Retouch',
+      undo: () => this.restoreLayerStack(before),
+      redo: () => this.restoreLayerStack(after),
     });
+    this.bump();
+    this.invalidate();
     this.pendingAiRetouch = null;
     this.setAiRetouchPreview(null);
     return layerId;

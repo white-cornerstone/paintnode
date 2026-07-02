@@ -58,6 +58,7 @@ export type AiRetouchGesture =
 
 export interface AiRetouchRequest {
   id: string;
+  maskLayerId: string;
   toolId: AiRetouchToolId;
   toolName: string;
   prompt: string;

@@ -22,6 +22,29 @@ function drawLayer(target: CanvasRenderingContext2D, layer: Layer, src: CanvasIm
   target.drawImage(src, layer.x, layer.y);
 }
 
+function layerMaskFor(doc: PaintDocument, layer: Layer): Layer | null {
+  if (!layer.maskLayerId) return null;
+  const mask = doc.layers.find((item) => item.id === layer.maskLayerId);
+  return mask?.kind === 'ai-retouch-mask' ? mask : null;
+}
+
+function applyLayerMask(layer: Layer, src: CanvasImageSource, mask: Layer, scratch?: HTMLCanvasElement): HTMLCanvasElement {
+  const out = scratch ?? createCanvas(layer.width, layer.height);
+  if (out.width !== layer.width || out.height !== layer.height) {
+    out.width = layer.width;
+    out.height = layer.height;
+  }
+  const c = ctx2d(out);
+  c.globalCompositeOperation = 'source-over';
+  c.globalAlpha = 1;
+  c.clearRect(0, 0, out.width, out.height);
+  c.drawImage(src, 0, 0);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(mask.canvas, mask.x - layer.x, mask.y - layer.y);
+  c.globalCompositeOperation = 'source-over';
+  return out;
+}
+
 /**
  * Composite every visible layer of `doc` onto `target`, bottom-to-top. If `stroke` is
  * supplied, the matching layer is rendered with the in-progress stroke merged in (via the
@@ -38,6 +61,8 @@ export function compositeLayers(
   for (const layer of doc.layers) {
     if (layer.kind === 'ai-retouch-mask') continue;
     if (!layer.visible || layer.opacity <= 0 || layer.suppressed) continue;
+
+    const mask = layerMaskFor(doc, layer);
 
     if (stroke && stroke.layerId === layer.id) {
       const sc = scratch ?? createCanvas(layer.width, layer.height);
@@ -56,9 +81,9 @@ export function compositeLayers(
       sctx.drawImage(buf, -layer.x, -layer.y);
       sctx.globalCompositeOperation = 'source-over';
       sctx.globalAlpha = 1;
-      drawLayer(target, layer, sc);
+      drawLayer(target, layer, mask ? applyLayerMask(layer, sc, mask) : sc);
     } else {
-      drawLayer(target, layer, layer.canvas);
+      drawLayer(target, layer, mask ? applyLayerMask(layer, layer.canvas, mask, scratch) : layer.canvas);
     }
   }
   target.restore();

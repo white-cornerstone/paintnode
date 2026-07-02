@@ -64,8 +64,10 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     const x = parseFloat(el.getAttribute('x') || '0') || 0;
     const y = parseFloat(el.getAttribute('y') || '0') || 0;
     const opacityRaw = parseFloat(el.getAttribute('opacity') || '1');
+    const layerId = el.getAttribute('paintnode-layer-id') || undefined;
     const sourceAssetId = el.getAttribute('paintnode-source-asset-id');
     const sourcePath = el.getAttribute('paintnode-source-path');
+    const maskLayerId = el.getAttribute('paintnode-mask-layer-id');
     const layerKind = el.getAttribute('paintnode-layer-kind');
     // Editable text layer: parse the sidecar model. The PNG is still used for pixels
     // (it renders identically even when the original fonts are missing on this machine).
@@ -85,11 +87,12 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
         }
       }
     }
-    const layer = new Layer(w, h, name);
+    const layer = new Layer(w, h, name, layerId);
     layer.x = x;
     layer.y = y;
     layer.sourceAssetId = sourceAssetId;
     layer.sourcePath = sourcePath;
+    layer.maskLayerId = maskLayerId;
     layer.opacity = clamp(Number.isNaN(opacityRaw) ? 1 : opacityRaw, 0, 1);
     layer.visible = (el.getAttribute('visibility') || 'visible') !== 'hidden';
     layer.blendMode = oraToBlend(el.getAttribute('composite-op'));
@@ -103,9 +106,10 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
 
     if (src && files[src]) {
       const bmp = await bytesToBitmap(files[src]);
-      const loaded = new Layer(bmp.width, bmp.height, name, undefined, x, y);
+      const loaded = new Layer(bmp.width, bmp.height, name, layerId, x, y);
       loaded.sourceAssetId = sourceAssetId;
       loaded.sourcePath = sourcePath;
+      loaded.maskLayerId = maskLayerId;
       loaded.opacity = layer.opacity;
       loaded.visible = layer.visible;
       loaded.blendMode = layer.blendMode;

@@ -21,6 +21,7 @@ export class Layer {
   blendMode = $state<BlendMode>('source-over');
   sourceAssetId = $state<string | null>(null);
   sourcePath = $state<string | null>(null);
+  maskLayerId = $state<string | null>(null);
   /** 'text' = editable text layer (see `text`); 'raster' = plain pixels. */
   kind = $state<LayerKind>('raster');
   /** Editable text model when `kind === 'text'`, else null. */
@@ -84,6 +85,7 @@ export class Layer {
     copy.blendMode = this.blendMode;
     copy.sourceAssetId = this.sourceAssetId;
     copy.sourcePath = this.sourcePath;
+    copy.maskLayerId = this.maskLayerId;
     copy.kind = this.kind;
     copy.text = this.text ? cloneModel(this.text) : null;
     copy.aiRetouch = this.aiRetouch ? structuredClone(this.aiRetouch) : null;

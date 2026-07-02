@@ -146,10 +146,14 @@
       if (generated.asset || savedAssetCount > 0) await project.refresh();
       const blob = await (await fetch(generated.dataUrl)).blob();
       const bmp = await createImageBitmap(blob);
+      const maskBmp = generated.maskDataUrl
+        ? await createImageBitmap(await (await fetch(generated.maskDataUrl)).blob())
+        : null;
       editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
         assetId: generated.asset?.id ?? null,
         path: generated.asset?.relativePath ?? null,
-      });
+      }, maskBmp, maskBmp?.width ?? 0, maskBmp?.height ?? 0);
+      maskBmp?.close();
       bmp.close();
       editor.flash(
         savedAssetCount > 0
