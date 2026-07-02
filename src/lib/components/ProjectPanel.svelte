@@ -707,31 +707,55 @@
   }
   .file-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
-    gap: 7px;
-    margin: 6px 0 9px 31px;
+    grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+    gap: 7px 5px;
+    margin: 5px 0 9px 31px;
   }
   .file-tile {
     display: grid;
-    grid-template-rows: 78px auto;
+    grid-template-rows: 42px 29px;
     align-items: start;
     justify-items: center;
-    gap: 7px;
+    gap: 4px;
     min-width: 0;
-    padding: 6px;
-    background: var(--bg-input);
-    border: 1px solid var(--border-soft);
+    padding: 3px 2px 4px;
+    background: transparent;
+    border: 1px solid transparent;
     border-radius: 4px;
   }
+  .file-tile:hover,
+  .file-tile:focus-within {
+    background: color-mix(in srgb, var(--bg-panel) 84%, var(--text-bright) 16%);
+    border-color: var(--border-soft);
+  }
   .file-tile .thumb {
-    width: 100%;
-    height: 78px;
+    width: 48px;
+    max-width: 100%;
+    height: 42px;
+    background: transparent;
+    border-color: transparent;
+    border-radius: 4px;
+  }
+  .file-tile .thumb:hover,
+  .file-tile .thumb:focus-visible {
+    background: var(--bg-input);
+    border-color: var(--border-soft);
+  }
+  .file-tile .thumb img {
+    object-fit: contain;
+    border-radius: 3px;
   }
   .file-tile .file-name {
-    min-height: 28px;
-    line-height: 1.25;
+    display: -webkit-box;
+    height: 29px;
+    font-size: 11px;
+    line-height: 1.2;
     text-align: center;
     white-space: normal;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
   .detail-scroll {
     max-width: 100%;
