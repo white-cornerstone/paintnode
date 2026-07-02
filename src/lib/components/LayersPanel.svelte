@@ -7,7 +7,7 @@
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
   import type { AnnotationItem } from '../engine/annotations';
 
   let {
@@ -75,8 +75,7 @@
     return text ? `${type}: ${text}` : type;
   }
   function toggleVisible(l: Layer) {
-    l.visible = !l.visible;
-    editor.invalidate();
+    editor.toggleLayerVisible(l);
   }
   function clampPercent(p: number): number {
     if (!Number.isFinite(p)) return activeOpacityPercent;
@@ -84,8 +83,7 @@
   }
   function setOpacity(p: number) {
     if (activeRasterLayer) {
-      activeRasterLayer.opacity = clampPercent(p) / 100;
-      editor.invalidate();
+      editor.setLayerOpacity(activeRasterLayer, clampPercent(p) / 100);
     }
   }
   function setOpacityFromInput(e: Event) {
@@ -112,8 +110,7 @@
   }
   function setBlend(e: Event) {
     if (activeRasterLayer) {
-      activeRasterLayer.blendMode = (e.target as HTMLSelectElement).value as Layer['blendMode'];
-      editor.invalidate();
+      editor.setLayerBlendMode(activeRasterLayer, (e.target as HTMLSelectElement).value as Layer['blendMode']);
     }
   }
   function startRename(l: Layer) {
@@ -145,7 +142,7 @@
   }
 
   function interactiveTarget(target: EventTarget | null): boolean {
-    return target instanceof HTMLElement && !!target.closest('button,input,select,textarea,[contenteditable="true"]');
+    return target instanceof Element && !!target.closest('button,input,select,textarea,[contenteditable="true"]');
   }
 
   function onLayerClick(e: MouseEvent, layer: Layer) {
@@ -414,6 +411,13 @@
             >
               <Icon svg={TextT} size={11} />
             </span>
+          {:else if l.kind === 'ai-retouch-mask'}
+            <span
+              class="type-badge mask-badge"
+              use:tooltip={{ text: 'AI retouch mask layer', placement: 'right' }}
+            >
+              <Icon svg={PaintBrushSparkle} size={11} />
+            </span>
           {/if}
         </div>
 
@@ -498,6 +502,10 @@
       {#if draggedLayer.kind === 'text'}
         <span class="type-badge">
           <Icon svg={TextT} size={11} />
+        </span>
+      {:else if draggedLayer.kind === 'ai-retouch-mask'}
+        <span class="type-badge mask-badge">
+          <Icon svg={PaintBrushSparkle} size={11} />
         </span>
       {/if}
     </div>
@@ -736,6 +744,9 @@
     border: 1px solid var(--border);
     border-radius: 3px;
     color: var(--text-bright);
+  }
+  .mask-badge {
+    color: #58f29a;
   }
   .name {
     flex: 1;

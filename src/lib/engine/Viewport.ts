@@ -1,5 +1,6 @@
 import type { PaintDocument } from './Document.svelte';
 import type { ActiveStroke } from './compositor';
+import type { AiRetouchPreview } from './aiRetouch';
 import type { Selection } from './selection';
 import { compositeLayers } from './compositor';
 import { clamp, createCanvas, ctx2d } from './types';
@@ -42,8 +43,10 @@ export class Viewport {
   private getDoc: () => PaintDocument | null;
   private getStroke: () => ActiveStroke | null;
   private getSelection: () => Selection | null;
+  private getRetouchPreview: () => AiRetouchPreview | null;
   private dashOffset = 0;
   private scratch: HTMLCanvasElement;
+  private retouchScratch: HTMLCanvasElement;
   private composited: HTMLCanvasElement;
   private compositeDirty = true;
   private checker: CanvasPattern | null = null;
@@ -56,13 +59,16 @@ export class Viewport {
     getDoc: () => PaintDocument | null,
     getStroke: () => ActiveStroke | null,
     getSelection: () => Selection | null,
+    getRetouchPreview: () => AiRetouchPreview | null = () => null,
   ) {
     this.canvas = canvas;
     this.ctx = ctx2d(canvas, { alpha: false });
     this.getDoc = getDoc;
     this.getStroke = getStroke;
     this.getSelection = getSelection;
+    this.getRetouchPreview = getRetouchPreview;
     this.scratch = createCanvas(1, 1);
+    this.retouchScratch = createCanvas(1, 1);
     this.composited = createCanvas(1, 1);
     this.checkerSrc = buildChecker();
   }
@@ -244,6 +250,37 @@ export class Viewport {
     ctx.imageSmoothingEnabled = this.scale < 1;
     ctx.drawImage(this.composited, 0, 0);
     ctx.restore();
+
+    const drawRetouchOverlay = (mask: HTMLCanvasElement, alpha = 0.48) => {
+      if (this.retouchScratch.width !== doc.width || this.retouchScratch.height !== doc.height) {
+        this.retouchScratch.width = doc.width;
+        this.retouchScratch.height = doc.height;
+      }
+      const rctx = ctx2d(this.retouchScratch);
+      rctx.setTransform(1, 0, 0, 1, 0, 0);
+      rctx.globalCompositeOperation = 'source-over';
+      rctx.globalAlpha = 1;
+      rctx.clearRect(0, 0, doc.width, doc.height);
+      rctx.fillStyle = `rgba(60, 255, 145, ${alpha})`;
+      rctx.fillRect(0, 0, doc.width, doc.height);
+      rctx.globalCompositeOperation = 'destination-in';
+      rctx.drawImage(mask, 0, 0, doc.width, doc.height);
+      rctx.globalCompositeOperation = 'source-over';
+      ctx.save();
+      ctx.setTransform(this.scale * dpr, 0, 0, this.scale * dpr, sx, sy);
+      ctx.drawImage(this.retouchScratch, 0, 0);
+      ctx.restore();
+    };
+
+    for (const layer of doc.layers) {
+      if (layer.kind !== 'ai-retouch-mask' || !layer.visible || layer.opacity <= 0) continue;
+      drawRetouchOverlay(layer.canvas, 0.42 * layer.opacity);
+    }
+
+    const retouch = this.getRetouchPreview();
+    if (retouch) {
+      drawRetouchOverlay(retouch.mask, 0.5);
+    }
 
     // Artboard border.
     ctx.save();

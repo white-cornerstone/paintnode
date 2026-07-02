@@ -52,6 +52,28 @@ import { SmudgeTool } from '../engine/tools/SmudgeTool';
 import { FocusTool } from '../engine/tools/FocusTool';
 import { ToningTool } from '../engine/tools/ToningTool';
 import { HandTool, ZoomTool } from '../engine/tools/NavTools';
+import { AiRetouchTool } from '../engine/tools/AiRetouchTool';
+import {
+  AI_RETOUCH_TOOL_NAMES,
+  aiRetouchPrompt,
+  cloneMask,
+  combineRetouchMask,
+  cropReference,
+  makeEditTarget,
+  makeRectMask,
+  makeUnionRectMask,
+  maskBounds,
+  maskHasPixels,
+  referenceRect,
+  type AiRetouchGesture,
+  type AiRetouchInputBytes,
+  type AiRetouchMaskMetadata,
+  type AiRetouchMoveMode,
+  type AiRetouchPatchMode,
+  type AiRetouchPreview,
+  type AiRetouchRequest,
+  type AiRetouchToolId,
+} from '../engine/aiRetouch';
 import { ui } from './ui.svelte';
 import { newAnnotation, type AnnotationItem, type AnnotationKind } from '../engine/annotations';
 import { projectDocumentSourceKey, type DocumentSourceKey } from './documentSource';
@@ -76,6 +98,109 @@ export interface DecoupledLayerImport {
   opacity?: number | null;
   visible?: boolean | null;
   sourceMeta?: LayerSourceMeta;
+}
+
+export interface GenerativeFillInput {
+  source: HTMLCanvasElement;
+  sourcePng: Uint8Array;
+  editTargetPng: Uint8Array;
+  maskPng: Uint8Array;
+  mask: HTMLCanvasElement;
+  editablePixels: number;
+  mode: 'transparent-selection' | 'selection';
+}
+
+const GENERATIVE_FILL_ALPHA_EMPTY = 8;
+const GENERATIVE_FILL_BLEND_FEATHER = 24;
+
+async function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((value) => {
+      if (value) resolve(value);
+      else reject(new Error('Unable to encode canvas as PNG.'));
+    }, 'image/png');
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function softGenerativeFillMask(
+  sourceData: ImageData,
+  selectionData: ImageData,
+  width: number,
+  height: number,
+  clipToTransparent: boolean,
+): { mask: HTMLCanvasElement; editablePixels: number } {
+  const pixels = width * height;
+  const coverage = new Uint8ClampedArray(pixels);
+  let frontier = new Uint8Array(pixels);
+  let editablePixels = 0;
+
+  for (let i = 0; i < pixels; i++) {
+    const p = i * 4;
+    const selected = selectionData.data[p + 3] >= 128;
+    const transparent = sourceData.data[p + 3] <= GENERATIVE_FILL_ALPHA_EMPTY;
+    if (selected && (!clipToTransparent || transparent)) {
+      coverage[i] = 255;
+      frontier[i] = 1;
+      editablePixels++;
+    }
+  }
+
+  for (let distance = 1; distance <= GENERATIVE_FILL_BLEND_FEATHER; distance++) {
+    const next = new Uint8Array(pixels);
+    const value = Math.round(255 * (1 - distance / (GENERATIVE_FILL_BLEND_FEATHER + 1)));
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (coverage[i] !== 0) continue;
+        if (sourceData.data[i * 4 + 3] <= GENERATIVE_FILL_ALPHA_EMPTY) continue;
+
+        let touchesFrontier = false;
+        for (let dy = -1; dy <= 1 && !touchesFrontier; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            if (frontier[ny * width + nx]) {
+              touchesFrontier = true;
+              break;
+            }
+          }
+        }
+
+        if (touchesFrontier) {
+          coverage[i] = value;
+          next[i] = 1;
+        }
+      }
+    }
+    frontier = next;
+  }
+
+  const mask = createCanvas(width, height);
+  const maskCtx = ctx2d(mask);
+  const maskImage = maskCtx.createImageData(width, height);
+  for (let i = 0; i < pixels; i++) {
+    const p = i * 4;
+    const value = coverage[i];
+    maskImage.data[p] = value;
+    maskImage.data[p + 1] = value;
+    maskImage.data[p + 2] = value;
+    maskImage.data[p + 3] = 255;
+  }
+  maskCtx.putImageData(maskImage, 0, 0);
+  return { mask, editablePixels };
+}
+
+function generativeFillEditTarget(source: HTMLCanvasElement): HTMLCanvasElement {
+  const target = createCanvas(source.width, source.height);
+  const targetCtx = ctx2d(target);
+  targetCtx.fillStyle = '#8b8f98';
+  targetCtx.fillRect(0, 0, target.width, target.height);
+  targetCtx.drawImage(source, 0, 0);
+  return target;
 }
 
 /** An in-progress text edit driven by the on-canvas TextEditorOverlay. */
@@ -175,6 +300,13 @@ export class EditorStore implements ToolHost {
   cloneAligned = $state(true);
   toneRange = $state<'shadows' | 'midtones' | 'highlights'>('midtones');
   spongeMode = $state<'saturate' | 'desaturate'>('saturate');
+  aiRetouchPatchMode = $state<AiRetouchPatchMode>('source');
+  aiRetouchMoveMode = $state<AiRetouchMoveMode>('move');
+  aiRetouchPupilSize = $state(50);
+  aiRetouchDarkenAmount = $state(50);
+  aiRetouchHealingSource = $state<{ x: number; y: number } | null>(null);
+  lastAiRetouchTool = $state<AiRetouchToolId>('spot-healing');
+  pendingAiRetouch = $state<AiRetouchRequest | null>(null);
   /** Whether Alt/Option is currently held — drives the live zoom-mode preview. */
   altDown = $state(false);
   // Type tool: the active on-canvas text edit session (null = not editing).
@@ -195,6 +327,7 @@ export class EditorStore implements ToolHost {
   rev = $state(0);
 
   private activeStroke: ActiveStroke | null = null;
+  private aiRetouchPreview: AiRetouchPreview | null = null;
   private embeddedRestore: EmbeddedDocumentRestore | null = null;
   private selectionContentMove: SelectionContentMoveSession | null = null;
   private flashTimer = 0;
@@ -219,6 +352,12 @@ export class EditorStore implements ToolHost {
       new ToningTool(this, 'dodge'),
       new ToningTool(this, 'burn'),
       new ToningTool(this, 'sponge'),
+      new AiRetouchTool(this, 'spot-healing'),
+      new AiRetouchTool(this, 'remove'),
+      new AiRetouchTool(this, 'healing-brush'),
+      new AiRetouchTool(this, 'patch'),
+      new AiRetouchTool(this, 'content-aware-move'),
+      new AiRetouchTool(this, 'red-eye'),
       new ShapeTool(this),
       new AnnotationTool(this),
       new TextTool(this),
@@ -233,6 +372,10 @@ export class EditorStore implements ToolHost {
   // --- Derived state ---
   get activeLayer(): Layer | null {
     return this.doc?.activeLayer ?? null;
+  }
+  get activeAiRetouchMaskLayer(): Layer | null {
+    const layer = this.activeLayer;
+    return layer?.kind === 'ai-retouch-mask' ? layer : null;
   }
   get activeTool(): Tool {
     return this.tools[this.activeToolId] ?? this.tools.brush;
@@ -325,6 +468,13 @@ export class EditorStore implements ToolHost {
   getActiveStroke(): ActiveStroke | null {
     return this.activeStroke;
   }
+  setAiRetouchPreview(preview: AiRetouchPreview | null): void {
+    this.aiRetouchPreview = preview;
+    this.viewport?.invalidate();
+  }
+  getAiRetouchPreview(): AiRetouchPreview | null {
+    return this.aiRetouchPreview;
+  }
   setSelection(sel: Selection | null): void {
     this.selection = sel;
     const session = this.activeDocument;
@@ -361,6 +511,28 @@ export class EditorStore implements ToolHost {
     const flat = compositeToCanvas(doc);
     const data = ctx2d(flat).getImageData(x, y, 1, 1).data;
     return { r: data[0], g: data[1], b: data[2] };
+  }
+  setLayerVisible(layer: Layer, visible: boolean): void {
+    if (layer.visible === visible) return;
+    layer.visible = visible;
+    this.bump();
+    this.invalidate();
+  }
+  toggleLayerVisible(layer: Layer): void {
+    this.setLayerVisible(layer, !layer.visible);
+  }
+  setLayerOpacity(layer: Layer, opacity: number): void {
+    const next = Math.max(0, Math.min(1, opacity));
+    if (layer.opacity === next) return;
+    layer.opacity = next;
+    this.bump();
+    this.invalidate();
+  }
+  setLayerBlendMode(layer: Layer, blendMode: Layer['blendMode']): void {
+    if (layer.blendMode === blendMode) return;
+    layer.blendMode = blendMode;
+    this.bump();
+    this.invalidate();
   }
   beginText(x: number, y: number): void {
     const doc = this.doc;
@@ -399,7 +571,9 @@ export class EditorStore implements ToolHost {
   setTool(id: string): void {
     if (!this.tools[id]) return;
     if (this.freeTransform) this.commitFreeTransform();
+    this.setAiRetouchPreview(null);
     this.activeToolId = id;
+    if (id in AI_RETOUCH_TOOL_NAMES) this.lastAiRetouchTool = id as AiRetouchToolId;
     if (id !== 'annotation') this.selectedAnnotationId = null;
   }
 
@@ -420,6 +594,7 @@ export class EditorStore implements ToolHost {
     this.activeDocumentId = null;
     this.selection = null;
     this.activeStroke = null;
+    this.aiRetouchPreview = null;
     this.textEdit = null;
     this.freeTransform = null;
     this.rasterizePrompt = null;
@@ -435,6 +610,7 @@ export class EditorStore implements ToolHost {
     this.activeDocumentId = restore.activeDocumentId;
     this.selection = restore.selection;
     this.activeStroke = null;
+    this.aiRetouchPreview = null;
     this.textEdit = restore.textEdit;
     this.freeTransform = null;
     this.rasterizePrompt = restore.rasterizePrompt;
@@ -487,6 +663,343 @@ export class EditorStore implements ToolHost {
       return this.docRectToLayerRect(sel.bounds, layer) ?? { x: 0, y: 0, w: layer.width, h: layer.height };
     }
     return { x: 0, y: 0, w: layer.width, h: layer.height };
+  }
+
+  async prepareGenerativeFillInput(): Promise<GenerativeFillInput | null> {
+    const doc = this.doc;
+    const sel = this.selection;
+    if (!doc || !sel) return null;
+
+    const source = compositeToCanvas(doc);
+    const sourceData = ctx2d(source, { willReadFrequently: true }).getImageData(0, 0, doc.width, doc.height);
+    const selectionData = ctx2d(sel.mask, { willReadFrequently: true }).getImageData(0, 0, doc.width, doc.height);
+
+    let selectedPixels = 0;
+    let selectedTransparentPixels = 0;
+    for (let i = 0; i < sourceData.data.length; i += 4) {
+      if (selectionData.data[i + 3] < 128) continue;
+      selectedPixels++;
+      if (sourceData.data[i + 3] <= GENERATIVE_FILL_ALPHA_EMPTY) selectedTransparentPixels++;
+    }
+    if (selectedPixels === 0) return null;
+
+    const clipToTransparent = selectedTransparentPixels > 0;
+    const { mask, editablePixels } = softGenerativeFillMask(sourceData, selectionData, doc.width, doc.height, clipToTransparent);
+    if (editablePixels === 0) return null;
+
+    return {
+      source,
+      sourcePng: await canvasToPngBytes(source),
+      editTargetPng: await canvasToPngBytes(generativeFillEditTarget(source)),
+      maskPng: await canvasToPngBytes(mask),
+      mask,
+      editablePixels,
+      mode: clipToTransparent ? 'transparent-selection' : 'selection',
+    };
+  }
+
+  private generativeFillLayerCanvas(
+    source: CanvasImageSource,
+    sw: number,
+    sh: number,
+    mask: HTMLCanvasElement,
+  ): HTMLCanvasElement | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    const fill = createCanvas(doc.width, doc.height);
+    const fillCtx = ctx2d(fill);
+    fillCtx.imageSmoothingEnabled = true;
+    fillCtx.imageSmoothingQuality = 'high';
+    fillCtx.drawImage(source, 0, 0, sw, sh, 0, 0, doc.width, doc.height);
+    fillCtx.globalCompositeOperation = 'destination-in';
+    const clip = createCanvas(doc.width, doc.height);
+    const clipCtx = ctx2d(clip, { willReadFrequently: true });
+    clipCtx.drawImage(mask, 0, 0, doc.width, doc.height);
+    const clipImage = clipCtx.getImageData(0, 0, doc.width, doc.height);
+    for (let i = 0; i < clipImage.data.length; i += 4) {
+      const coverage =
+        ((clipImage.data[i] * 0.2126 + clipImage.data[i + 1] * 0.7152 + clipImage.data[i + 2] * 0.0722) *
+          clipImage.data[i + 3]) /
+        255;
+      clipImage.data[i] = 255;
+      clipImage.data[i + 1] = 255;
+      clipImage.data[i + 2] = 255;
+      clipImage.data[i + 3] = coverage;
+    }
+    clipCtx.putImageData(clipImage, 0, 0);
+    fillCtx.drawImage(clip, 0, 0);
+    fillCtx.globalCompositeOperation = 'source-over';
+    return fill;
+  }
+
+  renderGenerativeFillComposite(
+    generated: CanvasImageSource,
+    sw: number,
+    sh: number,
+    mask: HTMLCanvasElement,
+    source: HTMLCanvasElement,
+  ): HTMLCanvasElement | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    const fill = this.generativeFillLayerCanvas(generated, sw, sh, mask);
+    if (!fill) return null;
+    const out = createCanvas(doc.width, doc.height);
+    const outCtx = ctx2d(out);
+    outCtx.drawImage(source, 0, 0, doc.width, doc.height);
+    outCtx.drawImage(fill, 0, 0);
+    return out;
+  }
+
+  private aiRetouchMetadataForGesture(toolId: AiRetouchToolId, gesture: AiRetouchGesture): AiRetouchMaskMetadata {
+    const metadata: AiRetouchMaskMetadata = {
+      toolId,
+      promptSeed: aiRetouchPrompt(toolId, gesture),
+    };
+    if (gesture.kind === 'brush') {
+      metadata.healingSource = this.aiRetouchHealingSource;
+      metadata.referenceRect = gesture.reference ?? null;
+    } else if (gesture.kind === 'patch') {
+      metadata.patchMode = gesture.mode;
+      metadata.referenceRect = gesture.reference;
+    } else if (gesture.kind === 'move') {
+      metadata.moveMode = gesture.mode;
+      metadata.destinationRect = gesture.destination;
+    } else if (gesture.kind === 'red-eye') {
+      metadata.pupilSize = gesture.pupilSize;
+      metadata.darkenAmount = gesture.darkenAmount;
+    }
+    return metadata;
+  }
+
+  private restoreAiRetouchMaskLayer(layer: Layer, pixels: ImageData, metadata: AiRetouchMaskMetadata | null): void {
+    layer.ctx.putImageData(pixels, 0, 0);
+    layer.aiRetouch = metadata ? structuredClone(metadata) : null;
+    layer.touch();
+    this.bump();
+    this.invalidate();
+  }
+
+  commitAiRetouchMaskGesture(toolId: AiRetouchToolId, gesture: AiRetouchGesture, mask: HTMLCanvasElement, mode: SelectionMode): void {
+    const doc = this.doc;
+    if (!doc || !maskHasPixels(mask)) {
+      this.flash('Draw an area to retouch');
+      return;
+    }
+    const metadata = this.aiRetouchMetadataForGesture(toolId, gesture);
+    const activeMask = this.activeAiRetouchMaskLayer;
+
+    if (!activeMask) {
+      if (mode === 'subtract' || mode === 'intersect') {
+        this.flash('No AI retouch mask to refine');
+        this.setAiRetouchPreview(null);
+        return;
+      }
+      this.structural('AI Retouch Mask', () => {
+        const layer = new Layer(doc.width, doc.height, `AI Mask: ${AI_RETOUCH_TOOL_NAMES[toolId]}`, undefined, 0, 0);
+        layer.kind = 'ai-retouch-mask';
+        layer.aiRetouch = metadata;
+        layer.ctx.drawImage(mask, 0, 0, doc.width, doc.height);
+        layer.touch();
+        doc.insertAboveActive(layer);
+      });
+      this.setAiRetouchPreview(null);
+      return;
+    }
+
+    const beforePixels = activeMask.ctx.getImageData(0, 0, activeMask.width, activeMask.height);
+    const beforeMetadata = activeMask.aiRetouch ? structuredClone(activeMask.aiRetouch) : null;
+    const nextMask = combineRetouchMask(activeMask.canvas, mask, mode, doc.width, doc.height);
+    activeMask.ctx.clearRect(0, 0, activeMask.width, activeMask.height);
+    if (nextMask) activeMask.ctx.drawImage(nextMask, 0, 0, doc.width, doc.height);
+    activeMask.aiRetouch = metadata;
+    activeMask.name = `AI Mask: ${AI_RETOUCH_TOOL_NAMES[toolId]}`;
+    activeMask.touch();
+    const afterPixels = activeMask.ctx.getImageData(0, 0, activeMask.width, activeMask.height);
+    const afterMetadata = structuredClone(metadata);
+    this.history.push({
+      label: 'AI Retouch Mask',
+      undo: () => this.restoreAiRetouchMaskLayer(activeMask, beforePixels, beforeMetadata),
+      redo: () => this.restoreAiRetouchMaskLayer(activeMask, afterPixels, afterMetadata),
+    });
+    this.bump();
+    this.invalidate();
+    this.setAiRetouchPreview(null);
+  }
+
+  setAiRetouchMaskReference(toolId: AiRetouchToolId, updates: Partial<AiRetouchMaskMetadata>): void {
+    const layer = this.activeAiRetouchMaskLayer;
+    if (!layer?.aiRetouch) {
+      this.flash('Select an AI retouch mask first');
+      return;
+    }
+    const before = structuredClone(layer.aiRetouch);
+    const after: AiRetouchMaskMetadata = {
+      ...before,
+      ...updates,
+      toolId,
+      promptSeed: before.promptSeed || AI_RETOUCH_TOOL_NAMES[toolId],
+    };
+    layer.aiRetouch = after;
+    layer.name = `AI Mask: ${AI_RETOUCH_TOOL_NAMES[toolId]}`;
+    this.history.push({
+      label: 'AI Retouch Mask Reference',
+      undo: () => {
+        layer.aiRetouch = structuredClone(before);
+        this.bump();
+        this.invalidate();
+      },
+      redo: () => {
+        layer.aiRetouch = structuredClone(after);
+        this.bump();
+        this.invalidate();
+      },
+    });
+    this.bump();
+    this.invalidate();
+    this.flash('AI retouch reference set');
+  }
+
+  setAiRetouchHealingSource(source: { x: number; y: number }): void {
+    this.aiRetouchHealingSource = source;
+    const doc = this.doc;
+    const layer = this.activeAiRetouchMaskLayer;
+    if (doc && layer?.aiRetouch?.toolId === 'healing-brush') {
+      this.setAiRetouchMaskReference('healing-brush', {
+        healingSource: source,
+        referenceRect: referenceRect(source, Math.max(1, this.brushSize) * 4, doc.width, doc.height),
+      });
+    }
+  }
+
+  clearAiRetouchHealingSource(): void {
+    this.aiRetouchHealingSource = null;
+    const layer = this.activeAiRetouchMaskLayer;
+    if (layer?.aiRetouch?.toolId === 'healing-brush') {
+      this.setAiRetouchMaskReference('healing-brush', {
+        healingSource: null,
+        referenceRect: null,
+      });
+    }
+  }
+
+  getAiRetouchMaskRunState(layer = this.activeAiRetouchMaskLayer): { canRun: boolean; reason: string } {
+    if (!layer || layer.kind !== 'ai-retouch-mask' || !layer.aiRetouch) return { canRun: false, reason: 'Select an AI retouch mask' };
+    if (!maskHasPixels(layer.canvas)) return { canRun: false, reason: 'Draw a retouch mask' };
+    const metadata = layer.aiRetouch;
+    if (metadata.toolId === 'healing-brush' && !metadata.referenceRect) return { canRun: false, reason: 'Alt-click a healing source' };
+    if (metadata.toolId === 'patch' && !metadata.referenceRect) return { canRun: false, reason: 'Drag inside the mask to choose a patch source' };
+    if (metadata.toolId === 'content-aware-move' && !metadata.destinationRect) return { canRun: false, reason: 'Drag inside the mask to place the subject' };
+    return { canRun: true, reason: '' };
+  }
+
+  getActiveAiRetouchMaskBounds(): Rect | null {
+    const layer = this.activeAiRetouchMaskLayer;
+    return layer ? maskBounds(layer.canvas) : null;
+  }
+
+  buildAiRetouchRequestFromMaskLayer(layer = this.activeAiRetouchMaskLayer): AiRetouchRequest | null {
+    const doc = this.doc;
+    const metadata = layer?.aiRetouch;
+    if (!doc || !layer || layer.kind !== 'ai-retouch-mask' || !metadata) return null;
+    const source = compositeToCanvas(doc);
+    const bounds = maskBounds(layer.canvas);
+    if (!bounds) return null;
+    let mask = cloneMask(layer.canvas);
+    let referenceRectValue: Rect | null = null;
+    let gesture: AiRetouchGesture;
+
+    if (metadata.toolId === 'patch') {
+      if (!metadata.referenceRect) return null;
+      const mode = metadata.patchMode ?? this.aiRetouchPatchMode;
+      gesture = { kind: 'patch', mode, target: bounds, reference: metadata.referenceRect };
+      if (mode === 'destination') {
+        const destinationMask = makeRectMask(doc.width, doc.height, metadata.referenceRect);
+        if (!destinationMask) return null;
+        mask = destinationMask;
+        referenceRectValue = bounds;
+      } else {
+        referenceRectValue = metadata.referenceRect;
+      }
+    } else if (metadata.toolId === 'content-aware-move') {
+      if (!metadata.destinationRect) return null;
+      const mode = metadata.moveMode ?? this.aiRetouchMoveMode;
+      gesture = { kind: 'move', mode, source: bounds, destination: metadata.destinationRect };
+      mask = makeUnionRectMask(doc.width, doc.height, [bounds, metadata.destinationRect]) ?? mask;
+      referenceRectValue = bounds;
+    } else if (metadata.toolId === 'red-eye') {
+      gesture = {
+        kind: 'red-eye',
+        bounds,
+        pupilSize: metadata.pupilSize ?? this.aiRetouchPupilSize,
+        darkenAmount: metadata.darkenAmount ?? this.aiRetouchDarkenAmount,
+      };
+    } else {
+      gesture = {
+        kind: 'brush',
+        points: [],
+        size: Math.max(1, this.brushSize),
+        hardness: this.brushHardness,
+        closedLoop: false,
+        reference: metadata.referenceRect ?? null,
+      };
+      referenceRectValue = metadata.referenceRect ?? null;
+    }
+
+    const reference = referenceRectValue ? cropReference(source, referenceRectValue) : null;
+    const editTarget = makeEditTarget(source, mask);
+    return {
+      id: globalThis.crypto?.randomUUID?.() ?? `ai-retouch-${Date.now()}`,
+      toolId: metadata.toolId,
+      toolName: AI_RETOUCH_TOOL_NAMES[metadata.toolId],
+      prompt: aiRetouchPrompt(metadata.toolId, gesture),
+      source,
+      editTarget,
+      mask,
+      reference,
+      gesture,
+    };
+  }
+
+  openAiRetouchForActiveMask(): void {
+    const state = this.getAiRetouchMaskRunState();
+    if (!state.canRun) {
+      this.flash(state.reason);
+      return;
+    }
+    const request = this.buildAiRetouchRequestFromMaskLayer();
+    if (!request) {
+      this.flash('AI retouch mask is not ready');
+      return;
+    }
+    this.pendingAiRetouch = request;
+    this.setAiRetouchPreview({ mask: request.mask });
+    ui.open('aiRetouch');
+  }
+
+  clearActiveAiRetouchMask(): void {
+    const layer = this.activeAiRetouchMaskLayer;
+    if (!layer) return;
+    const before = snapshotLayer(layer);
+    layer.clear();
+    const after = snapshotLayer(layer);
+    this.history.push(pixelCommand(layer, before, after, 'Clear AI Retouch Mask'));
+    this.bump();
+    this.invalidate();
+  }
+
+  async prepareAiRetouchInput(request = this.pendingAiRetouch): Promise<AiRetouchInputBytes | null> {
+    if (!request) return null;
+    return {
+      sourcePng: await canvasToPngBytes(request.source),
+      editTargetPng: await canvasToPngBytes(request.editTarget),
+      maskPng: await canvasToPngBytes(request.mask),
+      referencePng: request.reference ? await canvasToPngBytes(request.reference) : null,
+    };
+  }
+
+  dismissAiRetouch(): void {
+    this.pendingAiRetouch = null;
+    this.setAiRetouchPreview(null);
   }
 
   // --- Clipboard (cut / copy / paste) ---
@@ -587,6 +1100,7 @@ export class EditorStore implements ToolHost {
     }
     this.doc = doc;
     this.activeStroke = null;
+    this.aiRetouchPreview = null;
     this.activeDocumentId = session.id;
     this.selection = session.selection;
     this.attachHistory(session.history);
@@ -609,6 +1123,7 @@ export class EditorStore implements ToolHost {
     this.doc = session.doc;
     this.selection = session.selection;
     this.activeStroke = null;
+    this.aiRetouchPreview = null;
     this.attachHistory(session.history);
     this.notify();
     requestAnimationFrame(() => {
@@ -634,6 +1149,7 @@ export class EditorStore implements ToolHost {
         this.doc = null;
         this.selection = null;
         this.activeStroke = null;
+        this.aiRetouchPreview = null;
         this.textEdit = null;
         this.cancelFreeTransform();
         this.rasterizePrompt = null;
@@ -727,6 +1243,11 @@ export class EditorStore implements ToolHost {
       nl.opacity = l.opacity;
       nl.visible = l.visible;
       nl.blendMode = l.blendMode;
+      nl.sourceAssetId = l.sourceAssetId;
+      nl.sourcePath = l.sourcePath;
+      nl.kind = l.kind;
+      nl.text = l.text ? cloneModel(l.text) : null;
+      nl.aiRetouch = l.aiRetouch ? structuredClone(l.aiRetouch) : null;
       paint(nl.ctx, l);
       nl.touch();
       return nl;
@@ -752,6 +1273,7 @@ export class EditorStore implements ToolHost {
     copy.sourcePath = layer.sourcePath;
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
+    copy.aiRetouch = layer.aiRetouch ? structuredClone(layer.aiRetouch) : null;
     copy.ctx.drawImage(layer.canvas, 0, 0);
     copy.pixelRev = layer.pixelRev;
     return copy;
@@ -1815,6 +2337,59 @@ export class EditorStore implements ToolHost {
       placedId = layer.id;
     });
     return { oversized: isOversized, layerId: placedId };
+  }
+
+  insertGenerativeFill(
+    source: CanvasImageSource,
+    sw: number,
+    sh: number,
+    mask: HTMLCanvasElement,
+    name = 'Generative fill',
+    sourceMeta: LayerSourceMeta = {},
+  ): string | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    const fill = this.generativeFillLayerCanvas(source, sw, sh, mask);
+    if (!fill) return null;
+
+    let layerId: string | null = null;
+    this.structural('Generative Fill', () => {
+      const layer = new Layer(doc.width, doc.height, name, undefined, 0, 0);
+      layer.sourceAssetId = sourceMeta.assetId ?? null;
+      layer.sourcePath = sourceMeta.path ?? null;
+      layer.ctx.drawImage(fill, 0, 0);
+      layer.touch();
+      doc.insertAboveActive(layer);
+      layerId = layer.id;
+    });
+    return layerId;
+  }
+
+  insertAiRetouchResult(
+    request: AiRetouchRequest,
+    source: CanvasImageSource,
+    sw: number,
+    sh: number,
+    sourceMeta: LayerSourceMeta = {},
+  ): string | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    const fill = this.generativeFillLayerCanvas(source, sw, sh, request.mask);
+    if (!fill) return null;
+
+    let layerId: string | null = null;
+    this.structural('AI Retouch', () => {
+      const layer = new Layer(doc.width, doc.height, `AI Retouch: ${request.toolName}`, undefined, 0, 0);
+      layer.sourceAssetId = sourceMeta.assetId ?? null;
+      layer.sourcePath = sourceMeta.path ?? null;
+      layer.ctx.drawImage(fill, 0, 0);
+      layer.touch();
+      doc.insertAboveActive(layer);
+      layerId = layer.id;
+    });
+    this.pendingAiRetouch = null;
+    this.setAiRetouchPreview(null);
+    return layerId;
   }
 
   /** Insert a stack of AI-decoupled layers above the source layer as one undoable edit. */

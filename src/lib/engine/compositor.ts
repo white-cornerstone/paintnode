@@ -36,6 +36,7 @@ export function compositeLayers(
 ): void {
   target.save();
   for (const layer of doc.layers) {
+    if (layer.kind === 'ai-retouch-mask') continue;
     if (!layer.visible || layer.opacity <= 0 || layer.suppressed) continue;
 
     if (stroke && stroke.layerId === layer.id) {

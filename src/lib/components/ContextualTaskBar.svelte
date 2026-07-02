@@ -6,13 +6,16 @@
   import Icon from './Icon.svelte';
   import {
     ArrowReset,
+    Add,
     Checkmark,
     Crop,
+    Delete,
     Dismiss,
     EyeOff,
     ImageAdd,
     ImageGlobe,
     MoreHorizontal,
+    PaintBrushSparkle,
     Pin,
     PinOff,
     Settings,
@@ -52,16 +55,47 @@
 
   const context = $derived.by(() => {
     if (editor.freeTransform) return 'transform';
+    if (editor.activeAiRetouchMaskLayer) return 'ai-retouch-mask';
     if (editor.selection) return 'selection';
     if (editor.activeLayer) return 'canvas';
     return 'empty';
   });
 
   const actions = $derived.by<TaskAction[]>(() => {
+    const retouchState = editor.getAiRetouchMaskRunState();
     if (context === 'transform') {
       return [
         { id: 'transform-done', label: 'Done', icon: Checkmark, primary: true, run: () => editor.commitFreeTransform() },
         { id: 'transform-cancel', label: 'Cancel', icon: Dismiss, run: () => editor.cancelFreeTransform() },
+      ];
+    }
+
+    if (context === 'ai-retouch-mask') {
+      const mask = editor.activeAiRetouchMaskLayer;
+      return [
+        {
+          id: 'ai-retouch-run',
+          label: retouchState.canRun ? 'AI Retouch' : retouchState.reason,
+          icon: PaintBrushSparkle,
+          primary: true,
+          disabled: !retouchState.canRun,
+          run: () => editor.openAiRetouchForActiveMask(),
+        },
+        { id: 'mask-add', label: 'Add', icon: Add, run: () => { editor.selectionMode = 'add'; }, primary: editor.selectionMode === 'add' },
+        { id: 'mask-subtract', label: 'Subtract', icon: Dismiss, run: () => { editor.selectionMode = 'subtract'; }, primary: editor.selectionMode === 'subtract' },
+        { id: 'mask-clear', label: 'Clear', icon: ArrowReset, run: () => editor.clearActiveAiRetouchMask() },
+        {
+          id: 'mask-visibility',
+          label: mask?.visible ? 'Hide mask' : 'Show mask',
+          icon: EyeOff,
+          run: () => mask && editor.toggleLayerVisible(mask),
+        },
+        {
+          id: 'mask-delete',
+          label: 'Delete mask',
+          icon: Delete,
+          run: () => mask && editor.deleteLayer(mask.id),
+        },
       ];
     }
 

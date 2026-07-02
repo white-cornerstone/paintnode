@@ -2,6 +2,7 @@ import { editor } from './editor.svelte';
 import { openCommand, saveActiveCopyCommand, saveActiveCommand, exportPngCommand } from './commands';
 import { isTypingTarget } from './editing';
 import { ui } from './ui.svelte';
+import { nextAiRetouchTool } from '../engine/aiRetouch';
 
 const TOOL_KEYS: Record<string, string> = {
   v: 'move',
@@ -108,6 +109,12 @@ export function installKeyboard(): () => void {
     }
 
     const hasDocumentSurface = ui.activeSurface === 'document' && !!editor.doc;
+
+    if (hasDocumentSurface && k === 'j') {
+      const next = e.shiftKey ? nextAiRetouchTool(editor.lastAiRetouchTool) : editor.lastAiRetouchTool;
+      editor.setTool(next);
+      return;
+    }
 
     if (hasDocumentSurface && k in TOOL_KEYS) {
       editor.setTool(TOOL_KEYS[k]);

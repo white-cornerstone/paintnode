@@ -662,6 +662,22 @@ fn is_png(bytes: &[u8]) -> bool {
     bytes.starts_with(PNG_SIGNATURE)
 }
 
+fn png_dimensions_from_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !is_png(bytes) || bytes.len() < 24 {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn png_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("Failed to read PNG dimensions at {}: {e}", path.display()))?;
+    png_dimensions_from_bytes(&bytes)
+        .ok_or_else(|| format!("PNG dimensions are invalid at {}.", path.display()))
+}
+
 fn file_has_png_signature(path: &Path) -> bool {
     let Ok(mut file) = fs::File::open(path) else {
         return false;
@@ -1435,6 +1451,146 @@ Final response should be one short sentence confirming the composed image was ge
     )
 }
 
+fn generative_fill_prompt(prompt: &str) -> String {
+    format!(
+        r#"Use $imagegen to perform one mask-guided generative fill for PaintNode.
+
+Attached images:
+1. `source.png` is the current PaintNode document canvas. Transparent pixels are real empty canvas, not checkerboard UI.
+2. `edit_target.png` is the exact-size image to edit in place. It has the protected photo content plus a neutral gray placeholder where PaintNode needs generated pixels.
+3. `mask.png` is the edit mask. White pixels are the full editable/generated area. Gray pixels are a narrow seam-blending transition zone. Black pixels are protected context.
+
+User edit prompt:
+{prompt}
+
+Requirements:
+- Use `edit_target.png` as the canvas geometry. Do not create a new crop, zoom, framing, perspective, or aspect ratio.
+- Generate exactly one full-canvas PNG with the exact same pixel dimensions as `edit_target.png` and `source.png`.
+- Save the final exact-size PNG as `result.png` in the current working directory. This file is required.
+- Treat `result.png` as an in-place edit of `edit_target.png`, not as a newly composed photograph.
+- Preserve every black-mask/protected pixel from `source.png` visually unchanged. Treat protected content as context only.
+- Fill the white-mask area, matching the surrounding scene, perspective, lighting, focus, color, grain, and camera style.
+- Use the gray-mask transition zone only to keep edges registered and seamless with the original photo; do not make visible subject or composition changes there.
+- Blend naturally across the mask boundary, but do not repaint protected subjects, vehicles, people, buildings, signs, road markings, or other black-mask content.
+- Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
+- Do not leave the neutral gray placeholder visible in the white-mask area.
+- If extending a real photo, avoid inventing crisp readable text in newly generated distant signs or advertisements; partial or indistinct text is preferable.
+- Use the normal Codex image-generation flow for the visual fill. You may use deterministic scripting only to copy, crop, pad, or resize the generated image into `result.png` with the required exact dimensions.
+- Do not create, edit, or delete files in the working directory except `result.png`.
+- Do not ask follow-up questions.
+- If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
+
+Final response should be one short sentence confirming `result.png` was created."#
+    )
+}
+
+fn build_generative_fill_codex_command(
+    codex_bin: &str,
+    job_path: &Path,
+    prompt: &str,
+    json_progress: bool,
+) -> Command {
+    let mut command = Command::new(codex_bin);
+    command
+        .current_dir(job_path)
+        .arg("-s")
+        .arg("workspace-write")
+        .arg("-a")
+        .arg("never")
+        .arg("-C")
+        .arg(job_path)
+        .arg("exec")
+        .arg("--skip-git-repo-check");
+    if json_progress {
+        command.arg("--json");
+    }
+    command
+        .arg("-i")
+        .arg(job_path.join("source.png"))
+        .arg(job_path.join("edit_target.png"))
+        .arg(job_path.join("mask.png"))
+        .arg("--")
+        .arg(generative_fill_prompt(prompt.trim()))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY");
+    command
+}
+
+fn ai_retouch_prompt(prompt: &str, has_reference: bool) -> String {
+    let reference_note = if has_reference {
+        "4. `reference.png` is the sampled source/reference area for this retouch. Use it as visual guidance, not as a paste-in unless the user prompt explicitly asks for copied content."
+    } else {
+        "No reference image is attached for this retouch. Infer the repair from the protected context around the mask."
+    };
+    format!(
+        r#"Use $imagegen to perform one AI retouch edit for PaintNode.
+
+Attached images:
+1. `source.png` is the current PaintNode document canvas. Transparent pixels are real empty canvas, not checkerboard UI.
+2. `edit_target.png` is the exact-size image to edit in place. It preserves the original photo everywhere, including under the white mask. Masked pixels are editable even though their original content is still visible.
+3. `mask.png` is the edit mask. White pixels are editable. Black pixels are protected context.
+{reference_note}
+
+User retouch prompt:
+{prompt}
+
+Requirements:
+- Use `edit_target.png` as the canvas geometry. Do not create a crop, zoom, new framing, or aspect-ratio change.
+- Generate exactly one full-canvas PNG with the exact same pixel dimensions as `source.png` and `edit_target.png`.
+- Save the final exact-size PNG as `result.png` in the current working directory. This file is required.
+- Treat `result.png` as an in-place retouch of `edit_target.png`, not as a new composition.
+- Preserve protected/black-mask pixels from `source.png` visually unchanged.
+- The visible original content inside the white mask is the thing to repair/remove, not protected content.
+- Change only the masked retouch area, with any edge blending kept subtle and registered.
+- For text, logos, painted marks, signs, glare, or surface blemishes, remove only the foreground mark and reconstruct the continuous underlying surface. Do not cover it with a flat rectangle, paint swatch, or unrelated color block.
+- Match the surrounding scene, perspective, lighting, focus, color, texture, grain, and camera style.
+- Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, or mask visualization.
+- Use the normal Codex image-generation flow for the visual retouch. You may use deterministic scripting only to copy, crop, pad, or resize the generated image into `result.png` with the required exact dimensions.
+- Do not create, edit, or delete files in the working directory except `result.png`.
+- Do not ask follow-up questions.
+- If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
+
+Final response should be one short sentence confirming `result.png` was created."#
+    )
+}
+
+fn build_ai_retouch_codex_command(
+    codex_bin: &str,
+    job_path: &Path,
+    prompt: &str,
+    has_reference: bool,
+    json_progress: bool,
+) -> Command {
+    let mut command = Command::new(codex_bin);
+    command
+        .current_dir(job_path)
+        .arg("-s")
+        .arg("workspace-write")
+        .arg("-a")
+        .arg("never")
+        .arg("-C")
+        .arg(job_path)
+        .arg("exec")
+        .arg("--skip-git-repo-check");
+    if json_progress {
+        command.arg("--json");
+    }
+    command
+        .arg("-i")
+        .arg(job_path.join("source.png"))
+        .arg(job_path.join("edit_target.png"))
+        .arg(job_path.join("mask.png"));
+    if has_reference {
+        command.arg(job_path.join("reference.png"));
+    }
+    command
+        .arg("--")
+        .arg(ai_retouch_prompt(prompt.trim(), has_reference))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY");
+    command
+}
+
 fn build_workflow_compose_codex_command(
     codex_bin: &str,
     job_path: &Path,
@@ -1639,6 +1795,401 @@ async fn generate_codex_image(
             let source_file_name = recovered_source_path
                 .file_name()
                 .and_then(|name| name.to_str())
+                .filter(|name| *name != "result.png")
+                .filter(|name| safe_file_name(name).is_some());
+            let (id, relative_path) = if let Some(file_name) = source_file_name {
+                write_asset_file_with_file_name(&project_dir, "generated", file_name, &bytes)?
+            } else {
+                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?
+            };
+            let asset = ProjectAsset {
+                id,
+                kind: "generated".into(),
+                name: source_file_name
+                    .map(str::to_string)
+                    .unwrap_or_else(|| prompt.trim().chars().take(48).collect::<String>()),
+                relative_path,
+                created_at: now_id(),
+                prompt: Some(prompt.trim().into()),
+                source_file_name: source_file_name.map(str::to_string),
+                width: None,
+                height: None,
+                mime: Some("image/png".into()),
+            };
+            Some(add_asset(&project_dir, asset)?)
+        } else {
+            None
+        };
+
+        if cleanup_project_job {
+            let _ = fs::remove_dir_all(&job_path);
+        }
+
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(GeneratedImageResult { data_url, asset })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+/// Run local Codex headlessly for a mask-guided generative fill.
+#[tauri::command]
+async fn generate_codex_fill_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    source_png: Vec<u8>,
+    edit_target_png: Vec<u8>,
+    mask_png: Vec<u8>,
+    run_id: String,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter a generative fill prompt.".into());
+    }
+    if !is_png(&source_png) {
+        return Err("Generative fill source is not a PNG image.".into());
+    }
+    if !is_png(&edit_target_png) {
+        return Err("Generative fill edit target is not a PNG image.".into());
+    }
+    if !is_png(&mask_png) {
+        return Err("Generative fill mask is not a PNG image.".into());
+    }
+    let source_dimensions = png_dimensions_from_bytes(&source_png)
+        .ok_or_else(|| "Generative fill source PNG dimensions are invalid.".to_string())?;
+    let target_dimensions = png_dimensions_from_bytes(&edit_target_png)
+        .ok_or_else(|| "Generative fill edit target PNG dimensions are invalid.".to_string())?;
+    let mask_dimensions = png_dimensions_from_bytes(&mask_png)
+        .ok_or_else(|| "Generative fill mask PNG dimensions are invalid.".to_string())?;
+    if target_dimensions != source_dimensions {
+        return Err(format!(
+            "Generative fill edit target must match source dimensions. Source is {}x{}, target is {}x{}.",
+            source_dimensions.0, source_dimensions.1, target_dimensions.0, target_dimensions.1
+        ));
+    }
+    if mask_dimensions != source_dimensions {
+        return Err(format!(
+            "Generative fill mask must match source dimensions. Source is {}x{}, mask is {}x{}.",
+            source_dimensions.0, source_dimensions.1, mask_dimensions.0, mask_dimensions.1
+        ));
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let codex_bin = configured_or_default_codex_bin(bin)?;
+        let run_id = if run_id.trim().is_empty() {
+            format!("fill-{}", now_id())
+        } else {
+            run_id
+        };
+        let project_dir = project_path
+            .as_ref()
+            .map(|p| PathBuf::from(p.trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+        let cleanup_project_job = project_dir.is_some();
+        let temp_job;
+        let job_path = if let Some(project_dir) = &project_dir {
+            ensure_project_dirs(project_dir)?;
+            let run_dir = project_dir
+                .join(".paintnode")
+                .join("codex-runs")
+                .join(format!("fill-{}", now_id()));
+            fs::create_dir_all(&run_dir)
+                .map_err(|e| format!("Failed to create Codex fill folder: {e}"))?;
+            run_dir
+        } else {
+            temp_job = TempJobDir::new("paintnode-fill")?;
+            temp_job.path().to_path_buf()
+        };
+
+        fs::write(job_path.join("source.png"), &source_png)
+            .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
+        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+            .map_err(|e| format!("Failed to write generative fill edit target image: {e}"))?;
+        fs::write(job_path.join("mask.png"), &mask_png)
+            .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
+
+        emit_codex_progress(&app, &run_id, "Starting local Codex generative fill");
+        let codex_started_at = SystemTime::now();
+        let mut command =
+            build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), true);
+        let mut run = run_codex_with_progress(
+            &mut command,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )
+        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+
+        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Codex progress stream unavailable; retrying generative fill",
+            );
+            let mut fallback =
+                build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), false);
+            run = run_codex_with_progress(
+                &mut fallback,
+                GENERATION_TIMEOUT,
+                app.clone(),
+                run_id.clone(),
+            )
+            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+        }
+
+        if !run.output.status.success() {
+            if let Some(message) = final_codex_agent_message(&run.output) {
+                return Err(format!("Codex did not generate a fill image.\n\n{message}"));
+            }
+            return Err(command_failure("Codex generative fill", &run.output));
+        }
+
+        let requested_result_path = job_path.join("result.png");
+        let (recovered_source_path, staged_result_path) = if requested_result_path.exists() {
+            (requested_result_path.clone(), requested_result_path)
+        } else {
+            let Some((recovered_source_path, staged_result_path)) =
+                copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
+            else {
+                if let Some(message) = final_codex_agent_message(&run.output) {
+                    return Err(format!(
+                        "Codex did not create result.png or expose a generative fill image in its generated-images cache.\n\n{message}"
+                    ));
+                }
+                return Err("PaintNode could not find result.png or a generative fill PNG in Codex's generated-images cache.".into());
+            };
+            (recovered_source_path, staged_result_path)
+        };
+
+        let result_dimensions = png_dimensions(&staged_result_path)?;
+        if result_dimensions != source_dimensions {
+            return Err(format!(
+                "Codex generated a {}x{} fill, but this document needs exactly {}x{}. The fill was not inserted because scaling it would create seams.",
+                result_dimensions.0,
+                result_dimensions.1,
+                source_dimensions.0,
+                source_dimensions.1
+            ));
+        }
+
+        emit_codex_progress(&app, &run_id, "Reading generative fill PNG");
+        let data_url = read_png_data_url(&staged_result_path)?;
+        let asset = if let Some(project_dir) = project_dir {
+            emit_codex_progress(&app, &run_id, "Saving generative fill to the project");
+            let bytes = fs::read(&staged_result_path)
+                .map_err(|e| format!("Failed to read generative fill for project storage: {e}"))?;
+            let source_file_name = recovered_source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| *name != "result.png")
+                .filter(|name| safe_file_name(name).is_some());
+            let (id, relative_path) = if let Some(file_name) = source_file_name {
+                write_asset_file_with_file_name(&project_dir, "generated", file_name, &bytes)?
+            } else {
+                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?
+            };
+            let asset = ProjectAsset {
+                id,
+                kind: "generated".into(),
+                name: source_file_name
+                    .map(str::to_string)
+                    .unwrap_or_else(|| prompt.trim().chars().take(48).collect::<String>()),
+                relative_path,
+                created_at: now_id(),
+                prompt: Some(prompt.trim().into()),
+                source_file_name: source_file_name.map(str::to_string),
+                width: None,
+                height: None,
+                mime: Some("image/png".into()),
+            };
+            Some(add_asset(&project_dir, asset)?)
+        } else {
+            None
+        };
+
+        if cleanup_project_job {
+            let _ = fs::remove_dir_all(&job_path);
+        }
+
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(GeneratedImageResult { data_url, asset })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+/// Run local Codex headlessly for an AI retouch request.
+#[tauri::command]
+async fn generate_codex_retouch_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    source_png: Vec<u8>,
+    edit_target_png: Vec<u8>,
+    mask_png: Vec<u8>,
+    reference_png: Option<Vec<u8>>,
+    run_id: String,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter an AI retouch prompt.".into());
+    }
+    if !is_png(&source_png) {
+        return Err("AI retouch source is not a PNG image.".into());
+    }
+    if !is_png(&edit_target_png) {
+        return Err("AI retouch edit target is not a PNG image.".into());
+    }
+    if !is_png(&mask_png) {
+        return Err("AI retouch mask is not a PNG image.".into());
+    }
+    if let Some(reference_png) = &reference_png {
+        if !is_png(reference_png) {
+            return Err("AI retouch reference is not a PNG image.".into());
+        }
+        png_dimensions_from_bytes(reference_png)
+            .ok_or_else(|| "AI retouch reference PNG dimensions are invalid.".to_string())?;
+    }
+    let source_dimensions = png_dimensions_from_bytes(&source_png)
+        .ok_or_else(|| "AI retouch source PNG dimensions are invalid.".to_string())?;
+    let target_dimensions = png_dimensions_from_bytes(&edit_target_png)
+        .ok_or_else(|| "AI retouch edit target PNG dimensions are invalid.".to_string())?;
+    let mask_dimensions = png_dimensions_from_bytes(&mask_png)
+        .ok_or_else(|| "AI retouch mask PNG dimensions are invalid.".to_string())?;
+    if target_dimensions != source_dimensions {
+        return Err(format!(
+            "AI retouch edit target must match source dimensions. Source is {}x{}, target is {}x{}.",
+            source_dimensions.0, source_dimensions.1, target_dimensions.0, target_dimensions.1
+        ));
+    }
+    if mask_dimensions != source_dimensions {
+        return Err(format!(
+            "AI retouch mask must match source dimensions. Source is {}x{}, mask is {}x{}.",
+            source_dimensions.0, source_dimensions.1, mask_dimensions.0, mask_dimensions.1
+        ));
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let codex_bin = configured_or_default_codex_bin(bin)?;
+        let run_id = if run_id.trim().is_empty() {
+            format!("retouch-{}", now_id())
+        } else {
+            run_id
+        };
+        let project_dir = project_path
+            .as_ref()
+            .map(|p| PathBuf::from(p.trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+        let cleanup_project_job = project_dir.is_some();
+        let temp_job;
+        let job_path = if let Some(project_dir) = &project_dir {
+            ensure_project_dirs(project_dir)?;
+            let run_dir = project_dir
+                .join(".paintnode")
+                .join("codex-runs")
+                .join(format!("retouch-{}", now_id()));
+            fs::create_dir_all(&run_dir)
+                .map_err(|e| format!("Failed to create Codex retouch folder: {e}"))?;
+            run_dir
+        } else {
+            temp_job = TempJobDir::new("paintnode-retouch")?;
+            temp_job.path().to_path_buf()
+        };
+
+        fs::write(job_path.join("source.png"), &source_png)
+            .map_err(|e| format!("Failed to write AI retouch source image: {e}"))?;
+        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+            .map_err(|e| format!("Failed to write AI retouch edit target image: {e}"))?;
+        fs::write(job_path.join("mask.png"), &mask_png)
+            .map_err(|e| format!("Failed to write AI retouch mask image: {e}"))?;
+        let has_reference = if let Some(reference_png) = &reference_png {
+            fs::write(job_path.join("reference.png"), reference_png)
+                .map_err(|e| format!("Failed to write AI retouch reference image: {e}"))?;
+            true
+        } else {
+            false
+        };
+
+        emit_codex_progress(&app, &run_id, "Starting local Codex AI retouch");
+        let codex_started_at = SystemTime::now();
+        let mut command =
+            build_ai_retouch_codex_command(&codex_bin, &job_path, prompt.trim(), has_reference, true);
+        let mut run = run_codex_with_progress(
+            &mut command,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )
+        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+
+        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Codex progress stream unavailable; retrying AI retouch",
+            );
+            let mut fallback = build_ai_retouch_codex_command(
+                &codex_bin,
+                &job_path,
+                prompt.trim(),
+                has_reference,
+                false,
+            );
+            run = run_codex_with_progress(
+                &mut fallback,
+                GENERATION_TIMEOUT,
+                app.clone(),
+                run_id.clone(),
+            )
+            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+        }
+
+        if !run.output.status.success() {
+            if let Some(message) = final_codex_agent_message(&run.output) {
+                return Err(format!("Codex did not generate an AI retouch image.\n\n{message}"));
+            }
+            return Err(command_failure("Codex AI retouch", &run.output));
+        }
+
+        let requested_result_path = job_path.join("result.png");
+        let (recovered_source_path, staged_result_path) = if requested_result_path.exists() {
+            (requested_result_path.clone(), requested_result_path)
+        } else {
+            let Some((recovered_source_path, staged_result_path)) =
+                copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
+            else {
+                if let Some(message) = final_codex_agent_message(&run.output) {
+                    return Err(format!(
+                        "Codex did not create result.png or expose an AI retouch image in its generated-images cache.\n\n{message}"
+                    ));
+                }
+                return Err("PaintNode could not find result.png or an AI retouch PNG in Codex's generated-images cache.".into());
+            };
+            (recovered_source_path, staged_result_path)
+        };
+
+        let result_dimensions = png_dimensions(&staged_result_path)?;
+        if result_dimensions != source_dimensions {
+            return Err(format!(
+                "Codex generated a {}x{} AI retouch result, but this document needs exactly {}x{}. The result was not inserted because scaling it would create seams.",
+                result_dimensions.0,
+                result_dimensions.1,
+                source_dimensions.0,
+                source_dimensions.1
+            ));
+        }
+
+        emit_codex_progress(&app, &run_id, "Reading AI retouch PNG");
+        let data_url = read_png_data_url(&staged_result_path)?;
+        let asset = if let Some(project_dir) = project_dir {
+            emit_codex_progress(&app, &run_id, "Saving AI retouch to the project");
+            let bytes = fs::read(&staged_result_path)
+                .map_err(|e| format!("Failed to read AI retouch for project storage: {e}"))?;
+            let source_file_name = recovered_source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| *name != "result.png")
                 .filter(|name| safe_file_name(name).is_some());
             let (id, relative_path) = if let Some(file_name) = source_file_name {
                 write_asset_file_with_file_name(&project_dir, "generated", file_name, &bytes)?
@@ -2449,8 +3000,13 @@ async fn project_save_document_as(
 fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let new = MenuItem::with_id(app, "app:new", "New...", true, Some("CmdOrCtrl+N"))?;
     let open = MenuItem::with_id(app, "app:open", "Open...", true, Some("CmdOrCtrl+O"))?;
-    let close_document =
-        MenuItem::with_id(app, "app:close-document", "Close Document", true, Some("CmdOrCtrl+W"))?;
+    let close_document = MenuItem::with_id(
+        app,
+        "app:close-document",
+        "Close Document",
+        true,
+        Some("CmdOrCtrl+W"),
+    )?;
     let place = MenuItem::with_id(app, "app:place-image", "Place Image...", true, None::<&str>)?;
     let save = MenuItem::with_id(app, "app:save-ora", "Save", true, Some("CmdOrCtrl+S"))?;
     let save_copy = MenuItem::with_id(
@@ -2748,6 +3304,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate_image,
             generate_codex_image,
+            generate_codex_fill_image,
+            generate_codex_retouch_image,
             decouple_codex_image,
             compose_codex_workflow,
             project_open_folder,
@@ -3029,6 +3587,77 @@ mod tests {
         assert_eq!(args[image_idx + 2], image_paths[1].to_string_lossy());
         assert_eq!(args[image_idx + 3], "--");
         assert!(args[image_idx + 4].contains("Composition prompt:\ncompose scene"));
+    }
+
+    #[test]
+    fn generative_fill_command_attaches_source_and_mask_before_prompt() {
+        let job = TempJobDir::new("paintnode-fill-command-test").expect("temp dir");
+        let command =
+            build_generative_fill_codex_command("codex", job.path(), "extend photo", true);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        let image_idx = args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("image arg should be present");
+        assert_eq!(
+            args[image_idx + 1],
+            job.path().join("source.png").to_string_lossy()
+        );
+        assert_eq!(
+            args[image_idx + 2],
+            job.path().join("edit_target.png").to_string_lossy()
+        );
+        assert_eq!(
+            args[image_idx + 3],
+            job.path().join("mask.png").to_string_lossy()
+        );
+        assert_eq!(args[image_idx + 4], "--");
+        assert!(args[image_idx + 5].contains("Use `edit_target.png` as the canvas geometry"));
+        assert!(args[image_idx + 5].contains("Save the final exact-size PNG as `result.png`"));
+        assert!(args[image_idx + 5].contains("White pixels are the full editable/generated area"));
+        assert!(
+            args[image_idx + 5].contains("Gray pixels are a narrow seam-blending transition zone")
+        );
+        assert!(args[image_idx + 5].contains("User edit prompt:\nextend photo"));
+    }
+
+    #[test]
+    fn ai_retouch_command_attaches_optional_reference_before_prompt() {
+        let job = TempJobDir::new("paintnode-retouch-command-test").expect("temp dir");
+        let command =
+            build_ai_retouch_codex_command("codex", job.path(), "remove glare", true, true);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        let image_idx = args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("image arg should be present");
+        assert_eq!(
+            args[image_idx + 1],
+            job.path().join("source.png").to_string_lossy()
+        );
+        assert_eq!(
+            args[image_idx + 2],
+            job.path().join("edit_target.png").to_string_lossy()
+        );
+        assert_eq!(
+            args[image_idx + 3],
+            job.path().join("mask.png").to_string_lossy()
+        );
+        assert_eq!(
+            args[image_idx + 4],
+            job.path().join("reference.png").to_string_lossy()
+        );
+        assert_eq!(args[image_idx + 5], "--");
+        assert!(args[image_idx + 6].contains("Use $imagegen to perform one AI retouch edit"));
+        assert!(args[image_idx + 6].contains("User retouch prompt:\nremove glare"));
     }
 
     #[test]

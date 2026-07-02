@@ -136,6 +136,56 @@ export async function generateCodexImage(
   return invoke<GeneratedImageResult>('generate_codex_image', { bin, prompt, projectPath, runId });
 }
 
+export async function generateCodexFillImage(
+  config: CodexGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex generative fill is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `fill-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_codex_fill_image', {
+    bin,
+    prompt,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    runId,
+  });
+}
+
+export async function generateCodexRetouchImage(
+  config: CodexGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  referencePng: Uint8Array | null | undefined,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex AI retouch is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `retouch-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_codex_retouch_image', {
+    bin,
+    prompt,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    referencePng: referencePng ? Array.from(referencePng) : null,
+    runId,
+  });
+}
+
 export async function decoupleCodexImage(
   config: CodexGeneratorConfig,
   sourcePng: Uint8Array,

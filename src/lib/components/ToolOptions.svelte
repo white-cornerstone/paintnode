@@ -12,9 +12,13 @@
   const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
   const hasStoryboardEdit = $derived(hasWorkflow && workflow.storyboardEditing);
   const hasDrawingSurface = $derived(hasDocument || hasStoryboardEdit);
+  const aiRetouchTools = ['spot-healing', 'remove', 'healing-brush', 'patch', 'content-aware-move', 'red-eye'];
+  const aiRetouchBrushTools = ['spot-healing', 'remove', 'healing-brush'];
   // Tools that share the round-brush controls (size / hardness / strength).
-  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge'];
+  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge', ...aiRetouchBrushTools];
   const usesBrush = $derived(brushTools.includes(tool));
+  const isAiRetouch = $derived(aiRetouchTools.includes(tool));
+  const isAiRetouchBrush = $derived(aiRetouchBrushTools.includes(tool));
   const strengthLabel = $derived(
     tool === 'brush' || tool === 'eraser' || tool === 'clone'
       ? 'Opacity'
@@ -174,6 +178,9 @@
       <span class="divider"></span>
 
       {#if usesBrush}
+        {#if isAiRetouchBrush}
+          {@render selectionModeButtons()}
+        {/if}
         <label class="opt">
           Size
           <input type="range" min="1" max="500" bind:value={editor.brushSize} />
@@ -185,12 +192,22 @@
           <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
           <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
         </label>
-        <label class="opt">
-          {strengthLabel}
-          <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
-          <span class="val">{Math.round(editor.brushOpacity * 100)}%</span>
-        </label>
-        {#if tool === 'clone'}
+        {#if !isAiRetouchBrush}
+          <label class="opt">
+            {strengthLabel}
+            <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
+            <span class="val">{Math.round(editor.brushOpacity * 100)}%</span>
+          </label>
+        {/if}
+        {#if tool === 'healing-brush'}
+          <span class="pill">{editor.aiRetouchHealingSource ? 'Source set' : 'No source'}</span>
+          <button onclick={() => editor.clearAiRetouchHealingSource()} disabled={!editor.aiRetouchHealingSource}>Clear Source</button>
+          {@render toolInfo('healing-brush', 'Paint to create or refine an AI mask. Alt-click sets the source reference. Use the Contextual Task Bar to run AI Retouch.')}
+        {:else if tool === 'spot-healing'}
+          {@render toolInfo('spot-healing', 'Paint over small flaws to create or refine an AI mask. Use the Contextual Task Bar to run AI Retouch.')}
+        {:else if tool === 'remove'}
+          {@render toolInfo('remove', 'Brush over or loop around the distraction to create or refine an AI mask. Use Add/Subtract modes to adjust it before running.')}
+        {:else if tool === 'clone'}
           <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
           {@render toolInfo('clone', 'Alt-click to set the source, then paint.')}
         {:else if tool === 'dodge' || tool === 'burn'}
@@ -217,6 +234,35 @@
         {:else if tool === 'blur' || tool === 'sharpen'}
           {@render toolInfo(tool, `Drag to ${tool} pixels under the brush.`)}
         {/if}
+    {:else if isAiRetouch && tool === 'patch'}
+      {@render selectionModeButtons()}
+      <div class="seg">
+        <button class:on={editor.aiRetouchPatchMode === 'source'} onclick={() => (editor.aiRetouchPatchMode = 'source')}>Source</button>
+        <button class:on={editor.aiRetouchPatchMode === 'destination'} onclick={() => (editor.aiRetouchPatchMode = 'destination')}>Destination</button>
+      </div>
+      <button onclick={() => editor.clearActiveAiRetouchMask()} disabled={!editor.activeAiRetouchMaskLayer}>Clear Mask</button>
+      {@render toolInfo('patch', 'Draw or refine an AI mask, then drag inside it to choose the patch reference. Run from the Contextual Task Bar.')}
+    {:else if isAiRetouch && tool === 'content-aware-move'}
+      {@render selectionModeButtons()}
+      <div class="seg">
+        <button class:on={editor.aiRetouchMoveMode === 'move'} onclick={() => (editor.aiRetouchMoveMode = 'move')}>Move</button>
+        <button class:on={editor.aiRetouchMoveMode === 'extend'} onclick={() => (editor.aiRetouchMoveMode = 'extend')}>Extend</button>
+      </div>
+      <button onclick={() => editor.clearActiveAiRetouchMask()} disabled={!editor.activeAiRetouchMaskLayer}>Clear Mask</button>
+      {@render toolInfo('content-aware-move', 'Draw or refine a subject mask, then drag inside it to place or extend it. Run from the Contextual Task Bar.')}
+    {:else if isAiRetouch && tool === 'red-eye'}
+      {@render selectionModeButtons()}
+      <label class="opt">
+        Pupil Size
+        <input type="range" min="1" max="100" bind:value={editor.aiRetouchPupilSize} />
+        <span class="val">{Math.round(editor.aiRetouchPupilSize)}%</span>
+      </label>
+      <label class="opt">
+        Darken
+        <input type="range" min="0" max="100" bind:value={editor.aiRetouchDarkenAmount} />
+        <span class="val">{Math.round(editor.aiRetouchDarkenAmount)}%</span>
+      </label>
+      {@render toolInfo('red-eye', 'Click or drag around an eye reflection to create or refine an AI mask. Run from the Contextual Task Bar.')}
     {:else if tool === 'marquee'}
       {@render selectionModeButtons()}
       <label class="opt">

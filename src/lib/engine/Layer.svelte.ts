@@ -1,8 +1,9 @@
+import type { AiRetouchMaskMetadata } from './aiRetouch';
 import type { BlendMode, Rect } from './types';
 import { createCanvas, ctx2d, uid } from './types';
 import { cloneModel, type TextModel } from './text/model';
 
-export type LayerKind = 'raster' | 'text';
+export type LayerKind = 'raster' | 'text' | 'ai-retouch-mask';
 
 /**
  * A single layer. Metadata fields are reactive ($state) so the UI updates automatically;
@@ -24,6 +25,8 @@ export class Layer {
   kind = $state<LayerKind>('raster');
   /** Editable text model when `kind === 'text'`, else null. */
   text = $state<TextModel | null>(null);
+  /** AI retouch mask metadata when `kind === 'ai-retouch-mask'`, else null. */
+  aiRetouch = $state<AiRetouchMaskMetadata | null>(null);
   /** Bumped whenever pixels change, so reactive thumbnails can refresh. */
   pixelRev = $state(0);
   /**
@@ -83,6 +86,7 @@ export class Layer {
     copy.sourcePath = this.sourcePath;
     copy.kind = this.kind;
     copy.text = this.text ? cloneModel(this.text) : null;
+    copy.aiRetouch = this.aiRetouch ? structuredClone(this.aiRetouch) : null;
     copy.ctx.drawImage(this.canvas, 0, 0);
     copy.touch();
     return copy;

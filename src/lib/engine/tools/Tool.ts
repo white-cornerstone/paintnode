@@ -5,6 +5,7 @@ import type { History } from '../history';
 import type { ActiveStroke } from '../compositor';
 import type { RGB } from '../types';
 import type { Selection, SelectionMode } from '../selection';
+import type { AiRetouchGesture, AiRetouchPreview, AiRetouchToolId } from '../aiRetouch';
 
 /** Everything a tool needs from the editor, kept as a narrow interface to avoid coupling. */
 export interface ToolHost {
@@ -36,9 +37,23 @@ export interface ToolHost {
   toneRange: 'shadows' | 'midtones' | 'highlights';
   /** Sponge: increase or decrease saturation. */
   spongeMode: 'saturate' | 'desaturate';
+  /** AI Patch: whether the drawn area is repaired from, or copied to, the drag target. */
+  aiRetouchPatchMode: 'source' | 'destination';
+  /** AI Content-Aware Move: move a subject or extend/contract it. */
+  aiRetouchMoveMode: 'move' | 'extend';
+  /** AI Red Eye: relative size of the pupil correction. */
+  aiRetouchPupilSize: number;
+  /** AI Red Eye: correction darkness. */
+  aiRetouchDarkenAmount: number;
+  /** AI Healing Brush: sampled source point in document space. */
+  aiRetouchHealingSource: { x: number; y: number } | null;
   setActiveStroke(stroke: ActiveStroke | null): void;
   setSelection(sel: Selection | null): void;
   setForeground(rgb: RGB): void;
+  commitAiRetouchMaskGesture(toolId: AiRetouchToolId, gesture: AiRetouchGesture, mask: HTMLCanvasElement, mode: SelectionMode): void;
+  setAiRetouchMaskReference(toolId: AiRetouchToolId, updates: Partial<NonNullable<Layer['aiRetouch']>>): void;
+  setAiRetouchHealingSource(source: { x: number; y: number }): void;
+  setAiRetouchPreview(preview: AiRetouchPreview | null): void;
   /** Type tool: begin editing at a document position (new text, or the text layer there). */
   beginText(x: number, y: number): void;
   /** Notify reactive UI that pixels/layers changed (refresh thumbnails, history buttons). */

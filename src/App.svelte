@@ -72,6 +72,7 @@
   const loadHueSaturationDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/HueSaturationDialog.svelte');
   const loadGaussianBlurDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/GaussianBlurDialog.svelte');
   const loadAiGenerateDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
+  const loadAiRetouchDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
   const loadAiDecoupleDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadFontEmbedDialog: LazyComponentLoader = () => import('./lib/components/FontEmbedDialog.svelte');
@@ -769,6 +770,8 @@
   {@render lazyDialog(loadGaussianBlurDialog)}
 {:else if ui.dialog === 'aiGenerate'}
   {@render lazyDialog(loadAiGenerateDialog)}
+{:else if ui.dialog === 'aiRetouch'}
+  {@render lazyDialog(loadAiRetouchDialog)}
 {:else if ui.dialog === 'aiDecouple'}
   {@render lazyDialog(loadAiDecoupleDialog)}
 {:else if ui.dialog === 'stockImages'}

@@ -462,6 +462,18 @@
       };
     }
 
+    const retouchBounds = editor.getActiveAiRetouchMaskBounds();
+    if (editor.activeAiRetouchMaskLayer && retouchBounds) {
+      const p = fixedPoint(retouchBounds.x + retouchBounds.w / 2, retouchBounds.y + retouchBounds.h);
+      return {
+        x: viewportRect.left + p.x,
+        y: viewportRect.top + p.y + 14,
+        viewportWidth,
+        viewportHeight,
+        key: `ai-retouch-mask:${editor.activeAiRetouchMaskLayer.id}:${retouchBounds.x}:${retouchBounds.y}:${retouchBounds.w}:${retouchBounds.h}`,
+      };
+    }
+
     if (selection) {
       const p = fixedPoint(selection.bounds.x + selection.bounds.w / 2, selection.bounds.y + selection.bounds.h);
       return {
@@ -580,6 +592,7 @@
       () => editor.doc,
       () => editor.getActiveStroke(),
       () => editor.getSelection(),
+      () => editor.getAiRetouchPreview(),
     );
     vp.onAfterRender = () => {
       viewportFrame += 1;

@@ -7,6 +7,7 @@ export type DialogId =
   | 'hueSaturation'
   | 'gaussianBlur'
   | 'aiGenerate'
+  | 'aiRetouch'
   | 'aiDecouple'
   | 'stockImages';
 

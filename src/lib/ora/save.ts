@@ -26,6 +26,7 @@ function buildStackXml(
   doc: PaintDocument,
   srcMap: Map<string, string>,
   textMap: Map<string, string>,
+  retouchMap: Map<string, string>,
 ): string {
   const lines: string[] = [];
   // OpenRaster lists layers top-to-bottom; our array is bottom-to-top.
@@ -33,12 +34,14 @@ function buildStackXml(
     const l = doc.layers[i];
     const src = srcMap.get(l.id)!;
     const textPath = textMap.get(l.id);
+    const retouchPath = retouchMap.get(l.id);
     // Custom PaintNode attributes; other ORA readers ignore them and use the rasterized PNG.
     const extraAttrs = [
       l.sourceAssetId ? `paintnode-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
       l.sourcePath ? `paintnode-source-path="${escapeXml(l.sourcePath)}"` : '',
-      l.kind === 'text' ? `paintnode-layer-kind="text"` : '',
+      l.kind !== 'raster' ? `paintnode-layer-kind="${escapeXml(l.kind)}"` : '',
       textPath ? `paintnode-text-data="${textPath}"` : '',
+      retouchPath ? `paintnode-ai-retouch-data="${retouchPath}"` : '',
     ]
       .filter(Boolean)
       .join(' ');
@@ -77,6 +80,7 @@ export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = [
 
   const srcMap = new Map<string, string>();
   const textMap = new Map<string, string>();
+  const retouchMap = new Map<string, string>();
   for (let i = 0; i < doc.layers.length; i++) {
     const layer = doc.layers[i];
     const src = `data/layer${i}.png`;
@@ -88,6 +92,11 @@ export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = [
       textMap.set(layer.id, textPath);
       files[textPath] = enc.encode(serializeModel(layer.text));
     }
+    if (layer.kind === 'ai-retouch-mask' && layer.aiRetouch) {
+      const retouchPath = `data/layer${i}.ai-retouch.json`;
+      retouchMap.set(layer.id, retouchPath);
+      files[retouchPath] = enc.encode(JSON.stringify({ version: 1, ...layer.aiRetouch }));
+    }
   }
 
   const merged = compositeToCanvas(doc);
@@ -96,7 +105,7 @@ export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = [
   const thumb = makeThumbnail(merged, doc.width, doc.height, 256, 256);
   files['Thumbnails/thumbnail.png'] = await canvasToPngBytes(thumb);
 
-  files['stack.xml'] = enc.encode(buildStackXml(doc, srcMap, textMap));
+  files['stack.xml'] = enc.encode(buildStackXml(doc, srcMap, textMap, retouchMap));
 
   // Optional embedded fonts: extra files other ORA readers ignore.
   if (embedFonts.length) {

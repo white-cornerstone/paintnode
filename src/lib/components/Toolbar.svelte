@@ -14,7 +14,9 @@
     Wand,
     Crop,
     PaintBrush,
+    PaintBrushSparkle,
     Eraser,
+    EraserTool,
     CloneStamp,
     PaintBucket,
     Gradient,
@@ -38,6 +40,10 @@
     Board,
     Open,
     Sparkle,
+    Patch,
+    ImageEdit,
+    Eye,
+    ArrowTrendingSparkle,
     ArrowSwap,
   } from '../icons';
 
@@ -78,6 +84,18 @@
     { kind: 'tool', id: 'crop', key: 'C', icon: Crop },
     { kind: 'tool', id: 'eyedropper', key: 'I', icon: Eyedropper },
     { kind: 'tool', id: 'brush', key: 'B', icon: PaintBrush },
+    {
+      kind: 'group',
+      name: 'aiRetouch',
+      members: [
+        { id: 'spot-healing', icon: PaintBrushSparkle, label: 'Spot Healing Brush Tool', key: 'J' },
+        { id: 'remove', icon: EraserTool, label: 'Remove Tool', key: 'J' },
+        { id: 'healing-brush', icon: Patch, label: 'Healing Brush Tool', key: 'J' },
+        { id: 'patch', icon: ImageEdit, label: 'Patch Tool', key: 'J' },
+        { id: 'content-aware-move', icon: ArrowTrendingSparkle, label: 'Content-Aware Move Tool', key: 'J' },
+        { id: 'red-eye', icon: Eye, label: 'Red Eye Tool', key: 'J' },
+      ],
+    },
     { kind: 'tool', id: 'clone', key: 'S', icon: CloneStamp },
     { kind: 'tool', id: 'eraser', key: 'E', icon: Eraser },
     { kind: 'tool', id: 'fill', key: 'G', icon: PaintBucket },
@@ -161,6 +179,7 @@
   let lastMember = $state<Record<string, string>>({
     focus: 'blur',
     toning: 'dodge',
+    aiRetouch: 'spot-healing',
     type: 'text',
     annotation: 'annotation-callout',
   });
