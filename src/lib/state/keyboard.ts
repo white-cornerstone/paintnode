@@ -27,6 +27,13 @@ const TOOL_KEYS: Record<string, string> = {
 export function installKeyboard(): () => void {
   const onKey = (e: KeyboardEvent) => {
     if (isTypingTarget(e.target)) return;
+
+    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      ui.toggleWorkspaceFocusMode();
+      return;
+    }
+
     const k = e.key.toLowerCase();
     const vp = editor.viewport;
 

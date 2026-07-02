@@ -1,6 +1,7 @@
 import {
   AI_RETOUCH_TOOL_NAMES,
   combineRetouchMask,
+  effectiveAiRetouchMaskMode,
   maskBounds,
   maskContainsPoint,
   makeRectMask,
@@ -66,12 +67,15 @@ export class AiRetouchTool implements Tool {
       return;
     }
 
+    const active = this.host.activeLayer;
     this.start = p;
     this.points = [p];
     this.draggingExistingMask = null;
-    this.mode = selectionModeFromModifiers(this.host.selectionMode, e);
+    this.mode = effectiveAiRetouchMaskMode(
+      selectionModeFromModifiers(this.host.selectionMode, e),
+      active?.kind === 'ai-retouch-mask',
+    );
 
-    const active = this.host.activeLayer;
     if (
       (this.id === 'patch' || this.id === 'content-aware-move') &&
       active?.kind === 'ai-retouch-mask' &&

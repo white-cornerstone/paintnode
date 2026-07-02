@@ -3,6 +3,7 @@ import {
   aiRetouchPrompt,
   cloneAiRetouchMetadata,
   combineRetouchMask,
+  effectiveAiRetouchMaskMode,
   makeRectMask,
   maskBounds,
   maskHasPixels,
@@ -131,6 +132,14 @@ describe('AI retouch request helpers', () => {
     expect(nextAiRetouchTool('spot-healing')).toBe('remove');
     expect(nextAiRetouchTool('red-eye')).toBe('spot-healing');
     expect(nextAiRetouchTool('spot-healing', true)).toBe('red-eye');
+  });
+
+  it('defaults additional AI retouch strokes to add when a mask is active', () => {
+    expect(effectiveAiRetouchMaskMode('new', false)).toBe('new');
+    expect(effectiveAiRetouchMaskMode('new', true)).toBe('add');
+    expect(effectiveAiRetouchMaskMode('add', true)).toBe('add');
+    expect(effectiveAiRetouchMaskMode('subtract', true)).toBe('subtract');
+    expect(effectiveAiRetouchMaskMode('intersect', true)).toBe('intersect');
   });
 
   it('calculates stroke bounds with brush padding', () => {

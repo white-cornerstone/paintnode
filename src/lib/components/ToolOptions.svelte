@@ -3,6 +3,7 @@
   import { ui } from '../state/ui.svelte';
   import { workflow, type WorkflowTool } from '../state/workflow.svelte';
   import type { SelectionMode } from '../engine/selection';
+  import { effectiveAiRetouchMaskMode } from '../engine/aiRetouch';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { Add, Dismiss, Info, MarqueeRect, SquareMultiple } from '../icons';
@@ -19,6 +20,9 @@
   const usesBrush = $derived(brushTools.includes(tool));
   const isAiRetouch = $derived(aiRetouchTools.includes(tool));
   const isAiRetouchBrush = $derived(aiRetouchBrushTools.includes(tool));
+  const effectiveSelectionMode = $derived(
+    isAiRetouch ? effectiveAiRetouchMaskMode(editor.selectionMode, !!editor.activeAiRetouchMaskLayer) : editor.selectionMode,
+  );
   const strengthLabel = $derived(
     tool === 'brush' || tool === 'eraser' || tool === 'clone'
       ? 'Opacity'
@@ -72,9 +76,9 @@
   <div class="seg mode-seg" role="group" aria-label="Selection mode">
     {#each selectionModes as mode (mode.id)}
       <button
-        class:on={editor.selectionMode === mode.id}
+        class:on={effectiveSelectionMode === mode.id}
         aria-label={`${mode.label} selection`}
-        aria-pressed={editor.selectionMode === mode.id}
+        aria-pressed={effectiveSelectionMode === mode.id}
         use:tooltip={{ text: `${mode.label} selection`, placement: 'bottom' }}
         onclick={() => (editor.selectionMode = mode.id)}
       >

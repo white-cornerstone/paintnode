@@ -655,18 +655,22 @@
   {/await}
 {/snippet}
 
-<div class="app">
+<div class="app" class:workspace-focus={ui.workspaceFocusMode}>
   {#if desktop}
     <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
       <div class="desktop-title">PaintNode</div>
     </div>
-  {:else}
+  {:else if !ui.workspaceFocusMode}
     <MenuBar />
   {/if}
   <div class="middle">
-    <Toolbar />
+    {#if !ui.workspaceFocusMode}
+      <Toolbar />
+    {/if}
     <div class="workspace">
-      <ToolOptions />
+      {#if !ui.workspaceFocusMode}
+        <ToolOptions />
+      {/if}
       <div class="content-row">
         <section class="center">
           <DocumentTabs />
@@ -676,7 +680,7 @@
             <CanvasView />
           {/if}
         </section>
-        {#if hasDrawingPanels}
+        {#if hasDrawingPanels && !ui.workspaceFocusMode}
           <aside class="right" class:collapsed={rightCollapsed}>
             {#if rightCollapsed}
               <div class="dock-rail">
@@ -739,34 +743,38 @@
             {/if}
           </aside>
         {/if}
-        <aside class="project-side" class:collapsed={projectCollapsed}>
-          {#if projectCollapsed}
-            <div class="project-rail">
-              <button
-                class="rail-icon"
-                onclick={() => (projectCollapsed = false)}
-                use:tooltip={{ text: 'Expand project', placement: 'left' }}
-                aria-label="Expand project"
-              >
-                <Icon svg={Folder} size={18} />
-              </button>
-            </div>
-          {:else}
-            <div class="column-bar">
-              <button
-                class="panel-toggle"
-                onclick={() => (projectCollapsed = true)}
-                use:tooltip={{ text: 'Collapse project', placement: 'left' }}
-                aria-label="Collapse project"
-              ><Icon svg={ChevronDoubleRight} size={16} /></button>
-            </div>
-            <ProjectPanel />
-          {/if}
-        </aside>
-        </div>
+        {#if !ui.workspaceFocusMode}
+          <aside class="project-side" class:collapsed={projectCollapsed}>
+            {#if projectCollapsed}
+              <div class="project-rail">
+                <button
+                  class="rail-icon"
+                  onclick={() => (projectCollapsed = false)}
+                  use:tooltip={{ text: 'Expand project', placement: 'left' }}
+                  aria-label="Expand project"
+                >
+                  <Icon svg={Folder} size={18} />
+                </button>
+              </div>
+            {:else}
+              <div class="column-bar">
+                <button
+                  class="panel-toggle"
+                  onclick={() => (projectCollapsed = true)}
+                  use:tooltip={{ text: 'Collapse project', placement: 'left' }}
+                  aria-label="Collapse project"
+                ><Icon svg={ChevronDoubleRight} size={16} /></button>
+              </div>
+              <ProjectPanel />
+            {/if}
+          </aside>
+        {/if}
+      </div>
     </div>
   </div>
-  <StatusBar />
+  {#if !ui.workspaceFocusMode}
+    <StatusBar />
+  {/if}
 </div>
 
 {#if ui.dialog === 'new'}

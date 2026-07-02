@@ -32,6 +32,8 @@ class UiState {
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
   activeSurface = $state<'document' | 'workflow'>('document');
+  workspaceFocusMode = $state(false);
+  workspaceFocusHintVisible = $state(false);
   contextualTaskBarVisible = $state(true);
   contextualTaskBarResetToken = $state(0);
 
@@ -52,6 +54,16 @@ class UiState {
   }
   showWorkflow(): void {
     this.activeSurface = 'workflow';
+  }
+  toggleWorkspaceFocusMode(): void {
+    this.setWorkspaceFocusMode(!this.workspaceFocusMode);
+  }
+  setWorkspaceFocusMode(value: boolean): void {
+    this.workspaceFocusMode = value;
+    this.workspaceFocusHintVisible = value;
+  }
+  dismissWorkspaceFocusHint(): void {
+    this.workspaceFocusHintVisible = false;
   }
   showContextualTaskBar(): void {
     this.contextualTaskBarVisible = true;

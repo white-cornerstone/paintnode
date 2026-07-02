@@ -130,6 +130,10 @@ export function nextAiRetouchTool(current: AiRetouchToolId, backwards = false): 
   return AI_RETOUCH_TOOL_ORDER[(idx + delta + AI_RETOUCH_TOOL_ORDER.length) % AI_RETOUCH_TOOL_ORDER.length];
 }
 
+export function effectiveAiRetouchMaskMode(mode: SelectionMode, hasActiveMask: boolean): SelectionMode {
+  return hasActiveMask && mode === 'new' ? 'add' : mode;
+}
+
 export function pointsBounds(points: AiRetouchPoint[], padding = 0): Rect | null {
   if (!points.length) return null;
   let minX = Infinity;
