@@ -211,14 +211,16 @@ describe('AI retouch request helpers', () => {
     expect(maskHasPixels(combineRetouchMask(null, hit, 'new', 8, 6)!)).toBe(true);
   });
 
-  it('includes red-eye strength options in the prompt', () => {
+  it('focuses the red-eye prompt on pupil reflection retouching', () => {
     const redEye: AiRetouchGesture = {
       kind: 'red-eye',
       bounds: { x: 12, y: 14, w: 8, h: 8 },
-      pupilSize: 33,
-      darkenAmount: 72,
     };
-    expect(aiRetouchPrompt('red-eye', redEye)).toContain('Pupil size strength 33%, darken amount 72%');
+    const prompt = aiRetouchPrompt('red-eye', redEye);
+    expect(prompt).toContain('masked pupil reflection');
+    expect(prompt).toContain('Keep all non-target content pixel-faithful to the source');
+    expect(prompt).toContain('regardless of what that content depicts');
+    expect(prompt).toContain('Do not perform general image enhancement');
   });
 
   it('deep-copies editable mask metadata without structured cloning', () => {

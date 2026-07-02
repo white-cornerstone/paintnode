@@ -46,8 +46,6 @@ export interface AiRetouchMoveRequest {
 export interface AiRetouchRedEyeRequest {
   kind: 'red-eye';
   bounds: Rect;
-  pupilSize: number;
-  darkenAmount: number;
 }
 
 export type AiRetouchGesture =
@@ -89,8 +87,6 @@ export interface AiRetouchMaskMetadata {
   promptSeed: string;
   patchMode?: AiRetouchPatchMode;
   moveMode?: AiRetouchMoveMode;
-  pupilSize?: number;
-  darkenAmount?: number;
   healingSource?: AiRetouchPoint | null;
   referenceRect?: Rect | null;
   destinationRect?: Rect | null;
@@ -111,8 +107,6 @@ export function cloneAiRetouchMetadata(metadata: AiRetouchMaskMetadata | null | 
     promptSeed: metadata.promptSeed,
     patchMode: metadata.patchMode,
     moveMode: metadata.moveMode,
-    pupilSize: metadata.pupilSize,
-    darkenAmount: metadata.darkenAmount,
     healingSource: clonePoint(metadata.healingSource),
     referenceRect: cloneRect(metadata.referenceRect),
     destinationRect: cloneRect(metadata.destinationRect),
@@ -198,8 +192,7 @@ export function aiRetouchPrompt(toolId: AiRetouchToolId, gesture: AiRetouchGestu
         : 'Move the selected subject from the masked source area to the referenced destination area. Recompose the image by filling the original hole and blending the moved subject naturally at its new location.';
     }
     case 'red-eye': {
-      const opts = gesture.kind === 'red-eye' ? gesture : { pupilSize: 50, darkenAmount: 50 };
-      return `Correct red or white flash reflection inside the masked eye area. Preserve the iris shape, eyelids, natural catchlights, and face texture. Pupil size strength ${Math.round(opts.pupilSize)}%, darken amount ${Math.round(opts.darkenAmount)}%.`;
+      return 'Retouch only the masked pupil reflection to remove red-eye or white flash glare. Restore a natural dark pupil and iris detail inside the pupil only. Keep all non-target content pixel-faithful to the source, regardless of what that content depicts. Do not alter composition, crop, lighting, color, sharpness, grain, surrounding anatomy, background, text, graphics, objects, borders, overlays, or any other unmasked image content. Do not perform general image enhancement.';
     }
   }
 }

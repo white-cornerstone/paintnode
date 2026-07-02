@@ -309,8 +309,6 @@ export class EditorStore implements ToolHost {
   spongeMode = $state<'saturate' | 'desaturate'>('saturate');
   aiRetouchPatchMode = $state<AiRetouchPatchMode>('source');
   aiRetouchMoveMode = $state<AiRetouchMoveMode>('move');
-  aiRetouchPupilSize = $state(50);
-  aiRetouchDarkenAmount = $state(50);
   aiRetouchHealingSource = $state<{ x: number; y: number } | null>(null);
   lastAiRetouchTool = $state<AiRetouchToolId>('spot-healing');
   pendingAiRetouch = $state<AiRetouchRequest | null>(null);
@@ -808,9 +806,6 @@ export class EditorStore implements ToolHost {
     } else if (gesture.kind === 'move') {
       metadata.moveMode = gesture.mode;
       metadata.destinationRect = gesture.destination;
-    } else if (gesture.kind === 'red-eye') {
-      metadata.pupilSize = gesture.pupilSize;
-      metadata.darkenAmount = gesture.darkenAmount;
     }
     return metadata;
   }
@@ -977,8 +972,6 @@ export class EditorStore implements ToolHost {
       gesture = {
         kind: 'red-eye',
         bounds,
-        pupilSize: metadata.pupilSize ?? this.aiRetouchPupilSize,
-        darkenAmount: metadata.darkenAmount ?? this.aiRetouchDarkenAmount,
       };
     } else {
       gesture = {

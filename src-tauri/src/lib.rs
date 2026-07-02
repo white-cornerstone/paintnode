@@ -774,6 +774,31 @@ fn encode_rgba_png(image: image::RgbaImage, label: &str) -> Result<Vec<u8>, Stri
     Ok(bytes.into_inner())
 }
 
+fn read_png_bytes_resized_to_dimensions(
+    path: &Path,
+    expected_dimensions: (u32, u32),
+    label: &str,
+) -> Result<(Vec<u8>, (u32, u32), bool), String> {
+    let bytes = fs::read(path).map_err(|e| format!("Failed to read {label}: {e}"))?;
+    let dimensions = png_dimensions_from_bytes(&bytes)
+        .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
+    if dimensions == expected_dimensions {
+        return Ok((bytes, dimensions, false));
+    }
+
+    let image = decode_png_rgba(&bytes, label)?;
+    let resized = image::imageops::resize(
+        &image,
+        expected_dimensions.0,
+        expected_dimensions.1,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let resized_bytes = encode_rgba_png(resized, label)?;
+    fs::write(path, &resized_bytes)
+        .map_err(|e| format!("Failed to write resized {label} at {}: {e}", path.display()))?;
+    Ok((resized_bytes, dimensions, true))
+}
+
 fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
     let [r, g, b, a] = mask_pixel.0;
     let luminance = (u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19 + 128) / 256;
@@ -881,6 +906,54 @@ fn ai_retouch_editable_mask_png(
     }
 
     encode_rgba_png(out, "AI retouch editable mask")
+}
+
+fn ai_retouch_restore_protected_pixels_png(
+    source_png: &[u8],
+    candidate_png: &[u8],
+    mask_png: &[u8],
+) -> Result<Vec<u8>, String> {
+    let source = decode_png_rgba(source_png, "AI retouch source")?;
+    let candidate = decode_png_rgba(candidate_png, "AI retouch candidate")?;
+    let mask = decode_png_rgba(mask_png, "AI retouch mask")?;
+    let dimensions = source.dimensions();
+    if candidate.dimensions() != dimensions {
+        return Err(format!(
+            "AI retouch candidate must match source dimensions. Source is {}x{}, candidate is {}x{}.",
+            dimensions.0,
+            dimensions.1,
+            candidate.width(),
+            candidate.height()
+        ));
+    }
+    if mask.dimensions() != dimensions {
+        return Err(format!(
+            "AI retouch mask must match source dimensions. Source is {}x{}, mask is {}x{}.",
+            dimensions.0,
+            dimensions.1,
+            mask.width(),
+            mask.height()
+        ));
+    }
+
+    let mut out = image::RgbaImage::new(dimensions.0, dimensions.1);
+    for y in 0..dimensions.1 {
+        for x in 0..dimensions.0 {
+            let coverage = u32::from(mask_pixel_coverage(mask.get_pixel(x, y)));
+            let source_pixel = source.get_pixel(x, y).0;
+            let candidate_pixel = candidate.get_pixel(x, y).0;
+            let mut blended = [0_u8; 4];
+            for channel in 0..4 {
+                blended[channel] = ((u32::from(candidate_pixel[channel]) * coverage
+                    + u32::from(source_pixel[channel]) * (255 - coverage)
+                    + 127)
+                    / 255) as u8;
+            }
+            out.put_pixel(x, y, image::Rgba(blended));
+        }
+    }
+
+    encode_rgba_png(out, "AI retouch protected-pixel candidate")
 }
 
 fn file_has_png_signature(path: &Path) -> bool {
@@ -2049,6 +2122,7 @@ Requirements:
 - Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.
 - Do not create, edit, copy, verify, or delete files in the working directory.
 - PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, and black-mask/protected pixels will be discarded and preserved from `source.png` by the app.
+- Even so, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
 - You do not need to copy the generated PNG to `result.png`, composite the mask, restore protected pixels, crop, resize, write helper scripts, or prove exact pixel preservation. Those are deterministic PaintNode responsibilities.
 - Treat the generated candidate as an in-place retouch of `edit_target.png`, not as a new composition.
 - The visible original content inside the white mask is the thing to repair/remove, not protected content.
@@ -2816,27 +2890,38 @@ async fn generate_codex_retouch_image(
                 );
             };
 
-        let result_dimensions = png_dimensions(&staged_result_path)?;
-        if result_dimensions != source_dimensions {
-            return Err(format!(
-                "Codex generated a {}x{} AI retouch result, but this document needs exactly {}x{}. The result was not inserted because scaling it would create seams.",
-                result_dimensions.0,
-                result_dimensions.1,
-                source_dimensions.0,
-                source_dimensions.1
-            ));
+        let (generated_bytes, result_dimensions, resized_result) =
+            read_png_bytes_resized_to_dimensions(
+                &staged_result_path,
+                source_dimensions,
+                "AI retouch candidate",
+            )?;
+        if resized_result {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                &format!(
+                    "Resized AI retouch result from {}x{} to {}x{}",
+                    result_dimensions.0,
+                    result_dimensions.1,
+                    source_dimensions.0,
+                    source_dimensions.1
+                ),
+            );
         }
 
+        emit_codex_progress(&app, &run_id, "Restoring protected AI retouch pixels");
+        let protected_generated_bytes =
+            ai_retouch_restore_protected_pixels_png(&source_png, &generated_bytes, &mask_png)?;
+
         emit_codex_progress(&app, &run_id, "Preparing editable AI retouch mask");
-        let generated_bytes = fs::read(&staged_result_path)
-            .map_err(|e| format!("Failed to read AI retouch candidate: {e}"))?;
         let mask_data_url = Some(png_data_url(&ai_retouch_editable_mask_png(
             &source_png,
             &mask_png,
             AI_RETOUCH_MASK_GROW_RADIUS,
             AI_RETOUCH_MASK_FEATHER_RADIUS,
         )?)?);
-        let data_url = png_data_url(&generated_bytes)?;
+        let data_url = png_data_url(&protected_generated_bytes)?;
         let mut assets = Vec::new();
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving full AI retouch candidate to the project");
@@ -2844,7 +2929,7 @@ async fn generate_codex_retouch_image(
             let name = ai_retouch_asset_name(prompt.trim(), source_file_name.as_deref());
             let primary_asset = store_generated_png_asset(
                 &project_dir,
-                &generated_bytes,
+                &protected_generated_bytes,
                 name,
                 Some(prompt.trim().into()),
                 source_file_name,
@@ -4071,6 +4156,20 @@ mod tests {
     }
 
     #[test]
+    fn ai_retouch_restore_protected_pixels_preserves_black_mask_area() {
+        let source = test_rgba_png(2, 1, &[[10, 20, 30, 255], [40, 50, 60, 255]]);
+        let candidate = test_rgba_png(2, 1, &[[200, 10, 10, 255], [9, 9, 9, 255]]);
+        let mask = test_rgba_png(2, 1, &[[255, 255, 255, 255], [0, 0, 0, 255]]);
+
+        let result = ai_retouch_restore_protected_pixels_png(&source, &candidate, &mask)
+            .expect("protected-pixel candidate");
+        let image = decode_png_rgba(&result, "protected result").expect("decoded result");
+
+        assert_eq!(image.get_pixel(0, 0).0, [200, 10, 10, 255]);
+        assert_eq!(image.get_pixel(1, 0).0, [40, 50, 60, 255]);
+    }
+
+    #[test]
     fn ora_thumbnail_data_url_reads_embedded_thumbnail() {
         let job = TempJobDir::new("paintnode-ora-thumb-test").expect("temp dir");
         let path = job.path().join("document.ora");
@@ -4433,6 +4532,9 @@ mod tests {
         assert!(args[image_idx + 7].contains("red arrows, yellow callout boxes, annotation text"));
         assert!(args[image_idx + 7].contains("User retouch prompt:\nremove glare"));
         assert!(args[image_idx + 7].contains("PaintNode will apply `mask.png` after you finish"));
+        assert!(args[image_idx + 7]
+            .contains("visually identical to `source.png` everywhere `mask.png` is black"));
+        assert!(args[image_idx + 7].contains("Do not clean up, enhance, crop out, remove"));
         assert!(args[image_idx + 7].contains("Those are deterministic PaintNode responsibilities"));
         assert!(args[image_idx + 7].contains("generated image in Codex's generated-images cache"));
         assert!(!args[image_idx + 7].contains("Save the final exact-size PNG as `result.png`"));
@@ -4499,6 +4601,31 @@ mod tests {
                 .join("generated")
                 .join(file_name)
         ));
+    }
+
+    #[test]
+    fn read_png_bytes_resized_to_dimensions_overwrites_staged_result() {
+        let job = TempJobDir::new("paintnode-retouch-resize-test").expect("job dir");
+        let path = job.path().join("result.png");
+        let image = image::RgbaImage::from_fn(2, 2, |x, y| {
+            image::Rgba([
+                if x == 0 { 255 } else { 0 },
+                if y == 0 { 255 } else { 0 },
+                64,
+                255,
+            ])
+        });
+        let original = encode_rgba_png(image, "test image").expect("encode test png");
+        fs::write(&path, original).expect("write result");
+
+        let (bytes, original_dimensions, resized) =
+            read_png_bytes_resized_to_dimensions(&path, (1, 1), "AI retouch candidate")
+                .expect("resize");
+
+        assert_eq!(original_dimensions, (2, 2));
+        assert!(resized);
+        assert_eq!(png_dimensions_from_bytes(&bytes), Some((1, 1)));
+        assert_eq!(png_dimensions(&path).expect("path dimensions"), (1, 1));
     }
 
     #[test]

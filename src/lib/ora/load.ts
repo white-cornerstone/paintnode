@@ -17,8 +17,6 @@ function coerceAiRetouchMetadata(raw: unknown): AiRetouchMaskMetadata | null {
     promptSeed: typeof value.promptSeed === 'string' ? value.promptSeed : '',
     patchMode: value.patchMode === 'destination' ? 'destination' : value.patchMode === 'source' ? 'source' : undefined,
     moveMode: value.moveMode === 'extend' ? 'extend' : value.moveMode === 'move' ? 'move' : undefined,
-    pupilSize: typeof value.pupilSize === 'number' ? value.pupilSize : undefined,
-    darkenAmount: typeof value.darkenAmount === 'number' ? value.darkenAmount : undefined,
     healingSource: value.healingSource ?? null,
     referenceRect: value.referenceRect ?? null,
     destinationRect: value.destinationRect ?? null,

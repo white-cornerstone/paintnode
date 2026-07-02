@@ -53,7 +53,7 @@ export class AiRetouchTool implements Tool {
   }
 
   get usesBrushCursor(): boolean {
-    return this.id === 'spot-healing' || this.id === 'remove' || this.id === 'healing-brush';
+    return this.id === 'spot-healing' || this.id === 'remove' || this.id === 'healing-brush' || this.id === 'red-eye';
   }
 
   pointerDown(e: PointerInfo): void {
@@ -276,8 +276,6 @@ export class AiRetouchTool implements Tool {
     this.host.commitAiRetouchMaskGesture('red-eye', {
       kind: 'red-eye',
       bounds,
-      pupilSize: this.host.aiRetouchPupilSize,
-      darkenAmount: this.host.aiRetouchDarkenAmount,
     }, mask, this.mode);
   }
 

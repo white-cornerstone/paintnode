@@ -16,10 +16,11 @@
   const aiRetouchTools = ['spot-healing', 'remove', 'healing-brush', 'patch', 'content-aware-move', 'red-eye'];
   const aiRetouchBrushTools = ['spot-healing', 'remove', 'healing-brush'];
   // Tools that share the round-brush controls (size / hardness / strength).
-  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge', ...aiRetouchBrushTools];
+  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge', ...aiRetouchBrushTools, 'red-eye'];
   const usesBrush = $derived(brushTools.includes(tool));
   const isAiRetouch = $derived(aiRetouchTools.includes(tool));
   const isAiRetouchBrush = $derived(aiRetouchBrushTools.includes(tool));
+  const usesAiRetouchSelectionMode = $derived(isAiRetouchBrush || tool === 'red-eye');
   const effectiveSelectionMode = $derived(
     isAiRetouch ? effectiveAiRetouchMaskMode(editor.selectionMode, !!editor.activeAiRetouchMaskLayer) : editor.selectionMode,
   );
@@ -182,7 +183,7 @@
       <span class="divider"></span>
 
       {#if usesBrush}
-        {#if isAiRetouchBrush}
+        {#if usesAiRetouchSelectionMode}
           {@render selectionModeButtons()}
         {/if}
         <label class="opt">
@@ -191,12 +192,14 @@
           <input type="number" min="1" max="2000" bind:value={editor.brushSize} class="num" />
           <span class="unit">px</span>
         </label>
-        <label class="opt">
-          Hardness
-          <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
-          <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
-        </label>
-        {#if !isAiRetouchBrush}
+        {#if tool !== 'red-eye'}
+          <label class="opt">
+            Hardness
+            <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
+            <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
+          </label>
+        {/if}
+        {#if !isAiRetouchBrush && tool !== 'red-eye'}
           <label class="opt">
             {strengthLabel}
             <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
@@ -211,6 +214,8 @@
           {@render toolInfo('spot-healing', 'Paint over small flaws to create or refine an AI mask. Use the Contextual Task Bar to run AI Retouch.')}
         {:else if tool === 'remove'}
           {@render toolInfo('remove', 'Brush over or loop around the distraction to create or refine an AI mask. Use Add/Subtract modes to adjust it before running.')}
+        {:else if tool === 'red-eye'}
+          {@render toolInfo('red-eye', 'Click or drag around the pupil reflection to create or refine an AI mask. Run from the Contextual Task Bar.')}
         {:else if tool === 'clone'}
           <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
           {@render toolInfo('clone', 'Alt-click to set the source, then paint.')}
@@ -254,19 +259,6 @@
       </div>
       <button onclick={() => editor.clearActiveAiRetouchMask()} disabled={!editor.activeAiRetouchMaskLayer}>Clear Mask</button>
       {@render toolInfo('content-aware-move', 'Draw or refine a subject mask, then drag inside it to place or extend it. Run from the Contextual Task Bar.')}
-    {:else if isAiRetouch && tool === 'red-eye'}
-      {@render selectionModeButtons()}
-      <label class="opt">
-        Pupil Size
-        <input type="range" min="1" max="100" bind:value={editor.aiRetouchPupilSize} />
-        <span class="val">{Math.round(editor.aiRetouchPupilSize)}%</span>
-      </label>
-      <label class="opt">
-        Darken
-        <input type="range" min="0" max="100" bind:value={editor.aiRetouchDarkenAmount} />
-        <span class="val">{Math.round(editor.aiRetouchDarkenAmount)}%</span>
-      </label>
-      {@render toolInfo('red-eye', 'Click or drag around an eye reflection to create or refine an AI mask. Run from the Contextual Task Bar.')}
     {:else if tool === 'marquee'}
       {@render selectionModeButtons()}
       <label class="opt">
