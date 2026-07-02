@@ -92,6 +92,29 @@ export interface AiRetouchMaskMetadata {
   destinationRect?: Rect | null;
 }
 
+function clonePoint(point: AiRetouchPoint | null | undefined): AiRetouchPoint | null | undefined {
+  return point ? { x: point.x, y: point.y } : point;
+}
+
+function cloneRect(rect: Rect | null | undefined): Rect | null | undefined {
+  return rect ? { x: rect.x, y: rect.y, w: rect.w, h: rect.h } : rect;
+}
+
+export function cloneAiRetouchMetadata(metadata: AiRetouchMaskMetadata | null | undefined): AiRetouchMaskMetadata | null {
+  if (!metadata) return null;
+  return {
+    toolId: metadata.toolId,
+    promptSeed: metadata.promptSeed,
+    patchMode: metadata.patchMode,
+    moveMode: metadata.moveMode,
+    pupilSize: metadata.pupilSize,
+    darkenAmount: metadata.darkenAmount,
+    healingSource: clonePoint(metadata.healingSource),
+    referenceRect: cloneRect(metadata.referenceRect),
+    destinationRect: cloneRect(metadata.destinationRect),
+  };
+}
+
 export const AI_RETOUCH_TOOL_NAMES: Record<AiRetouchToolId, string> = {
   'spot-healing': 'Spot Healing Brush',
   remove: 'Remove',

@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   aiRetouchPrompt,
+  cloneAiRetouchMetadata,
   combineRetouchMask,
   makeRectMask,
   maskBounds,
@@ -209,5 +210,20 @@ describe('AI retouch request helpers', () => {
       darkenAmount: 72,
     };
     expect(aiRetouchPrompt('red-eye', redEye)).toContain('Pupil size strength 33%, darken amount 72%');
+  });
+
+  it('deep-copies editable mask metadata without structured cloning', () => {
+    const original = {
+      toolId: 'healing-brush',
+      promptSeed: 'heal',
+      healingSource: { x: 4, y: 5 },
+      referenceRect: { x: 1, y: 2, w: 3, h: 4 },
+      destinationRect: null,
+    } as const;
+
+    const copy = cloneAiRetouchMetadata(original)!;
+    expect(copy).toEqual(original);
+    expect(copy.healingSource).not.toBe(original.healingSource);
+    expect(copy.referenceRect).not.toBe(original.referenceRect);
   });
 });

@@ -56,6 +56,7 @@ import { AiRetouchTool } from '../engine/tools/AiRetouchTool';
 import {
   AI_RETOUCH_TOOL_NAMES,
   aiRetouchPrompt,
+  cloneAiRetouchMetadata,
   cloneMask,
   combineRetouchMask,
   cropReference,
@@ -773,7 +774,7 @@ export class EditorStore implements ToolHost {
 
   private restoreAiRetouchMaskLayer(layer: Layer, pixels: ImageData, metadata: AiRetouchMaskMetadata | null): void {
     layer.ctx.putImageData(pixels, 0, 0);
-    layer.aiRetouch = metadata ? structuredClone(metadata) : null;
+    layer.aiRetouch = cloneAiRetouchMetadata(metadata);
     layer.touch();
     this.bump();
     this.invalidate();
@@ -807,7 +808,7 @@ export class EditorStore implements ToolHost {
     }
 
     const beforePixels = activeMask.ctx.getImageData(0, 0, activeMask.width, activeMask.height);
-    const beforeMetadata = activeMask.aiRetouch ? structuredClone(activeMask.aiRetouch) : null;
+    const beforeMetadata = cloneAiRetouchMetadata(activeMask.aiRetouch);
     const nextMask = combineRetouchMask(activeMask.canvas, mask, mode, doc.width, doc.height);
     activeMask.ctx.clearRect(0, 0, activeMask.width, activeMask.height);
     if (nextMask) activeMask.ctx.drawImage(nextMask, 0, 0, doc.width, doc.height);
@@ -815,7 +816,7 @@ export class EditorStore implements ToolHost {
     activeMask.name = `AI Mask: ${AI_RETOUCH_TOOL_NAMES[toolId]}`;
     activeMask.touch();
     const afterPixels = activeMask.ctx.getImageData(0, 0, activeMask.width, activeMask.height);
-    const afterMetadata = structuredClone(metadata);
+    const afterMetadata = cloneAiRetouchMetadata(metadata);
     this.history.push({
       label: 'AI Retouch Mask',
       undo: () => this.restoreAiRetouchMaskLayer(activeMask, beforePixels, beforeMetadata),
@@ -832,7 +833,7 @@ export class EditorStore implements ToolHost {
       this.flash('Select an AI retouch mask first');
       return;
     }
-    const before = structuredClone(layer.aiRetouch);
+    const before = cloneAiRetouchMetadata(layer.aiRetouch)!;
     const after: AiRetouchMaskMetadata = {
       ...before,
       ...updates,
@@ -844,12 +845,12 @@ export class EditorStore implements ToolHost {
     this.history.push({
       label: 'AI Retouch Mask Reference',
       undo: () => {
-        layer.aiRetouch = structuredClone(before);
+        layer.aiRetouch = cloneAiRetouchMetadata(before);
         this.bump();
         this.invalidate();
       },
       redo: () => {
-        layer.aiRetouch = structuredClone(after);
+        layer.aiRetouch = cloneAiRetouchMetadata(after);
         this.bump();
         this.invalidate();
       },
@@ -1249,7 +1250,7 @@ export class EditorStore implements ToolHost {
       nl.maskLayerId = l.maskLayerId;
       nl.kind = l.kind;
       nl.text = l.text ? cloneModel(l.text) : null;
-      nl.aiRetouch = l.aiRetouch ? structuredClone(l.aiRetouch) : null;
+      nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
       paint(nl.ctx, l);
       nl.touch();
       return nl;
@@ -1276,7 +1277,7 @@ export class EditorStore implements ToolHost {
     copy.maskLayerId = layer.maskLayerId;
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
-    copy.aiRetouch = layer.aiRetouch ? structuredClone(layer.aiRetouch) : null;
+    copy.aiRetouch = cloneAiRetouchMetadata(layer.aiRetouch);
     copy.ctx.drawImage(layer.canvas, 0, 0);
     copy.pixelRev = layer.pixelRev;
     return copy;

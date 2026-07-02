@@ -1,4 +1,4 @@
-import type { AiRetouchMaskMetadata } from './aiRetouch';
+import { cloneAiRetouchMetadata, type AiRetouchMaskMetadata } from './aiRetouch';
 import type { BlendMode, Rect } from './types';
 import { createCanvas, ctx2d, uid } from './types';
 import { cloneModel, type TextModel } from './text/model';
@@ -88,7 +88,7 @@ export class Layer {
     copy.maskLayerId = this.maskLayerId;
     copy.kind = this.kind;
     copy.text = this.text ? cloneModel(this.text) : null;
-    copy.aiRetouch = this.aiRetouch ? structuredClone(this.aiRetouch) : null;
+    copy.aiRetouch = cloneAiRetouchMetadata(this.aiRetouch);
     copy.ctx.drawImage(this.canvas, 0, 0);
     copy.touch();
     return copy;
