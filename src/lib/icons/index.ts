@@ -59,6 +59,7 @@ export { default as OpenFolder } from '@fluentui/svg-icons/icons/open_folder_24_
 export { default as Open } from '@fluentui/svg-icons/icons/open_24_regular.svg?raw';
 export { default as ArrowSync } from '@fluentui/svg-icons/icons/arrow_sync_24_regular.svg?raw';
 export { default as Link } from '@fluentui/svg-icons/icons/link_24_regular.svg?raw';
+export { default as LinkDismiss } from '@fluentui/svg-icons/icons/link_dismiss_24_regular.svg?raw';
 export { default as SlideSize } from '@fluentui/svg-icons/icons/slide_size_24_regular.svg?raw';
 export { default as ChevronDoubleLeft } from '@fluentui/svg-icons/icons/chevron_double_left_20_regular.svg?raw';
 export { default as ChevronDoubleRight } from '@fluentui/svg-icons/icons/chevron_double_right_20_regular.svg?raw';

@@ -514,30 +514,47 @@ export class EditorStore implements ToolHost {
     return { r: data[0], g: data[1], b: data[2] };
   }
   setLayerVisible(layer: Layer, visible: boolean): void {
-    const doc = this.doc;
-    if (!doc) return;
-    const mask = doc.linkedMaskFor(layer);
-    const changes = [layer, ...(mask ? [mask] : [])];
-    if (changes.every((item) => item.visible === visible)) return;
-    if (changes.length === 0) return;
-    const before = changes.map((item) => ({ layer: item, visible: item.visible }));
-    doc.setLayerVisibleWithLinkedMask(layer, visible);
-    const after = changes.map((item) => ({ layer: item, visible: item.visible }));
+    if (layer.visible === visible) return;
+    const before = layer.visible;
+    layer.visible = visible;
     this.history.push({
       label: 'Layer Visibility',
       undo: () => {
-        for (const item of before) item.layer.visible = item.visible;
+        layer.visible = before;
         this.bump();
         this.invalidate();
       },
       redo: () => {
-        for (const item of after) item.layer.visible = item.visible;
+        layer.visible = visible;
         this.bump();
         this.invalidate();
       },
     });
     this.bump();
     this.invalidate();
+  }
+  setLayerMaskEnabled(layer: Layer, enabled: boolean): void {
+    if (!layer.maskLayerId || layer.maskEnabled === enabled) return;
+    const before = layer.maskEnabled;
+    layer.maskEnabled = enabled;
+    this.history.push({
+      label: enabled ? 'Enable Layer Mask' : 'Disable Layer Mask',
+      undo: () => {
+        layer.maskEnabled = before;
+        this.bump();
+        this.invalidate();
+      },
+      redo: () => {
+        layer.maskEnabled = enabled;
+        this.bump();
+        this.invalidate();
+      },
+    });
+    this.bump();
+    this.invalidate();
+  }
+  toggleLayerMaskEnabled(layer: Layer): void {
+    this.setLayerMaskEnabled(layer, !layer.maskEnabled);
   }
   toggleLayerVisible(layer: Layer): void {
     this.setLayerVisible(layer, !layer.visible);
@@ -1268,6 +1285,7 @@ export class EditorStore implements ToolHost {
       nl.sourceAssetId = l.sourceAssetId;
       nl.sourcePath = l.sourcePath;
       nl.maskLayerId = l.maskLayerId;
+      nl.maskEnabled = l.maskEnabled;
       nl.kind = l.kind;
       nl.text = l.text ? cloneModel(l.text) : null;
       nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
@@ -1295,6 +1313,7 @@ export class EditorStore implements ToolHost {
     copy.sourceAssetId = layer.sourceAssetId;
     copy.sourcePath = layer.sourcePath;
     copy.maskLayerId = layer.maskLayerId;
+    copy.maskEnabled = layer.maskEnabled;
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
     copy.aiRetouch = cloneAiRetouchMetadata(layer.aiRetouch);
@@ -2432,7 +2451,10 @@ export class EditorStore implements ToolHost {
     if (maskLayer && maskSource) {
       maskLayer.ctx.clearRect(0, 0, maskLayer.width, maskLayer.height);
       maskLayer.ctx.drawImage(maskSource, 0, 0, maskSw, maskSh, 0, 0, doc.width, doc.height);
+      maskLayer.visible = false;
       maskLayer.touch();
+    } else if (maskLayer) {
+      maskLayer.visible = false;
     }
     const layer = new Layer(doc.width, doc.height, `AI Retouch: ${request.toolName}`, undefined, 0, 0);
     layer.sourceAssetId = sourceMeta.assetId ?? null;

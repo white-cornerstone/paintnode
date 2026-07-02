@@ -50,26 +50,6 @@ describe('PaintDocument linked AI retouch masks', () => {
     expect(doc.linkedParentFor(mask)).toBe(result);
   });
 
-  it('toggles parent and linked mask visibility together', () => {
-    const { doc, mask, result } = linkedDocument();
-
-    doc.setLayerVisibleWithLinkedMask(result, false);
-    expect(result.visible).toBe(false);
-    expect(mask.visible).toBe(false);
-
-    doc.setLayerVisibleWithLinkedMask(result, true);
-    expect(result.visible).toBe(true);
-    expect(mask.visible).toBe(true);
-  });
-
-  it('lets child mask visibility remain independent', () => {
-    const { doc, mask, result } = linkedDocument();
-
-    doc.setLayerVisibleWithLinkedMask(mask, false);
-    expect(mask.visible).toBe(false);
-    expect(result.visible).toBe(true);
-  });
-
   it('removes linked masks when deleting their parent result layer', () => {
     const { doc, base, mask, result } = linkedDocument();
 
@@ -90,6 +70,7 @@ describe('PaintDocument linked AI retouch masks', () => {
 
   it('duplicates linked parent and mask as a new linked pair', () => {
     const { doc, mask, result } = linkedDocument();
+    result.maskEnabled = false;
 
     const copy = doc.duplicateLinked(result.id)!;
     const copiedMask = doc.linkedMaskFor(copy);
@@ -98,6 +79,7 @@ describe('PaintDocument linked AI retouch masks', () => {
     expect(copiedMask).not.toBeNull();
     expect(copiedMask).not.toBe(mask);
     expect(copy.maskLayerId).toBe(copiedMask!.id);
+    expect(copy.maskEnabled).toBe(false);
     expect(doc.activeLayerId).toBe(copy.id);
   });
 });

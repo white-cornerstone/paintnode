@@ -279,6 +279,7 @@ export class Viewport {
       if (layer.kind !== 'ai-retouch-mask' || !layer.visible || layer.opacity <= 0) continue;
       const linkedParent = doc.linkedParentFor(layer);
       if (linkedParent && !linkedParent.visible) continue;
+      if (linkedParent && !linkedParent.maskEnabled) continue;
       drawRetouchOverlay(layer.canvas, 0.42 * layer.opacity);
     }
 

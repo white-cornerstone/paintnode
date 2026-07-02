@@ -41,6 +41,7 @@ function buildStackXml(
       l.sourceAssetId ? `paintnode-source-asset-id="${escapeXml(l.sourceAssetId)}"` : '',
       l.sourcePath ? `paintnode-source-path="${escapeXml(l.sourcePath)}"` : '',
       l.maskLayerId ? `paintnode-mask-layer-id="${escapeXml(l.maskLayerId)}"` : '',
+      l.maskLayerId && !l.maskEnabled ? 'paintnode-mask-enabled="false"' : '',
       l.kind !== 'raster' ? `paintnode-layer-kind="${escapeXml(l.kind)}"` : '',
       textPath ? `paintnode-text-data="${textPath}"` : '',
       retouchPath ? `paintnode-ai-retouch-data="${retouchPath}"` : '',

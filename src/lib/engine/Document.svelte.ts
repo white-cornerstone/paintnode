@@ -62,12 +62,6 @@ export class PaintDocument {
     return linkedMask ? [layer.id, linkedMask.id] : [layer.id];
   }
 
-  setLayerVisibleWithLinkedMask(layer: Layer, visible: boolean): void {
-    layer.visible = visible;
-    const mask = this.linkedMaskFor(layer);
-    if (mask) mask.visible = visible;
-  }
-
   newLayer(name?: string): Layer {
     const n = name ?? `Layer ${this.layers.length + 1}`;
     const layer = new Layer(this.width, this.height, n);
@@ -139,7 +133,9 @@ export class PaintDocument {
     const layerCopy = layer.clone();
     const maskCopy = linkedMask.clone(linkedMask.name);
     layerCopy.maskLayerId = maskCopy.id;
+    layerCopy.maskEnabled = layer.maskEnabled;
     maskCopy.maskLayerId = null;
+    maskCopy.maskEnabled = true;
 
     const next = this.layers.slice();
     next.splice(idx + 1, 0, maskCopy, layerCopy);

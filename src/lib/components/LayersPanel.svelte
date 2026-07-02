@@ -7,7 +7,7 @@
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, LinkDismiss, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
   import type { AnnotationItem } from '../engine/annotations';
 
   type LayerPanelRow =
@@ -147,6 +147,10 @@
   }
   function linkedMaskLabel(row: LayerPanelRow): string {
     return row.kind === 'linked-mask' ? `Linked mask for ${row.parent.name}` : 'AI retouch mask layer';
+  }
+  function linkedMaskToggleLabel(row: LayerPanelRow): string {
+    if (row.kind !== 'linked-mask') return '';
+    return row.parent.maskEnabled ? `Disable linked mask for ${row.parent.name}` : `Enable linked mask for ${row.parent.name}`;
   }
 
   function reorderDraggedLayer(displaySlot: number | null) {
@@ -428,13 +432,18 @@
         onpointercancel={clearDrag}
       >
         {#if row.kind === 'linked-mask'}
-          <span
-            class="linked-indent"
-            use:tooltip={{ text: linkedMaskLabel(row), placement: 'right' }}
-            aria-hidden="true"
+          <button
+            class="linked-toggle"
+            class:disabled-mask={!row.parent.maskEnabled}
+            use:tooltip={{ text: linkedMaskToggleLabel(row), placement: 'right' }}
+            aria-label={linkedMaskToggleLabel(row)}
+            onclick={(e) => {
+              e.stopPropagation();
+              editor.toggleLayerMaskEnabled(row.parent);
+            }}
           >
-            <Icon svg={Link} size={13} />
-          </span>
+            <Icon svg={row.parent.maskEnabled ? Link : LinkDismiss} size={13} />
+          </button>
         {/if}
         <button
           class="eye"
@@ -735,13 +744,19 @@
     color: var(--text-dim);
     opacity: 0.5;
   }
-  .linked-indent {
+  .linked-toggle {
     flex: none;
     display: grid;
     place-items: center;
     width: 16px;
     height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
     color: var(--text-dim);
+  }
+  .linked-toggle.disabled-mask {
+    color: var(--danger);
   }
   .thumb-wrap {
     position: relative;

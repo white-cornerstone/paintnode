@@ -23,7 +23,7 @@ function drawLayer(target: CanvasRenderingContext2D, layer: Layer, src: CanvasIm
 }
 
 function layerMaskFor(doc: PaintDocument, layer: Layer): Layer | null {
-  if (!layer.maskLayerId) return null;
+  if (!layer.maskLayerId || !layer.maskEnabled) return null;
   const mask = doc.layers.find((item) => item.id === layer.maskLayerId);
   return mask?.kind === 'ai-retouch-mask' ? mask : null;
 }
