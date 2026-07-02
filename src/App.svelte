@@ -52,6 +52,7 @@
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { isDesktop, quitApplication } from './lib/integrations/desktop';
   import { project } from './lib/state/project.svelte';
+  import { settings } from './lib/state/settings.svelte';
   import { ui } from './lib/state/ui.svelte';
   import { workflow } from './lib/state/workflow.svelte';
   import { runEditableMenuAction } from './lib/state/editing';
@@ -75,6 +76,7 @@
   const loadAiRetouchDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
   const loadAiDecoupleDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
+  const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
   const loadFontEmbedDialog: LazyComponentLoader = () => import('./lib/components/FontEmbedDialog.svelte');
   const loadRasterizeTypeDialog: LazyComponentLoader = () => import('./lib/components/RasterizeTypeDialog.svelte');
   const loadSaveChangesDialog: LazyComponentLoader = () => import('./lib/components/SaveChangesDialog.svelte');
@@ -466,6 +468,9 @@
       case 'app:help-about':
         ui.open('about');
         break;
+      case 'app:settings':
+        ui.open('settings');
+        break;
       case 'app:quit':
         void requestApplicationClose();
         break;
@@ -516,10 +521,19 @@
     await openDocumentPaths(paths);
   }
 
+  $effect(() => {
+    if (!settings.value.general.autosaveEnabled) return;
+    const autosave = window.setInterval(
+      () => void autosaveOpenDocuments(),
+      settings.value.general.autosaveIntervalMs,
+    );
+    return () => window.clearInterval(autosave);
+  });
+
   onMount(() => {
     const disposeKeyboard = installKeyboard();
-    void project.restore();
-    const autosave = window.setInterval(() => void autosaveOpenDocuments(), 60_000);
+    ui.contextualTaskBarVisible = settings.value.general.showContextualTaskBarOnStartup;
+    if (settings.value.general.reopenLastProject) void project.restore();
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
     const unlistenNativeDrops: UnlistenFn[] = [];
@@ -566,7 +580,6 @@
       unlistenNativeDrops.forEach((unlisten) => unlisten());
       window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('paintnode:show-properties-panel', showPropertiesPanel);
-      window.clearInterval(autosave);
       disposeKeyboard();
     };
   });
@@ -776,6 +789,8 @@
   {@render lazyDialog(loadAiDecoupleDialog)}
 {:else if ui.dialog === 'stockImages'}
   {@render lazyDialog(loadStockImagesDialog)}
+{:else if ui.dialog === 'settings'}
+  {@render lazyDialog(loadSettingsDialog)}
 {/if}
 
 {#if ui.fontEmbed}

@@ -44,6 +44,30 @@ export class PaintDocument {
     if (this.indexOf(id) >= 0) this.activeLayerId = id;
   }
 
+  linkedMaskFor(layer: Layer): Layer | null {
+    if (!layer.maskLayerId) return null;
+    const mask = this.layers.find((item) => item.id === layer.maskLayerId);
+    return mask?.kind === 'ai-retouch-mask' ? mask : null;
+  }
+
+  linkedParentFor(mask: Layer): Layer | null {
+    if (mask.kind !== 'ai-retouch-mask') return null;
+    return this.layers.find((item) => item.maskLayerId === mask.id) ?? null;
+  }
+
+  linkedLayerDeletionIds(id: string): string[] {
+    const layer = this.layers.find((item) => item.id === id);
+    if (!layer) return [];
+    const linkedMask = this.linkedMaskFor(layer);
+    return linkedMask ? [layer.id, linkedMask.id] : [layer.id];
+  }
+
+  setLayerVisibleWithLinkedMask(layer: Layer, visible: boolean): void {
+    layer.visible = visible;
+    const mask = this.linkedMaskFor(layer);
+    if (mask) mask.visible = visible;
+  }
+
   newLayer(name?: string): Layer {
     const n = name ?? `Layer ${this.layers.length + 1}`;
     const layer = new Layer(this.width, this.height, n);
@@ -79,6 +103,21 @@ export class PaintDocument {
     }
   }
 
+  removeLinked(id: string): void {
+    const ids = new Set(this.linkedLayerDeletionIds(id));
+    if (ids.size === 0) return;
+    const firstRemoved = this.layers.findIndex((layer) => ids.has(layer.id));
+    const next = this.layers.filter((layer) => !ids.has(layer.id));
+    for (const layer of next) {
+      if (layer.maskLayerId && ids.has(layer.maskLayerId)) layer.maskLayerId = null;
+    }
+    this.layers = next;
+    if (this.activeLayerId && ids.has(this.activeLayerId)) {
+      const fallback = next[Math.min(Math.max(0, firstRemoved), next.length - 1)];
+      this.activeLayerId = fallback ? fallback.id : null;
+    }
+  }
+
   duplicate(id: string): Layer | null {
     const idx = this.indexOf(id);
     if (idx < 0) return null;
@@ -88,6 +127,25 @@ export class PaintDocument {
     this.layers = next;
     this.activeLayerId = copy.id;
     return copy;
+  }
+
+  duplicateLinked(id: string): Layer | null {
+    const idx = this.indexOf(id);
+    if (idx < 0) return null;
+    const layer = this.layers[idx];
+    const linkedMask = this.linkedMaskFor(layer);
+    if (!linkedMask) return this.duplicate(id);
+
+    const layerCopy = layer.clone();
+    const maskCopy = linkedMask.clone(linkedMask.name);
+    layerCopy.maskLayerId = maskCopy.id;
+    maskCopy.maskLayerId = null;
+
+    const next = this.layers.slice();
+    next.splice(idx + 1, 0, maskCopy, layerCopy);
+    this.layers = next;
+    this.activeLayerId = layerCopy.id;
+    return layerCopy;
   }
 
   /** Move a layer by delta in stack order (+1 = up/toward top). */

@@ -6,6 +6,8 @@
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { settings } from '../state/settings.svelte';
+  import { DEFAULT_CUSTOM_GENERATOR_ARGS, type AiProvider } from '../state/settings';
   import {
     isDesktop,
     generateCodexFillImage,
@@ -18,38 +20,15 @@
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type Provider = 'codex' | 'custom';
+  type Provider = AiProvider;
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  const KEY = 'paintnode.generator';
-  const DEFAULT_ARGS = '{prompt}\n--output\n{output}';
 
-  function loadCfg(): { provider: Provider; codexBin: string; bin: string; argsText: string } {
-    try {
-      const raw = localStorage.getItem(KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const provider = parsed.provider ?? (parsed.bin ? 'custom' : 'codex');
-        return {
-          provider: provider === 'custom' ? 'custom' : 'codex',
-          codexBin: '',
-          bin: '',
-          argsText: DEFAULT_ARGS,
-          ...parsed,
-        };
-      }
-    } catch {
-      /* ignore */
-    }
-    return { provider: 'codex', codexBin: '', bin: '', argsText: DEFAULT_ARGS };
-  }
-  const init = loadCfg();
-
-  let provider = $state<Provider>(init.provider);
-  let codexBin = $state(init.codexBin);
-  let bin = $state(init.bin);
-  let argsText = $state(init.argsText);
+  let provider = $state<Provider>(settings.value.ai.provider);
+  let codexBin = $state(settings.value.ai.codexBin);
+  let bin = $state(settings.value.ai.customBin);
+  let argsText = $state(settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   let prompt = $state('');
   let busy = $state(false);
   let error = $state('');
@@ -105,7 +84,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
   }
 
   async function saveFillDebugInputs(fillInput: Awaited<ReturnType<typeof editor.prepareGenerativeFillInput>>, generationPrompt: string): Promise<string | null> {
-    if (!fillInput || !project.path) return null;
+    if (!settings.value.workspace.keepAiRunInputs || !fillInput || !project.path) return null;
     const dir = `.paintnode/codex-runs/fill-inputs-${Date.now()}`;
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: fillInput.sourcePng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: fillInput.editTargetPng });
@@ -147,11 +126,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       error = 'Mask-guided generative fill is currently available with Local Codex only.';
       return;
     }
-    try {
-      localStorage.setItem(KEY, JSON.stringify({ provider, codexBin, bin, argsText }));
-    } catch {
-      /* ignore */
-    }
+    settings.update({ ai: { provider, codexBin, customBin: bin, customArgsText: argsText } });
     const userPrompt = prompt.trim();
     busy = true;
     let fillDebugDir: string | null = null;
@@ -181,13 +156,30 @@ Canvas size requirement: generate the image to match the current PaintNode canva
         provider === 'codex'
           ? fillInput
             ? await generateCodexFillImage(
-                { bin: codexBin, projectPath: null, runId },
+                {
+                  bin: codexBin,
+                  projectPath: null,
+                  runId,
+                  model: settings.value.ai.model,
+                  reasoningEffort: settings.value.ai.reasoningEffort,
+                  serviceTier: settings.value.ai.serviceTier,
+                },
                 fillInput.sourcePng,
                 fillInput.editTargetPng,
                 fillInput.maskPng,
                 generationPrompt,
               )
-            : await generateCodexImage({ bin: codexBin, projectPath: project.path, runId }, generationPrompt)
+            : await generateCodexImage(
+                {
+                  bin: codexBin,
+                  projectPath: project.path,
+                  runId,
+                  model: settings.value.ai.model,
+                  reasoningEffort: settings.value.ai.reasoningEffort,
+                  serviceTier: settings.value.ai.serviceTier,
+                },
+                generationPrompt,
+              )
           : null;
       if (generated?.asset) await project.refresh();
       const dataUrl =

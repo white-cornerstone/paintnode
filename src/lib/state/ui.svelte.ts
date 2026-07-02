@@ -9,7 +9,8 @@ export type DialogId =
   | 'aiGenerate'
   | 'aiRetouch'
   | 'aiDecouple'
-  | 'stockImages';
+  | 'stockImages'
+  | 'settings';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';

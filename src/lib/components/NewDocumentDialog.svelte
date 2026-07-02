@@ -4,6 +4,7 @@
   import { editor } from '../state/editor.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { project } from '../state/project.svelte';
+  import { settings } from '../state/settings.svelte';
   import { clamp } from '../engine/types';
   import { isDesktop } from '../integrations/desktop';
   import { Board, FolderAdd, ImageAdd } from '../icons';
@@ -31,6 +32,14 @@
   let tab = $state<Tab>('image');
 
   const imagePresets: ImagePreset[] = [
+    {
+      id: 'default',
+      name: 'Default Canvas',
+      meta: `${settings.value.workspace.defaultCanvasWidth} x ${settings.value.workspace.defaultCanvasHeight} px`,
+      width: settings.value.workspace.defaultCanvasWidth,
+      height: settings.value.workspace.defaultCanvasHeight,
+      bg: settings.value.workspace.defaultBackground,
+    },
     { id: 'desktop', name: 'Desktop Canvas', meta: '1280 x 800 px', width: 1280, height: 800, bg: 'transparent' },
     { id: 'hd', name: 'HD Screen', meta: '1920 x 1080 px', width: 1920, height: 1080, bg: 'transparent' },
     { id: 'square', name: 'Square Image', meta: '1024 x 1024 px', width: 1024, height: 1024, bg: 'transparent' },

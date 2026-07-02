@@ -6,6 +6,7 @@
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { settings } from '../state/settings.svelte';
   import { generateCodexRetouchImage, isDesktop, writeProjectDocumentPath } from '../integrations/desktop';
   import { Copy } from '../icons';
 
@@ -14,16 +15,7 @@
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  const KEY = 'paintnode.aiRetouch';
-  const init = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(KEY) || '{}') as { codexBin?: string };
-    } catch {
-      return {};
-    }
-  })();
-
-  let codexBin = $state(init.codexBin ?? '');
+  let codexBin = $state(settings.value.ai.codexBin);
   let prompt = $state(editor.pendingAiRetouch?.prompt ?? '');
   let busy = $state(false);
   let error = $state('');
@@ -76,7 +68,7 @@
   }
 
   async function saveDebugInputs(bytes: NonNullable<Awaited<ReturnType<typeof editor.prepareAiRetouchInput>>>, requestPrompt: string): Promise<string | null> {
-    if (!project.path || !request) return null;
+    if (!settings.value.workspace.keepAiRunInputs || !project.path || !request) return null;
     const dir = `.paintnode/codex-runs/retouch-inputs-${Date.now()}`;
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: bytes.sourcePng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
@@ -108,11 +100,7 @@
       error = 'Enter a retouch prompt.';
       return;
     }
-    try {
-      localStorage.setItem(KEY, JSON.stringify({ codexBin }));
-    } catch {
-      /* ignore */
-    }
+    settings.update({ ai: { codexBin } });
     busy = true;
     let debugDir: string | null = null;
     progress = 'Preparing AI retouch inputs...';
@@ -135,7 +123,14 @@
       debugDir = await saveDebugInputs(bytes, prompt.trim());
       if (debugDir) progress = `Saved retouch inputs: ${debugDir}`;
       const generated = await generateCodexRetouchImage(
-        { bin: codexBin, projectPath: project.path, runId },
+        {
+          bin: codexBin,
+          projectPath: project.path,
+          runId,
+          model: settings.value.ai.model,
+          reasoningEffort: settings.value.ai.reasoningEffort,
+          serviceTier: settings.value.ai.serviceTier,
+        },
         bytes.sourcePng,
         bytes.editTargetPng,
         bytes.maskPng,

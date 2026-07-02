@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
+  import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
   import { openCommand, openDocumentFiles } from '../state/commands';
   import { filesFromDataTransfer, hasFileDrag } from '../io';
@@ -31,6 +32,10 @@
   $effect(() => {
     editor.textEdit;
     viewTick = performance.now();
+  });
+  $effect(() => {
+    settings.value.workspace.showTransparencyChecker;
+    vp?.invalidate();
   });
 
   let spaceDown = $state(false);
@@ -593,6 +598,7 @@
       () => editor.getActiveStroke(),
       () => editor.getSelection(),
       () => editor.getAiRetouchPreview(),
+      () => settings.value.workspace.showTransparencyChecker,
     );
     vp.onAfterRender = () => {
       viewportFrame += 1;

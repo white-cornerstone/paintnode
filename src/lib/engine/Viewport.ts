@@ -44,6 +44,7 @@ export class Viewport {
   private getStroke: () => ActiveStroke | null;
   private getSelection: () => Selection | null;
   private getRetouchPreview: () => AiRetouchPreview | null;
+  private getShowTransparencyChecker: () => boolean;
   private dashOffset = 0;
   private scratch: HTMLCanvasElement;
   private retouchScratch: HTMLCanvasElement;
@@ -60,6 +61,7 @@ export class Viewport {
     getStroke: () => ActiveStroke | null,
     getSelection: () => Selection | null,
     getRetouchPreview: () => AiRetouchPreview | null = () => null,
+    getShowTransparencyChecker: () => boolean = () => true,
   ) {
     this.canvas = canvas;
     this.ctx = ctx2d(canvas, { alpha: false });
@@ -67,6 +69,7 @@ export class Viewport {
     this.getStroke = getStroke;
     this.getSelection = getSelection;
     this.getRetouchPreview = getRetouchPreview;
+    this.getShowTransparencyChecker = getShowTransparencyChecker;
     this.scratch = createCanvas(1, 1);
     this.retouchScratch = createCanvas(1, 1);
     this.composited = createCanvas(1, 1);
@@ -217,8 +220,8 @@ export class Viewport {
     ctx.restore();
 
     // Transparency checkerboard (fixed size in screen space).
-    if (!this.checker) this.checker = ctx.createPattern(this.checkerSrc, 'repeat');
-    if (this.checker) {
+    if (this.getShowTransparencyChecker() && !this.checker) this.checker = ctx.createPattern(this.checkerSrc, 'repeat');
+    if (this.getShowTransparencyChecker() && this.checker) {
       ctx.save();
       ctx.translate(sx, sy);
       ctx.fillStyle = this.checker;
@@ -274,6 +277,8 @@ export class Viewport {
 
     for (const layer of doc.layers) {
       if (layer.kind !== 'ai-retouch-mask' || !layer.visible || layer.opacity <= 0) continue;
+      const linkedParent = doc.linkedParentFor(layer);
+      if (linkedParent && !linkedParent.visible) continue;
       drawRetouchOverlay(layer.canvas, 0.42 * layer.opacity);
     }
 

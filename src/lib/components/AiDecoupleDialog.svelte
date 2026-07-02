@@ -7,6 +7,7 @@
   import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { settings } from '../state/settings.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { decoupleCodexImage, isDesktop, type DecoupledLayerResult, type ProjectAsset } from '../integrations/desktop';
   import { Copy } from '../icons';
@@ -16,42 +17,14 @@
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  const KEY = 'paintnode.decouple';
   const DEFAULT_PROMPT =
     'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
 
-  function loadCfg(): {
-    codexBin: string;
-    prompt: string;
-    addToWorkflow: boolean;
-    placeOnCanvas: boolean;
-    tolerance: number;
-  } {
-    try {
-      const raw = localStorage.getItem(KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        return {
-          codexBin: '',
-          prompt: DEFAULT_PROMPT,
-          tolerance: 30,
-          ...parsed,
-          addToWorkflow: parsed.addToWorkflow ?? true,
-          placeOnCanvas: parsed.placeOnCanvas ?? false,
-        };
-      }
-    } catch {
-      /* ignore */
-    }
-    return { codexBin: '', prompt: DEFAULT_PROMPT, addToWorkflow: true, placeOnCanvas: false, tolerance: 30 };
-  }
-
-  const init = loadCfg();
-  let codexBin = $state(init.codexBin);
-  let prompt = $state(init.prompt);
-  let addToWorkflow = $state(init.addToWorkflow);
-  let placeOnCanvas = $state(init.placeOnCanvas);
-  let tolerance = $state(init.tolerance);
+  let codexBin = $state(settings.value.ai.codexBin);
+  let prompt = $state(DEFAULT_PROMPT);
+  let addToWorkflow = $state(true);
+  let placeOnCanvas = $state(false);
+  let tolerance = $state(30);
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);
@@ -186,11 +159,7 @@
       error = 'Open a project folder, or enable placing extracted assets on the canvas.';
       return;
     }
-    try {
-      localStorage.setItem(KEY, JSON.stringify({ codexBin, prompt, addToWorkflow, placeOnCanvas, tolerance }));
-    } catch {
-      /* ignore */
-    }
+    settings.update({ ai: { codexBin } });
 
     busy = true;
     progress = 'Preparing source layer...';
@@ -210,7 +179,14 @@
     try {
       const sourcePng = await canvasPngBytes(sourceLayer.canvas);
       const result = await decoupleCodexImage(
-        { bin: codexBin, projectPath: project.path, runId },
+        {
+          bin: codexBin,
+          projectPath: project.path,
+          runId,
+          model: settings.value.ai.model,
+          reasoningEffort: settings.value.ai.reasoningEffort,
+          serviceTier: settings.value.ai.serviceTier,
+        },
         sourcePng,
         prompt.trim() || DEFAULT_PROMPT,
         false,

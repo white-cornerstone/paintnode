@@ -90,6 +90,15 @@ struct GeneratedImageResult {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CodexDetectionResult {
+    found: bool,
+    path: Option<String>,
+    version: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DecoupledLayerResult {
     name: String,
     data_url: String,
@@ -149,6 +158,13 @@ struct CodexProgressPayload {
 struct CodexRunResult {
     output: Output,
     thread_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct CodexCommandOptions {
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1697,6 +1713,42 @@ fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String
     )
 }
 
+fn clean_codex_option(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn codex_command_options(
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+) -> CodexCommandOptions {
+    CodexCommandOptions {
+        model: clean_codex_option(model),
+        reasoning_effort: clean_codex_option(reasoning_effort),
+        service_tier: clean_codex_option(service_tier),
+    }
+}
+
+fn apply_codex_command_options(command: &mut Command, options: &CodexCommandOptions) {
+    if let Some(model) = options.model.as_deref() {
+        command.arg("-m").arg(model);
+    }
+    if let Some(reasoning_effort) = options.reasoning_effort.as_deref() {
+        command
+            .arg("-c")
+            .arg(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+    }
+    if matches!(options.service_tier.as_deref(), Some("fast")) {
+        command
+            .arg("-c")
+            .arg("service_tier=\"fast\"")
+            .arg("-c")
+            .arg("features.fast_mode=true");
+    }
+}
+
 fn codex_prompt(user_prompt: &str) -> String {
     format!(
         r#"Use $imagegen to generate one raster PNG for PaintNode.
@@ -1719,6 +1771,7 @@ fn build_codex_command(
     codex_bin: &str,
     job_path: &Path,
     prompt: &str,
+    options: &CodexCommandOptions,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -1729,7 +1782,9 @@ fn build_codex_command(
         .arg("-a")
         .arg("never")
         .arg("-C")
-        .arg(job_path)
+        .arg(job_path);
+    apply_codex_command_options(&mut command, options);
+    command
         .arg("exec")
         .arg("--ephemeral")
         .arg("--skip-git-repo-check");
@@ -1813,6 +1868,7 @@ fn build_decouple_codex_command(
     codex_bin: &str,
     job_path: &Path,
     prompt: &str,
+    options: &CodexCommandOptions,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -1823,9 +1879,9 @@ fn build_decouple_codex_command(
         .arg("-a")
         .arg("never")
         .arg("-C")
-        .arg(job_path)
-        .arg("exec")
-        .arg("--skip-git-repo-check");
+        .arg(job_path);
+    apply_codex_command_options(&mut command, options);
+    command.arg("exec").arg("--skip-git-repo-check");
     if json_progress {
         command.arg("--json");
     }
@@ -1923,6 +1979,7 @@ fn build_generative_fill_codex_command(
     codex_bin: &str,
     job_path: &Path,
     prompt: &str,
+    options: &CodexCommandOptions,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -1933,9 +1990,9 @@ fn build_generative_fill_codex_command(
         .arg("-a")
         .arg("never")
         .arg("-C")
-        .arg(job_path)
-        .arg("exec")
-        .arg("--skip-git-repo-check");
+        .arg(job_path);
+    apply_codex_command_options(&mut command, options);
+    command.arg("exec").arg("--skip-git-repo-check");
     if json_progress {
         command.arg("--json");
     }
@@ -1994,6 +2051,7 @@ fn build_ai_retouch_codex_command(
     job_path: &Path,
     prompt: &str,
     has_reference: bool,
+    options: &CodexCommandOptions,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -2004,9 +2062,9 @@ fn build_ai_retouch_codex_command(
         .arg("-a")
         .arg("never")
         .arg("-C")
-        .arg(job_path)
-        .arg("exec")
-        .arg("--skip-git-repo-check");
+        .arg(job_path);
+    apply_codex_command_options(&mut command, options);
+    command.arg("exec").arg("--skip-git-repo-check");
     if json_progress {
         command.arg("--json");
     }
@@ -2032,6 +2090,7 @@ fn build_workflow_compose_codex_command(
     image_paths: &[PathBuf],
     prompt: &str,
     source_names: &[String],
+    options: &CodexCommandOptions,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -2042,9 +2101,9 @@ fn build_workflow_compose_codex_command(
         .arg("-a")
         .arg("never")
         .arg("-C")
-        .arg(job_path)
-        .arg("exec")
-        .arg("--skip-git-repo-check");
+        .arg(job_path);
+    apply_codex_command_options(&mut command, options);
+    command.arg("exec").arg("--skip-git-repo-check");
     if json_progress {
         command.arg("--json");
     }
@@ -2121,6 +2180,67 @@ async fn generate_image(bin: String, args: Vec<String>, prompt: String) -> Resul
     .map_err(|e| format!("Task error: {e}"))?
 }
 
+#[tauri::command]
+async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> CodexDetectionResult {
+        let codex_bin = match configured_or_default_codex_bin(bin) {
+            Ok(path) => path,
+            Err(error) => {
+                return CodexDetectionResult {
+                    found: false,
+                    path: None,
+                    version: None,
+                    error: Some(error),
+                };
+            }
+        };
+
+        match Command::new(&codex_bin)
+            .arg("--version")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        String::from_utf8_lossy(&output.stderr)
+                            .lines()
+                            .next()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    });
+                CodexDetectionResult {
+                    found: true,
+                    path: Some(codex_bin),
+                    version,
+                    error: None,
+                }
+            }
+            Ok(output) => CodexDetectionResult {
+                found: false,
+                path: Some(codex_bin),
+                version: None,
+                error: Some(command_failure("Codex detection", &output)),
+            },
+            Err(error) => CodexDetectionResult {
+                found: false,
+                path: Some(codex_bin),
+                version: None,
+                error: Some(format!("Failed to launch Codex: {error}")),
+            },
+        }
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))
+}
+
 /// Run local Codex headlessly to generate an image into a temp job folder.
 ///
 /// Auth is intentionally left to the user's local Codex installation. This command never reads
@@ -2133,6 +2253,9 @@ async fn generate_codex_image(
     prompt: String,
     project_path: Option<String>,
     run_id: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a prompt.".into());
@@ -2140,6 +2263,7 @@ async fn generate_codex_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
+        let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
         } else {
@@ -2166,7 +2290,7 @@ async fn generate_codex_image(
         };
         emit_codex_progress(&app, &run_id, "Starting local Codex");
         let codex_started_at = SystemTime::now();
-        let mut command = build_codex_command(&codex_bin, &job_path, prompt.trim(), true);
+        let mut command = build_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, true);
         let mut run = run_codex_with_progress(
             &mut command,
             GENERATION_TIMEOUT,
@@ -2181,7 +2305,7 @@ async fn generate_codex_image(
                 &run_id,
                 "Codex progress stream unavailable; retrying generation",
             );
-            let mut fallback = build_codex_command(&codex_bin, &job_path, prompt.trim(), false);
+            let mut fallback = build_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, false);
             run = run_codex_with_progress(
                 &mut fallback,
                 GENERATION_TIMEOUT,
@@ -2284,6 +2408,9 @@ async fn generate_codex_fill_image(
     edit_target_png: Vec<u8>,
     mask_png: Vec<u8>,
     run_id: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -2318,6 +2445,7 @@ async fn generate_codex_fill_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
+        let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let run_id = if run_id.trim().is_empty() {
             format!("fill-{}", now_id())
         } else {
@@ -2353,7 +2481,7 @@ async fn generate_codex_fill_image(
         emit_codex_progress(&app, &run_id, "Starting local Codex generative fill");
         let codex_started_at = SystemTime::now();
         let mut command =
-            build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), true);
+            build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, true);
         let mut run = run_codex_with_progress(
             &mut command,
             GENERATION_TIMEOUT,
@@ -2369,7 +2497,7 @@ async fn generate_codex_fill_image(
                 "Codex progress stream unavailable; retrying generative fill",
             );
             let mut fallback =
-                build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), false);
+                build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, false);
             run = run_codex_with_progress(
                 &mut fallback,
                 GENERATION_TIMEOUT,
@@ -2478,6 +2606,9 @@ async fn generate_codex_retouch_image(
     mask_png: Vec<u8>,
     reference_png: Option<Vec<u8>>,
     run_id: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter an AI retouch prompt.".into());
@@ -2519,6 +2650,7 @@ async fn generate_codex_retouch_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
+        let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let run_id = if run_id.trim().is_empty() {
             format!("retouch-{}", now_id())
         } else {
@@ -2561,7 +2693,7 @@ async fn generate_codex_retouch_image(
         emit_codex_progress(&app, &run_id, "Starting local Codex AI retouch");
         let codex_started_at = SystemTime::now();
         let mut command =
-            build_ai_retouch_codex_command(&codex_bin, &job_path, prompt.trim(), has_reference, true);
+            build_ai_retouch_codex_command(&codex_bin, &job_path, prompt.trim(), has_reference, &codex_options, true);
         let mut image_run = run_codex_with_progress_until_cached_png(
             &mut command,
             GENERATION_TIMEOUT,
@@ -2586,6 +2718,7 @@ async fn generate_codex_retouch_image(
                 &job_path,
                 prompt.trim(),
                 has_reference,
+                &codex_options,
                 false,
             );
             image_run = run_codex_with_progress_until_cached_png(
@@ -2695,6 +2828,9 @@ async fn decouple_codex_image(
     source_png: Vec<u8>,
     run_id: String,
     store_assets: Option<bool>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 ) -> Result<DecoupleImageResult, String> {
     if !is_png(&source_png) {
         return Err("Asset extraction source must be a PNG image.".into());
@@ -2702,6 +2838,7 @@ async fn decouple_codex_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
+        let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let run_id = if run_id.trim().is_empty() {
             format!("decouple-{}", now_id())
         } else {
@@ -2737,7 +2874,8 @@ async fn decouple_codex_image(
         } else {
             prompt.trim()
         };
-        let mut command = build_decouple_codex_command(&codex_bin, &job_path, user_prompt, true);
+        let mut command =
+            build_decouple_codex_command(&codex_bin, &job_path, user_prompt, &codex_options, true);
         let mut run = run_codex_with_progress(
             &mut command,
             GENERATION_TIMEOUT,
@@ -2752,8 +2890,13 @@ async fn decouple_codex_image(
                 &run_id,
                 "Codex progress stream unavailable; retrying asset extraction",
             );
-            let mut fallback =
-                build_decouple_codex_command(&codex_bin, &job_path, user_prompt, false);
+            let mut fallback = build_decouple_codex_command(
+                &codex_bin,
+                &job_path,
+                user_prompt,
+                &codex_options,
+                false,
+            );
             run = run_codex_with_progress(
                 &mut fallback,
                 GENERATION_TIMEOUT,
@@ -2885,6 +3028,9 @@ async fn compose_codex_workflow(
     project_path: Option<String>,
     sources: Vec<WorkflowSourceImage>,
     run_id: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a composition prompt.".into());
@@ -2895,6 +3041,7 @@ async fn compose_codex_workflow(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
+        let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let run_id = if run_id.trim().is_empty() {
             format!("workflow-{}", now_id())
         } else {
@@ -2952,6 +3099,7 @@ async fn compose_codex_workflow(
             &image_paths,
             prompt.trim(),
             &source_names,
+            &codex_options,
             true,
         );
         let mut run = run_codex_with_progress(
@@ -2974,6 +3122,7 @@ async fn compose_codex_workflow(
                 &image_paths,
                 prompt.trim(),
                 &source_names,
+                &codex_options,
                 false,
             );
             run = run_codex_with_progress(
@@ -3628,6 +3777,13 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         Some("CmdOrCtrl+1"),
     )?;
     let about = MenuItem::with_id(app, "app:about", "About PaintNode", true, None::<&str>)?;
+    let settings = MenuItem::with_id(
+        app,
+        "app:settings",
+        "Settings...",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
     let help_about =
         MenuItem::with_id(app, "app:help-about", "About PaintNode", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "app:quit", "Quit PaintNode", true, Some("CmdOrCtrl+Q"))?;
@@ -3638,6 +3794,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &about,
+            &settings,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -3766,6 +3923,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             generate_image,
+            detect_codex,
             generate_codex_image,
             generate_codex_fill_image,
             generate_codex_retouch_image,
@@ -3975,9 +4133,41 @@ mod tests {
     }
 
     #[test]
+    fn codex_command_applies_selected_model_effort_and_fast_mode() {
+        let job = TempJobDir::new("paintnode-codex-options-test").expect("temp dir");
+        for model in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] {
+            let options = codex_command_options(
+                Some(model.to_string()),
+                Some("high".to_string()),
+                Some("fast".to_string()),
+            );
+            let command = build_codex_command("codex", job.path(), "make an image", &options, true);
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+
+            let model_idx = args
+                .iter()
+                .position(|arg| arg == "-m")
+                .expect("model flag should be present");
+            assert_eq!(args[model_idx + 1], model);
+            assert!(args.contains(&"model_reasoning_effort=\"high\"".to_string()));
+            assert!(args.contains(&"service_tier=\"fast\"".to_string()));
+            assert!(args.contains(&"features.fast_mode=true".to_string()));
+        }
+    }
+
+    #[test]
     fn decouple_codex_command_delimits_image_args_before_prompt() {
         let job = TempJobDir::new("paintnode-decouple-command-test").expect("temp dir");
-        let command = build_decouple_codex_command("codex", job.path(), "separate objects", true);
+        let command = build_decouple_codex_command(
+            "codex",
+            job.path(),
+            "separate objects",
+            &CodexCommandOptions::default(),
+            true,
+        );
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
@@ -4080,6 +4270,7 @@ mod tests {
             &image_paths,
             "compose scene",
             &names,
+            &CodexCommandOptions::default(),
             true,
         );
         let args = command
@@ -4100,8 +4291,13 @@ mod tests {
     #[test]
     fn generative_fill_command_attaches_source_and_mask_before_prompt() {
         let job = TempJobDir::new("paintnode-fill-command-test").expect("temp dir");
-        let command =
-            build_generative_fill_codex_command("codex", job.path(), "extend photo", true);
+        let command = build_generative_fill_codex_command(
+            "codex",
+            job.path(),
+            "extend photo",
+            &CodexCommandOptions::default(),
+            true,
+        );
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
@@ -4136,8 +4332,14 @@ mod tests {
     #[test]
     fn ai_retouch_command_attaches_optional_reference_before_prompt() {
         let job = TempJobDir::new("paintnode-retouch-command-test").expect("temp dir");
-        let command =
-            build_ai_retouch_codex_command("codex", job.path(), "remove glare", true, true);
+        let command = build_ai_retouch_codex_command(
+            "codex",
+            job.path(),
+            "remove glare",
+            true,
+            &CodexCommandOptions::default(),
+            true,
+        );
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())

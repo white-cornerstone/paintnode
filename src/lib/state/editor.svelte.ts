@@ -514,8 +514,28 @@ export class EditorStore implements ToolHost {
     return { r: data[0], g: data[1], b: data[2] };
   }
   setLayerVisible(layer: Layer, visible: boolean): void {
-    if (layer.visible === visible) return;
-    layer.visible = visible;
+    const doc = this.doc;
+    if (!doc) return;
+    const mask = doc.linkedMaskFor(layer);
+    const changes = [layer, ...(mask ? [mask] : [])];
+    if (changes.every((item) => item.visible === visible)) return;
+    if (changes.length === 0) return;
+    const before = changes.map((item) => ({ layer: item, visible: item.visible }));
+    doc.setLayerVisibleWithLinkedMask(layer, visible);
+    const after = changes.map((item) => ({ layer: item, visible: item.visible }));
+    this.history.push({
+      label: 'Layer Visibility',
+      undo: () => {
+        for (const item of before) item.layer.visible = item.visible;
+        this.bump();
+        this.invalidate();
+      },
+      redo: () => {
+        for (const item of after) item.layer.visible = item.visible;
+        this.bump();
+        this.invalidate();
+      },
+    });
     this.bump();
     this.invalidate();
   }
@@ -1650,14 +1670,37 @@ export class EditorStore implements ToolHost {
   }
   deleteLayer(id: string): void {
     const doc = this.doc;
-    if (!doc || doc.layers.length <= 1) {
+    if (!doc) return;
+    const deletionIds = doc.linkedLayerDeletionIds(id);
+    if (deletionIds.length === 0) return;
+    if (doc.layers.length - deletionIds.length <= 0) {
       this.flash('Cannot delete the only layer');
       return;
     }
-    this.structural('Delete Layer', () => doc.remove(id));
+    const before = this.layerStackSnapshot();
+    doc.removeLinked(id);
+    const after = this.layerStackSnapshot();
+    this.history.push({
+      label: 'Delete Layer',
+      undo: () => this.restoreLayerStack(before),
+      redo: () => this.restoreLayerStack(after),
+    });
+    this.bump();
+    this.invalidate();
   }
   duplicateLayer(id: string): void {
-    this.structural('Duplicate Layer', () => this.doc!.duplicate(id));
+    const doc = this.doc;
+    if (!doc || doc.indexOf(id) < 0) return;
+    const before = this.layerStackSnapshot();
+    doc.duplicateLinked(id);
+    const after = this.layerStackSnapshot();
+    this.history.push({
+      label: 'Duplicate Layer',
+      undo: () => this.restoreLayerStack(before),
+      redo: () => this.restoreLayerStack(after),
+    });
+    this.bump();
+    this.invalidate();
   }
   moveLayer(id: string, delta: number): void {
     this.structural('Reorder Layer', () => this.doc!.move(id, delta));
