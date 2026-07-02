@@ -35,6 +35,7 @@ export interface PaintNodeSettings {
     defaultBackground: CanvasBackground;
     showTransparencyChecker: boolean;
     keepAiRunInputs: boolean;
+    layerAnnotationsExpanded: boolean;
   };
 }
 
@@ -72,6 +73,7 @@ export function defaultSettings(): PaintNodeSettings {
       defaultBackground: 'transparent',
       showTransparencyChecker: true,
       keepAiRunInputs: true,
+      layerAnnotationsExpanded: true,
     },
   };
 }
@@ -150,6 +152,10 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
         defaults.workspace.showTransparencyChecker,
       ),
       keepAiRunInputs: booleanOrDefault(workspace.keepAiRunInputs, defaults.workspace.keepAiRunInputs),
+      layerAnnotationsExpanded: booleanOrDefault(
+        workspace.layerAnnotationsExpanded,
+        defaults.workspace.layerAnnotationsExpanded,
+      ),
     },
   };
 }

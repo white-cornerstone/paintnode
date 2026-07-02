@@ -65,6 +65,8 @@ export interface AiRetouchRequest {
   source: HTMLCanvasElement;
   editTarget: HTMLCanvasElement;
   mask: HTMLCanvasElement;
+  annotatedSource: HTMLCanvasElement | null;
+  annotationNotes: string[];
   reference: HTMLCanvasElement | null;
   gesture: AiRetouchGesture;
 }
@@ -73,6 +75,8 @@ export interface AiRetouchInputBytes {
   sourcePng: Uint8Array;
   editTargetPng: Uint8Array;
   maskPng: Uint8Array;
+  annotatedSourcePng?: Uint8Array | null;
+  annotationNotes?: string[];
   referencePng?: Uint8Array | null;
 }
 

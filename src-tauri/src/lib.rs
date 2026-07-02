@@ -446,6 +446,10 @@ fn asset_view(project_path: &Path, asset: ProjectAsset) -> ProjectAssetView {
     }
 }
 
+fn is_hidden_project_file_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
     let folders = [
         ("document", PathBuf::from("documents")),
@@ -471,6 +475,9 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("file")
                 .to_string();
+            if is_hidden_project_file_name(&name) {
+                continue;
+            }
             let relative = relative_dir.join(&name);
             let is_workflow = is_workflow_path(&path);
             let mime = mime_for_path(&path)
@@ -2008,9 +2015,18 @@ fn build_generative_fill_codex_command(
     command
 }
 
-fn ai_retouch_prompt(prompt: &str, has_reference: bool) -> String {
+fn ai_retouch_prompt(prompt: &str, has_annotated_source: bool, has_reference: bool) -> String {
+    let annotation_note = if has_annotated_source {
+        "4. `annotated_source.png` is the clean source image with PaintNode annotation callouts rendered on top. Use it only to understand where the user's arrows, labels, and callouts point."
+    } else {
+        "No annotated source guide is attached for this retouch."
+    };
     let reference_note = if has_reference {
-        "4. `reference.png` is the sampled source/reference area for this retouch. Use it as visual guidance, not as a paste-in unless the user prompt explicitly asks for copied content."
+        if has_annotated_source {
+            "5. `reference.png` is the sampled source/reference area for this retouch. Use it as visual guidance, not as a paste-in unless the user prompt explicitly asks for copied content."
+        } else {
+            "4. `reference.png` is the sampled source/reference area for this retouch. Use it as visual guidance, not as a paste-in unless the user prompt explicitly asks for copied content."
+        }
     } else {
         "No reference image is attached for this retouch. Infer the repair from the protected context around the mask."
     };
@@ -2021,6 +2037,7 @@ Attached images:
 1. `source.png` is the current PaintNode document canvas. Transparent pixels are real empty canvas, not checkerboard UI.
 2. `edit_target.png` is the exact-size image to edit in place. It preserves the original photo everywhere, including under the white mask. Masked pixels are editable even though their original content is still visible.
 3. `mask.png` is the edit mask. White pixels are editable. Black pixels are protected context.
+{annotation_note}
 {reference_note}
 
 User retouch prompt:
@@ -2035,10 +2052,11 @@ Requirements:
 - You do not need to copy the generated PNG to `result.png`, composite the mask, restore protected pixels, crop, resize, write helper scripts, or prove exact pixel preservation. Those are deterministic PaintNode responsibilities.
 - Treat the generated candidate as an in-place retouch of `edit_target.png`, not as a new composition.
 - The visible original content inside the white mask is the thing to repair/remove, not protected content.
+- If `annotated_source.png` is attached, use its arrows, labels, and callout positions as guidance for what each nearby mask region should become.
 - Change only the masked retouch area, with any edge blending kept subtle and registered.
 - For text, logos, painted marks, signs, glare, or surface blemishes, remove only the foreground mark and reconstruct the continuous underlying surface. Do not cover it with a flat rectangle, paint swatch, or unrelated color block.
 - Match the surrounding scene, perspective, lighting, focus, color, texture, grain, and camera style.
-- Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, or mask visualization.
+- Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, red arrows, yellow callout boxes, annotation text, guide marks, or mask visualization.
 - Do not ask follow-up questions.
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
@@ -2050,6 +2068,7 @@ fn build_ai_retouch_codex_command(
     codex_bin: &str,
     job_path: &Path,
     prompt: &str,
+    has_annotated_source: bool,
     has_reference: bool,
     options: &CodexCommandOptions,
     json_progress: bool,
@@ -2073,12 +2092,19 @@ fn build_ai_retouch_codex_command(
         .arg(job_path.join("source.png"))
         .arg(job_path.join("edit_target.png"))
         .arg(job_path.join("mask.png"));
+    if has_annotated_source {
+        command.arg(job_path.join("annotated_source.png"));
+    }
     if has_reference {
         command.arg(job_path.join("reference.png"));
     }
     command
         .arg("--")
-        .arg(ai_retouch_prompt(prompt.trim(), has_reference))
+        .arg(ai_retouch_prompt(
+            prompt.trim(),
+            has_annotated_source,
+            has_reference,
+        ))
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY");
     command
@@ -2604,6 +2630,7 @@ async fn generate_codex_retouch_image(
     source_png: Vec<u8>,
     edit_target_png: Vec<u8>,
     mask_png: Vec<u8>,
+    annotated_source_png: Option<Vec<u8>>,
     reference_png: Option<Vec<u8>>,
     run_id: String,
     model: Option<String>,
@@ -2622,6 +2649,11 @@ async fn generate_codex_retouch_image(
     if !is_png(&mask_png) {
         return Err("AI retouch mask is not a PNG image.".into());
     }
+    if let Some(annotated_source_png) = &annotated_source_png {
+        if !is_png(annotated_source_png) {
+            return Err("AI retouch annotated source is not a PNG image.".into());
+        }
+    }
     if let Some(reference_png) = &reference_png {
         if !is_png(reference_png) {
             return Err("AI retouch reference is not a PNG image.".into());
@@ -2635,6 +2667,14 @@ async fn generate_codex_retouch_image(
         .ok_or_else(|| "AI retouch edit target PNG dimensions are invalid.".to_string())?;
     let mask_dimensions = png_dimensions_from_bytes(&mask_png)
         .ok_or_else(|| "AI retouch mask PNG dimensions are invalid.".to_string())?;
+    let annotated_source_dimensions = match &annotated_source_png {
+        Some(annotated_source_png) => Some(
+            png_dimensions_from_bytes(annotated_source_png).ok_or_else(|| {
+                "AI retouch annotated source PNG dimensions are invalid.".to_string()
+            })?,
+        ),
+        None => None,
+    };
     if target_dimensions != source_dimensions {
         return Err(format!(
             "AI retouch edit target must match source dimensions. Source is {}x{}, target is {}x{}.",
@@ -2646,6 +2686,14 @@ async fn generate_codex_retouch_image(
             "AI retouch mask must match source dimensions. Source is {}x{}, mask is {}x{}.",
             source_dimensions.0, source_dimensions.1, mask_dimensions.0, mask_dimensions.1
         ));
+    }
+    if let Some(annotated_source_dimensions) = annotated_source_dimensions {
+        if annotated_source_dimensions != source_dimensions {
+            return Err(format!(
+                "AI retouch annotated source must match source dimensions. Source is {}x{}, annotated source is {}x{}.",
+                source_dimensions.0, source_dimensions.1, annotated_source_dimensions.0, annotated_source_dimensions.1
+            ));
+        }
     }
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
@@ -2682,6 +2730,13 @@ async fn generate_codex_retouch_image(
             .map_err(|e| format!("Failed to write AI retouch edit target image: {e}"))?;
         fs::write(job_path.join("mask.png"), &mask_png)
             .map_err(|e| format!("Failed to write AI retouch mask image: {e}"))?;
+        let has_annotated_source = if let Some(annotated_source_png) = &annotated_source_png {
+            fs::write(job_path.join("annotated_source.png"), annotated_source_png)
+                .map_err(|e| format!("Failed to write AI retouch annotated source image: {e}"))?;
+            true
+        } else {
+            false
+        };
         let has_reference = if let Some(reference_png) = &reference_png {
             fs::write(job_path.join("reference.png"), reference_png)
                 .map_err(|e| format!("Failed to write AI retouch reference image: {e}"))?;
@@ -2693,7 +2748,7 @@ async fn generate_codex_retouch_image(
         emit_codex_progress(&app, &run_id, "Starting local Codex AI retouch");
         let codex_started_at = SystemTime::now();
         let mut command =
-            build_ai_retouch_codex_command(&codex_bin, &job_path, prompt.trim(), has_reference, &codex_options, true);
+            build_ai_retouch_codex_command(&codex_bin, &job_path, prompt.trim(), has_annotated_source, has_reference, &codex_options, true);
         let mut image_run = run_codex_with_progress_until_cached_png(
             &mut command,
             GENERATION_TIMEOUT,
@@ -2717,6 +2772,7 @@ async fn generate_codex_retouch_image(
                 &codex_bin,
                 &job_path,
                 prompt.trim(),
+                has_annotated_source,
                 has_reference,
                 &codex_options,
                 false,
@@ -4330,12 +4386,13 @@ mod tests {
     }
 
     #[test]
-    fn ai_retouch_command_attaches_optional_reference_before_prompt() {
+    fn ai_retouch_command_attaches_optional_guidance_before_reference() {
         let job = TempJobDir::new("paintnode-retouch-command-test").expect("temp dir");
         let command = build_ai_retouch_codex_command(
             "codex",
             job.path(),
             "remove glare",
+            true,
             true,
             &CodexCommandOptions::default(),
             true,
@@ -4363,15 +4420,22 @@ mod tests {
         );
         assert_eq!(
             args[image_idx + 4],
+            job.path().join("annotated_source.png").to_string_lossy()
+        );
+        assert_eq!(
+            args[image_idx + 5],
             job.path().join("reference.png").to_string_lossy()
         );
-        assert_eq!(args[image_idx + 5], "--");
-        assert!(args[image_idx + 6].contains("Use $imagegen to perform one AI retouch edit"));
-        assert!(args[image_idx + 6].contains("User retouch prompt:\nremove glare"));
-        assert!(args[image_idx + 6].contains("PaintNode will apply `mask.png` after you finish"));
-        assert!(args[image_idx + 6].contains("Those are deterministic PaintNode responsibilities"));
-        assert!(args[image_idx + 6].contains("generated image in Codex's generated-images cache"));
-        assert!(!args[image_idx + 6].contains("Save the final exact-size PNG as `result.png`"));
+        assert_eq!(args[image_idx + 6], "--");
+        assert!(args[image_idx + 7].contains("Use $imagegen to perform one AI retouch edit"));
+        assert!(args[image_idx + 7].contains("`annotated_source.png` is the clean source image"));
+        assert!(args[image_idx + 7].contains("arrows, labels, and callout positions as guidance"));
+        assert!(args[image_idx + 7].contains("red arrows, yellow callout boxes, annotation text"));
+        assert!(args[image_idx + 7].contains("User retouch prompt:\nremove glare"));
+        assert!(args[image_idx + 7].contains("PaintNode will apply `mask.png` after you finish"));
+        assert!(args[image_idx + 7].contains("Those are deterministic PaintNode responsibilities"));
+        assert!(args[image_idx + 7].contains("generated image in Codex's generated-images cache"));
+        assert!(!args[image_idx + 7].contains("Save the final exact-size PNG as `result.png`"));
     }
 
     #[test]
@@ -4435,6 +4499,28 @@ mod tests {
                 .join("generated")
                 .join(file_name)
         ));
+    }
+
+    #[test]
+    fn scan_project_files_excludes_hidden_metadata_files() {
+        let project = TempJobDir::new("paintnode-hidden-files-test").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        fs::write(
+            project.path().join("documents").join("tram-2.ora"),
+            ONE_PIXEL_PNG,
+        )
+        .expect("document");
+        fs::write(project.path().join("documents").join(".DS_Store"), b"meta").expect("metadata");
+        fs::write(project.path().join("autosave").join(".DS_Store"), b"meta")
+            .expect("autosave metadata");
+
+        let files = scan_project_files(project.path());
+        let names = files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["tram-2.ora"]);
     }
 
     #[test]

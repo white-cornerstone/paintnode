@@ -37,6 +37,17 @@
     return new TextEncoder().encode(text);
   }
 
+  function promptWithAnnotationNotes(requestPrompt: string, annotationNotes: string[] | undefined): string {
+    const notes = annotationNotes?.map((note) => note.trim()).filter(Boolean) ?? [];
+    if (!notes.length) return requestPrompt;
+    return `${requestPrompt}
+
+Visible PaintNode annotations:
+${notes.join('\n')}
+
+Use these annotations as direct user instructions for the regions they point to.`;
+  }
+
   function clearProgressListener() {
     stopProgress?.();
     stopProgress = null;
@@ -73,13 +84,16 @@
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: bytes.sourcePng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/mask.png`, bytes: bytes.maskPng });
+    if (bytes.annotatedSourcePng) {
+      await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/annotated_source.png`, bytes: bytes.annotatedSourcePng });
+    }
     if (bytes.referencePng) {
       await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/reference.png`, bytes: bytes.referencePng });
     }
     await writeProjectDocumentPath({
       projectPath: project.path,
       path: `${dir}/prompt.txt`,
-      bytes: textBytes(`${request.toolName}\n\n${requestPrompt}`),
+      bytes: textBytes(`${request.toolName}\n\n${promptWithAnnotationNotes(requestPrompt, bytes.annotationNotes)}`),
     });
     return dir;
   }
@@ -122,6 +136,7 @@
       if (!bytes) throw new Error('Unable to prepare AI retouch input.');
       debugDir = await saveDebugInputs(bytes, prompt.trim());
       if (debugDir) progress = `Saved retouch inputs: ${debugDir}`;
+      const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
       const generated = await generateCodexRetouchImage(
         {
           bin: codexBin,
@@ -134,8 +149,9 @@
         bytes.sourcePng,
         bytes.editTargetPng,
         bytes.maskPng,
+        bytes.annotatedSourcePng,
         bytes.referencePng,
-        prompt.trim(),
+        retouchPrompt,
       );
       const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
       if (generated.asset || savedAssetCount > 0) await project.refresh();

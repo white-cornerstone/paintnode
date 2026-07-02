@@ -18,7 +18,12 @@ describe('settings normalization', () => {
     const normalized = normalizeSettings({
       general: { autosaveEnabled: false, autosaveIntervalMs: 120_000 },
       ai: { provider: 'custom', model: 'gpt-5.4-mini', reasoningEffort: 'high', serviceTier: 'fast' },
-      workspace: { defaultCanvasWidth: 20_000, defaultCanvasHeight: -5, defaultBackground: 'white' },
+      workspace: {
+        defaultCanvasWidth: 20_000,
+        defaultCanvasHeight: -5,
+        defaultBackground: 'white',
+        layerAnnotationsExpanded: false,
+      },
     });
 
     expect(normalized.general.autosaveEnabled).toBe(false);
@@ -30,6 +35,11 @@ describe('settings normalization', () => {
     expect(normalized.workspace.defaultCanvasWidth).toBe(8192);
     expect(normalized.workspace.defaultCanvasHeight).toBe(1);
     expect(normalized.workspace.defaultBackground).toBe('white');
+    expect(normalized.workspace.layerAnnotationsExpanded).toBe(false);
+  });
+
+  it('defaults the annotation layer group to expanded for older settings', () => {
+    expect(normalizeSettings({ workspace: {} }).workspace.layerAnnotationsExpanded).toBe(true);
   });
 
   it('recovers from malformed JSON', () => {

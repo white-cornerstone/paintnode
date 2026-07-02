@@ -76,7 +76,13 @@ import {
   type AiRetouchToolId,
 } from '../engine/aiRetouch';
 import { ui } from './ui.svelte';
-import { newAnnotation, type AnnotationItem, type AnnotationKind } from '../engine/annotations';
+import {
+  annotationInstructionNotes,
+  newAnnotation,
+  visibleAnnotations,
+  type AnnotationItem,
+  type AnnotationKind,
+} from '../engine/annotations';
 import { projectDocumentSourceKey, type DocumentSourceKey } from './documentSource';
 
 export interface PlacedImageResult {
@@ -940,6 +946,9 @@ export class EditorStore implements ToolHost {
     const metadata = layer?.aiRetouch;
     if (!doc || !layer || layer.kind !== 'ai-retouch-mask' || !metadata) return null;
     const source = compositeToCanvas(doc);
+    const annotationItems = doc.annotationsVisible ? visibleAnnotations(doc.annotations) : [];
+    const annotatedSource = annotationItems.length ? this.renderAnnotatedSource(source, annotationItems) : null;
+    const annotationNotes = annotationInstructionNotes(annotationItems, doc.width, doc.height);
     const bounds = maskBounds(layer.canvas);
     if (!bounds) return null;
     let mask = cloneMask(layer.canvas);
@@ -993,6 +1002,8 @@ export class EditorStore implements ToolHost {
       source,
       editTarget,
       mask,
+      annotatedSource,
+      annotationNotes,
       maskLayerId: layer.id,
       reference,
       gesture,
@@ -1032,6 +1043,8 @@ export class EditorStore implements ToolHost {
       sourcePng: await canvasToPngBytes(request.source),
       editTargetPng: await canvasToPngBytes(request.editTarget),
       maskPng: await canvasToPngBytes(request.mask),
+      annotatedSourcePng: request.annotatedSource ? await canvasToPngBytes(request.annotatedSource) : null,
+      annotationNotes: request.annotationNotes,
       referencePng: request.reference ? await canvasToPngBytes(request.reference) : null,
     };
   }
@@ -2269,6 +2282,14 @@ export class EditorStore implements ToolHost {
     layer.touch();
     this.bump();
     this.invalidate();
+  }
+
+  private renderAnnotatedSource(source: HTMLCanvasElement, annotations: AnnotationItem[]): HTMLCanvasElement {
+    const annotated = createCanvas(source.width, source.height);
+    const ctx = ctx2d(annotated);
+    ctx.drawImage(source, 0, 0);
+    for (const item of annotations) this.drawAnnotationToContext(ctx, item);
+    return annotated;
   }
 
   private drawAnnotationToContext(ctx: CanvasRenderingContext2D, item: AnnotationItem): void {

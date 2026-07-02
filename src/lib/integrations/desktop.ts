@@ -208,6 +208,7 @@ export async function generateCodexRetouchImage(
   sourcePng: Uint8Array,
   editTargetPng: Uint8Array,
   maskPng: Uint8Array,
+  annotatedSourcePng: Uint8Array | null | undefined,
   referencePng: Uint8Array | null | undefined,
   prompt: string,
 ): Promise<GeneratedImageResult> {
@@ -225,6 +226,7 @@ export async function generateCodexRetouchImage(
     sourcePng: Array.from(sourcePng),
     editTargetPng: Array.from(editTargetPng),
     maskPng: Array.from(maskPng),
+    annotatedSourcePng: annotatedSourcePng ? Array.from(annotatedSourcePng) : null,
     referencePng: referencePng ? Array.from(referencePng) : null,
     runId,
   });

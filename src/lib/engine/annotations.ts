@@ -138,3 +138,17 @@ export function coerceAnnotations(value: unknown): AnnotationItem[] {
   }
   return result;
 }
+
+export function visibleAnnotations(items: AnnotationItem[]): AnnotationItem[] {
+  return items.filter((item) => item.visible);
+}
+
+export function annotationInstructionNotes(items: AnnotationItem[], width: number, height: number): string[] {
+  return visibleAnnotations(items)
+    .filter((item) => item.text.trim())
+    .map((item, index) => {
+      const cx = Math.round(((item.x + item.width / 2) / Math.max(1, width)) * 100);
+      const cy = Math.round(((item.y + item.height / 2) / Math.max(1, height)) * 100);
+      return `Annotation ${index + 1} at ${cx}% x, ${cy}% y (${item.kind}): ${item.text.trim()}`;
+    });
+}
