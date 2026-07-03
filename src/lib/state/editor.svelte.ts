@@ -25,7 +25,7 @@ import {
 } from '../engine/adjustments';
 import { gaussianBlur, sharpen } from '../engine/filters';
 import {
-  DEFAULT_LINE_HEIGHT,
+  defaultParagraph,
   cloneModel,
   defaultStyle,
   isBlankModel,
@@ -639,7 +639,7 @@ export class EditorStore implements ToolHost {
       version: 1,
       x: Math.round(x),
       y: Math.round(y),
-      paragraphs: [{ align: 'left', lineHeight: DEFAULT_LINE_HEIGHT, runs: [{ text: '', style }] }],
+      paragraphs: [defaultParagraph({ runs: [{ text: '', style }] })],
     };
     this.textEdit = { layerId: null, isNew: true, model, baseStyle: style };
   }

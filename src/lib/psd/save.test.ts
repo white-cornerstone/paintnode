@@ -41,10 +41,52 @@ describe('textModelToPsdText', () => {
       underline: true,
       tracking: 100,
     });
-    expect(text.paragraphStyleRuns).toEqual([
-      { length: 6, style: { justification: 'left', leadingType: 0 } },
-      { length: 5, style: { justification: 'center', leadingType: 0 } },
-    ]);
+    expect(text.paragraphStyleRuns).toHaveLength(2);
+    expect(text.paragraphStyleRuns?.[0].length).toBe(6);
+    expect(text.paragraphStyleRuns?.[0].style).toMatchObject({ justification: 'left', leadingType: 0 });
+    expect(text.paragraphStyleRuns?.[1].length).toBe(5);
+    expect(text.paragraphStyleRuns?.[1].style).toMatchObject({ justification: 'center' });
+  });
+
+  it('exports the v2 character and paragraph attributes', () => {
+    const model = plainTextModel(
+      'Hi',
+      0,
+      0,
+      defaultStyle({
+        size: 20,
+        leading: 26,
+        horizontalScale: 80,
+        verticalScale: 120,
+        baselineShift: 2,
+        caps: 'small',
+        script: 'sub',
+        strikethrough: true,
+      }),
+    );
+    model.paragraphs[0].align = 'justify-all';
+    model.paragraphs[0].indentLeft = 12;
+    model.paragraphs[0].spaceAfter = 6;
+    model.paragraphs[0].hyphenate = true;
+
+    const text = textModelToPsdText(model, { x: 0, y: 0 } as Layer);
+
+    expect(text.styleRuns?.[0].style).toMatchObject({
+      leading: 26,
+      autoLeading: false,
+      horizontalScale: 0.8,
+      verticalScale: 1.2,
+      baselineShift: 2,
+      fontCaps: 1,
+      fontBaseline: 2,
+      strikethrough: true,
+    });
+    expect(text.paragraphStyle).toMatchObject({
+      justification: 'justify-all',
+      startIndent: 12,
+      spaceAfter: 6,
+      autoHyphenate: true,
+    });
   });
 });
 

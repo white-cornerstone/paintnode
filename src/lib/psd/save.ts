@@ -1,4 +1,4 @@
-import type { BlendMode as PsdBlendMode, Layer as PsdLayer, LayerTextData, Psd, PixelData } from 'ag-psd';
+import type { BlendMode as PsdBlendMode, Layer as PsdLayer, LayerTextData, ParagraphStyle as PsdParagraphStyle, Psd, PixelData } from 'ag-psd';
 import type { PaintDocument } from '../engine/Document.svelte';
 import type { Layer } from '../engine/Layer.svelte';
 import type { BlendMode, RGB } from '../engine/types';
@@ -55,30 +55,42 @@ function psdStyle(style: TextStyle) {
     fauxBold: style.bold,
     fauxItalic: style.italic,
     underline: style.underline,
+    strikethrough: style.strikethrough,
     tracking: style.tracking ? Math.round((style.tracking / Math.max(1, style.size)) * 1000) : 0,
     fillColor: psdColor(style.color),
+    autoLeading: style.leading === null,
+    ...(style.leading !== null ? { leading: style.leading } : {}),
+    horizontalScale: style.horizontalScale / 100,
+    verticalScale: style.verticalScale / 100,
+    baselineShift: style.baselineShift,
+    fontCaps: style.caps === 'small' ? 1 : style.caps === 'all' ? 2 : 0,
+    fontBaseline: style.script === 'super' ? 1 : style.script === 'sub' ? 2 : 0,
   };
 }
 
-function lineLeading(paragraph: TextParagraph): number | undefined {
-  const maxSize = paragraph.runs.reduce((size, run) => Math.max(size, run.style.size), 0);
-  return maxSize > 0 ? maxSize * paragraph.lineHeight : undefined;
+/** PaintNode's TextAlign values are ag-psd Justification values. */
+function psdJustification(paragraph: TextParagraph): NonNullable<PsdParagraphStyle['justification']> {
+  return paragraph.align;
 }
 
-function psdJustification(paragraph: TextParagraph): 'left' | 'center' | 'right' {
-  if (paragraph.align === 'center') return 'center';
-  if (paragraph.align === 'right') return 'right';
-  return 'left';
+function psdParagraphStyle(paragraph: TextParagraph): PsdParagraphStyle {
+  return {
+    justification: psdJustification(paragraph),
+    firstLineIndent: paragraph.firstLineIndent,
+    startIndent: paragraph.indentLeft,
+    endIndent: paragraph.indentRight,
+    spaceBefore: paragraph.spaceBefore,
+    spaceAfter: paragraph.spaceAfter,
+    autoHyphenate: paragraph.hyphenate,
+    leadingType: 0,
+  };
 }
 
-function pushStyleRun(styleRuns: NonNullable<LayerTextData['styleRuns']>, text: string, run: TextRun, leading?: number): void {
+function pushStyleRun(styleRuns: NonNullable<LayerTextData['styleRuns']>, text: string, run: TextRun): void {
   if (!text.length) return;
   styleRuns.push({
     length: text.length,
-    style: {
-      ...psdStyle(run.style),
-      leading,
-    },
+    style: psdStyle(run.style),
   });
 }
 
@@ -100,24 +112,23 @@ export function textModelToPsdText(model: TextModel, layer: Layer): LayerTextDat
   for (let i = 0; i < model.paragraphs.length; i++) {
     const paragraph = model.paragraphs[i];
     const hasNewline = i < model.paragraphs.length - 1;
-    const leading = lineLeading(paragraph);
     let paragraphLength = 0;
 
     for (const run of paragraph.runs) {
-      pushStyleRun(styleRuns, run.text, run, leading);
+      pushStyleRun(styleRuns, run.text, run);
       paragraphLength += run.text.length;
     }
 
     if (hasNewline) {
       const newlineStyle = paragraph.runs.at(-1) ?? firstRun;
-      if (newlineStyle) pushStyleRun(styleRuns, '\n', newlineStyle, leading);
+      if (newlineStyle) pushStyleRun(styleRuns, '\n', newlineStyle);
       paragraphLength += 1;
     }
 
     if (paragraphLength > 0) {
       paragraphStyleRuns.push({
         length: paragraphLength,
-        style: { justification: psdJustification(paragraph), leadingType: 0 },
+        style: psdParagraphStyle(paragraph),
       });
     }
   }
@@ -128,11 +139,11 @@ export function textModelToPsdText(model: TextModel, layer: Layer): LayerTextDat
   return {
     text,
     transform: [1, 0, 0, 1, layer.x + model.x, layer.y + model.y],
-    antiAlias: 'smooth',
+    antiAlias: model.antiAlias ?? 'smooth',
     orientation: 'horizontal',
     style: fallbackStyle,
     styleRuns: styleRuns.length ? styleRuns : undefined,
-    paragraphStyle: fallbackParagraph ? { justification: psdJustification(fallbackParagraph), leadingType: 0 } : undefined,
+    paragraphStyle: fallbackParagraph ? psdParagraphStyle(fallbackParagraph) : undefined,
     paragraphStyleRuns: paragraphStyleRuns.length ? paragraphStyleRuns : undefined,
     shapeType: 'point',
   };
