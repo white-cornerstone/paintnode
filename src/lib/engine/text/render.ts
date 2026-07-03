@@ -57,6 +57,7 @@ export interface TextDrawTarget extends TextMeasurer {
   restore(): void;
   translate(x: number, y: number): void;
   scale(x: number, y: number): void;
+  rotate(rad: number): void;
   fillText(text: string, x: number, y: number): void;
   fillRect(x: number, y: number, w: number, h: number): void;
 }
@@ -267,8 +268,137 @@ function drawRun(ctx: TextDrawTarget, run: TextRun, x: number, baseline: number)
   return natural * face.h;
 }
 
+// --- Vertical layout (columns right-to-left, Photoshop "mixed" orientation) ---
+
+/** Characters drawn upright in vertical text (CJK, kana, hangul, fullwidth forms). */
+function isUprightChar(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return (
+    (code >= 0x1100 && code <= 0x11ff) || // hangul jamo
+    (code >= 0x2e80 && code <= 0x303f) || // CJK radicals + punctuation
+    (code >= 0x3040 && code <= 0x30ff) || // kana
+    (code >= 0x3130 && code <= 0x318f) || // hangul compatibility
+    (code >= 0x3400 && code <= 0x9fff) || // CJK ideographs
+    (code >= 0xac00 && code <= 0xd7af) || // hangul syllables
+    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility
+    (code >= 0xfe30 && code <= 0xfe4f) || // vertical forms
+    (code >= 0xff00 && code <= 0xffee) || // fullwidth forms
+    (code >= 0x20000 && code <= 0x2fa1f)
+  );
+}
+
+interface VerticalChar {
+  ch: string;
+  style: TextStyle;
+  fontSize: number;
+  upright: boolean;
+  /** Downward advance (includes tracking). */
+  advance: number;
+}
+
+interface VerticalColumn {
+  chars: VerticalChar[];
+  /** Total downward extent of the characters. */
+  length: number;
+  /** Column-to-column (rightward-to-leftward) advance. */
+  leading: number;
+  top: number;
+  bottom: number;
+  spaceBefore: number;
+  spaceAfter: number;
+  align: 'left' | 'center' | 'right';
+}
+
+interface VerticalLayout {
+  columns: VerticalColumn[];
+  width: number;
+  height: number;
+}
+
+function measureVertical(model: TextModel, m: TextMeasurer): VerticalLayout {
+  const columns: VerticalColumn[] = [];
+  for (const p of model.paragraphs) {
+    const runs = p.runs.length ? p.runs : [{ text: '', style: defaultLineStyle(p) }];
+    const chars: VerticalChar[] = [];
+    let length = 0;
+    let leading = 0;
+    for (const r of runs) {
+      const face = runFace(r.style);
+      leading = Math.max(leading, effectiveLeading(r.style));
+      for (const seg of runSegments(r, face)) {
+        m.font = fontString(r.style, seg.fontSize);
+        for (const ch of seg.text) {
+          const upright = isUprightChar(ch);
+          // Upright glyphs advance by their em box; rotated glyphs by their width.
+          const advance =
+            (upright ? seg.fontSize * face.v : m.measureText(ch).width * face.h) + r.style.tracking;
+          chars.push({ ch, style: r.style, fontSize: seg.fontSize, upright, advance });
+          length += advance;
+        }
+      }
+    }
+    if (leading <= 0) leading = effectiveLeading(runs[0]?.style ?? defaultStyle());
+    columns.push({
+      chars,
+      length,
+      leading,
+      top: p.indentLeft + p.firstLineIndent,
+      bottom: p.indentRight,
+      spaceBefore: p.spaceBefore,
+      spaceAfter: p.spaceAfter,
+      align: baseAlign(p.align),
+    });
+  }
+  const width = columns.reduce((sum, c) => sum + c.spaceBefore + c.leading + c.spaceAfter, 0);
+  const height = columns.reduce((mx, c) => Math.max(mx, c.top + c.length + c.bottom), 0);
+  return { columns, width, height };
+}
+
+/**
+ * Draw vertical text: characters top-to-bottom, columns right-to-left. CJK and
+ * fullwidth glyphs stay upright; Latin rotates 90° (Photoshop's default).
+ * Underline/strikethrough are not rendered in vertical text yet.
+ */
+function drawVerticalModel(ctx: TextDrawTarget, model: TextModel): void {
+  const layout = measureVertical(model, ctx);
+  ctx.save();
+  ctx.textBaseline = 'alphabetic';
+  let consumed = 0;
+  for (const col of layout.columns) {
+    consumed += col.spaceBefore + col.leading;
+    const centerX = model.x + layout.width - consumed + col.leading / 2;
+    const free = layout.height - (col.top + col.length + col.bottom);
+    let y = model.y + col.top + (col.align === 'center' ? free / 2 : col.align === 'right' ? free : 0);
+    for (const vc of col.chars) {
+      const face = runFace(vc.style);
+      ctx.fillStyle = rgbToCss(vc.style.color);
+      ctx.font = fontString(vc.style, vc.fontSize);
+      ctx.save();
+      if (vc.upright) {
+        const w = ctx.measureText(vc.ch).width;
+        ctx.translate(centerX - face.shift, y + vc.fontSize * face.v * 0.83);
+        ctx.scale(face.h, face.v);
+        ctx.fillText(vc.ch, -w / 2, 0);
+      } else {
+        ctx.translate(centerX - face.shift, y);
+        ctx.rotate(Math.PI / 2);
+        ctx.scale(face.h, face.v);
+        ctx.fillText(vc.ch, 0, vc.fontSize * 0.34);
+      }
+      ctx.restore();
+      y += vc.advance;
+    }
+    consumed += col.spaceAfter;
+  }
+  ctx.restore();
+}
+
 /** Draw a text model into a 2D context (caller clears first if needed). */
 export function drawTextModel(ctx: TextDrawTarget, model: TextModel): void {
+  if (model.orientation === 'vertical') {
+    drawVerticalModel(ctx, model);
+    return;
+  }
   const layout = layoutModel(model, ctx);
   ctx.save();
   ctx.textBaseline = 'alphabetic';
@@ -294,12 +424,20 @@ export function measureTextModel(
   model: TextModel,
   measurer: TextMeasurer = getMeasureCtx(),
 ): { width: number; height: number } {
+  if (model.orientation === 'vertical') {
+    const { width, height } = measureVertical(model, measurer);
+    return { width, height };
+  }
   const { width, height } = layoutModel(model, measurer);
   return { width, height };
 }
 
 /** Document-space bounding box of the rendered text (for hit-testing). */
 export function textBounds(model: TextModel, measurer: TextMeasurer = getMeasureCtx()): Rect {
+  if (model.orientation === 'vertical') {
+    const { width, height } = measureVertical(model, measurer);
+    return { x: model.x, y: model.y, w: width, h: height };
+  }
   const { width, height, minX } = layoutModel(model, measurer);
   return { x: model.x + minX, y: model.y, w: width - minX, h: height };
 }

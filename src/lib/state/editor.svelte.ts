@@ -12,6 +12,7 @@ import {
   selectAllSelection,
   invertSelection as invertSelectionMask,
   intersectMask,
+  maskToSelection,
   selectionContainsPoint,
   type SelectionMode,
 } from '../engine/selection';
@@ -35,7 +36,7 @@ import {
   type TextParagraph,
   type TextStyle,
 } from '../engine/text/model';
-import { renderTextToCanvas, textBounds } from '../engine/text/render';
+import { drawTextModel, renderTextToCanvas, textBounds } from '../engine/text/render';
 import type { Tool, ToolHost } from '../engine/tools/Tool';
 import { PaintTool } from '../engine/tools/PaintTool';
 import { FillTool } from '../engine/tools/FillTool';
@@ -221,6 +222,8 @@ export interface TextEditSession {
   model: TextModel;
   /** Style used for new/empty text and as the toolbar's starting values. */
   baseStyle: TextStyle;
+  /** Type mask session: committing creates a text-shaped selection, not a layer. */
+  mask?: boolean;
 }
 
 export interface FreeTransformSession {
@@ -383,7 +386,10 @@ export class EditorStore implements ToolHost {
       new AiRetouchTool(this, 'red-eye'),
       new ShapeTool(this),
       new AnnotationTool(this),
-      new TextTool(this),
+      new TextTool(this, 'text', 'Type', { orientation: 'horizontal', mask: false }),
+      new TextTool(this, 'type-vertical', 'Vertical Type', { orientation: 'vertical', mask: false }),
+      new TextTool(this, 'type-mask-h', 'Type Mask', { orientation: 'horizontal', mask: true }),
+      new TextTool(this, 'type-mask-v', 'Vertical Type Mask', { orientation: 'vertical', mask: true }),
       new EyedropperTool(this),
       new HandTool(this),
       new ZoomTool(this),
@@ -630,13 +636,16 @@ export class EditorStore implements ToolHost {
     this.bump();
     this.invalidate();
   }
-  beginText(x: number, y: number): void {
+  beginText(x: number, y: number, options: { orientation?: 'horizontal' | 'vertical'; mask?: boolean } = {}): void {
     const doc = this.doc;
     if (!doc) return;
-    const hit = this.textLayerAt(x, y);
-    if (hit) {
-      this.beginEditLayer(hit);
-      return;
+    // Mask sessions always start fresh; the normal type tools edit the layer hit.
+    if (!options.mask) {
+      const hit = this.textLayerAt(x, y);
+      if (hit) {
+        this.beginEditLayer(hit);
+        return;
+      }
     }
     const style = defaultStyle({
       family: this.lastFontFamily,
@@ -648,8 +657,9 @@ export class EditorStore implements ToolHost {
       x: Math.round(x),
       y: Math.round(y),
       paragraphs: [defaultParagraph({ runs: [{ text: '', style }] })],
+      ...(options.orientation === 'vertical' ? { orientation: 'vertical' as const } : {}),
     };
-    this.textEdit = { layerId: null, isNew: true, model, baseStyle: style };
+    this.textEdit = { layerId: null, isNew: true, model, baseStyle: style, mask: options.mask === true };
   }
   bump(): void {
     this.notify(true);
@@ -2249,6 +2259,25 @@ export class EditorStore implements ToolHost {
     this.textCommitFn = null;
     if (!doc || !session) return;
     const blank = isBlankModel(model);
+
+    if (session.mask) {
+      // Type mask: the committed text becomes a selection instead of a layer.
+      if (!blank) {
+        this.rememberTextDefaults(model);
+        const shape = createCanvas(doc.width, doc.height);
+        drawTextModel(ctx2d(shape), model);
+        const selection = maskToSelection(shape, doc.width, doc.height);
+        if (selection) {
+          this.setSelection(selection);
+          this.flash('Selection made from type');
+        } else {
+          this.flash('Type produced no selectable pixels');
+        }
+      }
+      this.bump();
+      this.invalidate();
+      return;
+    }
 
     if (session.isNew) {
       if (blank) {

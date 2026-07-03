@@ -68,12 +68,19 @@ export interface TextParagraph {
 
 export type TextAntiAlias = 'none' | 'sharp' | 'crisp' | 'strong' | 'smooth';
 
+export type TextOrientation = 'horizontal' | 'vertical';
+
 export interface TextModel {
   version: 1;
   /** Top-left anchor of the text block, in document pixels. */
   x: number;
   y: number;
   paragraphs: TextParagraph[];
+  /**
+   * Vertical text stacks characters top-to-bottom with paragraphs as columns
+   * advancing right-to-left (absent = horizontal).
+   */
+  orientation?: TextOrientation;
   /** Photoshop anti-alias mode (round-tripped; PaintNode always renders anti-aliased). */
   antiAlias?: TextAntiAlias;
 }
@@ -131,6 +138,7 @@ export function cloneModel(m: TextModel): TextModel {
     x: m.x,
     y: m.y,
     paragraphs: m.paragraphs.map(cloneParagraph),
+    ...(m.orientation === 'vertical' ? { orientation: m.orientation } : {}),
     ...(m.antiAlias ? { antiAlias: m.antiAlias } : {}),
   };
 }
@@ -220,6 +228,7 @@ export function deserializeModel(raw: string): TextModel | null {
     x: num(obj.x, 0),
     y: num(obj.y, 0),
     paragraphs,
+    ...(obj.orientation === 'vertical' ? { orientation: 'vertical' as const } : {}),
     ...(antiAlias ? { antiAlias } : {}),
   };
 }

@@ -38,6 +38,9 @@ function fakeSurface(): { target: TextDrawTarget; calls: Recorded } {
     scale(x: number, y: number) {
       state = { ...state, sx: state.sx * x, sy: state.sy * y };
     },
+    rotate() {
+      /* rotation is not tracked; rotated-glyph positions assert the translate only */
+    },
     measureText(text: string) {
       return { width: text.length * size * 0.5, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2 };
     },
@@ -201,6 +204,24 @@ describe('drawTextModel', () => {
     const { target, calls } = fakeSurface();
     drawTextModel(target, m);
     expect(calls.fillText.map((c) => c.text)).toEqual(['A', 'B']);
+  });
+
+  it('lays out vertical text as right-to-left columns with per-char advances', () => {
+    const m = plainTextModel('AB\n漢字', 100, 50, defaultStyle({ size: 10 }));
+    m.orientation = 'vertical';
+    const b = textBounds(m, fakeSurface().target);
+    // Two columns × auto leading (12) wide; tallest column: CJK 10+10 = 20.
+    expect(b).toEqual({ x: 100, y: 50, w: 24, h: 20 });
+
+    const { target, calls } = fakeSurface();
+    drawTextModel(target, m);
+    const a = calls.fillText.find((c) => c.text === 'A')!;
+    const han = calls.fillText.find((c) => c.text === '漢')!;
+    const zi = calls.fillText.find((c) => c.text === '字')!;
+    // First paragraph is the rightmost column.
+    expect(a.x).toBeGreaterThan(han.x);
+    // Characters in a column stack downward.
+    expect(zi.y).toBeGreaterThan(han.y);
   });
 
   it('keeps blank paragraphs occupying vertical space', () => {

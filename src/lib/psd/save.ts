@@ -196,7 +196,9 @@ function layerToPsd(doc: PaintDocument, layer: Layer): PsdLayer | null {
     mask: linkedPsdMask(doc, layer),
   };
 
-  if (layer.kind === 'text' && layer.text) {
+  // Vertical text exports as pixels only: ag-psd's vertical TySh writing can
+  // produce broken PSD files, so we never write text data for it.
+  if (layer.kind === 'text' && layer.text && layer.text.orientation !== 'vertical') {
     psdLayer.text = textModelToPsdText(layer.text, layer);
   }
 
@@ -294,8 +296,11 @@ function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
     blendMode: psdBlendFor(layer),
     canvas: layer.canvas,
   };
-  // Edited imported text: replace the parsed Photoshop text data with ours.
-  if (layer.kind === 'text' && layer.text) out.text = textModelToPsdText(layer.text, layer);
+  // Edited imported text: replace the parsed Photoshop text data with ours
+  // (imported editable text is always horizontal; vertical stays locked).
+  if (layer.kind === 'text' && layer.text && layer.text.orientation !== 'vertical') {
+    out.text = textModelToPsdText(layer.text, layer);
+  }
   const linked = linkedPsdMask(doc, layer);
   if (linked) {
     out.mask = linked;
@@ -423,6 +428,7 @@ export function needsTextInvalidation(doc: PaintDocument): boolean {
     (layer) =>
       layer.kind === 'text' &&
       layer.text &&
+      layer.text.orientation !== 'vertical' &&
       (!layer.psd || (layer.psd.lockReason === null && !isCleanPsdLayer(doc, layer))),
   );
 }

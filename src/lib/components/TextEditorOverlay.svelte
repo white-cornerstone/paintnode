@@ -101,6 +101,12 @@
     if (!root) return;
     const base = session?.baseStyle ?? defaultStyle();
     applyStyleAttrs(root, base);
+    if (model.orientation === 'vertical') {
+      // Mirror the engine's vertical layout: columns right-to-left, CJK upright,
+      // Latin rotated (CSS text-orientation: mixed matches Photoshop's default).
+      root.style.writingMode = 'vertical-rl';
+      root.style.textOrientation = 'mixed';
+    }
     root.innerHTML = '';
     const paragraphs = model.paragraphs.length
       ? model.paragraphs
@@ -277,11 +283,13 @@
       lines.push(defaultParagraph({ runs: [{ text: '', style: session?.baseStyle ?? defaultStyle() }] }));
     }
     const antiAlias = session?.model.antiAlias;
+    const orientation = session?.model.orientation;
     return {
       version: 1,
       x: Math.round(session!.model.x),
       y: Math.round(session!.model.y),
       paragraphs: lines,
+      ...(orientation === 'vertical' ? { orientation } : {}),
       ...(antiAlias ? { antiAlias } : {}),
     };
   }
@@ -548,11 +556,19 @@
     editor.registerTextParagraphApplier(applyParagraphPatch);
     document.addEventListener('selectionchange', onSelectionChange);
     if (session) buildFromModel(session.model);
-    void tick().then(() => {
+    const focusEditor = () => {
       editable?.focus();
       if (session?.isNew) placeCaretEnd();
       else selectAllContent();
       refreshToolbar();
+    };
+    void tick().then(() => {
+      focusEditor();
+      // The click that opened the session can blur to <body> after our focus
+      // (its default action races the mount) — retake focus once it settles.
+      setTimeout(() => {
+        if (editor.textEdit && editable && document.activeElement !== editable) focusEditor();
+      }, 60);
     });
   });
   onDestroy(() => {
