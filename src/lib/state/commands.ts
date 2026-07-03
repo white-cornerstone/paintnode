@@ -257,6 +257,16 @@ async function documentBytes(doc: PaintDocument, embed: EmbeddedFont[] = []): Pr
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+/**
+ * Honesty note appended to .ora save confirmations: Photoshop-only passthrough
+ * data (locked layers) lives only in memory and in PSD exports, not in .ora.
+ */
+function oraSaveNote(doc: PaintDocument): string {
+  return doc.layers.some((l) => l.locked)
+    ? ' — Photoshop-only layers are kept in PSD exports, not in .ora'
+    : '';
+}
+
 /** File ▸ Save — prompts once, then overwrites the same file on later saves. */
 export async function saveOraCommand(): Promise<void> {
   const doc = editor.doc;
@@ -275,7 +285,7 @@ export async function saveOraCommand(): Promise<void> {
       if (session?.savedPath) {
         const relativePath = await project.saveDocumentToPath(session.savedPath, bytes);
         editor.markSaved(relativePath);
-        editor.flash(`Saved ${relativePath}`);
+        editor.flash(`Saved ${relativePath}${oraSaveNote(doc)}`);
         return;
       }
 
@@ -284,7 +294,7 @@ export async function saveOraCommand(): Promise<void> {
       if (result) {
         editor.renameActiveDocument(result.name);
         editor.markSaved(result.relativePath);
-        editor.flash(`Saved ${result.relativePath}`);
+        editor.flash(`Saved ${result.relativePath}${oraSaveNote(doc)}`);
       } else {
         editor.flash('Save canceled');
       }
@@ -293,7 +303,7 @@ export async function saveOraCommand(): Promise<void> {
     const blob = await saveOra(doc, embed);
     downloadBlob(blob, name);
     editor.markSaved(null);
-    editor.flash('Saved .ora');
+    editor.flash(`Saved .ora${oraSaveNote(doc)}`);
   } catch (e) {
     editor.flash('Save failed: ' + (e as Error).message);
   }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BlendMode } from '../engine/types';
   import { BLEND_MODES } from '../engine/types';
+  import { PSD_LOCK_LABELS } from '../engine/psdSource';
   import { editor } from '../state/editor.svelte';
   import Panel from './Panel.svelte';
 
@@ -12,9 +13,11 @@
   const layer = $derived(editor.activeLayer);
   const doc = $derived(editor.doc);
   const opacityPercent = $derived(Math.round((layer?.opacity ?? 1) * 100));
+  const lockLabel = $derived(layer?.psd?.lockReason ? PSD_LOCK_LABELS[layer.psd.lockReason] : null);
 
   function setLayerNumber(field: 'x' | 'y', value: number): void {
     if (!layer || !Number.isFinite(value)) return;
+    if (editor.blockIfLocked(layer)) return;
     layer[field] = Math.round(value);
     editor.bump();
     editor.invalidate();
@@ -58,6 +61,9 @@
     <div class="section">
       <div class="section-title">Active layer</div>
       {#if layer}
+        {#if lockLabel}
+          <p class="lock-note">{lockLabel} from Photoshop — locked so it survives PSD export unchanged.</p>
+        {/if}
         <label class="field">
           <span>Name</span>
           <input value={layer.name} onblur={(e) => rename(e.currentTarget.value)} aria-label="Layer name" />
@@ -68,6 +74,7 @@
             <input
               type="number"
               value={layer.x}
+              readonly={layer.locked}
               oninput={(e) => setLayerNumber('x', e.currentTarget.valueAsNumber)}
               aria-label="Layer x position"
             />
@@ -77,6 +84,7 @@
             <input
               type="number"
               value={layer.y}
+              readonly={layer.locked}
               oninput={(e) => setLayerNumber('y', e.currentTarget.valueAsNumber)}
               aria-label="Layer y position"
             />
@@ -186,5 +194,9 @@
     margin: 0;
     color: var(--text-dim);
     font-size: 12px;
+  }
+  .lock-note {
+    color: #f2c14e;
+    font-size: 11px;
   }
 </style>
