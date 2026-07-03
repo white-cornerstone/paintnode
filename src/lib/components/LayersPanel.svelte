@@ -8,8 +8,9 @@
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, LinkDismiss, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, LinkDismiss, LockClosed, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
   import type { AnnotationItem } from '../engine/annotations';
+  import { PSD_LOCK_LABELS } from '../engine/psdSource';
 
   type LayerPanelRow =
     | { kind: 'layer'; layer: Layer; parent?: undefined }
@@ -101,6 +102,11 @@
   }
   function toggleVisible(l: Layer) {
     editor.toggleLayerVisible(l);
+  }
+  function lockTooltip(l: Layer): string {
+    const reason = l.psd?.lockReason;
+    const label = reason ? PSD_LOCK_LABELS[reason] : 'Photoshop-only layer';
+    return `${label} from Photoshop — editing is disabled so it survives PSD export unchanged`;
   }
   function clampPercent(p: number): number {
     if (!Number.isFinite(p)) return activeOpacityPercent;
@@ -485,6 +491,13 @@
             >
               <Icon svg={PaintBrushSparkle} size={11} />
             </span>
+          {:else if row.layer.locked}
+            <span
+              class="type-badge lock-badge"
+              use:tooltip={{ text: lockTooltip(row.layer), placement: 'right' }}
+            >
+              <Icon svg={LockClosed} size={11} label="Locked Photoshop layer" />
+            </span>
           {/if}
         </div>
 
@@ -518,16 +531,16 @@
       <Icon svg={Add} size={17} />
     </button>
     <button
-      use:tooltip={{ text: 'Duplicate layer', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Locked Photoshop layers cannot be duplicated' : 'Duplicate layer', placement: 'top' }}
       aria-label="Duplicate layer"
       onclick={() => activeRasterLayer && editor.duplicateLayer(activeRasterLayer.id)}
-      disabled={!activeRasterLayer}><Icon svg={SquareMultiple} size={17} /></button
+      disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={SquareMultiple} size={17} /></button
     >
     <button
-      use:tooltip={{ text: 'Merge down', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Locked Photoshop layers cannot be merged' : 'Merge down', placement: 'top' }}
       aria-label="Merge down"
       onclick={() => activeRasterLayer && editor.mergeDown(activeRasterLayer.id)}
-      disabled={!activeRasterLayer}><Icon svg={Merge} size={17} /></button
+      disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={Merge} size={17} /></button
     >
     <button
       use:tooltip={{ text: 'Reveal source asset', placement: 'top' }}
@@ -573,6 +586,10 @@
       {:else if draggedLayer.kind === 'ai-retouch-mask'}
         <span class="type-badge mask-badge">
           <Icon svg={PaintBrushSparkle} size={11} />
+        </span>
+      {:else if draggedLayer.locked}
+        <span class="type-badge lock-badge">
+          <Icon svg={LockClosed} size={11} />
         </span>
       {/if}
     </div>
@@ -846,6 +863,9 @@
   }
   .mask-badge {
     color: #58f29a;
+  }
+  .lock-badge {
+    color: #f2c14e;
   }
   .name {
     flex: 1;

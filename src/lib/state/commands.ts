@@ -1,6 +1,7 @@
 import { editor, type DocumentSession } from './editor.svelte';
 import { loadOra } from '../ora/load';
 import { saveOra, type EmbeddedFont } from '../ora/save';
+import { loadPsd } from '../psd/load';
 import { savePsd, savePsdBytes } from '../psd/save';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
@@ -58,6 +59,9 @@ async function resolveEmbed(
 const isOra = (file: { name: string; type?: string | null }): boolean =>
   /\.ora$/i.test(file.name) || file.type === 'image/openraster';
 
+const isPsd = (file: { name: string; type?: string | null }): boolean =>
+  /\.psd$/i.test(file.name) || file.type === 'image/vnd.adobe.photoshop';
+
 const isRasterImage = (file: { name: string; type?: string | null }): boolean =>
   file.type?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
 
@@ -102,18 +106,30 @@ async function openImageAsDocument(file: OpenableDocumentFile): Promise<void> {
   editor.openDocument(doc, true, file.sourceKey);
 }
 
-async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenFileResult> {
-  if (editor.focusDocumentBySource(file.sourceKey)) return 'focused';
+interface OpenedFileInfo {
+  result: OpenFileResult;
+  notices: string[];
+}
+
+async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenedFileInfo> {
+  if (editor.focusDocumentBySource(file.sourceKey)) return { result: 'focused', notices: [] };
 
   if (isOra(file)) {
     const doc = await loadOra(await file.arrayBuffer());
     doc.name = file.name.replace(/\.ora$/i, '');
     const session = editor.openDocument(doc, true, file.sourceKey);
     if (file.savedPath) session.savedPath = file.savedPath;
+  } else if (isPsd(file)) {
+    const { doc, notices } = await loadPsd(await file.arrayBuffer());
+    doc.name = file.name.replace(/\.psd$/i, '');
+    // Never adopt the .psd path as the save target: File ▸ Save writes .ora.
+    // Round-tripping back to Photoshop goes through File ▸ Export PSD.
+    editor.openDocument(doc, true, file.sourceKey);
+    return { result: 'opened', notices };
   } else {
     await openImageAsDocument(file);
   }
-  return 'opened';
+  return { result: 'opened', notices: [] };
 }
 
 export async function openDocumentFiles(files: Iterable<File>): Promise<void> {
@@ -121,20 +137,24 @@ export async function openDocumentFiles(files: Iterable<File>): Promise<void> {
 }
 
 async function openDocumentFileInputs(files: OpenableDocumentFile[]): Promise<void> {
-  const supported = files.filter((file) => isOra(file) || isRasterImage(file));
+  const supported = files.filter((file) => isOra(file) || isPsd(file) || isRasterImage(file));
   if (!supported.length) {
-    editor.flash('No supported image or .ora files');
+    editor.flash('No supported image, .ora, or .psd files');
     return;
   }
   try {
     let opened = 0;
     let focused = 0;
+    const notices: string[] = [];
     for (const file of supported) {
-      const result = await openDocumentFile(file);
-      if (result === 'opened') opened++;
+      const info = await openDocumentFile(file);
+      if (info.result === 'opened') opened++;
       else focused++;
+      notices.push(...info.notices);
     }
-    if (opened && focused) {
+    if (notices.length) {
+      editor.flash(`Opened ${supported[0].name} — ${notices.join('; ')}`);
+    } else if (opened && focused) {
       editor.flash(`Opened ${opened} file${opened === 1 ? '' : 's'}; focused ${focused} already open`);
     } else if (focused) {
       editor.flash(
@@ -173,9 +193,9 @@ export async function openDocumentPaths(paths: Iterable<string>): Promise<void> 
   }
 }
 
-/** File ▸ Open — accepts .ora and common raster formats. */
+/** File ▸ Open — accepts .ora, .psd, and common raster formats. */
 export async function openCommand(): Promise<void> {
-  const files = await openFiles('.ora,image/openraster,image/png,image/jpeg,image/webp,image/gif', true);
+  const files = await openFiles('.ora,.psd,image/openraster,image/vnd.adobe.photoshop,image/png,image/jpeg,image/webp,image/gif', true);
   if (!files.length) return;
   await openDocumentFiles(files);
 }

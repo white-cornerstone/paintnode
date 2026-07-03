@@ -50,7 +50,7 @@ flashed; LayersPanel lock badge (Fluent `LockClosed`) with tooltip explaining pr
 footer buttons (duplicate/merge) disabled for locked rows; opacity/blend/visibility remain.
 **Success Criteria**: opening a real PSD shows layers correctly positioned with locked
 badges; `npm run check` and `npm test` pass with 0 errors/warnings.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 5: Polish & honesty passes
 **Goal**: warn when saving `.ora` that Photoshop-only passthrough data isn't stored in

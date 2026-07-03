@@ -34,6 +34,7 @@ export { default as AddFilled } from '@fluentui/svg-icons/icons/add_24_filled.sv
 export { default as Checkmark } from '@fluentui/svg-icons/icons/checkmark_24_regular.svg?raw';
 export { default as SquareMultiple } from '@fluentui/svg-icons/icons/square_multiple_24_regular.svg?raw';
 export { default as Merge } from '@fluentui/svg-icons/icons/merge_24_regular.svg?raw';
+export { default as LockClosed } from '@fluentui/svg-icons/icons/lock_closed_24_regular.svg?raw';
 export { default as ArrowUp } from '@fluentui/svg-icons/icons/arrow_up_24_regular.svg?raw';
 export { default as ArrowDown } from '@fluentui/svg-icons/icons/arrow_down_24_regular.svg?raw';
 export { default as Delete } from '@fluentui/svg-icons/icons/delete_24_regular.svg?raw';

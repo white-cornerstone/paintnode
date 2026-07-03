@@ -11,6 +11,7 @@
   import { isDesktop } from '../integrations/desktop';
   import { bytesToBitmap, openFiles } from '../io';
   import { loadOra } from '../ora/load';
+  import { loadPsd } from '../psd/load';
   import {
     ArchiveClock,
     Apps,
@@ -80,18 +81,22 @@
     return /\.ora$/i.test(file.name) || file.mime === 'image/openraster';
   }
 
+  function isPsd(file: ProjectFile): boolean {
+    return /\.psd$/i.test(file.name) || file.mime === 'image/vnd.adobe.photoshop';
+  }
+
   function isWorkflow(file: ProjectFile): boolean {
     return file.kind === 'workflow' || /\.cxflow\.json$/i.test(file.name);
   }
 
   function isImage(file: ProjectFile): boolean {
-    return file.mime?.startsWith('image/') === true && !isOra(file);
+    return file.mime?.startsWith('image/') === true && !isOra(file) && !isPsd(file);
   }
 
   function iconFor(file: ProjectFile): string {
     if (file.kind === 'autosave') return ArchiveClock;
     if (isWorkflow(file)) return Sparkle;
-    if (isOra(file) || file.kind === 'document') return Document;
+    if (isOra(file) || isPsd(file) || file.kind === 'document') return Document;
     if (isImage(file)) return Image;
     return Folder;
   }
@@ -205,6 +210,22 @@
         editor.openDocument(doc, true, sourceKey);
         editor.markSaved(file.relativePath);
         editor.flash(`Opened ${file.name}`);
+        return;
+      }
+
+      if (isPsd(file)) {
+        const sourceKey = projectDocumentSourceKey(file.relativePath);
+        if (editor.focusDocumentBySource(sourceKey)) {
+          editor.flash(`${file.name} is already open`);
+          return;
+        }
+
+        const bytes = await project.readFile(file);
+        const { doc, notices } = await loadPsd(bufferFrom(bytes));
+        doc.name = file.name.replace(/\.psd$/i, '');
+        // No markSaved: File ▸ Save writes .ora; Export PSD round-trips to Photoshop.
+        editor.openDocument(doc, true, sourceKey);
+        editor.flash(notices.length ? `Opened ${file.name} — ${notices.join('; ')}` : `Opened ${file.name}`);
         return;
       }
 
