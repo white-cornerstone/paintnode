@@ -24,6 +24,83 @@ const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 const PAINTNODE_WORK_DIR: &str = "paintnode";
 const CODEX_RUNS_DIR: &str = "codex-runs";
 const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
+const AI_WORKING_CANVAS_UNIT: u32 = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PixelRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SupportedAspectRatio {
+    label: &'static str,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AiWorkingCanvas {
+    original_dimensions: (u32, u32),
+    working_dimensions: (u32, u32),
+    content_rect: PixelRect,
+    aspect_label: &'static str,
+}
+
+const AI_SUPPORTED_ASPECT_RATIOS: &[SupportedAspectRatio] = &[
+    SupportedAspectRatio {
+        label: "1:1",
+        width: 1,
+        height: 1,
+    },
+    SupportedAspectRatio {
+        label: "2:3",
+        width: 2,
+        height: 3,
+    },
+    SupportedAspectRatio {
+        label: "3:2",
+        width: 3,
+        height: 2,
+    },
+    SupportedAspectRatio {
+        label: "3:4",
+        width: 3,
+        height: 4,
+    },
+    SupportedAspectRatio {
+        label: "4:3",
+        width: 4,
+        height: 3,
+    },
+    SupportedAspectRatio {
+        label: "4:5",
+        width: 4,
+        height: 5,
+    },
+    SupportedAspectRatio {
+        label: "5:4",
+        width: 5,
+        height: 4,
+    },
+    SupportedAspectRatio {
+        label: "9:16",
+        width: 9,
+        height: 16,
+    },
+    SupportedAspectRatio {
+        label: "16:9",
+        width: 16,
+        height: 9,
+    },
+    SupportedAspectRatio {
+        label: "21:9",
+        width: 21,
+        height: 9,
+    },
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -846,29 +923,200 @@ fn encode_rgba_png(image: image::RgbaImage, label: &str) -> Result<Vec<u8>, Stri
     Ok(bytes.into_inner())
 }
 
-fn read_png_bytes_resized_to_dimensions(
+impl AiWorkingCanvas {
+    fn has_padding(&self) -> bool {
+        self.original_dimensions != self.working_dimensions
+            || self.content_rect.x != 0
+            || self.content_rect.y != 0
+    }
+}
+
+fn round_up_to_unit(value: u32, unit: u32) -> u32 {
+    value.div_ceil(unit).max(1) * unit
+}
+
+fn ai_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
+    let (original_width, original_height) = dimensions;
+    let mut best: Option<(AiWorkingCanvas, u64, u64)> = None;
+
+    for ratio in AI_SUPPORTED_ASPECT_RATIOS {
+        let minimum_units = original_width
+            .div_ceil(ratio.width)
+            .max(original_height.div_ceil(ratio.height))
+            .max(1);
+        let units = round_up_to_unit(minimum_units, AI_WORKING_CANVAS_UNIT);
+        let Some(working_width) = ratio.width.checked_mul(units) else {
+            continue;
+        };
+        let Some(working_height) = ratio.height.checked_mul(units) else {
+            continue;
+        };
+        if working_width < original_width || working_height < original_height {
+            continue;
+        }
+        let area = u64::from(working_width) * u64::from(working_height);
+        let aspect_error = ((i128::from(working_width) * i128::from(original_height))
+            - (i128::from(working_height) * i128::from(original_width)))
+        .unsigned_abs() as u64;
+        let content_rect = PixelRect {
+            x: (working_width - original_width) / 2,
+            y: (working_height - original_height) / 2,
+            width: original_width,
+            height: original_height,
+        };
+        let canvas = AiWorkingCanvas {
+            original_dimensions: dimensions,
+            working_dimensions: (working_width, working_height),
+            content_rect,
+            aspect_label: ratio.label,
+        };
+        let is_better = best
+            .as_ref()
+            .map(|(_, best_area, best_aspect_error)| {
+                (area, aspect_error) < (*best_area, *best_aspect_error)
+            })
+            .unwrap_or(true);
+        if is_better {
+            best = Some((canvas, area, aspect_error));
+        }
+    }
+
+    best.map(|(canvas, _, _)| canvas)
+        .unwrap_or(AiWorkingCanvas {
+            original_dimensions: dimensions,
+            working_dimensions: dimensions,
+            content_rect: PixelRect {
+                x: 0,
+                y: 0,
+                width: original_width,
+                height: original_height,
+            },
+            aspect_label: "custom",
+        })
+}
+
+fn validate_optional_target_dimensions(
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<Option<(u32, u32)>, String> {
+    match (width, height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => Ok(Some((width, height))),
+        (None, None) => Ok(None),
+        _ => Err("AI target dimensions must include both width and height.".into()),
+    }
+}
+
+fn pad_png_to_ai_working_canvas(
+    bytes: &[u8],
+    working: &AiWorkingCanvas,
+    label: &str,
+    background: image::Rgba<u8>,
+) -> Result<Vec<u8>, String> {
+    let image = decode_png_rgba(bytes, label)?;
+    if image.dimensions() != working.original_dimensions {
+        return Err(format!(
+            "{label} must be {}x{} before PaintNode prepares the AI working canvas, but it is {}x{}.",
+            working.original_dimensions.0,
+            working.original_dimensions.1,
+            image.width(),
+            image.height()
+        ));
+    }
+    if !working.has_padding() {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut out = image::RgbaImage::from_pixel(
+        working.working_dimensions.0,
+        working.working_dimensions.1,
+        background,
+    );
+    for y in 0..working.content_rect.height {
+        for x in 0..working.content_rect.width {
+            out.put_pixel(
+                working.content_rect.x + x,
+                working.content_rect.y + y,
+                *image.get_pixel(x, y),
+            );
+        }
+    }
+    encode_rgba_png(out, label)
+}
+
+fn scaled_content_rect(result_dimensions: (u32, u32), working: &AiWorkingCanvas) -> PixelRect {
+    let scale_x = result_dimensions.0 as f64 / working.working_dimensions.0 as f64;
+    let scale_y = result_dimensions.1 as f64 / working.working_dimensions.1 as f64;
+    let x = (working.content_rect.x as f64 * scale_x).round() as u32;
+    let y = (working.content_rect.y as f64 * scale_y).round() as u32;
+    let mut width = (working.content_rect.width as f64 * scale_x).round() as u32;
+    let mut height = (working.content_rect.height as f64 * scale_y).round() as u32;
+    let x = x.min(result_dimensions.0.saturating_sub(1));
+    let y = y.min(result_dimensions.1.saturating_sub(1));
+    width = width.max(1).min(result_dimensions.0 - x);
+    height = height.max(1).min(result_dimensions.1 - y);
+    PixelRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn crop_png_bytes_to_ai_content(
+    bytes: &[u8],
+    working: &AiWorkingCanvas,
+    label: &str,
+) -> Result<(Vec<u8>, (u32, u32), bool), String> {
+    let result_dimensions = png_dimensions_from_bytes(bytes)
+        .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
+    if result_dimensions == working.original_dimensions {
+        return Ok((bytes.to_vec(), result_dimensions, false));
+    }
+
+    let image = decode_png_rgba(bytes, label)?;
+    let rect = scaled_content_rect(result_dimensions, working);
+    let cropped =
+        image::imageops::crop_imm(&image, rect.x, rect.y, rect.width, rect.height).to_image();
+    let normalized = if cropped.dimensions() == working.original_dimensions {
+        cropped
+    } else {
+        image::imageops::resize(
+            &cropped,
+            working.original_dimensions.0,
+            working.original_dimensions.1,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+    let normalized_bytes = encode_rgba_png(normalized, label)?;
+    Ok((normalized_bytes, result_dimensions, true))
+}
+
+fn read_png_bytes_cropped_to_ai_working_canvas(
     path: &Path,
-    expected_dimensions: (u32, u32),
+    working: &AiWorkingCanvas,
     label: &str,
 ) -> Result<(Vec<u8>, (u32, u32), bool), String> {
     let bytes = fs::read(path).map_err(|e| format!("Failed to read {label}: {e}"))?;
-    let dimensions = png_dimensions_from_bytes(&bytes)
-        .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
-    if dimensions == expected_dimensions {
-        return Ok((bytes, dimensions, false));
+    let (normalized_bytes, result_dimensions, normalized) =
+        crop_png_bytes_to_ai_content(&bytes, working, label)?;
+    if normalized {
+        fs::write(path, &normalized_bytes)
+            .map_err(|e| format!("Failed to write cropped {label} at {}: {e}", path.display()))?;
     }
+    Ok((normalized_bytes, result_dimensions, normalized))
+}
 
-    let image = decode_png_rgba(&bytes, label)?;
-    let resized = image::imageops::resize(
-        &image,
-        expected_dimensions.0,
-        expected_dimensions.1,
-        image::imageops::FilterType::Lanczos3,
-    );
-    let resized_bytes = encode_rgba_png(resized, label)?;
-    fs::write(path, &resized_bytes)
-        .map_err(|e| format!("Failed to write resized {label} at {}: {e}", path.display()))?;
-    Ok((resized_bytes, dimensions, true))
+fn ai_working_canvas_accepts_result_dimensions(
+    working: &AiWorkingCanvas,
+    dimensions: (u32, u32),
+) -> bool {
+    if dimensions == working.original_dimensions || dimensions == working.working_dimensions {
+        return true;
+    }
+    let lhs = u128::from(dimensions.0) * u128::from(working.working_dimensions.1);
+    let rhs = u128::from(dimensions.1) * u128::from(working.working_dimensions.0);
+    let diff = lhs.abs_diff(rhs);
+    diff * 1000 <= lhs.max(rhs) * 2
 }
 
 fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
@@ -1246,7 +1494,7 @@ fn png_file_looks_stable(path: &Path) -> bool {
 fn find_ready_codex_cached_png(
     thread_id: Option<&str>,
     since: SystemTime,
-    expected_dimensions: (u32, u32),
+    working: &AiWorkingCanvas,
 ) -> Option<PathBuf> {
     let exclude_path = Path::new("__paintnode-result-placeholder.png");
     let candidates = find_codex_cached_pngs_in_roots(
@@ -1256,8 +1504,9 @@ fn find_ready_codex_cached_png(
         exclude_path,
     );
     candidates.into_iter().rev().find(|candidate| {
-        png_dimensions(candidate).ok() == Some(expected_dimensions)
-            && png_file_looks_stable(candidate)
+        png_dimensions(candidate).ok().is_some_and(|dimensions| {
+            ai_working_canvas_accepts_result_dimensions(working, dimensions)
+        }) && png_file_looks_stable(candidate)
     })
 }
 
@@ -2131,7 +2380,7 @@ fn run_codex_with_progress_until_cached_png(
     app: AppHandle,
     run_id: String,
     cache_since: SystemTime,
-    expected_dimensions: (u32, u32),
+    working: AiWorkingCanvas,
 ) -> Result<CodexImageRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -2178,18 +2427,14 @@ fn run_codex_with_progress_until_cached_png(
         }
 
         let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-        if find_ready_codex_cached_png(
-            current_thread_id.as_deref(),
-            cache_since,
-            expected_dimensions,
-        )
-        .is_some()
+        if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, &working)
+            .is_some()
         {
             image_cached_before_exit = true;
             emit_codex_progress(
                 &app,
                 &run_id,
-                "Codex image generated; applying PaintNode retouch mask",
+                "Codex image generated; normalizing PaintNode retouch result",
             );
             let _ = child.kill();
             break child
@@ -2199,18 +2444,14 @@ fn run_codex_with_progress_until_cached_png(
 
         if start.elapsed() >= timeout {
             let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-            if find_ready_codex_cached_png(
-                current_thread_id.as_deref(),
-                cache_since,
-                expected_dimensions,
-            )
-            .is_some()
+            if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, &working)
+                .is_some()
             {
                 image_cached_before_exit = true;
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    "Codex timed out after image generation; applying PaintNode retouch mask",
+                    "Codex timed out after image generation; normalizing PaintNode retouch result",
                 );
                 let _ = child.kill();
                 break child
@@ -2454,13 +2695,43 @@ fn antigravity_result_path(job_dir: &str) -> String {
     }
 }
 
+fn ai_working_canvas_instruction(working: &AiWorkingCanvas) -> String {
+    let rect = working.content_rect;
+    let padding_note = if working.has_padding() {
+        "Pixels outside the content rectangle are disposable padding/context only."
+    } else {
+        "The content rectangle fills the working canvas, so PaintNode will import the full image."
+    };
+    format!(
+        r#"PaintNode working canvas:
+- Provider-supported aspect ratio: {aspect}.
+- Working canvas: {working_width}x{working_height}.
+- Final PaintNode document/content rectangle: x={x}, y={y}, width={content_width}, height={content_height}.
+- Keep all meaningful final image content inside that rectangle. {padding_note}
+- Do not put required subjects, readable text, borders, UI chrome, or composition-critical details outside the rectangle.
+- PaintNode will crop that rectangle back to {content_width}x{content_height} after generation."#,
+        aspect = working.aspect_label,
+        working_width = working.working_dimensions.0,
+        working_height = working.working_dimensions.1,
+        x = rect.x,
+        y = rect.y,
+        content_width = rect.width,
+        content_height = rect.height,
+        padding_note = padding_note
+    )
+}
+
 fn antigravity_generate_prompt(
     user_prompt: &str,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
+    working: Option<&AiWorkingCanvas>,
 ) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let working_instruction = working
+        .map(ai_working_canvas_instruction)
+        .unwrap_or_else(|| "No explicit PaintNode target canvas was provided.".into());
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -2474,6 +2745,8 @@ fn antigravity_generate_prompt(
 User image prompt:
 {user_prompt}
 
+{working_instruction}
+
 {autonomy_contract}
 
 Required output:
@@ -2486,9 +2759,15 @@ Final response should be one short sentence confirming `{result_path}` was creat
     )
 }
 
-fn antigravity_fill_prompt(prompt: &str, job_dir: &str, autonomy: AiAutonomyLevel) -> String {
+fn antigravity_fill_prompt(
+    prompt: &str,
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
+) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let working_instruction = ai_working_canvas_instruction(working);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -2498,9 +2777,11 @@ fn antigravity_fill_prompt(prompt: &str, job_dir: &str, autonomy: AiAutonomyLeve
         r#"Perform one mask-guided PaintNode generative fill using the PNG files in `{job_dir}`.
 
 Input files:
-- `{job_dir}/source.png`: full current PaintNode canvas.
-- `{job_dir}/edit_target.png`: exact-size image to edit in place.
-- `{job_dir}/mask.png`: edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected context.
+- `{job_dir}/source.png`: provider-supported PaintNode working canvas with the real document centered inside it.
+- `{job_dir}/edit_target.png`: same-size image to edit in place.
+- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected context.
+
+{working_instruction}
 
 User fill prompt:
 {prompt}
@@ -2509,10 +2790,10 @@ User fill prompt:
 
 Required output:
 - Save exactly one PNG file as `{result_path}`.
-- The PNG must have exactly the same pixel dimensions as `source.png`, `edit_target.png`, and `mask.png`.
+- Prefer the same pixel dimensions as `source.png`, `edit_target.png`, and `mask.png`. If the image generation tool returns the same supported aspect ratio at a different resolution, save that PNG anyway; PaintNode will crop the content rectangle deterministically.
 - Change only the white-mask area and keep black-mask context visually preserved.
 - Match surrounding texture, lighting, perspective, color, focus, and grain.
-- Do not crop, zoom, reframe, or change aspect ratio.
+- Do not crop, zoom, reframe, or shift the centered content rectangle.
 {workspace_rule}
 - Do not ask follow-up questions.
 
@@ -2526,6 +2807,7 @@ fn antigravity_retouch_prompt(
     has_reference: bool,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
 ) -> String {
     let annotation_note = if has_annotated_source {
         format!("- `{job_dir}/annotated_source.png`: optional guide image with PaintNode callouts. Use it only to locate the requested edit.")
@@ -2539,6 +2821,7 @@ fn antigravity_retouch_prompt(
     };
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let working_instruction = ai_working_canvas_instruction(working);
     let contract_note = if autonomy == AiAutonomyLevel::Unmanaged {
         format!(
             "- `{job_dir}/paintnode_contract.txt`: deterministic PaintNode post-processing notes."
@@ -2557,12 +2840,14 @@ fn antigravity_retouch_prompt(
         r#"Perform one PaintNode AI retouch using the PNG files in `{job_dir}`.
 
 Input files:
-- `{job_dir}/source.png`: full current PaintNode canvas. Transparent pixels are real empty canvas.
-- `{job_dir}/edit_target.png`: exact-size photo/canvas image to edit in place.
-- `{job_dir}/mask.png`: edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected context.
+- `{job_dir}/source.png`: provider-supported PaintNode working canvas with the real document centered inside it. Transparent pixels are real empty canvas.
+- `{job_dir}/edit_target.png`: same-size photo/canvas image to edit in place.
+- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected context.
 {contract_note}
 {annotation_note}
 {reference_note}
+
+{working_instruction}
 
 User retouch prompt:
 {prompt}
@@ -2571,8 +2856,8 @@ User retouch prompt:
 
 Required output:
 - Save exactly one PNG file as `{result_path}`.
-- Prefer the same pixel dimensions as `source.png` and `edit_target.png`. If the image generation tool returns a different size, save that PNG as `{result_path}` anyway; PaintNode will resize it deterministically.
-- Treat the edit as an in-place retouch of `edit_target.png`; do not crop, zoom, reframe, or change aspect ratio.
+- Prefer the same pixel dimensions as `source.png` and `edit_target.png`. If the image generation tool returns the same supported aspect ratio at a different resolution, save that PNG as `{result_path}` anyway; PaintNode will crop the content rectangle deterministically.
+- Treat the edit as an in-place retouch of the centered content rectangle; do not crop, zoom, reframe, or shift that rectangle.
 - Treat `mask.png` as the maximum allowed edit area, not as an instruction to repaint every white pixel. Change only the content explicitly requested by the user prompt and preserve unrequested masked content.
 - If the prompt changes clothing or accessories, preserve the person's face, hair, skin, hands, pose, body proportions, expression, gaze, nearby bag, seat, window, and background unless the user explicitly asks to alter those details.
 - Blend naturally through any gray feather buffer. PaintNode will apply the mask afterward, but your candidate should still preserve protected and unrequested areas.
@@ -2586,8 +2871,13 @@ Final response should be one short sentence confirming `{result_path}` was creat
     )
 }
 
-fn antigravity_retouch_contract_text(job_dir: &str, autonomy: AiAutonomyLevel) -> String {
+fn antigravity_retouch_contract_text(
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
+) -> String {
     let result_path = antigravity_result_path(job_dir);
+    let working_instruction = ai_working_canvas_instruction(working);
     let method_limits = if autonomy == AiAutonomyLevel::Unmanaged {
         String::new()
     } else {
@@ -2606,14 +2896,17 @@ Do not do:
 
 Your only required output is `{result_path}`.
 
+{working_instruction}
+
 Antigravity should do:
 - Use the image-generation capability to create one visual retouch candidate.
 - Save or copy that generated PNG to `{result_path}`.
-- Preserve source geometry and masked-region intent as much as the image-generation tool allows.
+- Preserve the centered content rectangle geometry and masked-region intent as much as the image-generation tool allows.
 
 PaintNode will do after `{result_path}` exists:
 - Validate that the file is a PNG.
-- Resize the PNG to the exact source canvas dimensions if needed.
+- Crop the centered content rectangle back to the exact source canvas dimensions if needed.
+- If the image tool returned the same supported aspect ratio at another resolution, resize only that cropped content rectangle.
 - Restore protected black-mask pixels from `source.png`.
 - Blend gray feather-buffer mask pixels between generated and source pixels.
 - Apply the editable mask as the linked retouch mask layer.
@@ -2684,9 +2977,16 @@ Final response should be one short sentence confirming `{result_path}` was creat
     )
 }
 
-fn codex_prompt(user_prompt: &str, autonomy: AiAutonomyLevel) -> String {
+fn codex_prompt(
+    user_prompt: &str,
+    autonomy: AiAutonomyLevel,
+    working: Option<&AiWorkingCanvas>,
+) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
     let task_intro = "Use $imagegen to generate one raster PNG for PaintNode.";
+    let working_instruction = working
+        .map(ai_working_canvas_instruction)
+        .unwrap_or_else(|| "No explicit PaintNode target canvas was provided.".into());
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n"
     } else {
@@ -2697,6 +2997,8 @@ fn codex_prompt(user_prompt: &str, autonomy: AiAutonomyLevel) -> String {
 
 User image prompt:
 {user_prompt}
+
+{working_instruction}
 
 {autonomy_contract}
 
@@ -2716,6 +3018,7 @@ fn build_codex_command(
     prompt: &str,
     options: &CodexCommandOptions,
     autonomy: AiAutonomyLevel,
+    working: Option<&AiWorkingCanvas>,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -2736,7 +3039,7 @@ fn build_codex_command(
         command.arg("--json");
     }
     command
-        .arg(codex_prompt(prompt.trim(), autonomy))
+        .arg(codex_prompt(prompt.trim(), autonomy, working))
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY");
     command
@@ -2899,21 +3202,28 @@ Final response should be one short sentence confirming the composed image was ge
     )
 }
 
-fn generative_fill_prompt(prompt: &str, autonomy: AiAutonomyLevel) -> String {
+fn generative_fill_prompt(
+    prompt: &str,
+    autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
+) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
     let task_intro = "Use $imagegen to perform one mask-guided generative fill for PaintNode.";
+    let working_instruction = ai_working_canvas_instruction(working);
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic resizing, protected-pixel restoration, mask blending, and import.\n"
+        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic working-canvas crop-back, protected-pixel restoration, mask blending, and import.\n"
     } else {
-        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic resizing, protected-pixel restoration, mask blending, and import.\n- Do not create, edit, or delete files in the working directory except `result.png`.\n"
+        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic working-canvas crop-back, protected-pixel restoration, mask blending, and import.\n- Do not create, edit, or delete files in the working directory except `result.png`.\n"
     };
     format!(
         r#"{task_intro}
 
 Attached images:
-1. `source.png` is the current PaintNode document canvas. Transparent pixels are real empty canvas, not checkerboard UI.
-2. `edit_target.png` is the exact-size image to edit in place. It has the protected photo content plus a neutral gray placeholder where PaintNode needs generated pixels.
-3. `mask.png` is the edit mask. White pixels are the full editable/generated area. Gray pixels are a narrow seam-blending transition zone. Black pixels are protected context.
+1. `source.png` is a provider-supported PaintNode working canvas with the real document centered inside it. Transparent pixels are real empty canvas, not checkerboard UI.
+2. `edit_target.png` is the same-size image to edit in place. It has the protected photo content plus a neutral gray placeholder where PaintNode needs generated pixels.
+3. `mask.png` is the same-size edit mask. White pixels are the full editable/generated area. Gray pixels are a narrow seam-blending transition zone. Black pixels are protected context.
+
+{working_instruction}
 
 User edit prompt:
 {prompt}
@@ -2921,9 +3231,9 @@ User edit prompt:
 {autonomy_contract}
 
 Requirements:
-- Use `edit_target.png` as the canvas geometry. Do not create a new crop, zoom, framing, perspective, or aspect ratio.
-- Generate exactly one full-canvas PNG with the exact same pixel dimensions as `edit_target.png` and `source.png`.
-- Save the final exact-size PNG as `result.png` in the current working directory. This file is required.
+- Use the centered content rectangle inside `edit_target.png` as the final document geometry. Do not create a new crop, zoom, framing, perspective, or aspect ratio for that rectangle.
+- Prefer one full working-canvas PNG with the exact same pixel dimensions as `edit_target.png` and `source.png`. If the image generator returns the same supported aspect ratio at a different resolution, save that PNG anyway; PaintNode will crop the content rectangle.
+- Save the final PNG as `result.png` in the current working directory. This file is required.
 - Treat `result.png` as an in-place edit of `edit_target.png`, not as a newly composed photograph.
 - Preserve every black-mask/protected pixel from `source.png` visually unchanged. Treat protected content as context only.
 - Fill the white-mask area, matching the surrounding scene, perspective, lighting, focus, color, grain, and camera style.
@@ -2946,6 +3256,7 @@ fn build_generative_fill_codex_command(
     prompt: &str,
     options: &CodexCommandOptions,
     autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -2968,7 +3279,7 @@ fn build_generative_fill_codex_command(
         .arg(job_path.join("edit_target.png"))
         .arg(job_path.join("mask.png"))
         .arg("--")
-        .arg(generative_fill_prompt(prompt.trim(), autonomy))
+        .arg(generative_fill_prompt(prompt.trim(), autonomy, working))
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY");
     command
@@ -2979,6 +3290,7 @@ fn ai_retouch_prompt(
     has_annotated_source: bool,
     has_reference: bool,
     autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
 ) -> String {
     let annotation_note = if has_annotated_source {
         "4. `annotated_source.png` is the clean source image with PaintNode annotation callouts rendered on top. Use it only to understand where the user's arrows, labels, and callouts point."
@@ -2996,6 +3308,7 @@ fn ai_retouch_prompt(
     };
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
     let task_intro = "Use $imagegen to perform one AI retouch edit for PaintNode.";
+    let working_instruction = ai_working_canvas_instruction(working);
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n"
     } else {
@@ -3005,11 +3318,13 @@ fn ai_retouch_prompt(
         r#"{task_intro}
 
 Attached images:
-1. `source.png` is the current PaintNode document canvas. Transparent pixels are real empty canvas, not checkerboard UI.
-2. `edit_target.png` is the exact-size image to edit in place. It preserves the original photo everywhere, including under the white mask. Masked pixels are editable even though their original content is still visible.
-3. `mask.png` is the edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected context.
+1. `source.png` is a provider-supported PaintNode working canvas with the real document centered inside it. Transparent pixels are real empty canvas, not checkerboard UI.
+2. `edit_target.png` is the same-size image to edit in place. It preserves the original photo everywhere, including under the white mask. Masked pixels are editable even though their original content is still visible.
+3. `mask.png` is the same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected context.
 {annotation_note}
 {reference_note}
+
+{working_instruction}
 
 User retouch prompt:
 {prompt}
@@ -3017,8 +3332,8 @@ User retouch prompt:
 {autonomy_contract}
 
 Requirements:
-- Use `edit_target.png` as the canvas geometry. Do not create a crop, zoom, new framing, or aspect-ratio change.
-- Generate exactly one full-canvas PNG candidate with the exact same pixel dimensions as `source.png` and `edit_target.png`.
+- Use the centered content rectangle inside `edit_target.png` as the final document geometry. Do not create a crop, zoom, new framing, or aspect-ratio change for that rectangle.
+- Prefer one full working-canvas PNG candidate with the exact same pixel dimensions as `source.png` and `edit_target.png`. If the image generator returns the same supported aspect ratio at a different resolution, keep it; PaintNode will crop the content rectangle.
 {managed_method_requirements}
 - PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, gray-mask pixels will be blended with `source.png`, and black-mask/protected pixels will be discarded and preserved from `source.png` by the app.
 - Even so, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
@@ -3045,6 +3360,7 @@ fn build_ai_retouch_codex_command(
     has_reference: bool,
     options: &CodexCommandOptions,
     autonomy: AiAutonomyLevel,
+    working: &AiWorkingCanvas,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -3079,6 +3395,7 @@ fn build_ai_retouch_codex_command(
             has_annotated_source,
             has_reference,
             autonomy,
+            working,
         ))
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY");
@@ -3323,15 +3640,19 @@ async fn generate_codex_image(
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
     autonomy_level: Option<String>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a prompt.".into());
     }
+    let target_dimensions = validate_optional_target_dimensions(target_width, target_height)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let working = target_dimensions.map(ai_working_canvas_for_dimensions);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
         } else {
@@ -3351,8 +3672,15 @@ async fn generate_codex_image(
         };
         emit_codex_progress(&app, &run_id, "Starting local Codex");
         let codex_started_at = SystemTime::now();
-        let mut command =
-            build_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, autonomy, true);
+        let mut command = build_codex_command(
+            &codex_bin,
+            &job_path,
+            prompt.trim(),
+            &codex_options,
+            autonomy,
+            working.as_ref(),
+            true,
+        );
         let mut run = run_codex_with_progress(
             &mut command,
             GENERATION_TIMEOUT,
@@ -3367,8 +3695,15 @@ async fn generate_codex_image(
                 &run_id,
                 "Codex progress stream unavailable; retrying generation",
             );
-            let mut fallback =
-                build_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, autonomy, false);
+            let mut fallback = build_codex_command(
+                &codex_bin,
+                &job_path,
+                prompt.trim(),
+                &codex_options,
+                autonomy,
+                working.as_ref(),
+                false,
+            );
             run = run_codex_with_progress(
                 &mut fallback,
                 GENERATION_TIMEOUT,
@@ -3409,11 +3744,38 @@ async fn generate_codex_image(
         };
 
         emit_codex_progress(&app, &run_id, "Reading copied PNG");
-        let data_url = read_png_data_url(&staged_result_path)?;
+        let (bytes, result_dimensions, normalized_result) = if let Some(working) = &working {
+            read_png_bytes_cropped_to_ai_working_canvas(
+                &staged_result_path,
+                working,
+                "Codex generated image",
+            )?
+        } else {
+            let bytes = fs::read(&staged_result_path)
+                .map_err(|e| format!("Failed to read generated image: {e}"))?;
+            let dimensions = png_dimensions_from_bytes(&bytes)
+                .ok_or_else(|| "Codex generated image PNG dimensions are invalid.".to_string())?;
+            (bytes, dimensions, false)
+        };
+        if normalized_result {
+            if let Some(working) = &working {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    &format!(
+                        "Cropped Codex result from {}x{} {} canvas to {}x{}",
+                        result_dimensions.0,
+                        result_dimensions.1,
+                        working.aspect_label,
+                        working.original_dimensions.0,
+                        working.original_dimensions.1
+                    ),
+                );
+            }
+        }
+        let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving generated image to the project");
-            let bytes = fs::read(&staged_result_path)
-                .map_err(|e| format!("Failed to read generated image for project storage: {e}"))?;
             let source_file_name = recovered_source_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -3506,6 +3868,7 @@ async fn generate_codex_fill_image(
             source_dimensions.0, source_dimensions.1, mask_dimensions.0, mask_dimensions.1
         ));
     }
+    let working = ai_working_canvas_for_dimensions(source_dimensions);
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
@@ -3529,17 +3892,43 @@ async fn generate_codex_fill_image(
             temp_job.path().to_path_buf()
         };
 
-        fs::write(job_path.join("source.png"), &source_png)
+        let working_source_png = pad_png_to_ai_working_canvas(
+            &source_png,
+            &working,
+            "generative fill source image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_edit_target_png = pad_png_to_ai_working_canvas(
+            &edit_target_png,
+            &working,
+            "generative fill edit target image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_mask_png = pad_png_to_ai_working_canvas(
+            &mask_png,
+            &working,
+            "generative fill mask image",
+            image::Rgba([0, 0, 0, 255]),
+        )?;
+
+        fs::write(job_path.join("source.png"), &working_source_png)
             .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
-        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+        fs::write(job_path.join("edit_target.png"), &working_edit_target_png)
             .map_err(|e| format!("Failed to write generative fill edit target image: {e}"))?;
-        fs::write(job_path.join("mask.png"), &mask_png)
+        fs::write(job_path.join("mask.png"), &working_mask_png)
             .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
 
         emit_codex_progress(&app, &run_id, "Starting local Codex generative fill");
         let codex_started_at = SystemTime::now();
-        let mut command =
-            build_generative_fill_codex_command(&codex_bin, &job_path, prompt.trim(), &codex_options, autonomy, true);
+        let mut command = build_generative_fill_codex_command(
+            &codex_bin,
+            &job_path,
+            prompt.trim(),
+            &codex_options,
+            autonomy,
+            &working,
+            true,
+        );
         let mut run = run_codex_with_progress(
             &mut command,
             GENERATION_TIMEOUT,
@@ -3560,6 +3949,7 @@ async fn generate_codex_fill_image(
                 prompt.trim(),
                 &codex_options,
                 autonomy,
+                &working,
                 false,
             );
             run = run_codex_with_progress(
@@ -3595,23 +3985,30 @@ async fn generate_codex_fill_image(
             (recovered_source_path, staged_result_path)
         };
 
-        let result_dimensions = png_dimensions(&staged_result_path)?;
-        if result_dimensions != source_dimensions {
-            return Err(format!(
-                "Codex generated a {}x{} fill, but this document needs exactly {}x{}. The fill was not inserted because scaling it would create seams.",
-                result_dimensions.0,
-                result_dimensions.1,
-                source_dimensions.0,
-                source_dimensions.1
-            ));
-        }
-
         emit_codex_progress(&app, &run_id, "Reading generative fill PNG");
-        let data_url = read_png_data_url(&staged_result_path)?;
+        let (bytes, result_dimensions, normalized_result) =
+            read_png_bytes_cropped_to_ai_working_canvas(
+                &staged_result_path,
+                &working,
+                "Codex generative fill",
+            )?;
+        if normalized_result {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                &format!(
+                    "Cropped Codex fill from {}x{} {} canvas to {}x{}",
+                    result_dimensions.0,
+                    result_dimensions.1,
+                    working.aspect_label,
+                    source_dimensions.0,
+                    source_dimensions.1
+                ),
+            );
+        }
+        let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving generative fill to the project");
-            let bytes = fs::read(&staged_result_path)
-                .map_err(|e| format!("Failed to read generative fill for project storage: {e}"))?;
             let source_file_name = recovered_source_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -3734,6 +4131,7 @@ async fn generate_codex_retouch_image(
             ));
         }
     }
+    let working = ai_working_canvas_for_dimensions(source_dimensions);
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
@@ -3757,14 +4155,39 @@ async fn generate_codex_retouch_image(
             temp_job.path().to_path_buf()
         };
 
-        fs::write(job_path.join("source.png"), &source_png)
+        let working_source_png = pad_png_to_ai_working_canvas(
+            &source_png,
+            &working,
+            "AI retouch source image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_edit_target_png = pad_png_to_ai_working_canvas(
+            &edit_target_png,
+            &working,
+            "AI retouch edit target image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_mask_png = pad_png_to_ai_working_canvas(
+            &mask_png,
+            &working,
+            "AI retouch mask image",
+            image::Rgba([0, 0, 0, 255]),
+        )?;
+
+        fs::write(job_path.join("source.png"), &working_source_png)
             .map_err(|e| format!("Failed to write AI retouch source image: {e}"))?;
-        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+        fs::write(job_path.join("edit_target.png"), &working_edit_target_png)
             .map_err(|e| format!("Failed to write AI retouch edit target image: {e}"))?;
-        fs::write(job_path.join("mask.png"), &mask_png)
+        fs::write(job_path.join("mask.png"), &working_mask_png)
             .map_err(|e| format!("Failed to write AI retouch mask image: {e}"))?;
         let has_annotated_source = if let Some(annotated_source_png) = &annotated_source_png {
-            fs::write(job_path.join("annotated_source.png"), annotated_source_png)
+            let working_annotated_source_png = pad_png_to_ai_working_canvas(
+                annotated_source_png,
+                &working,
+                "AI retouch annotated source image",
+                image::Rgba([0, 0, 0, 0]),
+            )?;
+            fs::write(job_path.join("annotated_source.png"), working_annotated_source_png)
                 .map_err(|e| format!("Failed to write AI retouch annotated source image: {e}"))?;
             true
         } else {
@@ -3788,6 +4211,7 @@ async fn generate_codex_retouch_image(
             has_reference,
             &codex_options,
             autonomy,
+            &working,
             true,
         );
         let mut image_run = run_codex_with_progress_until_cached_png(
@@ -3796,7 +4220,7 @@ async fn generate_codex_retouch_image(
             app.clone(),
             run_id.clone(),
             codex_started_at,
-            source_dimensions,
+            working,
         )
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
@@ -3817,6 +4241,7 @@ async fn generate_codex_retouch_image(
                 has_reference,
                 &codex_options,
                 autonomy,
+                &working,
                 false,
             );
             image_run = run_codex_with_progress_until_cached_png(
@@ -3825,7 +4250,7 @@ async fn generate_codex_retouch_image(
                 app.clone(),
                 run_id.clone(),
                 codex_started_at,
-                source_dimensions,
+                working,
             )
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
@@ -3860,20 +4285,21 @@ async fn generate_codex_retouch_image(
         let raw_provider_bytes = fs::read(&staged_result_path)
             .map_err(|e| format!("Failed to read raw Codex AI retouch output: {e}"))?;
 
-        let (generated_bytes, result_dimensions, resized_result) =
-            read_png_bytes_resized_to_dimensions(
+        let (generated_bytes, result_dimensions, normalized_result) =
+            read_png_bytes_cropped_to_ai_working_canvas(
                 &staged_result_path,
-                source_dimensions,
+                &working,
                 "AI retouch candidate",
             )?;
-        if resized_result {
+        if normalized_result {
             emit_codex_progress(
                 &app,
                 &run_id,
                 &format!(
-                    "Resized AI retouch result from {}x{} to {}x{}",
+                    "Cropped AI retouch result from {}x{} {} canvas to {}x{}",
                     result_dimensions.0,
                     result_dimensions.1,
+                    working.aspect_label,
                     source_dimensions.0,
                     source_dimensions.1
                 ),
@@ -4392,15 +4818,19 @@ async fn generate_antigravity_image(
     model: Option<String>,
     approval_mode: Option<String>,
     autonomy_level: Option<String>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a prompt.".into());
     }
+    let target_dimensions = validate_optional_target_dimensions(target_width, target_height)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
         let options = antigravity_command_options(model, approval_mode);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let working = target_dimensions.map(ai_working_canvas_for_dimensions);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -4417,7 +4847,8 @@ async fn generate_antigravity_image(
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
 
         emit_codex_progress(&app, &run_id, "Starting local Antigravity");
-        let prompt_text = antigravity_generate_prompt(prompt.trim(), &job_dir, autonomy);
+        let prompt_text =
+            antigravity_generate_prompt(prompt.trim(), &job_dir, autonomy, working.as_ref());
         let run = run_antigravity(
             &antigravity_bin,
             &workspace_path,
@@ -4441,12 +4872,38 @@ async fn generate_antigravity_image(
 
         let result_path = job_path.join("result.png");
         emit_codex_progress(&app, &run_id, "Reading Antigravity result");
-        let data_url = read_png_data_url(&result_path)?;
+        let (bytes, result_dimensions, normalized_result) = if let Some(working) = &working {
+            read_png_bytes_cropped_to_ai_working_canvas(
+                &result_path,
+                working,
+                "Antigravity generated image",
+            )?
+        } else {
+            let bytes = fs::read(&result_path)
+                .map_err(|e| format!("Failed to read Antigravity image: {e}"))?;
+            let dimensions = png_dimensions_from_bytes(&bytes)
+                .ok_or_else(|| "Antigravity image PNG dimensions are invalid.".to_string())?;
+            (bytes, dimensions, false)
+        };
+        if normalized_result {
+            if let Some(working) = &working {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    &format!(
+                        "Cropped Antigravity result from {}x{} {} canvas to {}x{}",
+                        result_dimensions.0,
+                        result_dimensions.1,
+                        working.aspect_label,
+                        working.original_dimensions.0,
+                        working.original_dimensions.1
+                    ),
+                );
+            }
+        }
+        let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving Antigravity image to the project");
-            let bytes = fs::read(&result_path).map_err(|e| {
-                format!("Failed to read Antigravity image for project storage: {e}")
-            })?;
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
             Some(add_asset(
@@ -4514,6 +4971,7 @@ async fn generate_antigravity_fill_image(
             "Generative fill source, edit target, and mask must have identical dimensions.".into(),
         );
     }
+    let working = ai_working_canvas_for_dimensions(source_dimensions);
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
@@ -4533,11 +4991,29 @@ async fn generate_antigravity_fill_image(
             .to_path_buf();
         let new_antigravity_project = project_dir.is_none();
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
-        fs::write(job_path.join("source.png"), &source_png)
+        let working_source_png = pad_png_to_ai_working_canvas(
+            &source_png,
+            &working,
+            "generative fill source image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_edit_target_png = pad_png_to_ai_working_canvas(
+            &edit_target_png,
+            &working,
+            "generative fill edit target image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_mask_png = pad_png_to_ai_working_canvas(
+            &mask_png,
+            &working,
+            "generative fill mask image",
+            image::Rgba([0, 0, 0, 255]),
+        )?;
+        fs::write(job_path.join("source.png"), &working_source_png)
             .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
-        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+        fs::write(job_path.join("edit_target.png"), &working_edit_target_png)
             .map_err(|e| format!("Failed to write generative fill edit target image: {e}"))?;
-        fs::write(job_path.join("mask.png"), &mask_png)
+        fs::write(job_path.join("mask.png"), &working_mask_png)
             .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
 
         emit_codex_progress(&app, &run_id, "Starting local Antigravity generative fill");
@@ -4545,7 +5021,7 @@ async fn generate_antigravity_fill_image(
             &antigravity_bin,
             &workspace_path,
             &job_path,
-            &antigravity_fill_prompt(prompt.trim(), &job_dir, autonomy),
+            &antigravity_fill_prompt(prompt.trim(), &job_dir, autonomy, &working),
             &options,
             new_antigravity_project,
             GENERATION_TIMEOUT,
@@ -4562,17 +5038,28 @@ async fn generate_antigravity_fill_image(
             ));
         }
         let result_path = job_path.join("result.png");
-        let result_dimensions = png_dimensions(&result_path)?;
-        if result_dimensions != source_dimensions {
-            return Err(format!(
-                "Antigravity generated a {}x{} fill, but this document needs exactly {}x{}.",
-                result_dimensions.0, result_dimensions.1, source_dimensions.0, source_dimensions.1
-            ));
+        let (bytes, result_dimensions, normalized_result) =
+            read_png_bytes_cropped_to_ai_working_canvas(
+                &result_path,
+                &working,
+                "Antigravity generative fill",
+            )?;
+        if normalized_result {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                &format!(
+                    "Cropped Antigravity fill from {}x{} {} canvas to {}x{}",
+                    result_dimensions.0,
+                    result_dimensions.1,
+                    working.aspect_label,
+                    source_dimensions.0,
+                    source_dimensions.1
+                ),
+            );
         }
-        let data_url = read_png_data_url(&result_path)?;
+        let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
-            let bytes = fs::read(&result_path)
-                .map_err(|e| format!("Failed to read Antigravity fill for project storage: {e}"))?;
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
             Some(add_asset(
@@ -4642,6 +5129,7 @@ async fn generate_antigravity_retouch_image(
             "AI retouch source, edit target, and mask must have identical dimensions.".into(),
         );
     }
+    let working = ai_working_canvas_for_dimensions(source_dimensions);
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
@@ -4661,20 +5149,47 @@ async fn generate_antigravity_retouch_image(
             .to_path_buf();
         let new_antigravity_project = project_dir.is_none();
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
-        fs::write(job_path.join("source.png"), &source_png)
+        let working_source_png = pad_png_to_ai_working_canvas(
+            &source_png,
+            &working,
+            "AI retouch source image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_edit_target_png = pad_png_to_ai_working_canvas(
+            &edit_target_png,
+            &working,
+            "AI retouch edit target image",
+            image::Rgba([0, 0, 0, 0]),
+        )?;
+        let working_mask_png = pad_png_to_ai_working_canvas(
+            &mask_png,
+            &working,
+            "AI retouch mask image",
+            image::Rgba([0, 0, 0, 255]),
+        )?;
+        fs::write(job_path.join("source.png"), &working_source_png)
             .map_err(|e| format!("Failed to write AI retouch source image: {e}"))?;
-        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+        fs::write(job_path.join("edit_target.png"), &working_edit_target_png)
             .map_err(|e| format!("Failed to write AI retouch edit target image: {e}"))?;
-        fs::write(job_path.join("mask.png"), &mask_png)
+        fs::write(job_path.join("mask.png"), &working_mask_png)
             .map_err(|e| format!("Failed to write AI retouch mask image: {e}"))?;
         fs::write(
             job_path.join("paintnode_contract.txt"),
-            antigravity_retouch_contract_text(&job_dir, autonomy),
+            antigravity_retouch_contract_text(&job_dir, autonomy, &working),
         )
         .map_err(|e| format!("Failed to write AI retouch PaintNode contract: {e}"))?;
         let has_annotated_source = if let Some(annotated_source_png) = &annotated_source_png {
-            fs::write(job_path.join("annotated_source.png"), annotated_source_png)
-                .map_err(|e| format!("Failed to write AI retouch annotated source image: {e}"))?;
+            let working_annotated_source_png = pad_png_to_ai_working_canvas(
+                annotated_source_png,
+                &working,
+                "AI retouch annotated source image",
+                image::Rgba([0, 0, 0, 0]),
+            )?;
+            fs::write(
+                job_path.join("annotated_source.png"),
+                working_annotated_source_png,
+            )
+            .map_err(|e| format!("Failed to write AI retouch annotated source image: {e}"))?;
             true
         } else {
             false
@@ -4698,6 +5213,7 @@ async fn generate_antigravity_retouch_image(
                 has_reference,
                 &job_dir,
                 autonomy,
+                &working,
             ),
             &options,
             new_antigravity_project,
@@ -4718,12 +5234,26 @@ async fn generate_antigravity_retouch_image(
         emit_codex_progress(&app, &run_id, "Reading Antigravity AI retouch result");
         let raw_provider_bytes = fs::read(&result_path)
             .map_err(|e| format!("Failed to read raw Antigravity AI retouch output: {e}"))?;
-        let (generated_bytes, _result_dimensions, _resized_result) =
-            read_png_bytes_resized_to_dimensions(
+        let (generated_bytes, result_dimensions, normalized_result) =
+            read_png_bytes_cropped_to_ai_working_canvas(
                 &result_path,
-                source_dimensions,
+                &working,
                 "AI retouch candidate",
             )?;
+        if normalized_result {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                &format!(
+                    "Cropped Antigravity AI retouch from {}x{} {} canvas to {}x{}",
+                    result_dimensions.0,
+                    result_dimensions.1,
+                    working.aspect_label,
+                    source_dimensions.0,
+                    source_dimensions.1
+                ),
+            );
+        }
         emit_codex_progress(&app, &run_id, "Restoring protected AI retouch pixels");
         let protected_generated_bytes =
             ai_retouch_restore_protected_pixels_png(&source_png, &generated_bytes, &mask_png)?;
@@ -6046,6 +6576,7 @@ mod tests {
                 "make an image",
                 &options,
                 AiAutonomyLevel::Low,
+                None,
                 true,
             );
             let args = command
@@ -6198,19 +6729,22 @@ mod tests {
 
     #[test]
     fn antigravity_prompts_require_result_file_without_codex_cache_contract() {
+        let working = ai_working_canvas_for_dimensions((1280, 800));
         let retouch = antigravity_retouch_prompt(
             "remove glare",
             false,
             false,
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Low,
+            &working,
         );
         assert!(retouch.contains("result.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/source.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/edit_target.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/mask.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/paintnode_contract.txt"));
-        assert!(retouch.contains("PaintNode will resize it deterministically"));
+        assert!(retouch.contains("PaintNode working canvas"));
+        assert!(retouch.contains("PaintNode will crop the content rectangle deterministically"));
         assert!(retouch.contains("Do not write or run Python"));
         assert!(retouch.contains("maximum allowed edit area"));
         assert!(retouch.contains("preserve the person's face, hair, skin, hands"));
@@ -6223,8 +6757,9 @@ mod tests {
         let contract = antigravity_retouch_contract_text(
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Low,
+            &working,
         );
-        assert!(contract.contains("Resize the PNG to the exact source canvas dimensions"));
+        assert!(contract.contains("Crop the centered content rectangle"));
         assert!(contract.contains("Restore protected black-mask pixels"));
         assert!(contract.contains("Do not run Python, OpenCV, Pillow"));
         assert!(contract.contains("Do not keep working after"));
@@ -6232,8 +6767,9 @@ mod tests {
         let unmanaged_contract = antigravity_retouch_contract_text(
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Unmanaged,
+            &working,
         );
-        assert!(unmanaged_contract.contains("Resize the PNG to the exact source canvas dimensions"));
+        assert!(unmanaged_contract.contains("Crop the centered content rectangle"));
         assert!(!unmanaged_contract.contains("Do not run Python, OpenCV, Pillow"));
         assert!(!unmanaged_contract.contains("Do not keep working after"));
 
@@ -6251,21 +6787,29 @@ mod tests {
 
     #[test]
     fn unmanaged_autonomy_prompts_omit_method_guardrails() {
-        let prompt = codex_prompt("make an image", AiAutonomyLevel::Unmanaged);
+        let working = ai_working_canvas_for_dimensions((1280, 800));
+        let prompt = codex_prompt("make an image", AiAutonomyLevel::Unmanaged, Some(&working));
         assert!(prompt.contains("Autonomy level: Unmanaged"));
         assert!(prompt.contains("Use $imagegen"));
+        assert!(prompt.contains("Provider-supported aspect ratio"));
         assert!(prompt.contains("normal Codex image-generation flow"));
         assert!(!prompt.contains("Do not create, edit, or delete files in the working directory"));
         assert!(!prompt.contains("Do not write or run Python"));
 
-        let retouch = ai_retouch_prompt("remove glare", false, false, AiAutonomyLevel::Unmanaged);
+        let retouch = ai_retouch_prompt(
+            "remove glare",
+            false,
+            false,
+            AiAutonomyLevel::Unmanaged,
+            &working,
+        );
         assert!(retouch.contains("Autonomy level: Unmanaged"));
         assert!(retouch.contains("Use $imagegen"));
         assert!(retouch.contains("normal Codex image-generation flow"));
         assert!(!retouch.contains("Do not create, edit, copy, verify, or delete files"));
         assert!(!retouch.contains("write helper scripts"));
 
-        let fill = generative_fill_prompt("extend photo", AiAutonomyLevel::Unmanaged);
+        let fill = generative_fill_prompt("extend photo", AiAutonomyLevel::Unmanaged, &working);
         assert!(fill.contains("Autonomy level: Unmanaged"));
         assert!(fill.contains("Use $imagegen"));
         assert!(fill.contains("normal Codex image-generation flow"));
@@ -6406,12 +6950,14 @@ mod tests {
     #[test]
     fn generative_fill_command_attaches_source_and_mask_before_prompt() {
         let job = TempJobDir::new("paintnode-fill-command-test").expect("temp dir");
+        let working = ai_working_canvas_for_dimensions((1280, 800));
         let command = build_generative_fill_codex_command(
             "codex",
             job.path(),
             "extend photo",
             &CodexCommandOptions::default(),
             AiAutonomyLevel::Low,
+            &working,
             true,
         );
         let args = command
@@ -6436,8 +6982,9 @@ mod tests {
             job.path().join("mask.png").to_string_lossy()
         );
         assert_eq!(args[image_idx + 4], "--");
-        assert!(args[image_idx + 5].contains("Use `edit_target.png` as the canvas geometry"));
-        assert!(args[image_idx + 5].contains("Save the final exact-size PNG as `result.png`"));
+        assert!(args[image_idx + 5].contains("Use the centered content rectangle"));
+        assert!(args[image_idx + 5].contains("Save the final PNG as `result.png`"));
+        assert!(args[image_idx + 5].contains("Provider-supported aspect ratio: 3:2"));
         assert!(args[image_idx + 5].contains("White pixels are the full editable/generated area"));
         assert!(
             args[image_idx + 5].contains("Gray pixels are a narrow seam-blending transition zone")
@@ -6448,6 +6995,7 @@ mod tests {
     #[test]
     fn ai_retouch_command_attaches_optional_guidance_before_reference() {
         let job = TempJobDir::new("paintnode-retouch-command-test").expect("temp dir");
+        let working = ai_working_canvas_for_dimensions((1280, 800));
         let command = build_ai_retouch_codex_command(
             "codex",
             job.path(),
@@ -6456,6 +7004,7 @@ mod tests {
             true,
             &CodexCommandOptions::default(),
             AiAutonomyLevel::Low,
+            &working,
             true,
         );
         let args = command
@@ -6489,6 +7038,7 @@ mod tests {
         );
         assert_eq!(args[image_idx + 6], "--");
         assert!(args[image_idx + 7].contains("Use $imagegen to perform one AI retouch edit"));
+        assert!(args[image_idx + 7].contains("Provider-supported aspect ratio: 3:2"));
         assert!(args[image_idx + 7].contains("`annotated_source.png` is the clean source image"));
         assert!(args[image_idx + 7].contains("arrows, labels, and callout positions as guidance"));
         assert!(args[image_idx + 7].contains("red arrows, yellow callout boxes, annotation text"));
@@ -6585,28 +7135,123 @@ mod tests {
     }
 
     #[test]
-    fn read_png_bytes_resized_to_dimensions_overwrites_staged_result() {
-        let job = TempJobDir::new("paintnode-retouch-resize-test").expect("job dir");
-        let path = job.path().join("result.png");
-        let image = image::RgbaImage::from_fn(2, 2, |x, y| {
-            image::Rgba([
-                if x == 0 { 255 } else { 0 },
-                if y == 0 { 255 } else { 0 },
-                64,
-                255,
-            ])
-        });
-        let original = encode_rgba_png(image, "test image").expect("encode test png");
-        fs::write(&path, original).expect("write result");
+    fn ai_working_canvas_chooses_small_supported_canvas_for_unsupported_ratio() {
+        let working = ai_working_canvas_for_dimensions((1280, 800));
 
-        let (bytes, original_dimensions, resized) =
-            read_png_bytes_resized_to_dimensions(&path, (1, 1), "AI retouch candidate")
-                .expect("resize");
+        assert_eq!(working.aspect_label, "3:2");
+        assert_eq!(working.working_dimensions, (1296, 864));
+        assert_eq!(
+            working.content_rect,
+            PixelRect {
+                x: 8,
+                y: 32,
+                width: 1280,
+                height: 800,
+            }
+        );
+    }
 
-        assert_eq!(original_dimensions, (2, 2));
-        assert!(resized);
-        assert_eq!(png_dimensions_from_bytes(&bytes), Some((1, 1)));
-        assert_eq!(png_dimensions(&path).expect("path dimensions"), (1, 1));
+    #[test]
+    fn ai_working_canvas_leaves_exact_supported_ratio_unpadded() {
+        let working = ai_working_canvas_for_dimensions((1024, 768));
+
+        assert_eq!(working.aspect_label, "4:3");
+        assert_eq!(working.working_dimensions, (1024, 768));
+        assert_eq!(
+            working.content_rect,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 1024,
+                height: 768,
+            }
+        );
+        assert!(!working.has_padding());
+    }
+
+    #[test]
+    fn pad_png_to_ai_working_canvas_centers_original_pixels() {
+        let working = ai_working_canvas_for_dimensions((32, 20));
+        let source =
+            image::RgbaImage::from_fn(32, 20, |x, y| image::Rgba([x as u8, y as u8, 200, 255]));
+        let source_bytes = encode_rgba_png(source, "source").expect("encode source");
+
+        let padded = pad_png_to_ai_working_canvas(
+            &source_bytes,
+            &working,
+            "source",
+            image::Rgba([0, 0, 0, 0]),
+        )
+        .expect("pad source");
+        let padded_image = decode_png_rgba(&padded, "padded source").expect("decode padded");
+
+        assert_eq!(padded_image.dimensions(), working.working_dimensions);
+        assert_eq!(padded_image.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(
+            padded_image
+                .get_pixel(working.content_rect.x + 7, working.content_rect.y + 3)
+                .0,
+            [7, 3, 200, 255]
+        );
+    }
+
+    #[test]
+    fn crop_png_bytes_to_ai_content_extracts_centered_document_rect() {
+        let working = ai_working_canvas_for_dimensions((32, 20));
+        let output = image::RgbaImage::from_fn(
+            working.working_dimensions.0,
+            working.working_dimensions.1,
+            |x, y| {
+                let inside = x >= working.content_rect.x
+                    && x < working.content_rect.x + working.content_rect.width
+                    && y >= working.content_rect.y
+                    && y < working.content_rect.y + working.content_rect.height;
+                if inside {
+                    image::Rgba([
+                        (x - working.content_rect.x) as u8,
+                        (y - working.content_rect.y) as u8,
+                        77,
+                        255,
+                    ])
+                } else {
+                    image::Rgba([255, 0, 0, 255])
+                }
+            },
+        );
+        let output_bytes = encode_rgba_png(output, "provider output").expect("encode output");
+
+        let (cropped_bytes, provider_dimensions, cropped) =
+            crop_png_bytes_to_ai_content(&output_bytes, &working, "provider output")
+                .expect("crop output");
+        let cropped_image = decode_png_rgba(&cropped_bytes, "cropped output").expect("decode crop");
+
+        assert_eq!(provider_dimensions, working.working_dimensions);
+        assert!(cropped);
+        assert_eq!(cropped_image.dimensions(), working.original_dimensions);
+        assert_eq!(cropped_image.get_pixel(0, 0).0, [0, 0, 77, 255]);
+        assert_eq!(cropped_image.get_pixel(31, 19).0, [31, 19, 77, 255]);
+    }
+
+    #[test]
+    fn ai_working_canvas_accepts_scaled_same_ratio_outputs() {
+        let working = ai_working_canvas_for_dimensions((1280, 800));
+
+        assert!(ai_working_canvas_accepts_result_dimensions(
+            &working,
+            working.original_dimensions
+        ));
+        assert!(ai_working_canvas_accepts_result_dimensions(
+            &working,
+            working.working_dimensions
+        ));
+        assert!(ai_working_canvas_accepts_result_dimensions(
+            &working,
+            (1536, 1024)
+        ));
+        assert!(!ai_working_canvas_accepts_result_dimensions(
+            &working,
+            (1024, 1024)
+        ));
     }
 
     #[test]

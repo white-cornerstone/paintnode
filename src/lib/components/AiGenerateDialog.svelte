@@ -20,6 +20,7 @@
     generateImage,
     writeProjectDocumentPath,
     type ProjectAsset,
+    type TargetDimensions,
   } from '../integrations/desktop';
   import { Copy } from '../icons';
 
@@ -74,7 +75,13 @@
     if (!doc) return base;
     return `${base}
 
-Canvas size requirement: generate the image to match the current PaintNode canvas exactly: ${doc.width}x${doc.height} pixels, landscape/portrait orientation and aspect ratio included. Do not crop, letterbox, pillarbox, or add extra margins beyond this canvas.`;
+Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image generator uses fixed aspect-ratio buckets, PaintNode may use a supported working canvas with this target area centered and crop that area after generation. Keep the meaningful composition inside the final PaintNode target area.`;
+  }
+
+  function targetDimensions(): TargetDimensions | null {
+    const doc = editor.doc;
+    if (!doc) return null;
+    return { width: doc.width, height: doc.height };
   }
 
   function defaultFillPrompt(): string {
@@ -169,6 +176,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       const fillInput = hasSelection ? await editor.prepareGenerativeFillInput() : null;
       if (hasSelection && !fillInput) throw new Error('The current selection has no editable pixels.');
       const generationPrompt = fillInput ? userPrompt || defaultFillPrompt() : promptWithCanvasSize(userPrompt);
+      const generationTarget = fillInput ? null : targetDimensions();
       fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt) : null;
       if (fillDebugDir) progress = `Saved fill inputs: ${fillDebugDir}`;
       if (fillInput) progress = fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...';
@@ -185,6 +193,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
             : await generateCodexImage(
                 codexConfigFromRunOptions(runOptions, project.path, runId),
                 generationPrompt,
+                generationTarget,
               )
           : runOptions.provider === 'antigravity'
             ? fillInput
@@ -198,6 +207,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
               : await generateAntigravityImage(
                   antigravityConfigFromRunOptions(runOptions, project.path, runId),
                   generationPrompt,
+                  generationTarget,
                 )
             : null;
       if (generated?.asset) await project.refresh();

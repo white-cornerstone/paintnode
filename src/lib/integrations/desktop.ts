@@ -98,6 +98,11 @@ export interface AntigravityGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
 }
 
+export interface TargetDimensions {
+  width: number;
+  height: number;
+}
+
 export interface CodexDetectionResult {
   found: boolean;
   path: string | null;
@@ -271,6 +276,7 @@ export async function detectAntigravity(bin?: string): Promise<CodexDetectionRes
 export async function generateCodexImage(
   config: CodexGeneratorConfig,
   prompt: string,
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex image generation is only available in the desktop app.');
@@ -284,6 +290,8 @@ export async function generateCodexImage(
     prompt,
     projectPath,
     runId,
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
   });
 }
 
@@ -391,6 +399,7 @@ export async function composeCodexWorkflow(
 export async function generateAntigravityImage(
   config: AntigravityGeneratorConfig,
   prompt: string,
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity image generation is only available in the desktop app.');
@@ -400,6 +409,8 @@ export async function generateAntigravityImage(
     ...antigravityInvokeConfig({ ...config, runId }),
     prompt,
     runId,
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
   });
 }
 
