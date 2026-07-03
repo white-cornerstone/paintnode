@@ -185,7 +185,14 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
       lockReason,
       clipping: src.clipping === true,
       blendApproximated: blend.approximated,
-      imported: { x: layer.x, y: layer.y, pixelRev: layer.pixelRev, blendMode: blend.mode, mask: importedMask },
+      imported: {
+        x: layer.x,
+        y: layer.y,
+        pixelRev: layer.pixelRev,
+        blendMode: blend.mode,
+        visible: layer.visible,
+        mask: importedMask,
+      },
     };
     layers.push(layer);
   }

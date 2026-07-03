@@ -1,9 +1,26 @@
 import { zipSync, type Zippable } from 'fflate';
 import type { PaintDocument } from '../engine/Document.svelte';
-import { BLEND_TO_ORA } from '../engine/types';
+import type { Layer } from '../engine/Layer.svelte';
+import { BLEND_TO_ORA, createCanvas, ctx2d } from '../engine/types';
 import { compositeToCanvas, makeThumbnail } from '../engine/compositor';
 import { serializeModel } from '../engine/text/model';
 import { canvasToPngBytes } from '../io';
+
+/**
+ * The bitmap to store for a layer. Imported PSD masks exist only in memory
+ * (`layer.psdMask`) — .ora has no mask channel for them, so bake the mask into
+ * the exported pixels or autosaves/saves would show the masked-out areas.
+ */
+function bakedLayerCanvas(layer: Layer): HTMLCanvasElement {
+  const mask = layer.psdMask;
+  if (!mask || mask.disabled) return layer.canvas;
+  const out = createCanvas(layer.width, layer.height);
+  const c = ctx2d(out);
+  c.drawImage(layer.canvas, 0, 0);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(mask.coverage, 0, 0);
+  return out;
+}
 
 function escapeXml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => {
@@ -88,7 +105,7 @@ export async function saveOra(doc: PaintDocument, embedFonts: EmbeddedFont[] = [
     const layer = doc.layers[i];
     const src = `data/layer${i}.png`;
     srcMap.set(layer.id, src);
-    files[src] = await canvasToPngBytes(layer.canvas);
+    files[src] = await canvasToPngBytes(bakedLayerCanvas(layer));
     // Editable text layers also store their model as a sidecar JSON.
     if (layer.kind === 'text' && layer.text) {
       const textPath = `data/layer${i}.text.json`;

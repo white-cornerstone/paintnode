@@ -124,6 +124,19 @@ describe('serialize / deserialize', () => {
     expect(m!.paragraphs[0].runs[1].style.leading).toBe(60);
   });
 
+  it('migrates mixed-size paragraphs with the old previous-line advance', () => {
+    // Old renderer: baseline gap = prev line box height − prev ascent + own ascent
+    // (fallback metrics: ascent 0.8 × size). 72px headline → 12px caption:
+    // 93.6 − 57.6 + 9.6 = 45.6, NOT the caption's own 1.3 × 12 = 15.6.
+    const m = deserializeModel(
+      '{"paragraphs":[' +
+        '{"lineHeight":1.3,"runs":[{"text":"Headline","style":{"size":72}}]},' +
+        '{"lineHeight":1.3,"runs":[{"text":"caption","style":{"size":12}}]}]}',
+    );
+    expect(m!.paragraphs[0].runs[0].style.leading).toBeCloseTo(93.6, 5);
+    expect(m!.paragraphs[1].runs[0].style.leading).toBeCloseTo(45.6, 5);
+  });
+
   it('accepts justify alignments and the v2 character fields', () => {
     const m = deserializeModel(
       '{"paragraphs":[{"align":"justify-all","spaceBefore":4,"runs":[{"text":"a","style":{"caps":"small","script":"super","horizontalScale":80,"baselineShift":3,"strikethrough":true,"leading":30}}]}]}',

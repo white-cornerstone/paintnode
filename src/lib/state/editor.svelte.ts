@@ -1348,7 +1348,9 @@ export class EditorStore implements ToolHost {
   private remapLayers(nw: number, nh: number, paint: (c: CanvasRenderingContext2D, l: Layer) => void): Layer[] {
     const doc = this.doc!;
     return doc.layers.map((l) => {
-      const nl = new Layer(nw, nh, l.name);
+      // Keep the layer id: maskLayerId links point at ids, so fresh ids would
+      // leave every linked mask dangling after a crop/rotate/flip.
+      const nl = new Layer(nw, nh, l.name, l.id);
       nl.opacity = l.opacity;
       nl.visible = l.visible;
       nl.blendMode = l.blendMode;
@@ -1667,12 +1669,19 @@ export class EditorStore implements ToolHost {
         const layers = doc.layers.map((l) => {
           const nw = Math.max(1, Math.round(l.width * sx));
           const nh = Math.max(1, Math.round(l.height * sy));
-          const nl = new Layer(nw, nh, l.name);
+          // Keep the layer id so maskLayerId links survive the resize.
+          const nl = new Layer(nw, nh, l.name, l.id);
           nl.x = Math.round(l.x * sx);
           nl.y = Math.round(l.y * sy);
           nl.opacity = l.opacity;
           nl.visible = l.visible;
           nl.blendMode = l.blendMode;
+          nl.maskLayerId = l.maskLayerId;
+          nl.maskEnabled = l.maskEnabled;
+          // Text models are not rescaled, so text layers rasterize (as before);
+          // mask-kind survives so linked masks keep working after the resize.
+          nl.kind = l.kind === 'text' ? 'raster' : l.kind;
+          nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
           if (l.psd) nl.psd = { ...l.psd, imported: { ...l.psd.imported, pixelRev: -1 } };
           nl.ctx.imageSmoothingEnabled = true;
           nl.ctx.imageSmoothingQuality = 'high';
@@ -2347,7 +2356,10 @@ export class EditorStore implements ToolHost {
     const bx = layer.x;
     const by = layer.y;
     const region = this.unionTextRegion(beforeModel, bx, by, newModel, doc);
-    const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    // Imported PSD text pixels were rendered by Photoshop with different font
+    // metrics and can extend beyond our estimated bounds — snapshot the whole
+    // layer for those so undo restores every original pixel.
+    const before = (layer.psd ? null : snapshotRegion(layer, region)) ?? snapshotLayer(layer);
     const applyNew = () => {
       layer.text = cloneModel(newModel);
       layer.x = 0;
@@ -2356,7 +2368,8 @@ export class EditorStore implements ToolHost {
       layer.touch();
     };
     applyNew();
-    const after = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    // Undo/redo snapshots must cover the same area (full layer for imported text).
+    const after = (layer.psd ? null : snapshotRegion(layer, region)) ?? snapshotLayer(layer);
     this.history.push({
       label: 'Edit Text',
       undo: () => {

@@ -222,6 +222,7 @@ export function deserializeModel(raw: string): TextModel | null {
   const rawParagraphs = Array.isArray(obj.paragraphs) ? obj.paragraphs : [];
   const paragraphs = rawParagraphs.map(coerceParagraph);
   if (!paragraphs.length) return null;
+  migrateLineHeights(paragraphs, rawParagraphs);
   const antiAlias = coerceAntiAlias(obj.antiAlias);
   return {
     version: 1,
@@ -287,7 +288,7 @@ function coerceParagraph(v: unknown): TextParagraph {
     const ro = (r ?? {}) as Record<string, unknown>;
     return { text: typeof ro.text === 'string' ? ro.text : '', style: coerceStyle(ro.style) };
   });
-  const paragraph = defaultParagraph({
+  return defaultParagraph({
     align: coerceAlign(o.align),
     runs: runs.length ? runs : [{ text: '', style: defaultStyle() }],
     indentLeft: num(o.indentLeft, 0),
@@ -297,16 +298,34 @@ function coerceParagraph(v: unknown): TextParagraph {
     spaceAfter: num(o.spaceAfter, 0),
     hyphenate: !!o.hyphenate,
   });
-  // v1 migration: paragraphs stored a lineHeight multiplier of the largest run size.
-  // Convert it to explicit per-run leading so old documents keep their exact spacing.
-  const lineHeight = typeof o.lineHeight === 'number' && Number.isFinite(o.lineHeight) ? o.lineHeight : null;
-  if (lineHeight !== null) {
-    const maxSize = paragraph.runs.reduce((s, r) => Math.max(s, r.style.size), 0);
-    if (maxSize > 0) {
-      for (const run of paragraph.runs) {
-        if (run.style.leading === null) run.style.leading = lineHeight * maxSize;
-      }
+}
+
+/**
+ * v1 migration: paragraphs stored a lineHeight multiplier and the old renderer
+ * advanced each baseline by the PREVIOUS line's box height. Convert to explicit
+ * per-run leading that reproduces that advance (with the old fallback metrics:
+ * ascent = 0.8 × size, box height ≥ ascent + descent = size), so existing
+ * documents — including mixed-font-size ones — keep their spacing.
+ */
+function migrateLineHeights(paragraphs: TextParagraph[], raw: unknown[]): void {
+  const lineHeights = raw.map((v) => {
+    const o = (v ?? {}) as Record<string, unknown>;
+    return typeof o.lineHeight === 'number' && Number.isFinite(o.lineHeight) ? o.lineHeight : null;
+  });
+  if (!lineHeights.some((lh) => lh !== null)) return;
+  const maxSize = (p: TextParagraph) => p.runs.reduce((s, r) => Math.max(s, r.style.size), 0);
+  const boxHeight = (i: number) => {
+    const size = maxSize(paragraphs[i]);
+    const lh = lineHeights[i];
+    return lh === null || size <= 0 ? null : Math.max(lh * size, size);
+  };
+  for (let i = 0; i < paragraphs.length; i++) {
+    const prev = i > 0 ? i - 1 : i;
+    const prevHeight = boxHeight(prev);
+    if (prevHeight === null) continue;
+    const leading = prevHeight - 0.8 * maxSize(paragraphs[prev]) + 0.8 * maxSize(paragraphs[i]);
+    for (const run of paragraphs[i].runs) {
+      if (run.style.leading === null) run.style.leading = Math.max(1, leading);
     }
   }
-  return paragraph;
 }

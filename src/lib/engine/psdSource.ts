@@ -45,6 +45,12 @@ export interface PsdLayerSource {
     y: number;
     pixelRev: number;
     blendMode: BlendMode;
+    /**
+     * Effective visibility at import (own flag AND ancestor groups). Export only
+     * patches the layer's own hidden flag when this changed, so children of
+     * hidden groups keep their own visibility on round trip.
+     */
+    visible?: boolean;
     /** Linked mask layer created at import from the PSD layer mask, if any. */
     mask?: { layerId: string; pixelRev: number; x: number; y: number } | null;
   };

@@ -233,7 +233,10 @@ export function psdTextToModel(text: LayerTextData): TextModel | null {
   const raw = text.text ?? '';
 
   // Expand style runs to per-character styles (Photoshop separates lines with \r).
-  const chars = [...raw];
+  // Run lengths count UTF-16 code units, so index by code unit — splitting by code
+  // point would shift every style/paragraph after an astral character (emoji etc.);
+  // a surrogate pair's two units share one run style, so pairs reassemble intact.
+  const chars = raw.split('');
   const styles: TextStyle[] = [];
   const runs = text.styleRuns?.length
     ? text.styleRuns

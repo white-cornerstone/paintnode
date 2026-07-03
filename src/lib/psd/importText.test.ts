@@ -111,4 +111,20 @@ describe('psdTextToModel', () => {
     expect(model!.paragraphs[0].runs[0].text).toBe('One');
     expect(model!.paragraphs[1].runs[0].text).toBe('');
   });
+
+  it('indexes style runs by UTF-16 code units so astral characters stay aligned', () => {
+    // '😀' is one code point but TWO UTF-16 units; Photoshop run lengths count units.
+    const model = psdTextToModel({
+      text: '😀ab',
+      styleRuns: [
+        { length: 2, style: { fontSize: 40 } }, // the emoji
+        { length: 1, style: { fontSize: 20 } }, // 'a'
+        { length: 1, style: { fontSize: 10 } }, // 'b'
+      ],
+    });
+
+    const runs = model!.paragraphs[0].runs;
+    expect(runs.map((r) => r.text)).toEqual(['😀', 'a', 'b']);
+    expect(runs.map((r) => r.style.size)).toEqual([40, 20, 10]);
+  });
 });

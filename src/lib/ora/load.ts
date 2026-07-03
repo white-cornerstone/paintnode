@@ -55,6 +55,12 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
 
   // Our stack is bottom-to-top, so reverse the top-first list.
   const ordered = layerEls.reverse();
+  // Layer ids referenced as linked masks: a mask-kind layer without AI metadata
+  // (e.g. reconstructed from a PSD import) keeps its kind only when linked —
+  // otherwise a corrupt sidecar would turn a visible layer invisible.
+  const referencedMaskIds = new Set(
+    ordered.map((el) => el.getAttribute('paintnode-mask-layer-id')).filter((id): id is string => !!id),
+  );
   const layers: Layer[] = [];
   for (const el of ordered) {
     const name = el.getAttribute('name') || 'Layer';
@@ -96,12 +102,12 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     layer.opacity = clamp(Number.isNaN(opacityRaw) ? 1 : opacityRaw, 0, 1);
     layer.visible = (el.getAttribute('visibility') || 'visible') !== 'hidden';
     layer.blendMode = oraToBlend(el.getAttribute('composite-op'));
+    const isMaskKind =
+      layerKind === 'ai-retouch-mask' && (aiRetouch !== null || (!!layerId && referencedMaskIds.has(layerId)));
     if (textModel) {
       layer.kind = 'text';
       layer.text = textModel;
-    } else if (layerKind === 'ai-retouch-mask') {
-      // Keep the mask kind even when the AI metadata sidecar is missing (e.g. a
-      // linked mask reconstructed from a PSD import) so parent links survive.
+    } else if (isMaskKind) {
       layer.kind = 'ai-retouch-mask';
       layer.aiRetouch = aiRetouch;
     }
@@ -119,7 +125,7 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
       if (textModel) {
         loaded.kind = 'text';
         loaded.text = textModel;
-      } else if (layerKind === 'ai-retouch-mask') {
+      } else if (isMaskKind) {
         loaded.kind = 'ai-retouch-mask';
         loaded.aiRetouch = aiRetouch;
       }

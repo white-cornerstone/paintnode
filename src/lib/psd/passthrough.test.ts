@@ -153,6 +153,51 @@ describe('passthroughPsdLayer', () => {
     expect(out.mask?.disabled).toBe(true);
     expect(src.mask?.disabled).toBeUndefined();
   });
+
+  it('keeps the own hidden flag of visible children inside hidden groups', () => {
+    // Effective visibility at import was false (hidden ancestor group), the layer's
+    // own flag is not hidden — untouched round trip must not patch it.
+    const src: AgPsdLayer = { name: 'A' };
+    const layer = fakeLayer({
+      visible: false,
+      psd: { layer: src, imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over', visible: false } },
+    });
+
+    expect(passthroughPsdLayer(layer).hidden).toBeUndefined();
+  });
+
+  it('patches hidden only when the user changed visibility', () => {
+    const src: AgPsdLayer = { name: 'A' };
+    const layer = fakeLayer({
+      visible: false,
+      psd: { layer: src, imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over', visible: true } },
+    });
+
+    expect(passthroughPsdLayer(layer).hidden).toBe(true);
+  });
+
+  it('moves the text transform along with a moved clean text layer', () => {
+    const src: AgPsdLayer = {
+      name: 'T',
+      top: 10,
+      left: 20,
+      bottom: 30,
+      right: 40,
+      text: { text: 'Hi', transform: [1, 0, 0, 1, 22, 28], left: 20, top: 10, right: 40, bottom: 30 },
+    };
+    const layer = fakeLayer({
+      x: 30,
+      y: 15,
+      psd: { layer: src, imported: { x: 20, y: 10, pixelRev: 1, blendMode: 'source-over' } },
+    });
+
+    const out = passthroughPsdLayer(layer);
+
+    expect(out.text?.transform).toEqual([1, 0, 0, 1, 32, 33]);
+    expect([out.text?.left, out.text?.top]).toEqual([30, 15]);
+    // The original parsed text record is never mutated.
+    expect(src.text?.transform).toEqual([1, 0, 0, 1, 22, 28]);
+  });
 });
 
 describe('isCleanPsdLayer', () => {
@@ -249,6 +294,35 @@ describe('buildPsdChildren', () => {
     expect(children.map((child) => child.name)).toEqual(['Root', 'Group']);
     expect(children[1].opened).toBe(false);
     expect(children[1].children?.map((child) => child.name)).toEqual(['InA', 'Added', 'InB']);
+  });
+
+  it('splits an imported group instead of reordering when layers interleave', () => {
+    const group: AgPsdLayer = { name: 'G', children: [] };
+    const inGroupA = fakeLayer({ name: 'A', psd: { layer: { name: 'A' }, groupPath: [group] } });
+    const inGroupB = fakeLayer({ name: 'B', psd: { layer: { name: 'B' }, groupPath: [group] } });
+    const rootC = fakeLayer({ name: 'C', psd: { layer: { name: 'C' } } }); // imported root layer
+
+    // Stack (bottom→top): A, C, B — C must stay ABOVE A and BELOW B in the PSD.
+    const children = buildPsdChildren(fakeDoc([inGroupA, rootC, inGroupB]));
+
+    expect(children.map((child) => child.name)).toEqual(['G', 'C', 'G']);
+    expect(children[0].children?.map((c) => c.name)).toEqual(['A']);
+    expect(children[2].children?.map((c) => c.name)).toEqual(['B']);
+  });
+
+  it('drops the live text record when an imported text layer was rasterized', () => {
+    const src: AgPsdLayer = { name: 'T', text: { text: 'old text' } };
+    const layer = fakeLayer({
+      name: 'T',
+      pixelRev: 9, // painted over → dirty rebuild
+      psd: { layer: src, imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over' } },
+    });
+    // kind stays 'raster' (fakeLayer default), text null — the user rasterized it.
+
+    const [out] = buildPsdChildren(fakeDoc([layer]));
+
+    expect(out.text).toBeUndefined();
+    expect(out.canvas).toBe(canvas);
   });
 
   it('keeps a flat list for documents without PSD source', () => {

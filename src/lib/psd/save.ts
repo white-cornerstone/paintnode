@@ -251,7 +251,12 @@ export function passthroughPsdLayer(layer: Layer): PsdLayer {
   const src = meta.layer;
   const out: PsdLayer = { ...src };
   out.name = layer.name;
-  out.hidden = !layer.visible;
+  // Only patch the layer's own hidden flag when the user changed visibility.
+  // The imported value folded in hidden ancestor groups (which keep their own
+  // flag), so writing it back unconditionally would hide every child of a
+  // hidden group individually.
+  const importedVisible = meta.imported.visible ?? !src.hidden;
+  if (layer.visible !== importedVisible) out.hidden = !layer.visible;
   out.opacity = Math.max(0, Math.min(1, layer.opacity));
   out.blendMode = psdBlendFor(layer);
   const { dx, dy } = movedBy(layer);
@@ -269,6 +274,19 @@ export function passthroughPsdLayer(layer: Layer): PsdLayer {
         left: (src.mask.left ?? 0) + dx,
         bottom: (src.mask.bottom ?? 0) + dy,
         right: (src.mask.right ?? 0) + dx,
+      };
+    }
+    // A moved text layer must carry its transform along, or Photoshop snaps the
+    // text back to the old position the moment it re-renders the type layer.
+    if (src.text) {
+      const t = src.text.transform;
+      out.text = {
+        ...src.text,
+        ...(t && t.length >= 6 ? { transform: [t[0], t[1], t[2], t[3], t[4] + dx, t[5] + dy] } : {}),
+        ...(typeof src.text.left === 'number' ? { left: src.text.left + dx } : {}),
+        ...(typeof src.text.top === 'number' ? { top: src.text.top + dy } : {}),
+        ...(typeof src.text.right === 'number' ? { right: src.text.right + dx } : {}),
+        ...(typeof src.text.bottom === 'number' ? { bottom: src.text.bottom + dy } : {}),
       };
     }
   }
@@ -300,6 +318,10 @@ function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
   // (imported editable text is always horizontal; vertical stays locked).
   if (layer.kind === 'text' && layer.text && layer.text.orientation !== 'vertical') {
     out.text = textModelToPsdText(layer.text, layer);
+  } else if (out.text) {
+    // The user rasterized the imported text layer: drop the live type record so
+    // Photoshop doesn't resurrect the old text over the painted pixels.
+    delete out.text;
   }
   const linked = linkedPsdMask(doc, layer);
   if (linked) {
@@ -339,21 +361,23 @@ function strippedGroupNode(group: PsdLayer): PsdLayer {
  */
 export function buildPsdChildren(doc: PaintDocument): PsdLayer[] {
   const root: PsdLayer[] = [];
-  const groupNodes = new Map<PsdLayer, PsdLayer>();
+  // Currently-open group chain: original ag-psd group object → rebuilt node.
+  const open: { source: PsdLayer; node: PsdLayer }[] = [];
   let previousChain: PsdLayer[] = [];
 
-  const listFor = (chain: PsdLayer[]): PsdLayer[] => {
-    let list = root;
-    for (const group of chain) {
-      let node = groupNodes.get(group);
-      if (!node) {
-        node = strippedGroupNode(group);
-        groupNodes.set(group, node);
-        list.push(node);
-      }
-      list = node.children!;
+  const containerFor = (chain: PsdLayer[]): PsdLayer[] => {
+    // Keep the longest common prefix of open groups and close the rest. A closed
+    // group is never reopened — revisiting one emits a fresh node (splitting the
+    // group in two) so interleaved layers keep their z-order in the exported PSD.
+    let common = 0;
+    while (common < open.length && common < chain.length && open[common].source === chain[common]) common++;
+    open.length = common;
+    for (let i = common; i < chain.length; i++) {
+      const node = strippedGroupNode(chain[i]);
+      (open.length ? open[open.length - 1].node.children! : root).push(node);
+      open.push({ source: chain[i], node });
     }
-    return list;
+    return open.length ? open[open.length - 1].node.children! : root;
   };
 
   for (const layer of doc.layers) {
@@ -367,7 +391,7 @@ export function buildPsdChildren(doc: PaintDocument): PsdLayer[] {
       : layerToPsd(doc, layer);
     if (!node) continue;
     const chain = meta ? meta.groupPath : previousChain;
-    listFor(chain).push(node);
+    containerFor(chain).push(node);
     previousChain = chain;
   }
   return root;
