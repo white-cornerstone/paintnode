@@ -11,7 +11,7 @@ import type { Layer as AgPsdLayer, PixelData } from 'ag-psd';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { clamp, createCanvas, ctx2d } from '../engine/types';
-import type { PsdLayerMaskState } from '../engine/psdSource';
+import type { PsdLayerMaskState, PsdLayerSource } from '../engine/psdSource';
 import { flattenPsdTree, importNotices, psdLockReason, psdToBlend } from './import';
 
 export interface PsdImportResult {
@@ -75,6 +75,42 @@ function maskStateFor(
   };
 }
 
+/**
+ * Rebuild a PSD layer mask as a PaintNode linked mask layer (doc-sized, white
+ * pixels whose alpha is the mask coverage), so it shows up and edits as a
+ * parent–child mask row exactly like masks created in PaintNode.
+ */
+function linkedMaskLayerFor(
+  src: AgPsdLayer,
+  parent: Layer,
+  docWidth: number,
+  docHeight: number,
+  decodeMask: (layer: AgPsdLayer) => PixelData | undefined,
+): Layer | null {
+  const mask = src.mask;
+  if (!mask) return null;
+  const data = decodeMask(src);
+  if (!data || !data.width || !data.height) return null;
+  const relative = mask.positionRelativeToLayer === true;
+  const x = (mask.left ?? 0) + (relative ? (src.left ?? 0) : 0);
+  const y = (mask.top ?? 0) + (relative ? (src.top ?? 0) : 0);
+  const out = new Layer(docWidth, docHeight, `${parent.name} mask`);
+  out.kind = 'ai-retouch-mask';
+  // Hidden by convention: linked masks apply during compositing either way, the
+  // eye only shows the mask overlay (matches masks created by the AI flow).
+  out.visible = false;
+  const c = out.ctx;
+  const defaultColor = mask.defaultColor ?? 0;
+  if (defaultColor > 0) {
+    c.fillStyle = `rgba(255, 255, 255, ${defaultColor / 255})`;
+    c.fillRect(0, 0, out.width, out.height);
+    c.clearRect(x, y, data.width, data.height);
+  }
+  c.drawImage(maskAlphaCanvas(data), x, y);
+  out.touch();
+  return out;
+}
+
 /** Parse a Photoshop (.psd) file into a PaintDocument with passthrough state. */
 export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
   if (isPsb(buffer)) {
@@ -98,6 +134,7 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
   for (const item of flat) {
     const src = item.layer;
     const blend = psdToBlend(src.blendMode);
+    const lockReason = psdLockReason(src);
     const canvas = getLayerCanvas(src);
     const layer = new Layer(
       Math.max(1, canvas?.width ?? 1),
@@ -111,15 +148,28 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
     layer.opacity = clamp(src.opacity ?? 1, 0, 1);
     layer.visible = item.visible;
     layer.blendMode = blend.mode;
-    layer.psdMask = maskStateFor(src, layer, getLayerMaskImageData);
+
+    let importedMask: PsdLayerSource['imported']['mask'] = null;
+    if (lockReason) {
+      // Locked layers keep their mask internal: composited and passed through as-is.
+      layer.psdMask = maskStateFor(src, layer, getLayerMaskImageData);
+    } else {
+      const maskLayer = linkedMaskLayerFor(src, layer, psd.width, psd.height, getLayerMaskImageData);
+      if (maskLayer) {
+        layers.push(maskLayer); // sits directly below its parent in the stack
+        layer.maskLayerId = maskLayer.id;
+        layer.maskEnabled = src.mask?.disabled !== true;
+        importedMask = { layerId: maskLayer.id, pixelRev: maskLayer.pixelRev, x: maskLayer.x, y: maskLayer.y };
+      }
+    }
     layer.touch();
     layer.psd = {
       layer: src,
       groupPath: item.groupPath,
-      lockReason: psdLockReason(src),
+      lockReason,
       clipping: src.clipping === true,
       blendApproximated: blend.approximated,
-      imported: { x: layer.x, y: layer.y, pixelRev: layer.pixelRev, blendMode: blend.mode },
+      imported: { x: layer.x, y: layer.y, pixelRev: layer.pixelRev, blendMode: blend.mode, mask: importedMask },
     };
     layers.push(layer);
   }

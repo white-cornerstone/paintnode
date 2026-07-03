@@ -40,7 +40,14 @@ export interface PsdLayerSource {
   /** True when the PSD blend mode has no canvas equivalent (preview approximated). */
   blendApproximated: boolean;
   /** Import-time snapshot used to detect edits at save time. */
-  imported: { x: number; y: number; pixelRev: number; blendMode: BlendMode };
+  imported: {
+    x: number;
+    y: number;
+    pixelRev: number;
+    blendMode: BlendMode;
+    /** Linked mask layer created at import from the PSD layer mask, if any. */
+    mask?: { layerId: string; pixelRev: number; x: number; y: number } | null;
+  };
 }
 
 /**

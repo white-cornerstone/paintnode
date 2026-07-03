@@ -202,13 +202,24 @@ function psdBlendFor(layer: Layer): PsdLayer['blendMode'] {
   return meta.layer.blendMode;
 }
 
-/** True when an imported layer's pixels are untouched since import. */
+/** True when an imported layer's pixels (and linked mask) are untouched since import. */
 export function isCleanPsdLayer(doc: PaintDocument, layer: Layer): boolean {
   const meta = layer.psd;
   if (!meta) return false;
   if (layer.pixelRev !== meta.imported.pixelRev) return false;
-  // A PaintNode mask was attached after import — the layer record must be rebuilt.
-  if (doc.linkedMaskFor(layer)) return false;
+  const linked = doc.linkedMaskFor(layer);
+  const importedMask = meta.imported.mask ?? null;
+  if (linked) {
+    // A mask attached after import, or the imported mask painted/moved, needs a rebuild.
+    if (!importedMask || linked.id !== importedMask.layerId) return false;
+    if (linked.pixelRev !== importedMask.pixelRev) return false;
+    if (linked.x !== importedMask.x || linked.y !== importedMask.y) return false;
+    // The linked mask is anchored to the document, so moving the parent under it
+    // changes the masked result — the position patch alone can't express that.
+    if (layer.x !== meta.imported.x || layer.y !== meta.imported.y) return false;
+  } else if (importedMask) {
+    return false; // the imported mask was deleted — rebuild without it
+  }
   return true;
 }
 
@@ -248,6 +259,13 @@ export function passthroughPsdLayer(layer: Layer): PsdLayer {
       };
     }
   }
+  // Mask enable/disable is a safe single-flag patch on the original mask record.
+  if (meta.imported.mask && src.mask) {
+    const disabled = !layer.maskEnabled;
+    if ((src.mask.disabled === true) !== disabled) {
+      out.mask = { ...(out.mask ?? src.mask), disabled };
+    }
+  }
   return out;
 }
 
@@ -281,7 +299,10 @@ function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
       disabled: layer.psdMask.disabled,
       imageData: maskImageDataForPsd(maskCanvas),
     };
-  } else if (mask) {
+  } else if (mask && !meta.imported.mask) {
+    // A mask we never decoded into a linked layer: keep its original record.
+    // (If a linked mask WAS created at import and is gone now, the user deleted
+    // it, so the rebuilt layer intentionally has no mask.)
     out.mask = { ...mask };
   }
   return out;

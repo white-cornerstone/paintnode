@@ -99,7 +99,9 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
     if (textModel) {
       layer.kind = 'text';
       layer.text = textModel;
-    } else if (aiRetouch) {
+    } else if (layerKind === 'ai-retouch-mask') {
+      // Keep the mask kind even when the AI metadata sidecar is missing (e.g. a
+      // linked mask reconstructed from a PSD import) so parent links survive.
       layer.kind = 'ai-retouch-mask';
       layer.aiRetouch = aiRetouch;
     }
@@ -117,7 +119,7 @@ export async function loadOra(buffer: ArrayBuffer): Promise<PaintDocument> {
       if (textModel) {
         loaded.kind = 'text';
         loaded.text = textModel;
-      } else if (aiRetouch) {
+      } else if (layerKind === 'ai-retouch-mask') {
         loaded.kind = 'ai-retouch-mask';
         loaded.aiRetouch = aiRetouch;
       }

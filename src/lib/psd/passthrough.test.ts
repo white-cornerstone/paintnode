@@ -15,6 +15,7 @@ interface FakeLayerInit {
   visible?: boolean;
   blendMode?: string;
   pixelRev?: number;
+  maskEnabled?: boolean;
   psd?: Partial<PsdLayerSource> & { layer: AgPsdLayer };
   psdMask?: Layer['psdMask'];
 }
@@ -39,6 +40,7 @@ function fakeLayer(init: FakeLayerInit): Layer {
     blendMode: init.blendMode ?? 'source-over',
     kind: 'raster',
     pixelRev: init.pixelRev ?? 1,
+    maskEnabled: init.maskEnabled ?? true,
     canvas,
     psd,
     psdMask: init.psdMask ?? null,
@@ -46,12 +48,16 @@ function fakeLayer(init: FakeLayerInit): Layer {
   } as unknown as Layer;
 }
 
-function fakeDoc(layers: Layer[], psdSource: PaintDocument['psdSource'] = null): PaintDocument {
+function fakeDoc(
+  layers: Layer[],
+  psdSource: PaintDocument['psdSource'] = null,
+  linkedMaskFor: (layer: Layer) => Layer | null = () => null,
+): PaintDocument {
   return {
     width: 100,
     height: 80,
     layers,
-    linkedMaskFor: () => null,
+    linkedMaskFor,
     psdSource,
   } as unknown as PaintDocument;
 }
@@ -131,6 +137,22 @@ describe('passthroughPsdLayer', () => {
     // The original parsed object is never mutated.
     expect([src.top, src.left, src.mask?.top]).toEqual([10, 20, 12]);
   });
+
+  it('patches the mask disabled flag when the linked mask is toggled off', () => {
+    const src: AgPsdLayer = { name: 'A', mask: { top: 0, left: 0, bottom: 4, right: 4 } };
+    const layer = fakeLayer({
+      maskEnabled: false,
+      psd: {
+        layer: src,
+        imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over', mask: { layerId: 'm', pixelRev: 1, x: 0, y: 0 } },
+      },
+    });
+
+    const out = passthroughPsdLayer(layer);
+
+    expect(out.mask?.disabled).toBe(true);
+    expect(src.mask?.disabled).toBeUndefined();
+  });
 });
 
 describe('isCleanPsdLayer', () => {
@@ -142,6 +164,55 @@ describe('isCleanPsdLayer', () => {
 
     expect(isCleanPsdLayer(doc, clean)).toBe(true);
     expect(isCleanPsdLayer(doc, dirty)).toBe(false);
+  });
+
+  function maskedLayer(overrides: Partial<{ layerX: number; maskRev: number; maskX: number }> = {}): {
+    layer: Layer;
+    mask: Layer;
+  } {
+    const src: AgPsdLayer = { name: 'A', mask: { top: 0, left: 0, bottom: 4, right: 4 } };
+    const mask = {
+      id: 'mask-1',
+      kind: 'ai-retouch-mask',
+      pixelRev: overrides.maskRev ?? 1,
+      x: overrides.maskX ?? 0,
+      y: 0,
+    } as unknown as Layer;
+    const layer = fakeLayer({
+      x: overrides.layerX ?? 0,
+      psd: {
+        layer: src,
+        imported: {
+          x: 0,
+          y: 0,
+          pixelRev: 1,
+          blendMode: 'source-over',
+          mask: { layerId: 'mask-1', pixelRev: 1, x: 0, y: 0 },
+        },
+      },
+    });
+    return { layer, mask };
+  }
+
+  it('stays clean while the imported linked mask is untouched', () => {
+    const { layer, mask } = maskedLayer();
+    expect(isCleanPsdLayer(fakeDoc([layer], null, () => mask), layer)).toBe(true);
+  });
+
+  it('goes dirty when the imported linked mask is painted, moved, or deleted', () => {
+    const painted = maskedLayer({ maskRev: 2 });
+    expect(isCleanPsdLayer(fakeDoc([painted.layer], null, () => painted.mask), painted.layer)).toBe(false);
+
+    const moved = maskedLayer({ maskX: 5 });
+    expect(isCleanPsdLayer(fakeDoc([moved.layer], null, () => moved.mask), moved.layer)).toBe(false);
+
+    const deleted = maskedLayer();
+    expect(isCleanPsdLayer(fakeDoc([deleted.layer], null, () => null), deleted.layer)).toBe(false);
+  });
+
+  it('goes dirty when the parent moves under its document-anchored mask', () => {
+    const { layer, mask } = maskedLayer({ layerX: 10 });
+    expect(isCleanPsdLayer(fakeDoc([layer], null, () => mask), layer)).toBe(false);
   });
 });
 
