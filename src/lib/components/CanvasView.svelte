@@ -125,6 +125,10 @@
       editor.commitActiveText();
       return;
     }
+    // Locked Photoshop-only layers reject pixel edits (they are preserved as-is).
+    if (e.button === 0 && !spaceDown && editor.activeTool.editsPixels && editor.blockIfLocked(editor.activeLayer)) {
+      return;
+    }
     // A pixel tool can't paint on a text layer — offer to rasterize it first.
     if (e.button === 0 && !spaceDown && editor.activeTool.editsPixels && editor.activeLayer?.kind === 'text') {
       editor.promptRasterize(editor.activeLayer);

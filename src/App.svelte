@@ -16,10 +16,12 @@
   import LibrariesPanel from './lib/components/LibrariesPanel.svelte';
   import ChannelsPanel from './lib/components/ChannelsPanel.svelte';
   import PathsPanel from './lib/components/PathsPanel.svelte';
+  import CharacterPanel from './lib/components/CharacterPanel.svelte';
+  import ParagraphPanel from './lib/components/ParagraphPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import Icon from './lib/components/Icon.svelte';
-  import { tooltip } from './lib/actions/tooltip';
+  import { tooltip, truncatedTooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
@@ -36,15 +38,18 @@
     Layers,
     Library,
     Options,
+    TextFont,
+    TextParagraphIcon,
   } from './lib/icons';
   import { installKeyboard } from './lib/state/keyboard';
   import {
     autosaveOpenDocuments,
     exportPngCommand,
+    exportPsdCommand,
     importImageCommand,
     openCommand,
     openDocumentPaths,
-    saveOraCommand,
+    saveDocumentCommand,
     saveActiveCommand,
     saveActiveCopyCommand,
     saveWorkflowCommand,
@@ -95,12 +100,14 @@
     | 'patterns'
     | 'properties'
     | 'adjustments'
+    | 'character'
+    | 'paragraph'
     | 'libraries'
     | 'layers'
     | 'channels'
     | 'paths';
   type PanelDef = { id: PanelId; title: string; icon: string; grow?: boolean };
-  type PanelGroupId = 'presets' | 'edits' | 'structure';
+  type PanelGroupId = 'presets' | 'edits' | 'type' | 'structure';
   type PanelGroupDef = { id: PanelGroupId; panels: PanelDef[]; grow?: boolean };
   const panelGroups: PanelGroupDef[] = [
     {
@@ -121,6 +128,13 @@
       ],
     },
     {
+      id: 'type',
+      panels: [
+        { id: 'character', title: 'Character', icon: TextFont },
+        { id: 'paragraph', title: 'Paragraph', icon: TextParagraphIcon },
+      ],
+    },
+    {
       id: 'structure',
       grow: true,
       panels: [
@@ -133,11 +147,13 @@
   let activePanelByGroup = $state<Record<PanelGroupId, PanelId>>({
     presets: 'color',
     edits: 'properties',
+    type: 'character',
     structure: 'layers',
   });
   let collapsedPanelGroups = $state<Record<PanelGroupId, boolean>>({
     presets: false,
     edits: false,
+    type: false,
     structure: false,
   });
 
@@ -206,7 +222,7 @@
   }
 
   function documentDisplayName(session: DocumentSession): string {
-    return session.doc.name || 'Untitled';
+    return editor.documentFileName(session);
   }
 
   function unsavedWorkItems(): UnsavedWorkItem[] {
@@ -227,7 +243,7 @@
     const session = editor.documents.find((documentSession) => documentSession.id === id);
     if (!session) return true;
     editor.switchDocument(id);
-    await saveOraCommand();
+    await saveDocumentCommand();
     const updated = editor.documents.find((documentSession) => documentSession.id === id);
     return !updated || !editor.hasUnsavedChanges(updated);
   }
@@ -340,6 +356,9 @@
         break;
       case 'app:export-png':
         void exportPngCommand();
+        break;
+      case 'app:export-psd':
+        void exportPsdCommand();
         break;
       case 'app:close-document':
         void closeActiveDocument();
@@ -602,6 +621,10 @@
     <PropertiesPanel {collapsed} {onToggle} />
   {:else if id === 'adjustments'}
     <AdjustmentsPanel {collapsed} {onToggle} />
+  {:else if id === 'character'}
+    <CharacterPanel {collapsed} {onToggle} />
+  {:else if id === 'paragraph'}
+    <ParagraphPanel {collapsed} {onToggle} />
   {:else if id === 'libraries'}
     <LibrariesPanel {collapsed} {onToggle} />
   {:else if id === 'layers'}
@@ -624,6 +647,7 @@
         aria-selected={isActive}
         aria-expanded={closePeeked ? peekedPanel === panel.id : isActive && !collapsedPanelGroups[group.id]}
         onclick={() => (closePeeked ? clickPeekPanelTab(group, panel.id) : clickExpandedPanelTab(group, panel.id))}
+        use:truncatedTooltip={{ text: panel.title, placement: 'bottom' }}
       >
         {panel.title}
       </button>
@@ -1059,7 +1083,7 @@
   .panel-toggle:hover {
     color: var(--text-bright);
   }
-  /* Edge-collapsed dock: keep panel labels (Photoshop icon+label rail) */
+  /* Edge-collapsed dock: keep panel labels in the icon+label rail. */
   .dock-rail {
     display: flex;
     flex-direction: column;

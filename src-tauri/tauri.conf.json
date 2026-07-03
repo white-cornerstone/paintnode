@@ -33,7 +33,7 @@
     "category": "GraphicsAndDesign",
     "copyright": "© 2026 PaintNode",
     "shortDescription": "OpenRaster image editor",
-    "longDescription": "A Photoshop-style raster image editor that uses the open OpenRaster (.ora) format.",
+    "longDescription": "A professional raster image editor that uses the open OpenRaster (.ora) format.",
     "macOS": {
       "minimumSystemVersion": "10.15"
     },

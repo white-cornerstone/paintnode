@@ -782,6 +782,30 @@ fn saved_document_display_name(path: &Path, fallback_name: &str, is_workflow: bo
         .to_string()
 }
 
+fn save_as_extension_for_name(name: &str) -> &'static str {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.ends_with(".cxflow.json") {
+        "cxflow.json"
+    } else if lower.ends_with(".psd") {
+        "psd"
+    } else {
+        "ora"
+    }
+}
+
+fn save_as_path_has_expected_extension(path: &Path, extension: &str) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|file_name| {
+            let lower = file_name.to_ascii_lowercase();
+            if extension == "cxflow.json" {
+                lower.ends_with(".cxflow.json")
+            } else {
+                lower.ends_with(&format!(".{extension}"))
+            }
+        })
+}
+
 fn remove_autosave_for_name(project_path: &Path, name: &str) {
     let file_name = safe_document_file_name(name);
     let stem = Path::new(&file_name)
@@ -6003,24 +6027,11 @@ async fn project_save_document_as(
         if path.as_os_str().is_empty() {
             return Err("No save path was selected.".into());
         }
-        let is_workflow = name.trim().to_ascii_lowercase().ends_with(".cxflow.json");
-        let has_expected_extension =
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|file_name| {
-                    let lower = file_name.to_ascii_lowercase();
-                    if is_workflow {
-                        lower.ends_with(".cxflow.json")
-                    } else {
-                        lower.ends_with(".ora")
-                    }
-                });
+        let extension = save_as_extension_for_name(&name);
+        let is_workflow = extension == "cxflow.json";
+        let has_expected_extension = save_as_path_has_expected_extension(&path, extension);
         if !has_expected_extension {
-            if is_workflow {
-                path.set_extension("cxflow.json");
-            } else {
-                path.set_extension("ora");
-            }
+            path.set_extension(extension);
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -6083,6 +6094,13 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Export PNG...",
         true,
         Some("CmdOrCtrl+E"),
+    )?;
+    let export_psd = MenuItem::with_id(
+        app,
+        "app:export-psd",
+        "Export PSD...",
+        true,
+        None::<&str>,
     )?;
 
     let undo = MenuItem::with_id(app, "app:undo", "Undo", true, Some("CmdOrCtrl+Z"))?;
@@ -6267,6 +6285,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &save,
             &save_copy,
             &export,
+            &export_psd,
             &PredefinedMenuItem::separator(app)?,
             &close_document,
         ],
@@ -7346,6 +7365,33 @@ mod tests {
             saved_document_display_name(Path::new("/tmp/board.cxflow.json"), "Untitled", true),
             "board.cxflow.json"
         );
+    }
+
+    #[test]
+    fn save_as_extension_for_name_supports_psd_exports() {
+        assert_eq!(save_as_extension_for_name("sketch.psd"), "psd");
+        assert_eq!(save_as_extension_for_name("sketch.PSD"), "psd");
+        assert_eq!(save_as_extension_for_name("sketch.ora"), "ora");
+        assert_eq!(
+            save_as_extension_for_name("board.cxflow.json"),
+            "cxflow.json"
+        );
+    }
+
+    #[test]
+    fn save_as_path_has_expected_extension_supports_psd_exports() {
+        assert!(save_as_path_has_expected_extension(
+            Path::new("/tmp/sketch.psd"),
+            "psd"
+        ));
+        assert!(!save_as_path_has_expected_extension(
+            Path::new("/tmp/sketch.ora"),
+            "psd"
+        ));
+        assert!(save_as_path_has_expected_extension(
+            Path::new("/tmp/board.cxflow.json"),
+            "cxflow.json"
+        ));
     }
 
     #[test]

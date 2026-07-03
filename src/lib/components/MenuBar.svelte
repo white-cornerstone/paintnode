@@ -6,6 +6,7 @@
     saveActiveCommand,
     saveActiveCopyCommand,
     exportPngCommand,
+    exportPsdCommand,
     importImageCommand,
   } from '../state/commands';
   import Icon from './Icon.svelte';
@@ -38,6 +39,7 @@
         { label: 'Save', shortcut: '⌘S', action: () => void saveActiveCommand() },
         { label: 'Save a Copy…', shortcut: '⇧⌘S', action: () => void saveActiveCopyCommand() },
         { label: 'Export PNG…', shortcut: '⌘E', action: () => void exportPngCommand() },
+        { label: 'Export PSD…', action: () => void exportPsdCommand() },
       ],
     },
     {

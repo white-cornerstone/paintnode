@@ -12,6 +12,7 @@ import {
   selectAllSelection,
   invertSelection as invertSelectionMask,
   intersectMask,
+  maskToSelection,
   selectionContainsPoint,
   type SelectionMode,
 } from '../engine/selection';
@@ -25,15 +26,17 @@ import {
 } from '../engine/adjustments';
 import { gaussianBlur, sharpen } from '../engine/filters';
 import {
-  DEFAULT_LINE_HEIGHT,
+  defaultParagraph,
   cloneModel,
   defaultStyle,
   isBlankModel,
   textLayerName,
+  type TextAntiAlias,
   type TextModel,
+  type TextParagraph,
   type TextStyle,
 } from '../engine/text/model';
-import { renderTextToCanvas, textBounds } from '../engine/text/render';
+import { drawTextModel, renderTextToCanvas, textBounds } from '../engine/text/render';
 import type { Tool, ToolHost } from '../engine/tools/Tool';
 import { PaintTool } from '../engine/tools/PaintTool';
 import { FillTool } from '../engine/tools/FillTool';
@@ -219,6 +222,8 @@ export interface TextEditSession {
   model: TextModel;
   /** Style used for new/empty text and as the toolbar's starting values. */
   baseStyle: TextStyle;
+  /** Type mask session: committing creates a text-shaped selection, not a layer. */
+  mask?: boolean;
 }
 
 export interface FreeTransformSession {
@@ -250,6 +255,15 @@ export interface DocumentSession {
   hasSavedBaseline: boolean;
   /** Remembered "embed fonts?" choice for this document (null = ask on next save). */
   embedFonts: boolean | null;
+  /**
+   * Format File ▸ Save writes for this document. Documents opened from a .psd
+   * stay .psd; everything else saves .ora. While `savedPath` is null the first
+   * save always prompts for a name, so overwriting the original file is an
+   * explicit user choice rather than the default.
+   */
+  saveFormat: 'ora' | 'psd';
+  /** Extension of the file this document was loaded from (e.g. 'psd', 'png'), if any. */
+  sourceExtension: string | null;
 }
 
 interface LayerStackSnapshot {
@@ -326,6 +340,12 @@ export class EditorStore implements ToolHost {
   lastFontSize = $state(72);
   /** Set by the text overlay so other UI (e.g. canvas clicks) can commit the edit. */
   private textCommitFn: (() => void) | null = null;
+  /** Set by the text overlay so panels can restyle the live selection. */
+  private textStyleApplier: ((patch: Partial<TextStyle>) => void) | null = null;
+  private textParagraphApplier: ((patch: Partial<Omit<TextParagraph, 'runs'>>) => void) | null = null;
+  /** Style/paragraph under the caret while editing (set by the overlay for the panels). */
+  liveTextStyle = $state<TextStyle | null>(null);
+  liveTextParagraph = $state<Omit<TextParagraph, 'runs'> | null>(null);
 
   activeToolId = $state('brush');
   flashMessage = $state('');
@@ -366,7 +386,10 @@ export class EditorStore implements ToolHost {
       new AiRetouchTool(this, 'red-eye'),
       new ShapeTool(this),
       new AnnotationTool(this),
-      new TextTool(this),
+      new TextTool(this, 'text', 'Type', { orientation: 'horizontal', mask: false }),
+      new TextTool(this, 'type-vertical', 'Vertical Type', { orientation: 'vertical', mask: false }),
+      new TextTool(this, 'type-mask-h', 'Type Mask', { orientation: 'horizontal', mask: true }),
+      new TextTool(this, 'type-mask-v', 'Vertical Type Mask', { orientation: 'vertical', mask: true }),
       new EyedropperTool(this),
       new HandTool(this),
       new ZoomTool(this),
@@ -378,6 +401,26 @@ export class EditorStore implements ToolHost {
   // --- Derived state ---
   get activeLayer(): Layer | null {
     return this.doc?.activeLayer ?? null;
+  }
+  /** Flash-and-block helper: true when `layer` is a locked Photoshop-only layer. */
+  blockIfLocked(layer: Layer | null | undefined): boolean {
+    if (!layer?.locked) return false;
+    this.flash('Photoshop-only layer is locked; PaintNode preserves it for PSD export');
+    return true;
+  }
+  /** Blocks document-wide ops that cannot preserve locked Photoshop layers. */
+  private blockIfAnyLocked(operation: string): boolean {
+    if (!this.doc?.layers.some((l) => l.locked)) return false;
+    this.flash(`${operation} is disabled while the document has locked Photoshop layers`);
+    return true;
+  }
+  /** Blocks transforms that would desync Photoshop-protected layers, masks, or clipping. */
+  private blockIfPsdProtectedDoc(operation: string): boolean {
+    const doc = this.doc;
+    if (!doc) return false;
+    if (!doc.layers.some((l) => l.locked || l.psdMask || l.psd?.clipping)) return false;
+    this.flash(`${operation} is disabled while the document has Photoshop-protected layers`);
+    return true;
   }
   get activeAiRetouchMaskLayer(): Layer | null {
     const layer = this.activeLayer;
@@ -448,7 +491,23 @@ export class EditorStore implements ToolHost {
       sourceKey,
       hasSavedBaseline,
       embedFonts: null,
+      saveFormat: 'ora',
+      sourceExtension: null,
     };
+  }
+
+  /**
+   * File name shown for a session (tabs, save prompts): the saved file's real
+   * name once saved, else the loaded file's name with its extension, else the
+   * plain document name for brand-new documents.
+   */
+  documentFileName(session: DocumentSession): string {
+    const name = session.doc.name || 'Untitled';
+    if (session.savedPath) {
+      const base = session.savedPath.split('/').pop();
+      if (base) return base;
+    }
+    return session.sourceExtension ? `${name}.${session.sourceExtension}` : name;
   }
 
   private documentMatchesSource(session: DocumentSession, sourceKey: DocumentSourceKey): boolean {
@@ -577,13 +636,16 @@ export class EditorStore implements ToolHost {
     this.bump();
     this.invalidate();
   }
-  beginText(x: number, y: number): void {
+  beginText(x: number, y: number, options: { orientation?: 'horizontal' | 'vertical'; mask?: boolean } = {}): void {
     const doc = this.doc;
     if (!doc) return;
-    const hit = this.textLayerAt(x, y);
-    if (hit) {
-      this.beginEditLayer(hit);
-      return;
+    // Mask sessions always start fresh; the normal type tools edit the layer hit.
+    if (!options.mask) {
+      const hit = this.textLayerAt(x, y);
+      if (hit) {
+        this.beginEditLayer(hit);
+        return;
+      }
     }
     const style = defaultStyle({
       family: this.lastFontFamily,
@@ -594,9 +656,10 @@ export class EditorStore implements ToolHost {
       version: 1,
       x: Math.round(x),
       y: Math.round(y),
-      paragraphs: [{ align: 'left', lineHeight: DEFAULT_LINE_HEIGHT, runs: [{ text: '', style }] }],
+      paragraphs: [defaultParagraph({ runs: [{ text: '', style }] })],
+      ...(options.orientation === 'vertical' ? { orientation: 'vertical' as const } : {}),
     };
-    this.textEdit = { layerId: null, isNew: true, model, baseStyle: style };
+    this.textEdit = { layerId: null, isNew: true, model, baseStyle: style, mask: options.mask === true };
   }
   bump(): void {
     this.notify(true);
@@ -1285,7 +1348,9 @@ export class EditorStore implements ToolHost {
   private remapLayers(nw: number, nh: number, paint: (c: CanvasRenderingContext2D, l: Layer) => void): Layer[] {
     const doc = this.doc!;
     return doc.layers.map((l) => {
-      const nl = new Layer(nw, nh, l.name);
+      // Keep the layer id: maskLayerId links point at ids, so fresh ids would
+      // leave every linked mask dangling after a crop/rotate/flip.
+      const nl = new Layer(nw, nh, l.name, l.id);
       nl.opacity = l.opacity;
       nl.visible = l.visible;
       nl.blendMode = l.blendMode;
@@ -1296,6 +1361,8 @@ export class EditorStore implements ToolHost {
       nl.kind = l.kind;
       nl.text = l.text ? cloneModel(l.text) : null;
       nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
+      // Keep PSD group/metadata but force a rebuild on export (pixels remapped).
+      if (l.psd) nl.psd = { ...l.psd, imported: { ...l.psd.imported, pixelRev: -1 } };
       paint(nl.ctx, l);
       nl.touch();
       return nl;
@@ -1324,6 +1391,10 @@ export class EditorStore implements ToolHost {
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
     copy.aiRetouch = cloneAiRetouchMetadata(layer.aiRetouch);
+    // PSD passthrough state is immutable — sharing the reference is safe and
+    // keeps history snapshots from silently unlocking imported layers.
+    copy.psd = layer.psd;
+    copy.psdMask = layer.psdMask;
     copy.ctx.drawImage(layer.canvas, 0, 0);
     copy.pixelRev = layer.pixelRev;
     return copy;
@@ -1351,6 +1422,7 @@ export class EditorStore implements ToolHost {
     const layer = this.activeLayer;
     const sel = this.selection;
     if (!doc || !layer || !sel) return false;
+    if (this.blockIfLocked(layer)) return false;
     if (layer.kind !== 'raster') {
       this.flash('Rasterize the active layer before moving selected pixels');
       return false;
@@ -1386,6 +1458,7 @@ export class EditorStore implements ToolHost {
   moveActiveLayerBy(dx: number, dy: number): void {
     const layer = this.activeLayer;
     if (!layer) return;
+    if (this.blockIfLocked(layer)) return;
     layer.x = Math.round(layer.x + dx);
     layer.y = Math.round(layer.y + dy);
     this.invalidate();
@@ -1450,6 +1523,11 @@ export class EditorStore implements ToolHost {
     const layer = this.activeLayer;
     if (!layer) {
       this.flash('No active layer');
+      return;
+    }
+    if (this.blockIfLocked(layer)) return;
+    if (layer.psdMask) {
+      this.flash('Layer has a Photoshop mask; transforming it is not supported yet');
       return;
     }
     const bounds = this.alphaBounds(layer);
@@ -1558,6 +1636,7 @@ export class EditorStore implements ToolHost {
     const doc = this.doc;
     const sel = this.selection;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Crop')) return;
     const rect = sel ? clampRect(sel.bounds, doc.width, doc.height) : null;
     if (!rect) {
       this.flash('Make a selection to crop');
@@ -1578,6 +1657,7 @@ export class EditorStore implements ToolHost {
   resizeImage(w: number, h: number): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Image Size')) return;
     w = Math.max(1, Math.round(w));
     h = Math.max(1, Math.round(h));
     if (w === doc.width && h === doc.height) return;
@@ -1589,12 +1669,20 @@ export class EditorStore implements ToolHost {
         const layers = doc.layers.map((l) => {
           const nw = Math.max(1, Math.round(l.width * sx));
           const nh = Math.max(1, Math.round(l.height * sy));
-          const nl = new Layer(nw, nh, l.name);
+          // Keep the layer id so maskLayerId links survive the resize.
+          const nl = new Layer(nw, nh, l.name, l.id);
           nl.x = Math.round(l.x * sx);
           nl.y = Math.round(l.y * sy);
           nl.opacity = l.opacity;
           nl.visible = l.visible;
           nl.blendMode = l.blendMode;
+          nl.maskLayerId = l.maskLayerId;
+          nl.maskEnabled = l.maskEnabled;
+          // Text models are not rescaled, so text layers rasterize (as before);
+          // mask-kind survives so linked masks keep working after the resize.
+          nl.kind = l.kind === 'text' ? 'raster' : l.kind;
+          nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
+          if (l.psd) nl.psd = { ...l.psd, imported: { ...l.psd.imported, pixelRev: -1 } };
           nl.ctx.imageSmoothingEnabled = true;
           nl.ctx.imageSmoothingQuality = 'high';
           nl.ctx.drawImage(l.canvas, 0, 0, l.width, l.height, 0, 0, nw, nh);
@@ -1611,6 +1699,7 @@ export class EditorStore implements ToolHost {
   revealAll(): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfAnyLocked('Reveal All')) return;
     const visible = doc.layers.filter((l) => l.visible);
     if (!visible.length) return;
     const minX = Math.min(0, ...visible.map((l) => l.x));
@@ -1626,8 +1715,9 @@ export class EditorStore implements ToolHost {
     this.structural(
       'Reveal All',
       () => {
+        // Exact clones keep layer ids (mask links) and PSD passthrough state.
         const layers = doc.layers.map((l) => {
-          const nl = l.clone(l.name);
+          const nl = this.cloneLayerExact(l);
           nl.x = l.x - minX;
           nl.y = l.y - minY;
           return nl;
@@ -1642,6 +1732,7 @@ export class EditorStore implements ToolHost {
   rotate(deg: 90 | 180 | 270): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Rotate')) return;
     const swap = deg === 90 || deg === 270;
     const nw = swap ? doc.height : doc.width;
     const nh = swap ? doc.width : doc.height;
@@ -1672,6 +1763,7 @@ export class EditorStore implements ToolHost {
   flip(axis: 'h' | 'v'): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Flip')) return;
     this.structural(axis === 'h' ? 'Flip Horizontal' : 'Flip Vertical', () =>
       this.commitLayers(
         this.remapLayers(doc.width, doc.height, (c, l) => {
@@ -1717,6 +1809,7 @@ export class EditorStore implements ToolHost {
   duplicateLayer(id: string): void {
     const doc = this.doc;
     if (!doc || doc.indexOf(id) < 0) return;
+    if (this.blockIfLocked(doc.layers[doc.indexOf(id)])) return;
     const before = this.layerStackSnapshot();
     doc.duplicateLinked(id);
     const after = this.layerStackSnapshot();
@@ -1823,6 +1916,7 @@ export class EditorStore implements ToolHost {
       this.flash('No layer below to merge into');
       return;
     }
+    if (this.blockIfLocked(doc.layers[idx]) || this.blockIfLocked(doc.layers[idx - 1])) return;
     this.structural('Merge Down', () => {
       const above = doc.layers[idx];
       const below = doc.layers[idx - 1];
@@ -1852,6 +1946,7 @@ export class EditorStore implements ToolHost {
   flatten(): void {
     const doc = this.doc;
     if (!doc || doc.layers.length <= 1) return;
+    if (this.blockIfAnyLocked('Flatten')) return;
     this.structural('Flatten Image', () => {
       const flat = new Layer(doc.width, doc.height, 'Background');
       flat.ctx.drawImage(compositeToCanvas(doc), 0, 0);
@@ -1868,6 +1963,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const img = layer.ctx.getImageData(0, 0, layer.width, layer.height);
@@ -1910,6 +2006,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const filtered = fn(layer.canvas);
@@ -1943,6 +2040,7 @@ export class EditorStore implements ToolHost {
   clearActive(): void {
     const layer = this.activeLayer;
     if (!layer) return;
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const mask = this.selectionMaskForLayer(layer);
@@ -1966,6 +2064,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const mask = this.selectionMaskForLayer(layer);
@@ -1994,6 +2093,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const tile = createCanvas(24, 24);
     const tc = ctx2d(tile);
     tc.fillStyle = '#303236';
@@ -2092,6 +2192,74 @@ export class EditorStore implements ToolHost {
     this.textCommitFn?.();
   }
 
+  /** Overlay registers appliers so the Character/Paragraph panels can restyle the live selection. */
+  registerTextStyleApplier(fn: ((patch: Partial<TextStyle>) => void) | null): void {
+    this.textStyleApplier = fn;
+  }
+  registerTextParagraphApplier(fn: ((patch: Partial<Omit<TextParagraph, 'runs'>>) => void) | null): void {
+    this.textParagraphApplier = fn;
+  }
+
+  /** The text layer the Character/Paragraph panels operate on when not editing. */
+  get panelTextLayer(): Layer | null {
+    if (this.textEdit) return null;
+    const layer = this.activeLayer;
+    return layer?.kind === 'text' && layer.text && !layer.locked ? layer : null;
+  }
+
+  /** Fold the layer offset into a cloned model (applyTextEdit resets x/y to 0). */
+  private clonedDocSpaceModel(layer: Layer): TextModel {
+    const model = cloneModel(layer.text!);
+    model.x += layer.x;
+    model.y += layer.y;
+    return model;
+  }
+
+  /** Apply character styling to the live selection or the whole selected text layer. */
+  applyCharacterStyle(patch: Partial<TextStyle>): void {
+    if (this.textEdit) {
+      this.textStyleApplier?.(patch);
+      return;
+    }
+    const layer = this.panelTextLayer;
+    if (!layer?.text) return;
+    const model = this.clonedDocSpaceModel(layer);
+    for (const paragraph of model.paragraphs) {
+      for (const run of paragraph.runs) {
+        Object.assign(run.style, patch);
+        if (patch.color) run.style.color = { ...patch.color };
+      }
+    }
+    this.applyTextEdit(layer, model);
+  }
+
+  /** Apply paragraph settings to the live selection or the whole selected text layer. */
+  applyParagraphStyle(patch: Partial<Omit<TextParagraph, 'runs'>>): void {
+    if (this.textEdit) {
+      this.textParagraphApplier?.(patch);
+      return;
+    }
+    const layer = this.panelTextLayer;
+    if (!layer?.text) return;
+    const model = this.clonedDocSpaceModel(layer);
+    for (const paragraph of model.paragraphs) Object.assign(paragraph, patch);
+    this.applyTextEdit(layer, model);
+  }
+
+  /** Set the (per-layer) Photoshop anti-alias mode, kept for PSD round trips. */
+  applyTextAntiAlias(mode: TextAntiAlias): void {
+    if (this.textEdit) {
+      this.textEdit.model.antiAlias = mode;
+      this.bump();
+      return;
+    }
+    const layer = this.panelTextLayer;
+    if (!layer?.text) return;
+    const model = this.clonedDocSpaceModel(layer);
+    model.antiAlias = mode;
+    this.applyTextEdit(layer, model);
+  }
+
   /** Finish the active edit, applying `model` (undoable). */
   commitText(model: TextModel): void {
     const session = this.textEdit;
@@ -2100,6 +2268,25 @@ export class EditorStore implements ToolHost {
     this.textCommitFn = null;
     if (!doc || !session) return;
     const blank = isBlankModel(model);
+
+    if (session.mask) {
+      // Type mask: the committed text becomes a selection instead of a layer.
+      if (!blank) {
+        this.rememberTextDefaults(model);
+        const shape = createCanvas(doc.width, doc.height);
+        drawTextModel(ctx2d(shape), model);
+        const selection = maskToSelection(shape, doc.width, doc.height);
+        if (selection) {
+          this.setSelection(selection);
+          this.flash('Selection made from type');
+        } else {
+          this.flash('Type produced no selectable pixels');
+        }
+      }
+      this.bump();
+      this.invalidate();
+      return;
+    }
 
     if (session.isNew) {
       if (blank) {
@@ -2127,7 +2314,7 @@ export class EditorStore implements ToolHost {
     }
     layer.suppressed = false;
     if (blank) {
-      // All text deleted → remove the layer (Photoshop-style), unless it's the only one.
+      // All text deleted → remove the layer, unless it's the only one.
       if (doc.layers.length > 1) {
         this.structural('Delete Text', () => doc.remove(layer.id));
       } else {
@@ -2169,7 +2356,10 @@ export class EditorStore implements ToolHost {
     const bx = layer.x;
     const by = layer.y;
     const region = this.unionTextRegion(beforeModel, bx, by, newModel, doc);
-    const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    // Imported PSD text pixels were rendered by Photoshop with different font
+    // metrics and can extend beyond our estimated bounds — snapshot the whole
+    // layer for those so undo restores every original pixel.
+    const before = (layer.psd ? null : snapshotRegion(layer, region)) ?? snapshotLayer(layer);
     const applyNew = () => {
       layer.text = cloneModel(newModel);
       layer.x = 0;
@@ -2178,7 +2368,8 @@ export class EditorStore implements ToolHost {
       layer.touch();
     };
     applyNew();
-    const after = snapshotRegion(layer, region) ?? snapshotLayer(layer);
+    // Undo/redo snapshots must cover the same area (full layer for imported text).
+    const after = (layer.psd ? null : snapshotRegion(layer, region)) ?? snapshotLayer(layer);
     this.history.push({
       label: 'Edit Text',
       undo: () => {

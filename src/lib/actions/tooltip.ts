@@ -81,6 +81,47 @@ const normalize = (p: TooltipParam): TooltipOptions =>
   typeof p === 'string' ? { text: p } : p;
 
 /**
+ * `use:truncatedTooltip={{ text, placement }}` — like `tooltip`, but only shows
+ * when the element's content is visually cropped (ellipsized), so labels that
+ * fit stay quiet.
+ */
+export const truncatedTooltip: Action<HTMLElement, TooltipParam> = (node, param) => {
+  let opts = normalize(param);
+  const cropped = () =>
+    node.scrollWidth - node.clientWidth > 1 || node.scrollHeight - node.clientHeight > 1;
+
+  const open = () => {
+    if (!cropped()) return;
+    clearTimeout(showTimer);
+    showTimer = window.setTimeout(() => show(node, opts), opts.delay ?? 300);
+  };
+  const close = () => {
+    clearTimeout(showTimer);
+    hide(node);
+  };
+
+  node.addEventListener('pointerenter', open);
+  node.addEventListener('pointerleave', close);
+  node.addEventListener('pointerdown', close);
+  node.addEventListener('focus', open);
+  node.addEventListener('blur', close);
+
+  return {
+    update(p: TooltipParam) {
+      opts = normalize(p);
+    },
+    destroy() {
+      node.removeEventListener('pointerenter', open);
+      node.removeEventListener('pointerleave', close);
+      node.removeEventListener('pointerdown', close);
+      node.removeEventListener('focus', open);
+      node.removeEventListener('blur', close);
+      hide(node);
+    },
+  };
+};
+
+/**
  * `use:tooltip={'New Layer'}` or `use:tooltip={{ text, placement: 'right' }}`.
  * Shows a styled tooltip on hover/focus. Attach to the interactive control (e.g. the button).
  */

@@ -391,6 +391,12 @@
       {@render toolInfo('gradient', 'Drag to set direction. Shift constrains the angle.')}
     {:else if tool === 'text'}
       {@render toolInfo('text', 'Click to add text, or click existing text to edit. Esc commits the edit.')}
+    {:else if tool === 'type-vertical'}
+      {@render toolInfo('type-vertical', 'Click to add vertical text (columns flow right to left). Esc commits the edit.')}
+    {:else if tool === 'type-mask-h'}
+      {@render toolInfo('type-mask-h', 'Type, then Esc to turn the text shape into a selection instead of a layer.')}
+    {:else if tool === 'type-mask-v'}
+      {@render toolInfo('type-mask-v', 'Vertical type mask: type, then Esc to make a text-shaped selection.')}
     {:else if tool === 'eyedropper'}
       {@render toolInfo('eyedropper', 'Click or drag to sample a color into the foreground.')}
     {:else if tool === 'move'}

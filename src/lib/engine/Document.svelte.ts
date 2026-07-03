@@ -1,6 +1,7 @@
 import { Layer } from './Layer.svelte';
 import { uid } from './types';
 import { coerceAnnotations, type AnnotationItem } from './annotations';
+import type { PsdDocumentSource } from './psdSource';
 
 /**
  * A document: an ordered stack of layers (index 0 = bottom of the stack) plus the
@@ -15,6 +16,11 @@ export class PaintDocument {
   activeLayerId = $state<string | null>(null);
   annotations = $state<AnnotationItem[]>([]);
   annotationsVisible = $state(true);
+  /**
+   * Original parsed PSD when the document was opened from one, else null. Used to
+   * pass Photoshop-only data through on PSD export. Not carried into `clone()`.
+   */
+  psdSource: PsdDocumentSource | null = null;
 
   constructor(width: number, height: number, name = 'Untitled', id?: string) {
     this.id = id ?? uid('doc');

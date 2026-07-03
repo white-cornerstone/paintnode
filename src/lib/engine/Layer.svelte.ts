@@ -2,6 +2,7 @@ import { cloneAiRetouchMetadata, type AiRetouchMaskMetadata } from './aiRetouch'
 import type { BlendMode, Rect } from './types';
 import { createCanvas, ctx2d, uid } from './types';
 import { cloneModel, type TextModel } from './text/model';
+import type { PsdLayerMaskState, PsdLayerSource } from './psdSource';
 
 export type LayerKind = 'raster' | 'text' | 'ai-retouch-mask';
 
@@ -29,6 +30,14 @@ export class Layer {
   text = $state<TextModel | null>(null);
   /** AI retouch mask metadata when `kind === 'ai-retouch-mask'`, else null. */
   aiRetouch = $state<AiRetouchMaskMetadata | null>(null);
+  /**
+   * Photoshop passthrough when imported from a PSD, else null. Holds the original
+   * parsed layer so untouched layers are written back losslessly on PSD export.
+   * Set once at import; never mutated afterwards.
+   */
+  psd: PsdLayerSource | null = null;
+  /** Imported PSD layer mask (composited and preserved on export; not editable). */
+  psdMask: PsdLayerMaskState | null = null;
   /** Bumped whenever pixels change, so reactive thumbnails can refresh. */
   pixelRev = $state(0);
   /**
@@ -54,6 +63,11 @@ export class Layer {
   }
   get height(): number {
     return this.canvas.height;
+  }
+
+  /** True for Photoshop-only layers PaintNode preserves but cannot edit. */
+  get locked(): boolean {
+    return this.psd?.lockReason != null;
   }
 
   /** Mark pixels dirty (call after drawing into `ctx`). */
@@ -91,6 +105,9 @@ export class Layer {
     copy.kind = this.kind;
     copy.text = this.text ? cloneModel(this.text) : null;
     copy.aiRetouch = cloneAiRetouchMetadata(this.aiRetouch);
+    // A duplicate has no Photoshop packet of its own (psd stays null), but keeps
+    // the imported mask so it composites the same way.
+    copy.psdMask = this.psdMask;
     copy.ctx.drawImage(this.canvas, 0, 0);
     copy.touch();
     return copy;

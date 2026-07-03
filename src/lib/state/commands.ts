@@ -1,6 +1,8 @@
 import { editor, type DocumentSession } from './editor.svelte';
 import { loadOra } from '../ora/load';
 import { saveOra, type EmbeddedFont } from '../ora/save';
+import { loadPsd } from '../psd/load';
+import { savePsd, savePsdBytes } from '../psd/save';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { compositeToCanvas } from '../engine/compositor';
@@ -57,6 +59,9 @@ async function resolveEmbed(
 const isOra = (file: { name: string; type?: string | null }): boolean =>
   /\.ora$/i.test(file.name) || file.type === 'image/openraster';
 
+const isPsd = (file: { name: string; type?: string | null }): boolean =>
+  /\.psd$/i.test(file.name) || file.type === 'image/vnd.adobe.photoshop';
+
 const isRasterImage = (file: { name: string; type?: string | null }): boolean =>
   file.type?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
 
@@ -71,6 +76,11 @@ interface OpenableDocumentFile {
 }
 
 type OpenFileResult = 'opened' | 'focused';
+
+function exportFileName(name: string, ext: 'png' | 'psd'): string {
+  const stem = (name || 'untitled').replace(/\.(ora|psd|png|jpe?g|webp)$/i, '') || 'untitled';
+  return `${stem}.${ext}`;
+}
 
 function fileToOpenable(file: File): OpenableDocumentFile {
   return {
@@ -93,21 +103,38 @@ async function openImageAsDocument(file: OpenableDocumentFile): Promise<void> {
   bmp.close();
   doc.layers = [layer];
   doc.activeLayerId = layer.id;
-  editor.openDocument(doc, true, file.sourceKey);
+  const session = editor.openDocument(doc, true, file.sourceKey);
+  session.sourceExtension = file.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? null;
 }
 
-async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenFileResult> {
-  if (editor.focusDocumentBySource(file.sourceKey)) return 'focused';
+interface OpenedFileInfo {
+  result: OpenFileResult;
+  notices: string[];
+}
+
+async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenedFileInfo> {
+  if (editor.focusDocumentBySource(file.sourceKey)) return { result: 'focused', notices: [] };
 
   if (isOra(file)) {
     const doc = await loadOra(await file.arrayBuffer());
     doc.name = file.name.replace(/\.ora$/i, '');
     const session = editor.openDocument(doc, true, file.sourceKey);
+    session.sourceExtension = 'ora';
     if (file.savedPath) session.savedPath = file.savedPath;
+  } else if (isPsd(file)) {
+    const { doc, notices } = await loadPsd(await file.arrayBuffer());
+    doc.name = file.name.replace(/\.psd$/i, '');
+    // The document stays .psd, but the original path is never adopted as the
+    // save target: the first Save prompts for a name, so overwriting the
+    // opened file is an explicit choice.
+    const session = editor.openDocument(doc, true, file.sourceKey);
+    session.saveFormat = 'psd';
+    session.sourceExtension = 'psd';
+    return { result: 'opened', notices };
   } else {
     await openImageAsDocument(file);
   }
-  return 'opened';
+  return { result: 'opened', notices: [] };
 }
 
 export async function openDocumentFiles(files: Iterable<File>): Promise<void> {
@@ -115,20 +142,24 @@ export async function openDocumentFiles(files: Iterable<File>): Promise<void> {
 }
 
 async function openDocumentFileInputs(files: OpenableDocumentFile[]): Promise<void> {
-  const supported = files.filter((file) => isOra(file) || isRasterImage(file));
+  const supported = files.filter((file) => isOra(file) || isPsd(file) || isRasterImage(file));
   if (!supported.length) {
-    editor.flash('No supported image or .ora files');
+    editor.flash('No supported image, .ora, or .psd files');
     return;
   }
   try {
     let opened = 0;
     let focused = 0;
+    const notices: string[] = [];
     for (const file of supported) {
-      const result = await openDocumentFile(file);
-      if (result === 'opened') opened++;
+      const info = await openDocumentFile(file);
+      if (info.result === 'opened') opened++;
       else focused++;
+      notices.push(...info.notices);
     }
-    if (opened && focused) {
+    if (notices.length) {
+      editor.flash(`Opened ${supported[0].name} — ${notices.join('; ')}`);
+    } else if (opened && focused) {
       editor.flash(`Opened ${opened} file${opened === 1 ? '' : 's'}; focused ${focused} already open`);
     } else if (focused) {
       editor.flash(
@@ -167,9 +198,9 @@ export async function openDocumentPaths(paths: Iterable<string>): Promise<void> 
   }
 }
 
-/** File ▸ Open — accepts .ora and common raster formats. */
+/** File ▸ Open — accepts .ora, .psd, and common raster formats. */
 export async function openCommand(): Promise<void> {
-  const files = await openFiles('.ora,image/openraster,image/png,image/jpeg,image/webp,image/gif', true);
+  const files = await openFiles('.ora,.psd,image/openraster,image/vnd.adobe.photoshop,image/png,image/jpeg,image/webp,image/gif', true);
   if (!files.length) return;
   await openDocumentFiles(files);
 }
@@ -231,6 +262,16 @@ async function documentBytes(doc: PaintDocument, embed: EmbeddedFont[] = []): Pr
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+/**
+ * Honesty note appended to .ora save confirmations: Photoshop-only passthrough
+ * data (locked layers) lives only in memory and in PSD exports, not in .ora.
+ */
+function oraSaveNote(doc: PaintDocument): string {
+  return doc.layers.some((l) => l.locked)
+    ? ' — Photoshop-only layers are kept in PSD exports, not in .ora'
+    : '';
+}
+
 /** File ▸ Save — prompts once, then overwrites the same file on later saves. */
 export async function saveOraCommand(): Promise<void> {
   const doc = editor.doc;
@@ -249,7 +290,7 @@ export async function saveOraCommand(): Promise<void> {
       if (session?.savedPath) {
         const relativePath = await project.saveDocumentToPath(session.savedPath, bytes);
         editor.markSaved(relativePath);
-        editor.flash(`Saved ${relativePath}`);
+        editor.flash(`Saved ${relativePath}${oraSaveNote(doc)}`);
         return;
       }
 
@@ -258,7 +299,7 @@ export async function saveOraCommand(): Promise<void> {
       if (result) {
         editor.renameActiveDocument(result.name);
         editor.markSaved(result.relativePath);
-        editor.flash(`Saved ${result.relativePath}`);
+        editor.flash(`Saved ${result.relativePath}${oraSaveNote(doc)}`);
       } else {
         editor.flash('Save canceled');
       }
@@ -267,7 +308,8 @@ export async function saveOraCommand(): Promise<void> {
     const blob = await saveOra(doc, embed);
     downloadBlob(blob, name);
     editor.markSaved(null);
-    editor.flash('Saved .ora');
+    if (session) session.sourceExtension = 'ora';
+    editor.flash(`Saved .ora${oraSaveNote(doc)}`);
   } catch (e) {
     editor.flash('Save failed: ' + (e as Error).message);
   }
@@ -300,6 +342,80 @@ export async function saveCopyOraCommand(): Promise<void> {
   }
 }
 
+/** File ▸ Save for PSD-opened documents — stays .psd; passthrough keeps Photoshop data. */
+async function savePsdDocumentCommand(): Promise<void> {
+  const doc = editor.doc;
+  const session = editor.activeDocument;
+  if (!doc) return;
+  try {
+    editor.flash('Saving .psd…');
+    const name = `${doc.name || 'untitled'}.psd`;
+    if (isDesktop()) {
+      const bytes = await savePsdBytes(doc);
+      if (session?.savedPath) {
+        const relativePath = await project.saveDocumentToPath(session.savedPath, bytes);
+        editor.markSaved(relativePath);
+        editor.flash(`Saved ${relativePath}`);
+        return;
+      }
+      // First save after opening a .psd always asks for a name, so overwriting
+      // the original file is an explicit choice, not the default.
+      const result = await project.saveDocumentAs(name, bytes, doc.name);
+      if (result) {
+        editor.renameActiveDocument(result.name);
+        editor.markSaved(result.relativePath);
+        editor.flash(`Saved ${result.relativePath}`);
+      } else {
+        editor.flash('Save canceled');
+      }
+      return;
+    }
+    downloadBlob(await savePsd(doc), name);
+    editor.markSaved(null);
+    if (session) session.sourceExtension = 'psd';
+    editor.flash('Saved .psd');
+  } catch (e) {
+    editor.flash('Save failed: ' + (e as Error).message);
+  }
+}
+
+async function savePsdCopyCommand(): Promise<void> {
+  const doc = editor.doc;
+  if (!doc) return;
+  try {
+    editor.flash('Saving copy…');
+    const name = `${doc.name || 'untitled'}.psd`;
+    if (isDesktop()) {
+      const bytes = await savePsdBytes(doc);
+      const result = await project.saveDocumentAs(name, bytes, null, 'Save a Copy');
+      editor.flash(result ? `Saved copy ${result.relativePath}` : 'Save copy canceled');
+      return;
+    }
+    downloadBlob(await savePsd(doc), name);
+    editor.flash('Saved copy');
+  } catch (e) {
+    editor.flash('Save copy failed: ' + (e as Error).message);
+  }
+}
+
+/** File ▸ Save — routes to the document's native format (.psd docs stay .psd). */
+export async function saveDocumentCommand(): Promise<void> {
+  if (editor.activeDocument?.saveFormat === 'psd') {
+    await savePsdDocumentCommand();
+    return;
+  }
+  await saveOraCommand();
+}
+
+/** File ▸ Save a Copy — same format routing as Save. */
+export async function saveDocumentCopyCommand(): Promise<void> {
+  if (editor.activeDocument?.saveFormat === 'psd') {
+    await savePsdCopyCommand();
+    return;
+  }
+  await saveCopyOraCommand();
+}
+
 export async function saveWorkflowCommand(): Promise<void> {
   try {
     window.dispatchEvent(new Event('paintnode:workflow-before-save'));
@@ -329,7 +445,7 @@ export async function saveActiveCommand(): Promise<void> {
     await saveWorkflowCommand();
     return;
   }
-  await saveOraCommand();
+  await saveDocumentCommand();
 }
 
 export async function saveActiveCopyCommand(): Promise<void> {
@@ -337,7 +453,7 @@ export async function saveActiveCopyCommand(): Promise<void> {
     await saveWorkflowAsCommand();
     return;
   }
-  await saveCopyOraCommand();
+  await saveDocumentCopyCommand();
 }
 
 export async function autosaveOpenDocuments(): Promise<void> {
@@ -366,9 +482,30 @@ export async function exportPngCommand(): Promise<void> {
   if (!doc) return;
   try {
     const blob = await canvasToPngBlob(compositeToCanvas(doc));
-    downloadBlob(blob, `${doc.name || 'untitled'}.png`);
+    downloadBlob(blob, exportFileName(doc.name, 'png'));
     editor.flash('Exported PNG');
   } catch (e) {
     editor.flash('Export failed: ' + (e as Error).message);
+  }
+}
+
+/** File ▸ Export PSD (layered Photoshop handoff) */
+export async function exportPsdCommand(): Promise<void> {
+  const doc = editor.doc;
+  if (!doc) return;
+  try {
+    editor.flash('Exporting PSD…');
+    const name = exportFileName(doc.name, 'psd');
+    if (isDesktop()) {
+      const bytes = await savePsdBytes(doc);
+      const result = await project.saveDocumentAs(name, bytes, null, 'Export Photoshop Document');
+      editor.flash(result ? `Exported ${result.relativePath}` : 'Export canceled');
+      return;
+    }
+    const blob = await savePsd(doc);
+    downloadBlob(blob, name);
+    editor.flash('Exported PSD');
+  } catch (e) {
+    editor.flash('PSD export failed: ' + (e as Error).message);
   }
 }

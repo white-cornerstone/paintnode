@@ -124,9 +124,9 @@
       name: 'type',
       members: [
         { id: 'text', icon: TextT, label: 'Horizontal Type Tool', key: 'T' },
-        { id: 'type-vertical', icon: TextT, label: 'Vertical Type Tool', disabled: true },
-        { id: 'type-mask-h', icon: TextT, label: 'Horizontal Type Mask Tool', disabled: true },
-        { id: 'type-mask-v', icon: TextT, label: 'Vertical Type Mask Tool', disabled: true },
+        { id: 'type-vertical', icon: TextT, label: 'Vertical Type Tool' },
+        { id: 'type-mask-h', icon: TextT, label: 'Horizontal Type Mask Tool' },
+        { id: 'type-mask-v', icon: TextT, label: 'Vertical Type Mask Tool' },
       ],
     },
     {
@@ -175,7 +175,7 @@
 
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
-  // Remembered active member per flyout group (Photoshop shows the last-used tool of a group).
+  // Remembered active member per flyout group so the last-used tool stays surfaced.
   let lastMember = $state<Record<string, string>>({
     focus: 'blur',
     toning: 'dodge',

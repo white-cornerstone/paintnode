@@ -34,6 +34,7 @@ export { default as AddFilled } from '@fluentui/svg-icons/icons/add_24_filled.sv
 export { default as Checkmark } from '@fluentui/svg-icons/icons/checkmark_24_regular.svg?raw';
 export { default as SquareMultiple } from '@fluentui/svg-icons/icons/square_multiple_24_regular.svg?raw';
 export { default as Merge } from '@fluentui/svg-icons/icons/merge_24_regular.svg?raw';
+export { default as LockClosed } from '@fluentui/svg-icons/icons/lock_closed_24_regular.svg?raw';
 export { default as ArrowUp } from '@fluentui/svg-icons/icons/arrow_up_24_regular.svg?raw';
 export { default as ArrowDown } from '@fluentui/svg-icons/icons/arrow_down_24_regular.svg?raw';
 export { default as Delete } from '@fluentui/svg-icons/icons/delete_24_regular.svg?raw';
@@ -99,6 +100,15 @@ export { default as LineH } from '@fluentui/svg-icons/icons/line_horizontal_1_da
 export { default as Lasso } from '@fluentui/svg-icons/icons/lasso_24_regular.svg?raw';
 export { default as Shapes } from '@fluentui/svg-icons/icons/shapes_24_regular.svg?raw';
 export { default as TextT } from '@fluentui/svg-icons/icons/text_t_24_regular.svg?raw';
+export { default as TextFont } from '@fluentui/svg-icons/icons/text_font_24_regular.svg?raw';
+export { default as TextParagraphIcon } from '@fluentui/svg-icons/icons/text_paragraph_24_regular.svg?raw';
+export { default as TextStrikethrough } from '@fluentui/svg-icons/icons/text_strikethrough_24_regular.svg?raw';
+export { default as TextCaseUppercase } from '@fluentui/svg-icons/icons/text_case_uppercase_24_regular.svg?raw';
+export { default as TextCaseTitle } from '@fluentui/svg-icons/icons/text_case_title_24_regular.svg?raw';
+export { default as TextSubscript } from '@fluentui/svg-icons/icons/text_subscript_24_regular.svg?raw';
+export { default as TextSuperscript } from '@fluentui/svg-icons/icons/text_superscript_24_regular.svg?raw';
+export { default as TextAlignJustify } from '@fluentui/svg-icons/icons/text_align_justify_24_regular.svg?raw';
+export { default as TextAlignJustifyLow } from '@fluentui/svg-icons/icons/text_align_justify_low_24_regular.svg?raw';
 export { default as CommentNote } from '@fluentui/svg-icons/icons/comment_note_24_regular.svg?raw';
 export { default as Note } from '@fluentui/svg-icons/icons/note_24_regular.svg?raw';
 export { default as Tag } from '@fluentui/svg-icons/icons/tag_24_regular.svg?raw';

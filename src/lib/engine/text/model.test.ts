@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  DEFAULT_LINE_HEIGHT,
   cloneModel,
   defaultStyle,
   deserializeModel,
@@ -95,11 +94,18 @@ describe('serialize / deserialize', () => {
     expect(m!.x).toBe(5);
     expect(m!.y).toBe(0);
     expect(m!.paragraphs[0].align).toBe('left');
-    expect(m!.paragraphs[0].lineHeight).toBe(DEFAULT_LINE_HEIGHT);
+    expect(m!.paragraphs[0].indentLeft).toBe(0);
+    expect(m!.paragraphs[0].spaceAfter).toBe(0);
     const style = m!.paragraphs[0].runs[0].style;
     expect(style.family).toBe('sans-serif');
     expect(style.size).toBe(72);
     expect(style.color).toEqual({ r: 0, g: 0, b: 0 });
+    expect(style.leading).toBeNull();
+    expect(style.horizontalScale).toBe(100);
+    expect(style.verticalScale).toBe(100);
+    expect(style.caps).toBe('none');
+    expect(style.script).toBe('none');
+    expect(style.strikethrough).toBe(false);
   });
 
   it('fills an empty run for a paragraph that has none', () => {
@@ -107,5 +113,42 @@ describe('serialize / deserialize', () => {
     expect(m!.paragraphs[0].runs).toHaveLength(1);
     expect(m!.paragraphs[0].runs[0].text).toBe('');
     expect(m!.paragraphs[0].align).toBe('right');
+  });
+
+  it('migrates pre-v2 lineHeight multipliers to explicit per-run leading', () => {
+    const m = deserializeModel(
+      '{"paragraphs":[{"lineHeight":1.5,"runs":[{"text":"a","style":{"size":40}},{"text":"b","style":{"size":20}}]}]}',
+    );
+    // Old semantics: line advance = lineHeight × largest run size.
+    expect(m!.paragraphs[0].runs[0].style.leading).toBe(60);
+    expect(m!.paragraphs[0].runs[1].style.leading).toBe(60);
+  });
+
+  it('migrates mixed-size paragraphs with the old previous-line advance', () => {
+    // Old renderer: baseline gap = prev line box height − prev ascent + own ascent
+    // (fallback metrics: ascent 0.8 × size). 72px headline → 12px caption:
+    // 93.6 − 57.6 + 9.6 = 45.6, NOT the caption's own 1.3 × 12 = 15.6.
+    const m = deserializeModel(
+      '{"paragraphs":[' +
+        '{"lineHeight":1.3,"runs":[{"text":"Headline","style":{"size":72}}]},' +
+        '{"lineHeight":1.3,"runs":[{"text":"caption","style":{"size":12}}]}]}',
+    );
+    expect(m!.paragraphs[0].runs[0].style.leading).toBeCloseTo(93.6, 5);
+    expect(m!.paragraphs[1].runs[0].style.leading).toBeCloseTo(45.6, 5);
+  });
+
+  it('accepts justify alignments and the v2 character fields', () => {
+    const m = deserializeModel(
+      '{"paragraphs":[{"align":"justify-all","spaceBefore":4,"runs":[{"text":"a","style":{"caps":"small","script":"super","horizontalScale":80,"baselineShift":3,"strikethrough":true,"leading":30}}]}]}',
+    );
+    expect(m!.paragraphs[0].align).toBe('justify-all');
+    expect(m!.paragraphs[0].spaceBefore).toBe(4);
+    const style = m!.paragraphs[0].runs[0].style;
+    expect(style.caps).toBe('small');
+    expect(style.script).toBe('super');
+    expect(style.horizontalScale).toBe(80);
+    expect(style.baselineShift).toBe(3);
+    expect(style.strikethrough).toBe(true);
+    expect(style.leading).toBe(30);
   });
 });

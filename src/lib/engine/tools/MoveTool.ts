@@ -23,6 +23,10 @@ export class MoveTool implements Tool {
       this.host.flash('No active layer');
       return;
     }
+    if (layer.locked) {
+      this.host.flash('Photoshop-only layer is locked; PaintNode preserves it for PSD export');
+      return;
+    }
     this.startX = e.x;
     this.startY = e.y;
     this.startLayerX = layer.x;

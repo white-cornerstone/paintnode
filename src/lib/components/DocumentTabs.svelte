@@ -3,7 +3,7 @@
   import { tooltip } from '../actions/tooltip';
   import { Dismiss } from '../icons';
   import { filesFromDataTransfer, hasFileDrag } from '../io';
-  import { openDocumentFiles, saveOraCommand } from '../state/commands';
+  import { openDocumentFiles, saveDocumentCommand } from '../state/commands';
   import { editor, type DocumentSession } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
@@ -11,7 +11,7 @@
   let dragOverTabs = $state(false);
 
   function documentName(session: DocumentSession): string {
-    return session.doc.name || 'Untitled';
+    return editor.documentFileName(session);
   }
 
   function documentNameWithMarker(session: DocumentSession): string {
@@ -72,7 +72,7 @@
     });
     if (choice === 'cancel') return;
     if (choice === 'save') {
-      await saveOraCommand();
+      await saveDocumentCommand();
       const updated = editor.documents.find((documentSession) => documentSession.id === session.id);
       if (updated && editor.hasUnsavedChanges(updated)) return;
     }

@@ -52,7 +52,7 @@ export interface ToolHost {
   setAiRetouchHealingSource(source: { x: number; y: number }): void;
   setAiRetouchPreview(preview: AiRetouchPreview | null): void;
   /** Type tool: begin editing at a document position (new text, or the text layer there). */
-  beginText(x: number, y: number): void;
+  beginText(x: number, y: number, options?: { orientation?: 'horizontal' | 'vertical'; mask?: boolean }): void;
   /** Notify reactive UI that pixels/layers changed (refresh thumbnails, history buttons). */
   bump(): void;
   invalidate(): void;

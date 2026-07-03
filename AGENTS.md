@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Guidance for AI agents and contributors working on **PaintNode** — a backend-free,
-Photoshop-style raster image editor (Svelte 5 + TypeScript + Vite) that uses the open
+professional raster image editor (Svelte 5 + TypeScript + Vite) that uses the open
 **OpenRaster (.ora)** format as its native document format.
 
 ## Commands

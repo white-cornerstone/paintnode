@@ -7,11 +7,15 @@
   import { fonts } from '../state/fonts.svelte';
   import { rgbToHex } from '../engine/color';
   import {
-    DEFAULT_LINE_HEIGHT,
+    AUTO_LEADING,
+    defaultParagraph,
     defaultStyle,
+    stylesEqual,
     type TextAlign,
+    type TextCaps,
     type TextModel,
     type TextParagraph,
+    type TextScript,
     type TextStyle,
   } from '../engine/text/model';
   import type { RGB } from '../engine/types';
@@ -32,7 +36,6 @@
   let curItalic = $state(false);
   let curUnderline = $state(false);
   let curAlign = $state<TextAlign>('left');
-  let curLineHeight = $state(DEFAULT_LINE_HEIGHT);
 
   const BLOCK_TAGS = new Set(['DIV', 'P']);
 
@@ -44,27 +47,73 @@
   // --- model -> DOM ---
 
   function styleToCss(s: TextStyle): string {
+    const deco =
+      [s.underline ? 'underline' : '', s.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || 'none';
+    const capsCss = s.caps === 'all' ? 'text-transform:uppercase;' : s.caps === 'small' ? 'font-variant-caps:small-caps;' : '';
+    const scriptCss = s.script === 'super' ? 'vertical-align:super;' : s.script === 'sub' ? 'vertical-align:sub;' : '';
     return (
       `font-family:${s.family};font-size:${s.size}px;color:${rgbToHex(s.color)};` +
       `font-weight:${s.bold ? 700 : 400};font-style:${s.italic ? 'italic' : 'normal'};` +
-      `text-decoration:${s.underline ? 'underline' : 'none'};` +
-      `letter-spacing:${s.tracking ? `${s.tracking}px` : 'normal'};`
+      `text-decoration:${deco};` +
+      `letter-spacing:${s.tracking ? `${s.tracking}px` : 'normal'};` +
+      capsCss +
+      scriptCss
     );
+  }
+
+  /**
+   * Attributes CSS cannot round-trip (scales, baseline shift, exact leading, caps,
+   * script) ride on data attributes; styleOfEl reads them back via `closest()`.
+   */
+  function applyStyleAttrs(el: HTMLElement, s: TextStyle): void {
+    el.setAttribute('style', styleToCss(s));
+    el.setAttribute('data-pn-leading', s.leading === null ? 'auto' : String(s.leading));
+    el.setAttribute('data-pn-hscale', String(s.horizontalScale));
+    el.setAttribute('data-pn-vscale', String(s.verticalScale));
+    el.setAttribute('data-pn-bshift', String(s.baselineShift));
+    el.setAttribute('data-pn-caps', s.caps);
+    el.setAttribute('data-pn-script', s.script);
+  }
+
+  function applyParagraphAttrs(div: HTMLElement, p: TextParagraph): void {
+    div.style.textAlign = p.align.startsWith('justify') ? 'left' : p.align;
+    const leading = p.runs.reduce(
+      (mx, r) => Math.max(mx, r.style.leading ?? AUTO_LEADING * r.style.size * (r.style.verticalScale / 100)),
+      0,
+    );
+    if (leading > 0) div.style.lineHeight = `${leading}px`;
+    div.style.textIndent = p.firstLineIndent ? `${p.firstLineIndent}px` : '';
+    div.style.paddingLeft = p.indentLeft ? `${p.indentLeft}px` : '';
+    div.style.paddingRight = p.indentRight ? `${p.indentRight}px` : '';
+    div.style.marginTop = p.spaceBefore ? `${p.spaceBefore}px` : '';
+    div.style.marginBottom = p.spaceAfter ? `${p.spaceAfter}px` : '';
+    div.setAttribute('data-pn-align', p.align);
+    div.setAttribute('data-pn-indent-left', String(p.indentLeft));
+    div.setAttribute('data-pn-indent-right', String(p.indentRight));
+    div.setAttribute('data-pn-indent-first', String(p.firstLineIndent));
+    div.setAttribute('data-pn-space-before', String(p.spaceBefore));
+    div.setAttribute('data-pn-space-after', String(p.spaceAfter));
+    div.setAttribute('data-pn-hyphenate', p.hyphenate ? '1' : '0');
   }
 
   function buildFromModel(model: TextModel): void {
     const root = editable;
     if (!root) return;
     const base = session?.baseStyle ?? defaultStyle();
-    root.setAttribute('style', baseRootStyle(base));
+    applyStyleAttrs(root, base);
+    if (model.orientation === 'vertical') {
+      // Mirror the engine's vertical layout: columns right-to-left, CJK upright,
+      // Latin rotated (CSS text-orientation: mixed matches Photoshop's default).
+      root.style.writingMode = 'vertical-rl';
+      root.style.textOrientation = 'mixed';
+    }
     root.innerHTML = '';
     const paragraphs = model.paragraphs.length
       ? model.paragraphs
-      : [{ align: 'left', lineHeight: DEFAULT_LINE_HEIGHT, runs: [{ text: '', style: base }] }];
+      : [defaultParagraph({ runs: [{ text: '', style: base }] })];
     for (const p of paragraphs) {
       const div = document.createElement('div');
-      div.style.textAlign = p.align;
-      div.style.lineHeight = String(p.lineHeight || DEFAULT_LINE_HEIGHT);
+      applyParagraphAttrs(div, p);
       const hasText = p.runs.some((r) => r.text.length > 0);
       if (!hasText) {
         div.appendChild(document.createElement('br'));
@@ -72,18 +121,13 @@
         for (const r of p.runs) {
           if (!r.text) continue;
           const span = document.createElement('span');
-          span.setAttribute('style', styleToCss(r.style));
+          applyStyleAttrs(span, r.style);
           span.textContent = r.text;
           div.appendChild(span);
         }
       }
       root.appendChild(div);
     }
-  }
-
-  function baseRootStyle(s: TextStyle): string {
-    // The editable inherits base style so bare typed text adopts it.
-    return styleToCss(s) + 'line-height:' + DEFAULT_LINE_HEIGHT + ';';
   }
 
   // --- DOM -> model ---
@@ -107,11 +151,16 @@
     return a === 'center' ? 'center' : a === 'right' || a === 'end' ? 'right' : 'left';
   }
 
-  function lineHeightFrom(cs: CSSStyleDeclaration): number {
-    if (!cs.lineHeight || cs.lineHeight === 'normal') return DEFAULT_LINE_HEIGHT;
-    const lh = parseFloat(cs.lineHeight);
-    const fs = parseFloat(cs.fontSize);
-    return lh && fs ? Number((lh / fs).toFixed(3)) : DEFAULT_LINE_HEIGHT;
+  /** Read a data attribute from the element or its nearest annotated ancestor. */
+  function dataAttr(el: HTMLElement, name: string): string | null {
+    const holder = el.closest(`[data-${name}]`);
+    return holder instanceof HTMLElement ? holder.getAttribute(`data-${name}`) : null;
+  }
+
+  function dataNum(el: HTMLElement, name: string, fallback: number): number {
+    const raw = dataAttr(el, name);
+    const value = raw === null ? NaN : parseFloat(raw);
+    return Number.isFinite(value) ? value : fallback;
   }
 
   function styleOfEl(el: Element | null): TextStyle {
@@ -120,40 +169,83 @@
     const cs = getComputedStyle(el);
     const weight = parseInt(cs.fontWeight, 10);
     const deco = `${cs.textDecorationLine} ${cs.textDecoration}`;
-    return {
+    const leadingRaw = dataAttr(el, 'pn-leading');
+    const leading = leadingRaw !== null && leadingRaw !== 'auto' && Number.isFinite(parseFloat(leadingRaw))
+      ? parseFloat(leadingRaw)
+      : null;
+    const capsRaw = dataAttr(el, 'pn-caps');
+    const caps: TextCaps =
+      capsRaw === 'small' || capsRaw === 'all'
+        ? capsRaw
+        : cs.textTransform === 'uppercase'
+          ? 'all'
+          : cs.fontVariantCaps === 'small-caps'
+            ? 'small'
+            : 'none';
+    const scriptRaw = dataAttr(el, 'pn-script');
+    const script: TextScript =
+      scriptRaw === 'super' || scriptRaw === 'sub'
+        ? scriptRaw
+        : cs.verticalAlign === 'super'
+          ? 'super'
+          : cs.verticalAlign === 'sub'
+            ? 'sub'
+            : 'none';
+    return defaultStyle({
       family: cleanFamily(cs.fontFamily) || base.family,
       size: Math.round(parseFloat(cs.fontSize)) || base.size,
       color: parseCssColor(cs.color) ?? base.color,
       bold: (Number.isFinite(weight) && weight >= 600) || cs.fontWeight === 'bold',
       italic: cs.fontStyle === 'italic' || cs.fontStyle.startsWith('oblique'),
       underline: deco.includes('underline'),
-      tracking: cs.letterSpacing && cs.letterSpacing !== 'normal' ? Math.round(parseFloat(cs.letterSpacing)) || 0 : 0,
-    };
+      strikethrough: deco.includes('line-through'),
+      tracking:
+        cs.letterSpacing && cs.letterSpacing !== 'normal'
+          ? Math.round((parseFloat(cs.letterSpacing) || 0) * 100) / 100
+          : 0,
+      leading,
+      horizontalScale: dataNum(el, 'pn-hscale', 100),
+      verticalScale: dataNum(el, 'pn-vscale', 100),
+      baselineShift: dataNum(el, 'pn-bshift', 0),
+      caps,
+      script,
+    });
   }
 
-  function sameStyle(a: TextStyle, b: TextStyle): boolean {
-    return (
-      a.family === b.family &&
-      a.size === b.size &&
-      a.bold === b.bold &&
-      a.italic === b.italic &&
-      a.underline === b.underline &&
-      a.tracking === b.tracking &&
-      a.color.r === b.color.r &&
-      a.color.g === b.color.g &&
-      a.color.b === b.color.b
-    );
+  /** Paragraph attributes for a block element (dataset first, CSS fallback). */
+  function paragraphFromBlock(el: HTMLElement | null): Omit<TextParagraph, 'runs'> {
+    if (!el) return defaultParagraph();
+    const alignRaw = el.getAttribute('data-pn-align');
+    const align: TextAlign =
+      alignRaw === 'center' || alignRaw === 'right' || alignRaw === 'left' ||
+      alignRaw === 'justify-left' || alignRaw === 'justify-center' || alignRaw === 'justify-right' ||
+      alignRaw === 'justify-all'
+        ? alignRaw
+        : alignFrom(getComputedStyle(el).textAlign);
+    const attr = (name: string) => {
+      const v = el.getAttribute(`data-${name}`);
+      const parsed = v === null ? NaN : parseFloat(v);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    return defaultParagraph({
+      align,
+      indentLeft: attr('pn-indent-left'),
+      indentRight: attr('pn-indent-right'),
+      firstLineIndent: attr('pn-indent-first'),
+      spaceBefore: attr('pn-space-before'),
+      spaceAfter: attr('pn-space-after'),
+      hyphenate: el.getAttribute('data-pn-hyphenate') === '1',
+    });
   }
 
   function serialize(): TextModel {
     const root = editable;
     const lines: TextParagraph[] = [];
-    let pendingAlign: TextAlign = 'left';
-    let pendingLH = DEFAULT_LINE_HEIGHT;
+    let pending: Omit<TextParagraph, 'runs'> = defaultParagraph();
     let cur: TextParagraph | null = null;
     const ensure = () => {
       if (!cur) {
-        cur = { align: pendingAlign, lineHeight: pendingLH, runs: [] };
+        cur = { ...pending, runs: [] };
         lines.push(cur);
       }
     };
@@ -162,7 +254,7 @@
       ensure();
       const runs = cur!.runs;
       const last = runs[runs.length - 1];
-      if (last && sameStyle(last.style, style)) last.text += text;
+      if (last && stylesEqual(last.style, style)) last.text += text;
       else runs.push({ text, style });
     };
     const walk = (node: Node) => {
@@ -179,9 +271,7 @@
       }
       if (BLOCK_TAGS.has(el.tagName)) {
         cur = null;
-        const cs = getComputedStyle(el);
-        pendingAlign = alignFrom(cs.textAlign);
-        pendingLH = lineHeightFrom(cs);
+        pending = paragraphFromBlock(el);
         for (const c of Array.from(el.childNodes)) walk(c);
         cur = null;
         return;
@@ -190,9 +280,18 @@
     };
     if (root) for (const c of Array.from(root.childNodes)) walk(c);
     if (!lines.length) {
-      lines.push({ align: 'left', lineHeight: DEFAULT_LINE_HEIGHT, runs: [{ text: '', style: session?.baseStyle ?? defaultStyle() }] });
+      lines.push(defaultParagraph({ runs: [{ text: '', style: session?.baseStyle ?? defaultStyle() }] }));
     }
-    return { version: 1, x: Math.round(session!.model.x), y: Math.round(session!.model.y), paragraphs: lines };
+    const antiAlias = session?.model.antiAlias;
+    const orientation = session?.model.orientation;
+    return {
+      version: 1,
+      x: Math.round(session!.model.x),
+      y: Math.round(session!.model.y),
+      paragraphs: lines,
+      ...(orientation === 'vertical' ? { orientation } : {}),
+      ...(antiAlias ? { antiAlias } : {}),
+    };
   }
 
   // --- commit / cancel ---
@@ -280,12 +379,12 @@
   }
   function setAlign(a: TextAlign): void {
     curAlign = a;
-    restore();
-    ensureSelection();
-    document.execCommand(a === 'center' ? 'justifyCenter' : a === 'right' ? 'justifyRight' : 'justifyLeft');
-    refreshToolbar();
+    applyParagraphPatch({ align: a });
   }
-  function wrapStyle(prop: 'fontSize' | 'letterSpacing', value: string): void {
+  function wrapSelection(
+    decorate: (span: HTMLSpanElement) => void,
+    afterAttach: ((span: HTMLSpanElement) => void) | null = null,
+  ): void {
     restore();
     ensureSelection();
     const sel = window.getSelection();
@@ -293,10 +392,11 @@
     const range = sel.getRangeAt(0);
     if (range.collapsed) return;
     const span = document.createElement('span');
-    span.style[prop] = value;
+    decorate(span);
     try {
       span.appendChild(range.extractContents());
       range.insertNode(span);
+      afterAttach?.(span);
       const nr = document.createRange();
       nr.selectNodeContents(span);
       sel.removeAllRanges();
@@ -307,6 +407,37 @@
     }
     refreshToolbar();
   }
+  function wrapStyle(prop: 'fontSize' | 'letterSpacing', value: string): void {
+    const cssName = prop === 'fontSize' ? 'font-size' : 'letter-spacing';
+    wrapSelection(
+      (span) => span.style.setProperty(cssName, value),
+      // The wrapper must win: clear the property from wrapped descendants, whose
+      // inline values would otherwise override the cascade (Photoshop semantics —
+      // setting size/tracking on a selection applies to all of it).
+      (span) =>
+        span.querySelectorAll('*').forEach((el) => {
+          if (el instanceof HTMLElement) el.style.removeProperty(cssName);
+        }),
+    );
+  }
+  /**
+   * Wrap the selection in a span carrying a data attribute (+ CSS approximation),
+   * stripping the same attribute from wrapped descendants so the wrapper wins.
+   */
+  function wrapData(name: string, value: string, cssProps: [string, string][] = []): void {
+    wrapSelection(
+      (span) => {
+        span.setAttribute(`data-${name}`, value);
+        for (const [prop, cssValue] of cssProps) span.style.setProperty(prop, cssValue);
+      },
+      (span) => {
+        span.querySelectorAll(`[data-${name}]`).forEach((el) => {
+          el.removeAttribute(`data-${name}`);
+          if (el instanceof HTMLElement) for (const [prop] of cssProps) el.style.removeProperty(prop);
+        });
+      },
+    );
+  }
   function setSize(px: number): void {
     curSize = px;
     wrapStyle('fontSize', `${px}px`);
@@ -315,13 +446,68 @@
     curTracking = px;
     wrapStyle('letterSpacing', `${px}px`);
   }
-  function setLineHeight(mult: number): void {
-    curLineHeight = mult;
-    if (!editable) return;
-    const blocks = editable.querySelectorAll('div,p');
-    if (blocks.length) blocks.forEach((b) => ((b as HTMLElement).style.lineHeight = String(mult)));
-    else editable.style.lineHeight = String(mult);
+
+  /** Selection element for reading the current style (panel toggle semantics). */
+  function selectionElement(): Element | null {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) {
+      const n = sel.getRangeAt(0).startContainer;
+      return n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement;
+    }
+    return editable ?? null;
+  }
+
+  /** Character patch from the panels, applied to the live selection. */
+  function applyStylePatch(patch: Partial<TextStyle>): void {
     restore();
+    ensureSelection();
+    const cur = styleOfEl(selectionElement());
+    if (patch.family !== undefined) exec('fontName', patch.family);
+    if (patch.color !== undefined) exec('foreColor', rgbToHex(patch.color));
+    if (patch.bold !== undefined && patch.bold !== cur.bold) exec('bold');
+    if (patch.italic !== undefined && patch.italic !== cur.italic) exec('italic');
+    if (patch.underline !== undefined && patch.underline !== cur.underline) exec('underline');
+    if (patch.strikethrough !== undefined && patch.strikethrough !== cur.strikethrough) exec('strikeThrough');
+    if (patch.size !== undefined) wrapStyle('fontSize', `${patch.size}px`);
+    if (patch.tracking !== undefined) wrapStyle('letterSpacing', `${patch.tracking}px`);
+    if (patch.leading !== undefined) wrapData('pn-leading', patch.leading === null ? 'auto' : String(patch.leading));
+    if (patch.horizontalScale !== undefined) wrapData('pn-hscale', String(patch.horizontalScale));
+    if (patch.verticalScale !== undefined) wrapData('pn-vscale', String(patch.verticalScale));
+    if (patch.baselineShift !== undefined) wrapData('pn-bshift', String(patch.baselineShift));
+    if (patch.caps !== undefined) {
+      wrapData('pn-caps', patch.caps, [
+        ['text-transform', patch.caps === 'all' ? 'uppercase' : 'none'],
+        ['font-variant-caps', patch.caps === 'small' ? 'small-caps' : 'normal'],
+      ]);
+    }
+    if (patch.script !== undefined) {
+      wrapData('pn-script', patch.script, [
+        ['vertical-align', patch.script === 'super' ? 'super' : patch.script === 'sub' ? 'sub' : 'baseline'],
+      ]);
+    }
+    refreshToolbar();
+  }
+
+  /** Blocks intersecting the selection (all blocks when nothing is selected). */
+  function selectedBlocks(): HTMLElement[] {
+    if (!editable) return [];
+    const blocks = Array.from(editable.querySelectorAll('div,p')).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement,
+    );
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return blocks;
+    const range = sel.getRangeAt(0);
+    const hit = blocks.filter((block) => range.intersectsNode(block));
+    return hit.length ? hit : blocks;
+  }
+
+  /** Paragraph patch from the panels/toolbar, applied to selected paragraphs. */
+  function applyParagraphPatch(patch: Partial<Omit<TextParagraph, 'runs'>>): void {
+    restore();
+    for (const block of selectedBlocks()) {
+      const merged = { ...paragraphFromBlock(block), ...patch, runs: [] };
+      applyParagraphAttrs(block, merged);
+    }
     refreshToolbar();
   }
 
@@ -335,13 +521,7 @@
   }
 
   function refreshToolbar(): void {
-    const sel = window.getSelection();
-    let el: Element | null = null;
-    if (sel && sel.rangeCount) {
-      const n = sel.getRangeAt(0).startContainer;
-      el = n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement;
-    }
-    el = el ?? editable ?? null;
+    const el = selectionElement();
     const st = styleOfEl(el);
     curFamily = st.family;
     curSize = st.size;
@@ -350,11 +530,12 @@
     curBold = st.bold;
     curItalic = st.italic;
     curUnderline = st.underline;
+    editor.liveTextStyle = st;
     const block = closestBlock(el) ?? editable;
-    if (block) {
-      const cs = getComputedStyle(block);
-      curAlign = alignFrom(cs.textAlign);
-      curLineHeight = lineHeightFrom(cs);
+    if (block instanceof HTMLElement) {
+      const paragraph = paragraphFromBlock(block);
+      curAlign = paragraph.align;
+      editor.liveTextParagraph = paragraph;
     }
   }
 
@@ -371,17 +552,31 @@
 
   onMount(() => {
     editor.registerTextCommit(doCommit);
+    editor.registerTextStyleApplier(applyStylePatch);
+    editor.registerTextParagraphApplier(applyParagraphPatch);
     document.addEventListener('selectionchange', onSelectionChange);
     if (session) buildFromModel(session.model);
-    void tick().then(() => {
+    const focusEditor = () => {
       editable?.focus();
       if (session?.isNew) placeCaretEnd();
       else selectAllContent();
       refreshToolbar();
+    };
+    void tick().then(() => {
+      focusEditor();
+      // The click that opened the session can blur to <body> after our focus
+      // (its default action races the mount) — retake focus once it settles.
+      setTimeout(() => {
+        if (editor.textEdit && editable && document.activeElement !== editable) focusEditor();
+      }, 60);
     });
   });
   onDestroy(() => {
     editor.registerTextCommit(null);
+    editor.registerTextStyleApplier(null);
+    editor.registerTextParagraphApplier(null);
+    editor.liveTextStyle = null;
+    editor.liveTextParagraph = null;
     document.removeEventListener('selectionchange', onSelectionChange);
   });
 
@@ -487,17 +682,6 @@
   <span class="sep"></span>
 
   <input
-    class="lh"
-    type="number"
-    min="0.5"
-    max="4"
-    step="0.05"
-    value={curLineHeight}
-    onchange={(e) => setLineHeight(+(e.currentTarget as HTMLInputElement).value || DEFAULT_LINE_HEIGHT)}
-    use:tooltip={{ text: 'Line height', placement: 'top' }}
-    aria-label="Line height"
-  />
-  <input
     class="tracking"
     type="number"
     min="-20"
@@ -567,7 +751,6 @@
     width: 116px;
   }
   .type-toolbar .size,
-  .type-toolbar .lh,
   .type-toolbar .tracking {
     width: 50px;
   }
