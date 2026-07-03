@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import type {
   AiRunOptions,
+  AiAutonomyLevel,
   CodexModelId,
   AntigravityApprovalMode,
   AntigravityModelId,
@@ -17,6 +18,25 @@ export function isDesktop(): boolean {
       '__TAURI__' in window ||
       (window as unknown as { isTauri?: boolean }).isTauri === true)
   );
+}
+
+export async function readDesktopClipboardText(): Promise<string | null> {
+  if (!isDesktop()) return null;
+  try {
+    return await invoke<string | null>('clipboard_read_text');
+  } catch {
+    return null;
+  }
+}
+
+export async function writeDesktopClipboardText(text: string): Promise<boolean> {
+  if (!isDesktop()) return false;
+  try {
+    await invoke('clipboard_write_text', { text });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function safeStem(value: string): string {
@@ -59,6 +79,8 @@ export interface CodexGeneratorConfig {
   reasoningEffort?: ReasoningEffort | null;
   /** Speed tier selected in PaintNode settings. */
   serviceTier?: ServiceTier | null;
+  /** How much deterministic tool-building autonomy the local agent may use for this run. */
+  autonomyLevel?: AiAutonomyLevel | null;
 }
 
 export interface AntigravityGeneratorConfig {
@@ -72,6 +94,8 @@ export interface AntigravityGeneratorConfig {
   model: AntigravityModelId;
   /** Whether to skip Antigravity permission prompts inside PaintNode's temporary job folder. */
   approvalMode?: AntigravityApprovalMode | null;
+  /** How much deterministic tool-building autonomy the local agent may use for this run. */
+  autonomyLevel?: AiAutonomyLevel | null;
 }
 
 export interface CodexDetectionResult {
@@ -184,6 +208,7 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     model: config.model,
     reasoningEffort: config.reasoningEffort ?? null,
     serviceTier: config.serviceTier ?? 'default',
+    autonomyLevel: config.autonomyLevel ?? 'low',
   };
 }
 
@@ -194,6 +219,7 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
     approvalMode: config.approvalMode ?? 'skipPermissions',
+    autonomyLevel: config.autonomyLevel ?? 'low',
   };
 }
 
@@ -205,6 +231,7 @@ export function codexConfigFromRunOptions(options: AiRunOptions, projectPath?: s
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,
+    autonomyLevel: options.autonomyLevel,
   };
 }
 
@@ -215,6 +242,7 @@ export function antigravityConfigFromRunOptions(options: AiRunOptions, projectPa
     runId,
     model: options.antigravityModel,
     approvalMode: options.antigravityApprovalMode,
+    autonomyLevel: options.autonomyLevel,
   };
 }
 

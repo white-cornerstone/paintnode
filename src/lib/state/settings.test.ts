@@ -26,6 +26,7 @@ describe('settings normalization', () => {
       general: { autosaveEnabled: false, autosaveIntervalMs: 120_000 },
       ai: {
         provider: 'antigravity',
+        autonomyLevel: 'unmanaged',
         model: 'gpt-5.4-mini',
         reasoningEffort: 'high',
         serviceTier: 'fast',
@@ -46,6 +47,7 @@ describe('settings normalization', () => {
     expect(normalized.ai.model).toBe('gpt-5.4-mini');
     expect(normalized.ai.reasoningEffort).toBe('high');
     expect(normalized.ai.serviceTier).toBe('fast');
+    expect(normalized.ai.autonomyLevel).toBe('unmanaged');
     expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (High)');
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
     expect(normalized.workspace.defaultCanvasWidth).toBe(8192);
@@ -65,6 +67,7 @@ describe('settings normalization', () => {
   it('keeps Codex as the default provider and exposes Antigravity model defaults', () => {
     const defaults = defaultSettings();
     expect(defaults.ai.provider).toBe('codex');
+    expect(defaults.ai.autonomyLevel).toBe('low');
     expect(defaults.ai.antigravityModel).toBe('auto');
     expect(defaults.ai.antigravityApprovalMode).toBe('skipPermissions');
     expect(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id)).toContain('Gemini 3.5 Flash (High)');
@@ -72,10 +75,16 @@ describe('settings normalization', () => {
 
   it('falls back to safe Antigravity defaults for unknown saved Antigravity settings', () => {
     const normalized = normalizeSettings({
-      ai: { provider: 'antigravity', antigravityModel: 'antigravity-1-old', antigravityApprovalMode: 'wild' },
+      ai: {
+        provider: 'antigravity',
+        autonomyLevel: 'agentic',
+        antigravityModel: 'antigravity-1-old',
+        antigravityApprovalMode: 'wild',
+      },
     });
 
     expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.autonomyLevel).toBe('low');
     expect(normalized.ai.antigravityModel).toBe('auto');
     expect(normalized.ai.antigravityApprovalMode).toBe('skipPermissions');
   });
@@ -100,6 +109,7 @@ describe('settings normalization', () => {
     const value = normalizeSettings({
       ai: {
         provider: 'antigravity',
+        autonomyLevel: 'guided',
         codexBin: '/bin/codex',
         antigravityBin: '/bin/agy',
         antigravityModel: 'Gemini 3.1 Pro (High)',
@@ -110,6 +120,7 @@ describe('settings normalization', () => {
     runOptions.provider = 'codex';
 
     expect(runOptions.antigravityBin).toBe('/bin/agy');
+    expect(runOptions.autonomyLevel).toBe('guided');
     expect(value.ai.provider).toBe('antigravity');
   });
 });

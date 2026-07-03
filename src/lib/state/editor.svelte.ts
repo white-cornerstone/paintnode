@@ -284,6 +284,7 @@ export class EditorStore implements ToolHost {
   brushSize = $state(24);
   brushHardness = $state(0.85);
   brushOpacity = $state(1);
+  aiRetouchBrushFeather = $state(24);
   tolerance = $state(24);
   selection = $state<Selection | null>(null);
   selectionMode = $state<SelectionMode>('new');

@@ -1374,7 +1374,7 @@
         }
       });
     } catch {
-      progress = 'Local Codex is running...';
+      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
     }
 
     try {

@@ -15,6 +15,7 @@
   const hasDrawingSurface = $derived(hasDocument || hasStoryboardEdit);
   const aiRetouchTools = ['spot-healing', 'remove', 'healing-brush', 'patch', 'content-aware-move', 'red-eye'];
   const aiRetouchBrushTools = ['spot-healing', 'remove', 'healing-brush'];
+  const AI_RETOUCH_FEATHER_MAX = 200;
   // Tools that share the round-brush controls (size / hardness / strength).
   const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge', ...aiRetouchBrushTools, 'red-eye'];
   const usesBrush = $derived(brushTools.includes(tool));
@@ -71,6 +72,11 @@
     document.addEventListener('pointerdown', closeTipOnOutsidePointer, true);
     return () => document.removeEventListener('pointerdown', closeTipOnOutsidePointer, true);
   });
+
+  function commitAiRetouchBrushFeather(): void {
+    const value = Number.isFinite(editor.aiRetouchBrushFeather) ? editor.aiRetouchBrushFeather : 0;
+    editor.aiRetouchBrushFeather = Math.max(0, Math.min(500, Math.round(value)));
+  }
 </script>
 
 {#snippet selectionModeButtons()}
@@ -197,6 +203,29 @@
             Hardness
             <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
             <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
+          </label>
+        {/if}
+        {#if isAiRetouchBrush}
+          <label class="opt">
+            Feather
+            <input
+              type="range"
+              min="0"
+              max={AI_RETOUCH_FEATHER_MAX}
+              step="1"
+              bind:value={editor.aiRetouchBrushFeather}
+              oninput={commitAiRetouchBrushFeather}
+            />
+            <input
+              type="number"
+              min="0"
+              max="500"
+              step="1"
+              bind:value={editor.aiRetouchBrushFeather}
+              class="num"
+              onchange={commitAiRetouchBrushFeather}
+            />
+            <span class="unit">px</span>
           </label>
         {/if}
         {#if !isAiRetouchBrush && tool !== 'red-eye'}

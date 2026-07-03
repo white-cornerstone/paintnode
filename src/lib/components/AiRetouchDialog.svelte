@@ -146,7 +146,7 @@ Use these annotations as direct user instructions for the regions they point to.
         }
       });
     } catch {
-      progress = 'Local Codex is running...';
+      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
     }
 
     try {

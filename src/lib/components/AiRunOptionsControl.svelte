@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import {
@@ -6,6 +7,7 @@
     ANTIGRAVITY_MODEL_OPTIONS,
     type AiProvider,
     type AiRunOptions,
+    type AiAutonomyLevel,
     type CodexModelId,
     type AntigravityApprovalMode,
     type AntigravityModelId,
@@ -31,6 +33,12 @@
     { value: 'skipPermissions', label: 'Skip job-folder permissions' },
     { value: 'default', label: 'Default permissions' },
   ];
+  const autonomyLevels: { value: AiAutonomyLevel; label: string; short: string }[] = [
+    { value: 'low', label: 'Low autonomy', short: 'Low' },
+    { value: 'guided', label: 'Guided tools', short: 'Guided' },
+    { value: 'open', label: 'Open-ended', short: 'Open' },
+    { value: 'unmanaged', label: 'Unmanaged', short: 'Unmanaged' },
+  ];
   const providers: { value: AiProvider; label: string }[] = [
     { value: 'codex', label: 'Local Codex CLI' },
     { value: 'antigravity', label: 'Local Antigravity CLI' },
@@ -38,17 +46,25 @@
   ];
 
   let open = $state(false);
-  let submenu = $state<'reasoning' | 'model' | 'speed' | 'antigravityModel' | 'antigravityApproval' | null>(null);
+  let submenu = $state<'autonomy' | 'reasoning' | 'model' | 'speed' | 'antigravityModel' | 'antigravityApproval' | null>(null);
+  let pillElement = $state<HTMLButtonElement | null>(null);
+  let menuElement = $state<HTMLDivElement | null>(null);
+  let menuStyle = $state('visibility: hidden; left: 8px; top: 8px;');
+  const menuMargin = 8;
+  const menuGap = 6;
+  const floatingMenuClass = 'ai-run-options-floating-menu';
+  const dismissLayerClass = 'ai-run-options-dismiss-layer';
 
   const providerLabel = $derived(providers.find((item) => item.value === options.provider)?.label ?? 'AI');
   const codexModelLabel = $derived(CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label.replace('GPT-', '') ?? options.model);
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
+  const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
   const antigravityModelLabel = $derived(
     ANTIGRAVITY_MODEL_OPTIONS.find((item) => item.id === options.antigravityModel)?.label ?? options.antigravityModel,
   );
   const summary = $derived.by(() => {
-    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort}`;
-    if (options.provider === 'antigravity') return `Antigravity ${antigravityModelLabel}`;
+    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${autonomyShort}`;
+    if (options.provider === 'antigravity') return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
     return 'Custom CLI';
   });
 
@@ -69,6 +85,10 @@
     options = { ...options, serviceTier };
   }
 
+  function setAutonomy(autonomyLevel: AiAutonomyLevel): void {
+    options = { ...options, autonomyLevel };
+  }
+
   function setAntigravityModel(antigravityModel: AntigravityModelId): void {
     options = { ...options, antigravityModel };
   }
@@ -80,10 +100,7 @@
   function close(): void {
     open = false;
     submenu = null;
-  }
-
-  function closeFromWindow(): void {
-    if (open) close();
+    cleanupFloatingMenus();
   }
 
   function onWindowKeydown(event: KeyboardEvent): void {
@@ -92,19 +109,88 @@
 
   function toggle(event: MouseEvent): void {
     event.stopPropagation();
-    open = !open;
+    if (open) {
+      close();
+      return;
+    }
+    cleanupFloatingMenus();
+    open = true;
+    void updateMenuPosition();
   }
 
   function stopPointer(event: PointerEvent): void {
     event.stopPropagation();
   }
+
+  function cleanupFloatingMenus(currentMenu: HTMLElement | undefined = undefined, currentDismissLayer: HTMLElement | undefined = undefined): void {
+    document.querySelectorAll<HTMLElement>(`.${floatingMenuClass}`).forEach((node) => {
+      if (node !== currentMenu) node.remove();
+    });
+    document.querySelectorAll<HTMLElement>(`.${dismissLayerClass}`).forEach((node) => {
+      if (node !== currentDismissLayer) node.remove();
+    });
+  }
+
+  function portal(node: HTMLElement): { destroy: () => void } {
+    const parent = node.parentNode;
+    const anchor = document.createComment('ai-run-options-menu');
+    parent?.insertBefore(anchor, node);
+    const dismissLayer = document.createElement('div');
+    dismissLayer.className = dismissLayerClass;
+    dismissLayer.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    });
+    node.classList.add(floatingMenuClass);
+    cleanupFloatingMenus(node, dismissLayer);
+    document.body.appendChild(dismissLayer);
+    document.body.appendChild(node);
+
+    return {
+      destroy() {
+        dismissLayer.remove();
+        node.remove();
+        anchor.remove();
+      },
+    };
+  }
+
+  async function updateMenuPosition(): Promise<void> {
+    if (!open || !pillElement) return;
+    await tick();
+    const anchor = pillElement.getBoundingClientRect();
+    const menu = menuElement?.getBoundingClientRect();
+    const menuWidth = menu?.width ?? 248;
+    const menuHeight = menu?.height ?? 320;
+    const maxLeft = Math.max(menuMargin, window.innerWidth - menuWidth - menuMargin);
+    const left = Math.min(Math.max(menuMargin, anchor.right - menuWidth), maxLeft);
+    const above = anchor.top - menuHeight - menuGap;
+    const below = anchor.bottom + menuGap;
+    const maxTop = Math.max(menuMargin, window.innerHeight - menuHeight - menuMargin);
+    const top = above >= menuMargin ? above : Math.min(Math.max(menuMargin, below), maxTop);
+    menuStyle = `left: ${Math.round(left)}px; top: ${Math.round(top)}px;`;
+  }
+
+  $effect(() => {
+    if (!open) return;
+    submenu;
+    options.provider;
+    void updateMenuPosition();
+  });
+
+  $effect(() => () => cleanupFloatingMenus());
 </script>
 
-<svelte:window onpointerdown={closeFromWindow} onkeydown={onWindowKeydown} />
+<svelte:window
+  onkeydown={onWindowKeydown}
+  onresize={() => void updateMenuPosition()}
+  onscroll={() => void updateMenuPosition()}
+/>
 
 <div class="ai-options">
   {#if open}
-    <div class="menu" role="presentation" onpointerdown={stopPointer}>
+    <div bind:this={menuElement} use:portal class="menu" style={menuStyle} role="presentation" onpointerdown={stopPointer}>
       <div class="menu-title">Provider</div>
       {#each providers as provider (provider.value)}
         <button type="button" class:active={options.provider === provider.value} onclick={() => setProvider(provider.value)}>
@@ -115,6 +201,21 @@
 
       {#if options.provider === 'codex'}
         <div class="separator"></div>
+        <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
+          <span>Autonomy</span>
+          <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
+          <Icon svg={ChevronRight} size={14} />
+        </button>
+        {#if submenu === 'autonomy'}
+          <div class="subitems">
+            {#each autonomyLevels as item (item.value)}
+              <button type="button" class:active={options.autonomyLevel === item.value} onclick={() => setAutonomy(item.value)}>
+                <span>{item.label}</span>
+                {#if options.autonomyLevel === item.value}<Icon svg={Checkmark} size={15} />{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
         <button type="button" onclick={() => (submenu = submenu === 'reasoning' ? null : 'reasoning')}>
           <span>Reasoning</span>
           <span class="value">{reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.label}</span>
@@ -162,6 +263,21 @@
         {/if}
       {:else if options.provider === 'antigravity'}
         <div class="separator"></div>
+        <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
+          <span>Autonomy</span>
+          <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
+          <Icon svg={ChevronRight} size={14} />
+        </button>
+        {#if submenu === 'autonomy'}
+          <div class="subitems">
+            {#each autonomyLevels as item (item.value)}
+              <button type="button" class:active={options.autonomyLevel === item.value} onclick={() => setAutonomy(item.value)}>
+                <span>{item.label}</span>
+                {#if options.autonomyLevel === item.value}<Icon svg={Checkmark} size={15} />{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
         <button type="button" onclick={() => (submenu = submenu === 'antigravityModel' ? null : 'antigravityModel')}>
           <span>Model</span>
           <span class="value">{ANTIGRAVITY_MODEL_OPTIONS.find((item) => item.id === options.antigravityModel)?.label}</span>
@@ -197,6 +313,7 @@
   {/if}
 
   <button
+    bind:this={pillElement}
     class="pill"
     type="button"
     disabled={disabled}
@@ -233,10 +350,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  :global(.ai-run-options-dismiss-layer) {
+    position: fixed;
+    inset: 0;
+    z-index: 2499;
+    background: transparent;
+  }
   .menu {
-    position: absolute;
-    right: 0;
-    bottom: calc(100% + 6px);
+    position: fixed;
     z-index: 2500;
     min-width: 248px;
     max-height: min(430px, calc(100vh - 96px));

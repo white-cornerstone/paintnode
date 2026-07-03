@@ -28,6 +28,7 @@ export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ServiceTier = 'default' | 'fast';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
+export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity' | 'custom';
 export type CanvasBackground = 'white' | 'transparent';
 
@@ -37,6 +38,7 @@ export interface AiRunOptions {
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
   serviceTier: ServiceTier;
+  autonomyLevel: AiAutonomyLevel;
   antigravityBin: string;
   antigravityModel: AntigravityModelId;
   antigravityApprovalMode: AntigravityApprovalMode;
@@ -56,6 +58,7 @@ export interface PaintNodeSettings {
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
     serviceTier: ServiceTier;
+    autonomyLevel: AiAutonomyLevel;
     antigravityBin: string;
     antigravityModel: AntigravityModelId;
     antigravityApprovalMode: AntigravityApprovalMode;
@@ -88,6 +91,7 @@ const MODEL_IDS = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id)
 const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id));
 const AUTOSAVE_INTERVALS = new Set<number>(AUTOSAVE_INTERVAL_OPTIONS.map((option) => option.value));
 const REASONING_EFFORTS = new Set<string>(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
 
 export function defaultSettings(): PaintNodeSettings {
   return {
@@ -103,6 +107,7 @@ export function defaultSettings(): PaintNodeSettings {
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
       serviceTier: 'default',
+      autonomyLevel: 'low',
       antigravityBin: '',
       antigravityModel: 'auto',
       antigravityApprovalMode: 'skipPermissions',
@@ -181,6 +186,9 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
         ? (ai.reasoningEffort as ReasoningEffort)
         : defaults.ai.reasoningEffort,
       serviceTier: ai.serviceTier === 'fast' ? 'fast' : 'default',
+      autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))
+        ? (ai.autonomyLevel as AiAutonomyLevel)
+        : defaults.ai.autonomyLevel,
       antigravityBin: stringOrDefault(savedAntigravityBin, defaults.ai.antigravityBin),
       antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(savedAntigravityModel))
         ? (savedAntigravityModel as AntigravityModelId)
@@ -236,6 +244,7 @@ export function defaultAiRunOptions(): AiRunOptions {
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
     serviceTier: ai.serviceTier,
+    autonomyLevel: ai.autonomyLevel,
     antigravityBin: ai.antigravityBin,
     antigravityModel: ai.antigravityModel,
     antigravityApprovalMode: ai.antigravityApprovalMode,
@@ -250,6 +259,7 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
     serviceTier: value.ai.serviceTier,
+    autonomyLevel: value.ai.autonomyLevel,
     antigravityBin: value.ai.antigravityBin,
     antigravityModel: value.ai.antigravityModel,
     antigravityApprovalMode: value.ai.antigravityApprovalMode,

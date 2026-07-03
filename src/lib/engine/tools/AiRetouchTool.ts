@@ -158,6 +158,7 @@ export class AiRetouchTool implements Tool {
       points: this.points,
       size: Math.max(1, this.host.brushSize),
       hardness: this.host.brushHardness,
+      feather: Math.max(0, this.host.aiRetouchBrushFeather),
       closedLoop: this.id === 'remove' && closeEnoughToLoop(this.points, Math.max(1, this.host.brushSize)),
     });
   }
@@ -182,6 +183,7 @@ export class AiRetouchTool implements Tool {
       points: this.points.slice(),
       size,
       hardness: this.host.brushHardness,
+      feather: Math.max(0, this.host.aiRetouchBrushFeather),
       closedLoop: this.id === 'remove' && closeEnoughToLoop(this.points, size),
       reference: this.host.aiRetouchHealingSource ? referenceRect(this.host.aiRetouchHealingSource, size * 4, docW, docH) : null,
     } as const;

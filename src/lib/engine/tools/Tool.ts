@@ -18,6 +18,7 @@ export interface ToolHost {
   brushSize: number;
   brushHardness: number;
   brushOpacity: number;
+  aiRetouchBrushFeather: number;
   tolerance: number;
   selection: Selection | null;
   selectionMode: SelectionMode;

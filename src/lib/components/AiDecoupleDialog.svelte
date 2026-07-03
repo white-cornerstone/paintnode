@@ -176,7 +176,7 @@
 
     busy = true;
     progress = 'Preparing source layer...';
-    editor.flash('Extracting assets with Codex...');
+    editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
     clearProgressListener();
     const runId = createRunId();
     try {
@@ -186,7 +186,7 @@
         }
       });
     } catch {
-      progress = 'Local Codex is running...';
+      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
     }
 
     try {

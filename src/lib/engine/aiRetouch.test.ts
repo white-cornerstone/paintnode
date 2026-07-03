@@ -4,7 +4,9 @@ import {
   cloneAiRetouchMetadata,
   combineRetouchMask,
   effectiveAiRetouchMaskMode,
+  featherRetouchMask,
   makeRectMask,
+  makeStrokeMask,
   maskBounds,
   maskHasPixels,
   nextAiRetouchTool,
@@ -43,9 +45,44 @@ class FakeCanvas {
 
 class FakeContext {
   fillStyle = '#ffffff';
+  strokeStyle = '#ffffff';
+  lineWidth = 1;
+  lineCap = 'round';
+  lineJoin = 'round';
+  filter = 'none';
   globalCompositeOperation = 'source-over';
+  private arcPath: { x: number; y: number; radius: number } | null = null;
 
   constructor(private canvas: FakeCanvas) {}
+
+  beginPath(): void {
+    this.arcPath = null;
+  }
+
+  moveTo(): void {}
+
+  lineTo(): void {}
+
+  closePath(): void {}
+
+  arc(x: number, y: number, radius: number): void {
+    this.arcPath = { x, y, radius };
+  }
+
+  fill(): void {
+    if (!this.arcPath) return;
+    const { x, y, radius } = this.arcPath;
+    for (let yy = Math.floor(y - radius); yy <= Math.ceil(y + radius); yy++) {
+      for (let xx = Math.floor(x - radius); xx <= Math.ceil(x + radius); xx++) {
+        if (xx < 0 || yy < 0 || xx >= this.canvas.width || yy >= this.canvas.height) continue;
+        const centerX = xx + 0.5;
+        const centerY = yy + 0.5;
+        if (Math.hypot(centerX - x, centerY - y) <= radius + 0.51) this.writePixel(xx, yy, 255);
+      }
+    }
+  }
+
+  stroke(): void {}
 
   fillRect(x: number, y: number, w: number, h: number): void {
     for (let yy = Math.max(0, y); yy < Math.min(this.canvas.height, y + h); yy++) {
@@ -95,6 +132,10 @@ class FakeContext {
         this.canvas.data().set(image.data.slice(src, src + 4), dst);
       }
     }
+  }
+
+  createImageData(w: number, h: number): ImageData {
+    return { data: new Uint8ClampedArray(w * h * 4), width: w, height: h, colorSpace: 'srgb' } as ImageData;
   }
 
   private writePixel(x: number, y: number, srcAlpha: number): void {
@@ -201,6 +242,35 @@ describe('AI retouch request helpers', () => {
     expect(maskBounds(subtracted)).toEqual({ x: 1, y: 1, w: 4, h: 3 });
     expect(alphaAt(subtracted, 3, 2)).toBe(0);
     expect(alphaAt(subtracted, 2, 2)).toBe(255);
+  });
+
+  it('feathers retouch masks with a soft outer buffer', () => {
+    const mask = makeRectMask(9, 1, { x: 4, y: 0, w: 1, h: 1 })!;
+    const feathered = featherRetouchMask(mask, 2);
+
+    expect(alphaAt(feathered, 4, 0)).toBe(255);
+    expect(alphaAt(feathered, 3, 0)).toBeGreaterThan(alphaAt(feathered, 2, 0));
+    expect(alphaAt(feathered, 5, 0)).toBeGreaterThan(alphaAt(feathered, 6, 0));
+    expect(alphaAt(feathered, 2, 0)).toBeGreaterThan(0);
+    expect(alphaAt(feathered, 6, 0)).toBeGreaterThan(0);
+    expect(alphaAt(feathered, 0, 0)).toBe(0);
+    expect(alphaAt(feathered, 8, 0)).toBe(0);
+  });
+
+  it('applies feather per AI retouch brush stroke', () => {
+    const mask = makeStrokeMask(7, 1, {
+      kind: 'brush',
+      points: [{ x: 3.5, y: 0.5 }],
+      size: 1,
+      hardness: 1,
+      feather: 1,
+    })!;
+
+    expect(alphaAt(mask, 3, 0)).toBe(255);
+    expect(alphaAt(mask, 2, 0)).toBeGreaterThan(0);
+    expect(alphaAt(mask, 4, 0)).toBeGreaterThan(0);
+    expect(alphaAt(mask, 0, 0)).toBe(0);
+    expect(alphaAt(mask, 6, 0)).toBe(0);
   });
 
   it('returns no mask when subtract or intersect starts without an existing mask', () => {

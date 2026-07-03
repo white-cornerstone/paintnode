@@ -27,3 +27,4 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2.7.1"
+arboard = "3.6"

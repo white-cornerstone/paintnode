@@ -162,7 +162,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
           }
         });
       } catch {
-        progress = 'Local Codex is running...';
+        progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
       }
     }
     try {
