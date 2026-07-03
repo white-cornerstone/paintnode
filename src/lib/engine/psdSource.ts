@@ -45,17 +45,20 @@ export interface PsdLayerSource {
 
 /**
  * A PSD layer mask imported for compositing. The mask itself is not editable in
- * PaintNode; it is preserved and written back on PSD export.
+ * PaintNode; it is preserved and written back on PSD export. It is linked to its
+ * layer: `x`/`y` are relative to the layer's top-left, so it follows layer moves.
  */
 export interface PsdLayerMaskState {
-  /** Alpha-coverage canvas (white pixels, alpha = mask value) for compositing. */
+  /** Alpha-coverage canvas (white pixels, alpha = mask value), for PSD export. */
   canvas: HTMLCanvasElement;
-  /** Document-space position of the mask bitmap. */
+  /** Mask bitmap offset relative to the layer's top-left. */
   x: number;
   y: number;
   /** Mask value (0-255) outside the mask bitmap bounds (255 = reveal). */
   defaultColor: number;
   disabled: boolean;
+  /** Layer-sized coverage canvas (defaultColor outside the bitmap) for compositing. */
+  coverage: HTMLCanvasElement;
 }
 
 /** Document-level passthrough: the original parsed Psd plus import notices. */

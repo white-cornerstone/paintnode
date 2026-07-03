@@ -45,6 +45,22 @@ function applyLayerMask(layer: Layer, src: CanvasImageSource, mask: Layer, scrat
   return out;
 }
 
+/** Apply an imported PSD layer mask (precomputed layer-sized coverage canvas). */
+function applyPsdMask(layer: Layer, src: CanvasImageSource): HTMLCanvasElement {
+  const state = layer.psdMask!;
+  const out = createCanvas(layer.width, layer.height);
+  const c = ctx2d(out);
+  c.drawImage(src, 0, 0);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(state.coverage, 0, 0);
+  c.globalCompositeOperation = 'source-over';
+  return out;
+}
+
+function maskedSource(layer: Layer, src: CanvasImageSource): CanvasImageSource {
+  return layer.psdMask && !layer.psdMask.disabled ? applyPsdMask(layer, src) : src;
+}
+
 /**
  * Composite every visible layer of `doc` onto `target`, bottom-to-top. If `stroke` is
  * supplied, the matching layer is rendered with the in-progress stroke merged in (via the
@@ -81,9 +97,9 @@ export function compositeLayers(
       sctx.drawImage(buf, -layer.x, -layer.y);
       sctx.globalCompositeOperation = 'source-over';
       sctx.globalAlpha = 1;
-      drawLayer(target, layer, mask ? applyLayerMask(layer, sc, mask) : sc);
+      drawLayer(target, layer, maskedSource(layer, mask ? applyLayerMask(layer, sc, mask) : sc));
     } else {
-      drawLayer(target, layer, mask ? applyLayerMask(layer, layer.canvas, mask, scratch) : layer.canvas);
+      drawLayer(target, layer, maskedSource(layer, mask ? applyLayerMask(layer, layer.canvas, mask, scratch) : layer.canvas));
     }
   }
   target.restore();

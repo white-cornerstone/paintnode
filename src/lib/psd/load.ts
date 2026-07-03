@@ -42,6 +42,7 @@ function maskAlphaCanvas(data: PixelData): HTMLCanvasElement {
 
 function maskStateFor(
   src: AgPsdLayer,
+  layer: Layer,
   decodeMask: (layer: AgPsdLayer) => PixelData | undefined,
 ): PsdLayerMaskState | null {
   const mask = src.mask;
@@ -49,12 +50,28 @@ function maskStateFor(
   const data = decodeMask(src);
   if (!data || !data.width || !data.height) return null;
   const relative = mask.positionRelativeToLayer === true;
+  const maskCanvas = maskAlphaCanvas(data);
+  // Offset relative to the layer's top-left, so the mask follows layer moves.
+  const x = (mask.left ?? 0) - (relative ? 0 : (src.left ?? 0));
+  const y = (mask.top ?? 0) - (relative ? 0 : (src.top ?? 0));
+  const defaultColor = mask.defaultColor ?? 0;
+
+  const coverage = createCanvas(layer.width, layer.height);
+  const c = ctx2d(coverage);
+  if (defaultColor > 0) {
+    c.fillStyle = `rgba(255, 255, 255, ${defaultColor / 255})`;
+    c.fillRect(0, 0, coverage.width, coverage.height);
+    c.clearRect(x, y, maskCanvas.width, maskCanvas.height);
+  }
+  c.drawImage(maskCanvas, x, y);
+
   return {
-    canvas: maskAlphaCanvas(data),
-    x: (mask.left ?? 0) + (relative ? (src.left ?? 0) : 0),
-    y: (mask.top ?? 0) + (relative ? (src.top ?? 0) : 0),
-    defaultColor: mask.defaultColor ?? 0,
+    canvas: maskCanvas,
+    x,
+    y,
+    defaultColor,
     disabled: mask.disabled === true,
+    coverage,
   };
 }
 
@@ -94,7 +111,7 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
     layer.opacity = clamp(src.opacity ?? 1, 0, 1);
     layer.visible = item.visible;
     layer.blendMode = blend.mode;
-    layer.psdMask = maskStateFor(src, getLayerMaskImageData);
+    layer.psdMask = maskStateFor(src, layer, getLayerMaskImageData);
     layer.touch();
     layer.psd = {
       layer: src,

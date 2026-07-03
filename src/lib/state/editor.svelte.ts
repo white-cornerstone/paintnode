@@ -379,6 +379,26 @@ export class EditorStore implements ToolHost {
   get activeLayer(): Layer | null {
     return this.doc?.activeLayer ?? null;
   }
+  /** Flash-and-block helper: true when `layer` is a locked Photoshop-only layer. */
+  blockIfLocked(layer: Layer | null | undefined): boolean {
+    if (!layer?.locked) return false;
+    this.flash('Photoshop-only layer is locked; PaintNode preserves it for PSD export');
+    return true;
+  }
+  /** Blocks document-wide ops that cannot preserve locked Photoshop layers. */
+  private blockIfAnyLocked(operation: string): boolean {
+    if (!this.doc?.layers.some((l) => l.locked)) return false;
+    this.flash(`${operation} is disabled while the document has locked Photoshop layers`);
+    return true;
+  }
+  /** Blocks transforms that would desync Photoshop-protected layers, masks, or clipping. */
+  private blockIfPsdProtectedDoc(operation: string): boolean {
+    const doc = this.doc;
+    if (!doc) return false;
+    if (!doc.layers.some((l) => l.locked || l.psdMask || l.psd?.clipping)) return false;
+    this.flash(`${operation} is disabled while the document has Photoshop-protected layers`);
+    return true;
+  }
   get activeAiRetouchMaskLayer(): Layer | null {
     const layer = this.activeLayer;
     return layer?.kind === 'ai-retouch-mask' ? layer : null;
@@ -1296,6 +1316,8 @@ export class EditorStore implements ToolHost {
       nl.kind = l.kind;
       nl.text = l.text ? cloneModel(l.text) : null;
       nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
+      // Keep PSD group/metadata but force a rebuild on export (pixels remapped).
+      if (l.psd) nl.psd = { ...l.psd, imported: { ...l.psd.imported, pixelRev: -1 } };
       paint(nl.ctx, l);
       nl.touch();
       return nl;
@@ -1324,6 +1346,10 @@ export class EditorStore implements ToolHost {
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
     copy.aiRetouch = cloneAiRetouchMetadata(layer.aiRetouch);
+    // PSD passthrough state is immutable — sharing the reference is safe and
+    // keeps history snapshots from silently unlocking imported layers.
+    copy.psd = layer.psd;
+    copy.psdMask = layer.psdMask;
     copy.ctx.drawImage(layer.canvas, 0, 0);
     copy.pixelRev = layer.pixelRev;
     return copy;
@@ -1351,6 +1377,7 @@ export class EditorStore implements ToolHost {
     const layer = this.activeLayer;
     const sel = this.selection;
     if (!doc || !layer || !sel) return false;
+    if (this.blockIfLocked(layer)) return false;
     if (layer.kind !== 'raster') {
       this.flash('Rasterize the active layer before moving selected pixels');
       return false;
@@ -1386,6 +1413,7 @@ export class EditorStore implements ToolHost {
   moveActiveLayerBy(dx: number, dy: number): void {
     const layer = this.activeLayer;
     if (!layer) return;
+    if (this.blockIfLocked(layer)) return;
     layer.x = Math.round(layer.x + dx);
     layer.y = Math.round(layer.y + dy);
     this.invalidate();
@@ -1450,6 +1478,11 @@ export class EditorStore implements ToolHost {
     const layer = this.activeLayer;
     if (!layer) {
       this.flash('No active layer');
+      return;
+    }
+    if (this.blockIfLocked(layer)) return;
+    if (layer.psdMask) {
+      this.flash('Layer has a Photoshop mask; transforming it is not supported yet');
       return;
     }
     const bounds = this.alphaBounds(layer);
@@ -1558,6 +1591,7 @@ export class EditorStore implements ToolHost {
     const doc = this.doc;
     const sel = this.selection;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Crop')) return;
     const rect = sel ? clampRect(sel.bounds, doc.width, doc.height) : null;
     if (!rect) {
       this.flash('Make a selection to crop');
@@ -1578,6 +1612,7 @@ export class EditorStore implements ToolHost {
   resizeImage(w: number, h: number): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Image Size')) return;
     w = Math.max(1, Math.round(w));
     h = Math.max(1, Math.round(h));
     if (w === doc.width && h === doc.height) return;
@@ -1595,6 +1630,7 @@ export class EditorStore implements ToolHost {
           nl.opacity = l.opacity;
           nl.visible = l.visible;
           nl.blendMode = l.blendMode;
+          if (l.psd) nl.psd = { ...l.psd, imported: { ...l.psd.imported, pixelRev: -1 } };
           nl.ctx.imageSmoothingEnabled = true;
           nl.ctx.imageSmoothingQuality = 'high';
           nl.ctx.drawImage(l.canvas, 0, 0, l.width, l.height, 0, 0, nw, nh);
@@ -1611,6 +1647,7 @@ export class EditorStore implements ToolHost {
   revealAll(): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfAnyLocked('Reveal All')) return;
     const visible = doc.layers.filter((l) => l.visible);
     if (!visible.length) return;
     const minX = Math.min(0, ...visible.map((l) => l.x));
@@ -1626,8 +1663,9 @@ export class EditorStore implements ToolHost {
     this.structural(
       'Reveal All',
       () => {
+        // Exact clones keep layer ids (mask links) and PSD passthrough state.
         const layers = doc.layers.map((l) => {
-          const nl = l.clone(l.name);
+          const nl = this.cloneLayerExact(l);
           nl.x = l.x - minX;
           nl.y = l.y - minY;
           return nl;
@@ -1642,6 +1680,7 @@ export class EditorStore implements ToolHost {
   rotate(deg: 90 | 180 | 270): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Rotate')) return;
     const swap = deg === 90 || deg === 270;
     const nw = swap ? doc.height : doc.width;
     const nh = swap ? doc.width : doc.height;
@@ -1672,6 +1711,7 @@ export class EditorStore implements ToolHost {
   flip(axis: 'h' | 'v'): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Flip')) return;
     this.structural(axis === 'h' ? 'Flip Horizontal' : 'Flip Vertical', () =>
       this.commitLayers(
         this.remapLayers(doc.width, doc.height, (c, l) => {
@@ -1717,6 +1757,7 @@ export class EditorStore implements ToolHost {
   duplicateLayer(id: string): void {
     const doc = this.doc;
     if (!doc || doc.indexOf(id) < 0) return;
+    if (this.blockIfLocked(doc.layers[doc.indexOf(id)])) return;
     const before = this.layerStackSnapshot();
     doc.duplicateLinked(id);
     const after = this.layerStackSnapshot();
@@ -1823,6 +1864,7 @@ export class EditorStore implements ToolHost {
       this.flash('No layer below to merge into');
       return;
     }
+    if (this.blockIfLocked(doc.layers[idx]) || this.blockIfLocked(doc.layers[idx - 1])) return;
     this.structural('Merge Down', () => {
       const above = doc.layers[idx];
       const below = doc.layers[idx - 1];
@@ -1852,6 +1894,7 @@ export class EditorStore implements ToolHost {
   flatten(): void {
     const doc = this.doc;
     if (!doc || doc.layers.length <= 1) return;
+    if (this.blockIfAnyLocked('Flatten')) return;
     this.structural('Flatten Image', () => {
       const flat = new Layer(doc.width, doc.height, 'Background');
       flat.ctx.drawImage(compositeToCanvas(doc), 0, 0);
@@ -1868,6 +1911,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const img = layer.ctx.getImageData(0, 0, layer.width, layer.height);
@@ -1910,6 +1954,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const filtered = fn(layer.canvas);
@@ -1943,6 +1988,7 @@ export class EditorStore implements ToolHost {
   clearActive(): void {
     const layer = this.activeLayer;
     if (!layer) return;
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const mask = this.selectionMaskForLayer(layer);
@@ -1966,6 +2012,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const region = this.editRegion(layer);
     const before = snapshotRegion(layer, region) ?? snapshotLayer(layer);
     const mask = this.selectionMaskForLayer(layer);
@@ -1994,6 +2041,7 @@ export class EditorStore implements ToolHost {
       this.flash('No active layer');
       return;
     }
+    if (this.blockIfLocked(layer)) return;
     const tile = createCanvas(24, 24);
     const tc = ctx2d(tile);
     tc.fillStyle = '#303236';

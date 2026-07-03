@@ -269,14 +269,14 @@ function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
   if (linked) {
     out.mask = linked;
   } else if (mask && layer.psdMask) {
-    const { dx, dy } = movedBy(layer);
+    // The imported mask is linked to the layer (offsets are layer-relative).
     const maskCanvas = layer.psdMask.canvas;
     out.mask = {
       ...mask,
-      left: layer.psdMask.x + dx,
-      top: layer.psdMask.y + dy,
-      right: layer.psdMask.x + dx + maskCanvas.width,
-      bottom: layer.psdMask.y + dy + maskCanvas.height,
+      left: layer.x + layer.psdMask.x,
+      top: layer.y + layer.psdMask.y,
+      right: layer.x + layer.psdMask.x + maskCanvas.width,
+      bottom: layer.y + layer.psdMask.y + maskCanvas.height,
       positionRelativeToLayer: false,
       disabled: layer.psdMask.disabled,
       imageData: maskImageDataForPsd(maskCanvas),
@@ -319,8 +319,10 @@ export function buildPsdChildren(doc: PaintDocument): PsdLayer[] {
 
   for (const layer of doc.layers) {
     const meta = layer.psd;
+    // Locked layers can never be edited in PaintNode, so they always pass through —
+    // rebuilding one from its raster preview would destroy its Photoshop data.
     const node = meta
-      ? isCleanPsdLayer(doc, layer)
+      ? meta.lockReason !== null || isCleanPsdLayer(doc, layer)
         ? passthroughPsdLayer(layer)
         : rebuildImportedLayer(doc, layer)
       : layerToPsd(doc, layer);

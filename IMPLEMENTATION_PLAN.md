@@ -42,7 +42,7 @@ delete stay allowed on locked layers.
 **Success Criteria**: locked layers reject all pixel/structural edits with a flash
 message; meta survives history snapshots (cloneLayerExact) and clone/remap paths.
 **Tests**: Document/Layer meta preservation tests where pure.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 4: Open wiring + Layers panel UI
 **Goal**: File ▸ Open accepts `.psd` (picker, drag-drop, desktop paths); import notices
