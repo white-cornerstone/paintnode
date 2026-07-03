@@ -1,13 +1,20 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
-  import { detectCodex, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
+  import { detectCodex, detectAntigravity, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
   import {
     AUTOSAVE_INTERVAL_OPTIONS,
     CODEX_MODEL_OPTIONS,
     DEFAULT_CUSTOM_GENERATOR_ARGS,
+    DEFAULT_CUSTOM_EXTRACT_ARGS,
+    DEFAULT_CUSTOM_FILL_ARGS,
+    DEFAULT_CUSTOM_RETOUCH_ARGS,
+    DEFAULT_CUSTOM_WORKFLOW_ARGS,
+    ANTIGRAVITY_MODEL_OPTIONS,
     type AiProvider,
     type CanvasBackground,
     type CodexModelId,
+    type AntigravityApprovalMode,
+    type AntigravityModelId,
     type ReasoningEffort,
     type ServiceTier,
   } from '../state/settings';
@@ -23,7 +30,7 @@
     { value: 'low', label: 'Low' },
     { value: 'medium', label: 'Medium' },
     { value: 'high', label: 'High' },
-    { value: 'xhigh', label: 'XHigh' },
+    { value: 'xhigh', label: 'Extra High' },
   ];
   const serviceTiers: { value: ServiceTier; label: string; hint: string }[] = [
     { value: 'default', label: 'Default', hint: 'Use normal Codex speed.' },
@@ -32,7 +39,9 @@
 
   let tab = $state<Tab>('general');
   let detectBusy = $state(false);
+  let antigravityDetectBusy = $state(false);
   let codexDetection = $state<CodexDetectionResult | null>(null);
+  let antigravityDetection = $state<CodexDetectionResult | null>(null);
 
   function textValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
@@ -74,8 +83,45 @@
     }
   }
 
+  async function runAntigravityDetection(): Promise<void> {
+    antigravityDetection = null;
+    if (!desktop) {
+      antigravityDetection = {
+        found: false,
+        path: null,
+        version: null,
+        error: 'Antigravity detection is available only in the desktop app.',
+      };
+      return;
+    }
+    antigravityDetectBusy = true;
+    try {
+      const result = await detectAntigravity(settings.value.ai.antigravityBin);
+      antigravityDetection = result;
+      if (result.found && result.path) settings.update({ ai: { antigravityBin: result.path } });
+    } catch (error) {
+      antigravityDetection = {
+        found: false,
+        path: null,
+        version: null,
+        error: (error as Error)?.message ?? String(error),
+      };
+    } finally {
+      antigravityDetectBusy = false;
+    }
+  }
+
   function resetCustomArgs(): void {
-    settings.update({ ai: { customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS } });
+    settings.update({
+      ai: {
+        customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
+        customGenerateArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
+        customFillArgsText: DEFAULT_CUSTOM_FILL_ARGS,
+        customRetouchArgsText: DEFAULT_CUSTOM_RETOUCH_ARGS,
+        customExtractArgsText: DEFAULT_CUSTOM_EXTRACT_ARGS,
+        customWorkflowArgsText: DEFAULT_CUSTOM_WORKFLOW_ARGS,
+      },
+    });
   }
 </script>
 
@@ -146,65 +192,77 @@
       {:else if tab === 'ai'}
         <div class="section-head">
           <h2>AI</h2>
-          <p>Defaults for local Codex image generation, retouching, extraction, and workflows.</p>
+          <p>Defaults for local AI image generation, retouching, extraction, and workflows.</p>
         </div>
 
-        <div class="detect-row">
-          <label class="field">
-            <span>Codex command</span>
-            <input
-              type="text"
-              value={settings.value.ai.codexBin}
-              placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex"
-              spellcheck="false"
-              oninput={(event) => settings.update({ ai: { codexBin: textValue(event) } })}
-            />
-          </label>
-          <button type="button" onclick={runCodexDetection} disabled={detectBusy}>
-            {detectBusy ? 'Detecting...' : 'Detect'}
-          </button>
-        </div>
+        <label class="field">
+          <span>Default image provider</span>
+          <select
+            value={settings.value.ai.provider}
+            onchange={(event) => settings.update({ ai: { provider: textValue(event) as AiProvider } })}
+          >
+            <option value="codex">Local Codex CLI</option>
+            <option value="antigravity">Local Antigravity CLI</option>
+            <option value="custom">Custom CLI</option>
+          </select>
+        </label>
 
-        {#if codexDetection}
-          <p class:ok={codexDetection.found} class:error={!codexDetection.found} class="status-line">
-            {#if codexDetection.found}
-              Found {codexDetection.version || 'Codex'} at {codexDetection.path}
-            {:else}
-              {codexDetection.error || 'Codex was not found.'}
-            {/if}
-          </p>
-        {/if}
+        {#if settings.value.ai.provider === 'codex'}
+          <div class="detect-row">
+            <label class="field">
+              <span>Codex command</span>
+              <input
+                type="text"
+                value={settings.value.ai.codexBin}
+                placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex"
+                spellcheck="false"
+                oninput={(event) => settings.update({ ai: { codexBin: textValue(event) } })}
+              />
+            </label>
+            <button type="button" onclick={runCodexDetection} disabled={detectBusy}>
+              {detectBusy ? 'Detecting...' : 'Detect'}
+            </button>
+          </div>
 
-        <div class="grid-2">
-          <label class="field">
-            <span>Model</span>
-            <select
-              value={settings.value.ai.model}
-              onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
-            >
-              {#each CODEX_MODEL_OPTIONS as option (option.id)}
-                <option value={option.id}>{option.label}</option>
-              {/each}
-            </select>
-          </label>
+          {#if codexDetection}
+            <p class:ok={codexDetection.found} class:error={!codexDetection.found} class="status-line">
+              {#if codexDetection.found}
+                Found {codexDetection.version || 'Codex'} at {codexDetection.path}
+              {:else}
+                {codexDetection.error || 'Codex was not found.'}
+              {/if}
+            </p>
+          {/if}
+
+          <div class="grid-2">
+            <label class="field">
+              <span>Model</span>
+              <select
+                value={settings.value.ai.model}
+                onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
+              >
+                {#each CODEX_MODEL_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Reasoning effort</span>
+              <select
+                value={settings.value.ai.reasoningEffort}
+                onchange={(event) =>
+                  settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
+              >
+                {#each reasoningEfforts as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
 
           <label class="field">
-            <span>Reasoning effort</span>
-            <select
-              value={settings.value.ai.reasoningEffort}
-              onchange={(event) =>
-                settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
-            >
-              {#each reasoningEfforts as option (option.value)}
-                <option value={option.value}>{option.label}</option>
-              {/each}
-            </select>
-          </label>
-        </div>
-
-        <div class="grid-2">
-          <label class="field">
-            <span>Speed</span>
+            <span>Codex speed</span>
             <select
               value={settings.value.ai.serviceTier}
               onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
@@ -215,42 +273,129 @@
             </select>
             <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
           </label>
+        {:else if settings.value.ai.provider === 'antigravity'}
+          <div class="detect-row">
+            <label class="field">
+              <span>Antigravity command</span>
+	              <input
+	                type="text"
+	                value={settings.value.ai.antigravityBin}
+	                placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
+	                spellcheck="false"
+	                oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
+	              />
+            </label>
+            <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
+              {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
+            </button>
+          </div>
+
+          {#if antigravityDetection}
+            <p class:ok={antigravityDetection.found} class:error={!antigravityDetection.found} class="status-line">
+              {#if antigravityDetection.found}
+                Found {antigravityDetection.version || 'Antigravity'} at {antigravityDetection.path}
+              {:else}
+                {antigravityDetection.error || 'Antigravity CLI was not found.'}
+              {/if}
+            </p>
+          {/if}
 
           <label class="field">
-            <span>Default image provider</span>
+            <span>Antigravity model</span>
             <select
-              value={settings.value.ai.provider}
-              onchange={(event) => settings.update({ ai: { provider: textValue(event) as AiProvider } })}
+              value={settings.value.ai.antigravityModel}
+              onchange={(event) => settings.update({ ai: { antigravityModel: textValue(event) as AntigravityModelId } })}
             >
-              <option value="codex">Local Codex</option>
-              <option value="custom">Custom CLI</option>
+              {#each ANTIGRAVITY_MODEL_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
             </select>
+            <small>Auto lets Antigravity CLI choose its configured/default model.</small>
           </label>
-        </div>
 
-        <div class="subsection">
-          <h3>Custom CLI</h3>
           <label class="field">
-            <span>Command</span>
-            <input
-              type="text"
-              value={settings.value.ai.customBin}
-              placeholder="Full path to your image-gen CLI"
-              spellcheck="false"
-              oninput={(event) => settings.update({ ai: { customBin: textValue(event) } })}
-            />
-          </label>
-          <label class="field">
-            <span>Arguments</span>
-            <textarea
-              rows="4"
-              spellcheck="false"
-              value={settings.value.ai.customArgsText}
-              oninput={(event) => settings.update({ ai: { customArgsText: textValue(event) } })}
-            ></textarea>
-          </label>
-          <button type="button" class="secondary" onclick={resetCustomArgs}>Reset arguments</button>
-        </div>
+            <span>Antigravity automation</span>
+	            <select
+	              value={settings.value.ai.antigravityApprovalMode}
+	              onchange={(event) =>
+	                settings.update({ ai: { antigravityApprovalMode: textValue(event) as AntigravityApprovalMode } })}
+	            >
+	              <option value="skipPermissions">Skip permissions inside PaintNode job folders</option>
+	              <option value="default">Use Antigravity CLI default permissions</option>
+	            </select>
+	            <small>Install with Google's script, then run <code>agy</code> once to sign in. PaintNode validates generated files before import.</small>
+	          </label>
+        {:else}
+          <div class="subsection">
+            <h3>Custom CLI</h3>
+            <label class="field">
+              <span>Command</span>
+              <input
+                type="text"
+                value={settings.value.ai.customBin}
+                placeholder="Full path to your image-gen CLI"
+                spellcheck="false"
+                oninput={(event) => settings.update({ ai: { customBin: textValue(event) } })}
+              />
+            </label>
+            <label class="field">
+              <span>Generate arguments</span>
+              <textarea
+                rows="4"
+                spellcheck="false"
+                value={settings.value.ai.customGenerateArgsText}
+                oninput={(event) =>
+                  settings.update({ ai: { customArgsText: textValue(event), customGenerateArgsText: textValue(event) } })}
+              ></textarea>
+            </label>
+            <div class="grid-2">
+              <label class="field">
+                <span>Fill arguments</span>
+                <textarea
+                  rows="3"
+                  spellcheck="false"
+                  value={settings.value.ai.customFillArgsText}
+                  oninput={(event) => settings.update({ ai: { customFillArgsText: textValue(event) } })}
+                ></textarea>
+              </label>
+              <label class="field">
+                <span>Retouch arguments</span>
+                <textarea
+                  rows="3"
+                  spellcheck="false"
+                  value={settings.value.ai.customRetouchArgsText}
+                  oninput={(event) => settings.update({ ai: { customRetouchArgsText: textValue(event) } })}
+                ></textarea>
+              </label>
+            </div>
+            <div class="grid-2">
+              <label class="field">
+                <span>Extract arguments</span>
+                <textarea
+                  rows="3"
+                  spellcheck="false"
+                  value={settings.value.ai.customExtractArgsText}
+                  oninput={(event) => settings.update({ ai: { customExtractArgsText: textValue(event) } })}
+                ></textarea>
+              </label>
+              <label class="field">
+                <span>Workflow arguments</span>
+                <textarea
+                  rows="3"
+                  spellcheck="false"
+                  value={settings.value.ai.customWorkflowArgsText}
+                  oninput={(event) => settings.update({ ai: { customWorkflowArgsText: textValue(event) } })}
+                ></textarea>
+              </label>
+            </div>
+            <small class="custom-help">
+              Rich jobs run in a PaintNode job folder. Templates can use {`{prompt}`}, {`{promptFile}`},
+              {`{jobDir}`}, {`{output}`}, {`{manifest}`}, {`{source}`}, {`{editTarget}`}, {`{mask}`},
+              {`{annotatedSource}`}, {`{reference}`}, and {`{inputsDir}`}.
+            </small>
+            <button type="button" class="secondary" onclick={resetCustomArgs}>Reset arguments</button>
+          </div>
+        {/if}
       {:else}
         <div class="section-head">
           <h2>Workspace</h2>

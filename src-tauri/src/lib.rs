@@ -20,6 +20,9 @@ const AI_RETOUCH_MASK_GROW_RADIUS: u32 = 16;
 const AI_RETOUCH_MASK_FEATHER_RADIUS: u32 = 8;
 const PROJECT_MANIFEST: &str = "paintnode.project.json";
 const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
+const PAINTNODE_WORK_DIR: &str = "paintnode";
+const CODEX_RUNS_DIR: &str = "codex-runs";
+const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -167,6 +170,12 @@ struct CodexCommandOptions {
     service_tier: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct AntigravityCommandOptions {
+    model: Option<String>,
+    approval_mode: Option<String>,
+}
+
 #[derive(Debug)]
 struct CodexImageRunResult {
     run: CodexRunResult,
@@ -256,11 +265,50 @@ fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to create generated assets folder: {e}"))?;
     fs::create_dir_all(project_path.join("assets").join("imported"))
         .map_err(|e| format!("Failed to create imported assets folder: {e}"))?;
-    fs::create_dir_all(project_path.join(".paintnode").join("codex-runs"))
+    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join(CODEX_RUNS_DIR))
         .map_err(|e| format!("Failed to create Codex runs folder: {e}"))?;
-    fs::create_dir_all(project_path.join(".paintnode").join("trash"))
+    fs::create_dir_all(
+        project_path
+            .join(PAINTNODE_WORK_DIR)
+            .join(ANTIGRAVITY_RUNS_DIR),
+    )
+    .map_err(|e| format!("Failed to create Antigravity runs folder: {e}"))?;
+    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("trash"))
         .map_err(|e| format!("Failed to create project trash folder: {e}"))?;
     Ok(())
+}
+
+fn project_agent_run_dir(
+    project_dir: &Path,
+    vendor_dir: &str,
+    prefix: &str,
+) -> Result<PathBuf, String> {
+    ensure_project_dirs(project_dir)?;
+    let run_dir = project_dir
+        .join(PAINTNODE_WORK_DIR)
+        .join(vendor_dir)
+        .join(format!("{prefix}-{}", now_id()));
+    fs::create_dir_all(&run_dir).map_err(|e| format!("Failed to create AI job folder: {e}"))?;
+    Ok(run_dir)
+}
+
+fn cleanup_project_agent_job(job_path: &Path) {
+    let _ = fs::remove_dir_all(job_path);
+    if let Some(vendor_dir) = job_path.parent() {
+        let is_agent_vendor_dir = vendor_dir
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some(PAINTNODE_WORK_DIR);
+        if is_agent_vendor_dir {
+            let is_empty = fs::read_dir(vendor_dir)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if is_empty {
+                let _ = fs::remove_dir(vendor_dir);
+            }
+        }
+    }
 }
 
 fn default_project_name(path: &Path) -> String {
@@ -1829,6 +1877,224 @@ fn apply_codex_command_options(command: &mut Command, options: &CodexCommandOpti
     }
 }
 
+fn configured_or_default_antigravity_bin(bin: Option<String>) -> Result<String, String> {
+    if let Some(bin) = bin.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        return Ok(bin);
+    }
+
+    let mut candidates = vec!["agy".to_string()];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/.local/bin/agy"));
+    }
+    candidates.extend([
+        "/opt/homebrew/bin/agy".to_string(),
+        "/usr/local/bin/agy".to_string(),
+    ]);
+    for candidate in candidates {
+        if Command::new(&candidate).arg("--version").output().is_ok() {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    Err("Antigravity CLI was not found. Install Antigravity CLI, or enter the full path to the `agy` binary.".into())
+}
+
+fn antigravity_command_options(
+    model: Option<String>,
+    approval_mode: Option<String>,
+) -> AntigravityCommandOptions {
+    let model = clean_codex_option(model).filter(|value| value != "auto");
+    let approval_mode = clean_codex_option(approval_mode);
+    AntigravityCommandOptions {
+        model,
+        approval_mode,
+    }
+}
+
+fn apply_antigravity_command_options(command: &mut Command, options: &AntigravityCommandOptions) {
+    if matches!(options.approval_mode.as_deref(), Some("skipPermissions")) {
+        command.arg("--dangerously-skip-permissions");
+    }
+    if let Some(model) = options.model.as_deref() {
+        command.arg("--model").arg(model);
+    }
+}
+
+fn build_antigravity_command(
+    antigravity_bin: &str,
+    workspace_path: &Path,
+    job_path: &Path,
+    prompt: &str,
+    options: &AntigravityCommandOptions,
+    new_project: bool,
+    _json_progress: bool,
+) -> Command {
+    let mut command = Command::new(antigravity_bin);
+    command.current_dir(workspace_path);
+    apply_antigravity_command_options(&mut command, options);
+    if new_project {
+        command.arg("--new-project");
+    }
+    command.arg("--add-dir").arg(job_path);
+    command.arg("-p").arg(prompt.trim());
+    command
+}
+
+fn antigravity_job_dir_label(workspace_path: &Path, job_path: &Path) -> String {
+    if workspace_path == job_path {
+        ".".into()
+    } else if let Ok(relative) = job_path.strip_prefix(workspace_path) {
+        relative.to_string_lossy().replace('\\', "/")
+    } else {
+        job_path.to_string_lossy().into_owned()
+    }
+}
+
+fn antigravity_result_path(job_dir: &str) -> String {
+    if job_dir == "." {
+        "result.png".into()
+    } else {
+        format!("{job_dir}/result.png")
+    }
+}
+
+fn antigravity_generate_prompt(user_prompt: &str, job_dir: &str) -> String {
+    let result_path = antigravity_result_path(job_dir);
+    format!(
+        r#"Generate one raster PNG for PaintNode.
+
+User image prompt:
+{user_prompt}
+
+Required output:
+- Work only inside the PaintNode AI job directory `{job_dir}`.
+- Save the final image as `{result_path}`.
+- PNG only.
+- Do not ask follow-up questions.
+- Do not edit files outside the PaintNode AI job directory.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+    )
+}
+
+fn antigravity_fill_prompt(prompt: &str, job_dir: &str) -> String {
+    let result_path = antigravity_result_path(job_dir);
+    format!(
+        r#"Perform one mask-guided PaintNode generative fill using the PNG files in `{job_dir}`.
+
+Input files:
+- `{job_dir}/source.png`: full current PaintNode canvas.
+- `{job_dir}/edit_target.png`: exact-size image to edit in place.
+- `{job_dir}/mask.png`: edit mask. White pixels are editable. Black pixels are protected context.
+
+User fill prompt:
+{prompt}
+
+Required output:
+- Save exactly one PNG file as `{result_path}`.
+- The PNG must have exactly the same pixel dimensions as `source.png`, `edit_target.png`, and `mask.png`.
+- Change only the white-mask area and keep black-mask context visually preserved.
+- Match surrounding texture, lighting, perspective, color, focus, and grain.
+- Do not crop, zoom, reframe, or change aspect ratio.
+- Work only inside `{job_dir}` and do not ask follow-up questions.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+    )
+}
+
+fn antigravity_retouch_prompt(
+    prompt: &str,
+    has_annotated_source: bool,
+    has_reference: bool,
+    job_dir: &str,
+) -> String {
+    let annotation_note = if has_annotated_source {
+        format!("- `{job_dir}/annotated_source.png`: optional guide image with PaintNode callouts. Use it only to locate the requested edit.")
+    } else {
+        "- No annotated source guide is present.".into()
+    };
+    let reference_note = if has_reference {
+        format!("- `{job_dir}/reference.png`: optional sampled reference area. Use it as visual guidance, not as pasted content unless the user explicitly requests copying.")
+    } else {
+        "- No sampled reference image is present.".into()
+    };
+    let result_path = antigravity_result_path(job_dir);
+    format!(
+        r#"Perform one PaintNode AI retouch using the PNG files in `{job_dir}`.
+
+Input files:
+- `{job_dir}/source.png`: full current PaintNode canvas. Transparent pixels are real empty canvas.
+- `{job_dir}/edit_target.png`: exact-size photo/canvas image to edit in place.
+- `{job_dir}/mask.png`: edit mask. White pixels are editable. Black pixels are protected context.
+{annotation_note}
+{reference_note}
+
+User retouch prompt:
+{prompt}
+
+Required output:
+- Save exactly one PNG file as `{result_path}`.
+- `result.png` must have exactly the same pixel dimensions as `source.png` and `edit_target.png`.
+- Treat the edit as an in-place retouch of `edit_target.png`; do not crop, zoom, reframe, or change aspect ratio.
+- Change only the white area of `mask.png`. PaintNode will apply the mask afterward, but your candidate should still preserve protected areas.
+- Keep every black-mask/protected area visually identical to `source.png`: no enhancement, denoise, sharpening, relight, recolor, cleanup, straightening, or reframing outside the mask.
+- Use surrounding texture, lighting, perspective, grain, focus, and edges to blend the retouched area naturally.
+- Do not include UI chrome, checkerboard transparency, selection outlines, masks, annotations, labels, or guide marks in `result.png`.
+- Work only inside `{job_dir}` and do not ask follow-up questions.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+    )
+}
+
+fn antigravity_decouple_prompt(prompt: &str, job_dir: &str) -> String {
+    format!(
+        r#"Extract reusable visual assets from `{job_dir}/source.png` for PaintNode.
+
+User guidance:
+{prompt}
+
+Required output:
+- Work only inside `{job_dir}`.
+- Create `{job_dir}/manifest.json`.
+- Create one PNG file per extracted layer/asset inside `{job_dir}`.
+- If useful, create PNG alpha masks inside `{job_dir}`.
+- The manifest must be JSON with a top-level `layers` array.
+- Each layer must include `name` and `file`. Optional fields are `alphaMask`, `keyColor`, `x`, `y`, `opacity`, and `visible`.
+- Use file names relative to `{job_dir}`, such as `asset-1.png`, not absolute paths.
+- Do not ask follow-up questions.
+
+Final response should be one short sentence confirming `manifest.json` and the PNG assets were created."#
+    )
+}
+
+fn antigravity_workflow_prompt(prompt: &str, source_names: &[String], job_dir: &str) -> String {
+    let result_path = antigravity_result_path(job_dir);
+    let sources = source_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("{}. {}", index + 1, name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"Compose one new PaintNode raster PNG from the workflow asset images in `{job_dir}/inputs/`.
+
+Available source assets:
+{sources}
+
+User composition prompt:
+{prompt}
+
+Required output:
+- Save exactly one final composed PNG as `{result_path}`.
+- PNG only.
+- Work only inside `{job_dir}`.
+- Do not edit or delete the input files.
+- Do not ask follow-up questions.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+    )
+}
+
 fn codex_prompt(user_prompt: &str) -> String {
     format!(
         r#"Use $imagegen to generate one raster PNG for PaintNode.
@@ -2341,6 +2607,50 @@ async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionResult, Strin
     .map_err(|e| format!("Task error: {e}"))
 }
 
+#[tauri::command]
+async fn detect_antigravity(bin: Option<String>) -> Result<CodexDetectionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> CodexDetectionResult {
+        let antigravity_bin = match configured_or_default_antigravity_bin(bin) {
+            Ok(path) => path,
+            Err(error) => {
+                return CodexDetectionResult {
+                    found: false,
+                    path: None,
+                    version: None,
+                    error: Some(error),
+                };
+            }
+        };
+
+        match Command::new(&antigravity_bin).arg("--version").output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                CodexDetectionResult {
+                    found: true,
+                    path: Some(antigravity_bin),
+                    version: Some(if stdout.is_empty() { stderr } else { stdout }),
+                    error: None,
+                }
+            }
+            Ok(output) => CodexDetectionResult {
+                found: false,
+                path: Some(antigravity_bin),
+                version: None,
+                error: Some(command_failure("Antigravity detection", &output)),
+            },
+            Err(error) => CodexDetectionResult {
+                found: false,
+                path: Some(antigravity_bin),
+                version: None,
+                error: Some(format!("Failed to launch Antigravity CLI: {error}")),
+            },
+        }
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))
+}
+
 /// Run local Codex headlessly to generate an image into a temp job folder.
 ///
 /// Auth is intentionally left to the user's local Codex installation. This command never reads
@@ -2376,14 +2686,7 @@ async fn generate_codex_image(
         let cleanup_project_job = project_dir.is_some();
         let temp_job;
         let job_path = if let Some(project_dir) = &project_dir {
-            ensure_project_dirs(project_dir)?;
-            let run_dir = project_dir
-                .join(".paintnode")
-                .join("codex-runs")
-                .join(format!("run-{}", now_id()));
-            fs::create_dir_all(&run_dir)
-                .map_err(|e| format!("Failed to create Codex run folder: {e}"))?;
-            run_dir
+            project_agent_run_dir(project_dir, CODEX_RUNS_DIR, "run")?
         } else {
             temp_job = TempJobDir::new("paintnode-codex")?;
             temp_job.path().to_path_buf()
@@ -2481,7 +2784,7 @@ async fn generate_codex_image(
         };
 
         if cleanup_project_job {
-            let _ = fs::remove_dir_all(&job_path);
+            cleanup_project_agent_job(&job_path);
         }
 
         emit_codex_progress(&app, &run_id, "Done");
@@ -2558,14 +2861,7 @@ async fn generate_codex_fill_image(
         let cleanup_project_job = project_dir.is_some();
         let temp_job;
         let job_path = if let Some(project_dir) = &project_dir {
-            ensure_project_dirs(project_dir)?;
-            let run_dir = project_dir
-                .join(".paintnode")
-                .join("codex-runs")
-                .join(format!("fill-{}", now_id()));
-            fs::create_dir_all(&run_dir)
-                .map_err(|e| format!("Failed to create Codex fill folder: {e}"))?;
-            run_dir
+            project_agent_run_dir(project_dir, CODEX_RUNS_DIR, "fill")?
         } else {
             temp_job = TempJobDir::new("paintnode-fill")?;
             temp_job.path().to_path_buf()
@@ -2678,7 +2974,7 @@ async fn generate_codex_fill_image(
         };
 
         if cleanup_project_job {
-            let _ = fs::remove_dir_all(&job_path);
+            cleanup_project_agent_job(&job_path);
         }
 
         emit_codex_progress(&app, &run_id, "Done");
@@ -2785,14 +3081,7 @@ async fn generate_codex_retouch_image(
         let cleanup_project_job = project_dir.is_some();
         let temp_job;
         let job_path = if let Some(project_dir) = &project_dir {
-            ensure_project_dirs(project_dir)?;
-            let run_dir = project_dir
-                .join(".paintnode")
-                .join("codex-runs")
-                .join(format!("retouch-{}", now_id()));
-            fs::create_dir_all(&run_dir)
-                .map_err(|e| format!("Failed to create Codex retouch folder: {e}"))?;
-            run_dir
+            project_agent_run_dir(project_dir, CODEX_RUNS_DIR, "retouch")?
         } else {
             temp_job = TempJobDir::new("paintnode-retouch")?;
             temp_job.path().to_path_buf()
@@ -2942,7 +3231,7 @@ async fn generate_codex_retouch_image(
         };
 
         if cleanup_project_job {
-            let _ = fs::remove_dir_all(&job_path);
+            cleanup_project_agent_job(&job_path);
         }
 
         emit_codex_progress(&app, &run_id, "Done");
@@ -2990,16 +3279,10 @@ async fn decouple_codex_image(
             .map(|p| PathBuf::from(p.trim()))
             .filter(|p| !p.as_os_str().is_empty());
         let store_assets = store_assets.unwrap_or(true);
+        let cleanup_project_job = project_dir.is_some();
         let temp_job;
         let job_path = if let Some(project_dir) = &project_dir {
-            ensure_project_dirs(project_dir)?;
-            let run_dir = project_dir
-                .join(".paintnode")
-                .join("codex-runs")
-                .join(format!("decouple-{}", now_id()));
-            fs::create_dir_all(&run_dir)
-                .map_err(|e| format!("Failed to create Codex decouple folder: {e}"))?;
-            run_dir
+            project_agent_run_dir(project_dir, CODEX_RUNS_DIR, "decouple")?
         } else {
             temp_job = TempJobDir::new("paintnode-decouple")?;
             temp_job.path().to_path_buf()
@@ -3150,6 +3433,10 @@ async fn decouple_codex_image(
             });
         }
 
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+
         emit_codex_progress(&app, &run_id, "Done");
         Ok(DecoupleImageResult {
             layers,
@@ -3195,14 +3482,7 @@ async fn compose_codex_workflow(
         let cleanup_project_job = project_dir.is_some();
         let temp_job;
         let job_path = if let Some(project_dir) = &project_dir {
-            ensure_project_dirs(project_dir)?;
-            let run_dir = project_dir
-                .join(".paintnode")
-                .join("codex-runs")
-                .join(format!("workflow-{}", now_id()));
-            fs::create_dir_all(&run_dir)
-                .map_err(|e| format!("Failed to create Codex workflow folder: {e}"))?;
-            run_dir
+            project_agent_run_dir(project_dir, CODEX_RUNS_DIR, "workflow")?
         } else {
             temp_job = TempJobDir::new("paintnode-workflow")?;
             temp_job.path().to_path_buf()
@@ -3338,7 +3618,7 @@ async fn compose_codex_workflow(
         };
 
         if cleanup_project_job {
-            let _ = fs::remove_dir_all(&job_path);
+            cleanup_project_agent_job(&job_path);
         }
 
         emit_codex_progress(&app, &run_id, "Done");
@@ -3354,19 +3634,685 @@ async fn compose_codex_workflow(
     .map_err(|e| format!("Task error: {e}"))?
 }
 
+fn project_or_temp_job_path(
+    project_path: &Option<String>,
+    prefix: &str,
+) -> Result<(Option<PathBuf>, PathBuf, bool, Option<TempJobDir>), String> {
+    let project_dir = project_path
+        .as_ref()
+        .map(|p| PathBuf::from(p.trim()))
+        .filter(|p| !p.as_os_str().is_empty());
+    if let Some(project_dir) = &project_dir {
+        let run_dir = project_agent_run_dir(project_dir, ANTIGRAVITY_RUNS_DIR, prefix)?;
+        Ok((Some(project_dir.clone()), run_dir, true, None))
+    } else {
+        let temp_job = TempJobDir::new(&format!("paintnode-{prefix}"))?;
+        let path = temp_job.path().to_path_buf();
+        Ok((None, path, false, Some(temp_job)))
+    }
+}
+
+fn run_antigravity(
+    antigravity_bin: &str,
+    workspace_path: &Path,
+    job_path: &Path,
+    prompt: &str,
+    options: &AntigravityCommandOptions,
+    new_project: bool,
+    timeout: Duration,
+    app: AppHandle,
+    run_id: String,
+) -> Result<CodexRunResult, String> {
+    let mut command = build_antigravity_command(
+        antigravity_bin,
+        workspace_path,
+        job_path,
+        prompt,
+        options,
+        new_project,
+        true,
+    );
+    run_codex_with_progress(&mut command, timeout, app, run_id)
+        .map_err(|e| format!("Failed to run Antigravity at '{antigravity_bin}': {e}"))
+}
+
 #[tauri::command]
-async fn project_open_folder() -> Result<Option<ProjectState>, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<Option<ProjectState>, String> {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Open PaintNode Project Folder")
-            .pick_folder()
-        else {
-            return Ok(None);
+async fn generate_antigravity_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    run_id: String,
+    model: Option<String>,
+    approval_mode: Option<String>,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter a prompt.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+        let options = antigravity_command_options(model, approval_mode);
+        let run_id = if run_id.trim().is_empty() {
+            format!("antigravity-{}", now_id())
+        } else {
+            run_id
         };
-        Ok(Some(project_state(&path)?))
+        let (project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(&project_path, "antigravity")?;
+        let workspace_path = project_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .unwrap_or(job_path.as_path())
+            .to_path_buf();
+        let new_antigravity_project = project_dir.is_none();
+        let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
+
+        emit_codex_progress(&app, &run_id, "Starting local Antigravity");
+        let prompt_text = antigravity_generate_prompt(prompt.trim(), &job_dir);
+        let run = run_antigravity(
+            &antigravity_bin,
+            &workspace_path,
+            &job_path,
+            &prompt_text,
+            &options,
+            new_antigravity_project,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )?;
+        if !run.output.status.success() {
+            return Err(command_failure("Antigravity", &run.output));
+        }
+
+        let result_path = job_path.join("result.png");
+        emit_codex_progress(&app, &run_id, "Reading Antigravity result");
+        let data_url = read_png_data_url(&result_path)?;
+        let asset = if let Some(project_dir) = project_dir {
+            emit_codex_progress(&app, &run_id, "Saving Antigravity image to the project");
+            let bytes = fs::read(&result_path).map_err(|e| {
+                format!("Failed to read Antigravity image for project storage: {e}")
+            })?;
+            let (id, relative_path) =
+                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
+            Some(add_asset(
+                &project_dir,
+                ProjectAsset {
+                    id,
+                    kind: "generated".into(),
+                    name: prompt.trim().chars().take(48).collect::<String>(),
+                    relative_path,
+                    created_at: now_id(),
+                    prompt: Some(prompt.trim().into()),
+                    source_file_name: Some("result.png".into()),
+                    width: None,
+                    height: None,
+                    mime: Some("image/png".into()),
+                },
+            )?)
+        } else {
+            None
+        };
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Done");
+        let assets = asset.iter().cloned().collect();
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+async fn generate_antigravity_fill_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    source_png: Vec<u8>,
+    edit_target_png: Vec<u8>,
+    mask_png: Vec<u8>,
+    run_id: String,
+    model: Option<String>,
+    approval_mode: Option<String>,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter a generative fill prompt.".into());
+    }
+    if !is_png(&source_png) || !is_png(&edit_target_png) || !is_png(&mask_png) {
+        return Err("Generative fill inputs must be PNG images.".into());
+    }
+    let source_dimensions = png_dimensions_from_bytes(&source_png)
+        .ok_or_else(|| "Generative fill source PNG dimensions are invalid.".to_string())?;
+    let target_dimensions = png_dimensions_from_bytes(&edit_target_png)
+        .ok_or_else(|| "Generative fill edit target PNG dimensions are invalid.".to_string())?;
+    let mask_dimensions = png_dimensions_from_bytes(&mask_png)
+        .ok_or_else(|| "Generative fill mask PNG dimensions are invalid.".to_string())?;
+    if target_dimensions != source_dimensions || mask_dimensions != source_dimensions {
+        return Err(
+            "Generative fill source, edit target, and mask must have identical dimensions.".into(),
+        );
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+        let options = antigravity_command_options(model, approval_mode);
+        let run_id = if run_id.trim().is_empty() {
+            format!("antigravity-fill-{}", now_id())
+        } else {
+            run_id
+        };
+        let (project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(&project_path, "antigravity-fill")?;
+        let workspace_path = project_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .unwrap_or(job_path.as_path())
+            .to_path_buf();
+        let new_antigravity_project = project_dir.is_none();
+        let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
+        fs::write(job_path.join("source.png"), &source_png)
+            .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
+        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+            .map_err(|e| format!("Failed to write generative fill edit target image: {e}"))?;
+        fs::write(job_path.join("mask.png"), &mask_png)
+            .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
+
+        emit_codex_progress(&app, &run_id, "Starting local Antigravity generative fill");
+        let run = run_antigravity(
+            &antigravity_bin,
+            &workspace_path,
+            &job_path,
+            &antigravity_fill_prompt(prompt.trim(), &job_dir),
+            &options,
+            new_antigravity_project,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )?;
+        if !run.output.status.success() {
+            return Err(command_failure("Antigravity generative fill", &run.output));
+        }
+        let result_path = job_path.join("result.png");
+        let result_dimensions = png_dimensions(&result_path)?;
+        if result_dimensions != source_dimensions {
+            return Err(format!(
+                "Antigravity generated a {}x{} fill, but this document needs exactly {}x{}.",
+                result_dimensions.0, result_dimensions.1, source_dimensions.0, source_dimensions.1
+            ));
+        }
+        let data_url = read_png_data_url(&result_path)?;
+        let asset = if let Some(project_dir) = project_dir {
+            let bytes = fs::read(&result_path)
+                .map_err(|e| format!("Failed to read Antigravity fill for project storage: {e}"))?;
+            let (id, relative_path) =
+                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
+            Some(add_asset(
+                &project_dir,
+                ProjectAsset {
+                    id,
+                    kind: "generated".into(),
+                    name: prompt.trim().chars().take(48).collect::<String>(),
+                    relative_path,
+                    created_at: now_id(),
+                    prompt: Some(prompt.trim().into()),
+                    source_file_name: Some("result.png".into()),
+                    width: None,
+                    height: None,
+                    mime: Some("image/png".into()),
+                },
+            )?)
+        } else {
+            None
+        };
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Done");
+        let assets = asset.iter().cloned().collect();
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+async fn generate_antigravity_retouch_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    source_png: Vec<u8>,
+    edit_target_png: Vec<u8>,
+    mask_png: Vec<u8>,
+    annotated_source_png: Option<Vec<u8>>,
+    reference_png: Option<Vec<u8>>,
+    run_id: String,
+    model: Option<String>,
+    approval_mode: Option<String>,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter an AI retouch prompt.".into());
+    }
+    if !is_png(&source_png) || !is_png(&edit_target_png) || !is_png(&mask_png) {
+        return Err("AI retouch inputs must be PNG images.".into());
+    }
+    let source_dimensions = png_dimensions_from_bytes(&source_png)
+        .ok_or_else(|| "AI retouch source PNG dimensions are invalid.".to_string())?;
+    let target_dimensions = png_dimensions_from_bytes(&edit_target_png)
+        .ok_or_else(|| "AI retouch edit target PNG dimensions are invalid.".to_string())?;
+    let mask_dimensions = png_dimensions_from_bytes(&mask_png)
+        .ok_or_else(|| "AI retouch mask PNG dimensions are invalid.".to_string())?;
+    if target_dimensions != source_dimensions || mask_dimensions != source_dimensions {
+        return Err(
+            "AI retouch source, edit target, and mask must have identical dimensions.".into(),
+        );
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+        let options = antigravity_command_options(model, approval_mode);
+        let run_id = if run_id.trim().is_empty() {
+            format!("antigravity-retouch-{}", now_id())
+        } else {
+            run_id
+        };
+        let (project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(&project_path, "antigravity-retouch")?;
+        let workspace_path = project_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .unwrap_or(job_path.as_path())
+            .to_path_buf();
+        let new_antigravity_project = project_dir.is_none();
+        let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
+        fs::write(job_path.join("source.png"), &source_png)
+            .map_err(|e| format!("Failed to write AI retouch source image: {e}"))?;
+        fs::write(job_path.join("edit_target.png"), &edit_target_png)
+            .map_err(|e| format!("Failed to write AI retouch edit target image: {e}"))?;
+        fs::write(job_path.join("mask.png"), &mask_png)
+            .map_err(|e| format!("Failed to write AI retouch mask image: {e}"))?;
+        let has_annotated_source = if let Some(annotated_source_png) = &annotated_source_png {
+            fs::write(job_path.join("annotated_source.png"), annotated_source_png)
+                .map_err(|e| format!("Failed to write AI retouch annotated source image: {e}"))?;
+            true
+        } else {
+            false
+        };
+        let has_reference = if let Some(reference_png) = &reference_png {
+            fs::write(job_path.join("reference.png"), reference_png)
+                .map_err(|e| format!("Failed to write AI retouch reference image: {e}"))?;
+            true
+        } else {
+            false
+        };
+
+        emit_codex_progress(&app, &run_id, "Starting local Antigravity AI retouch");
+        let run = run_antigravity(
+            &antigravity_bin,
+            &workspace_path,
+            &job_path,
+            &antigravity_retouch_prompt(
+                prompt.trim(),
+                has_annotated_source,
+                has_reference,
+                &job_dir,
+            ),
+            &options,
+            new_antigravity_project,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )?;
+        if !run.output.status.success() {
+            return Err(command_failure("Antigravity AI retouch", &run.output));
+        }
+        let result_path = job_path.join("result.png");
+        let (generated_bytes, _result_dimensions, _resized_result) =
+            read_png_bytes_resized_to_dimensions(
+                &result_path,
+                source_dimensions,
+                "AI retouch candidate",
+            )?;
+        let mask_data_url = Some(png_data_url(&ai_retouch_editable_mask_png(
+            &source_png,
+            &mask_png,
+            AI_RETOUCH_MASK_GROW_RADIUS,
+            AI_RETOUCH_MASK_FEATHER_RADIUS,
+        )?)?);
+        let data_url = png_data_url(&generated_bytes)?;
+        let mut assets = Vec::new();
+        let asset = if let Some(project_dir) = project_dir {
+            let primary_asset = store_generated_png_asset(
+                &project_dir,
+                &generated_bytes,
+                ai_retouch_asset_name(prompt.trim(), Some("result.png")),
+                Some(prompt.trim().into()),
+                Some("result.png".into()),
+            )?;
+            assets.push(primary_asset.clone());
+            Some(primary_asset)
+        } else {
+            None
+        };
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+async fn decouple_antigravity_image(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    source_png: Vec<u8>,
+    run_id: String,
+    store_assets: Option<bool>,
+    model: Option<String>,
+    approval_mode: Option<String>,
+) -> Result<DecoupleImageResult, String> {
+    if !is_png(&source_png) {
+        return Err("Asset extraction source must be a PNG image.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
+        let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+        let options = antigravity_command_options(model, approval_mode);
+        let run_id = if run_id.trim().is_empty() {
+            format!("antigravity-decouple-{}", now_id())
+        } else {
+            run_id
+        };
+        let (project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(&project_path, "antigravity-decouple")?;
+        let workspace_path = project_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .unwrap_or(job_path.as_path())
+            .to_path_buf();
+        let new_antigravity_project = project_dir.is_none();
+        let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
+        let store_assets = store_assets.unwrap_or(true);
+        fs::write(job_path.join("source.png"), &source_png)
+            .map_err(|e| format!("Failed to write decouple source image: {e}"))?;
+        let user_prompt = if prompt.trim().is_empty() {
+            "Identify the main reusable elements and create a useful recomposition asset pack."
+        } else {
+            prompt.trim()
+        };
+
+        emit_codex_progress(&app, &run_id, "Starting local Antigravity asset extraction");
+        let run = run_antigravity(
+            &antigravity_bin,
+            &workspace_path,
+            &job_path,
+            &antigravity_decouple_prompt(user_prompt, &job_dir),
+            &options,
+            new_antigravity_project,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )?;
+        if !run.output.status.success() {
+            return Err(command_failure("Antigravity asset extraction", &run.output));
+        }
+        let manifest_path = job_path.join("manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).map_err(|e| {
+            format!(
+                "Antigravity did not create manifest.json at {}: {e}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
+            .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
+        if manifest.layers.is_empty() {
+            return Err("Asset manifest did not contain any assets.".into());
+        }
+
+        let mut layers = Vec::new();
+        for (index, layer) in manifest.layers.into_iter().enumerate() {
+            let name = if layer.name.trim().is_empty() {
+                format!("Extracted Asset {}", index + 1)
+            } else {
+                layer.name.trim().chars().take(80).collect::<String>()
+            };
+            let layer_path = safe_job_child_path(&job_path, &layer.file)?;
+            let bytes = fs::read(&layer_path).map_err(|e| {
+                format!(
+                    "Asset '{}' was listed but could not be read at {}: {e}",
+                    name,
+                    layer_path.display()
+                )
+            })?;
+            if !is_png(&bytes) {
+                return Err(format!("Asset '{}' is not a valid PNG.", name));
+            }
+            let alpha_mask_data_url = match layer.alpha_mask.as_deref().map(str::trim) {
+                Some(mask_file) if !mask_file.is_empty() => {
+                    let mask_path = safe_job_child_path(&job_path, mask_file)?;
+                    let mask_bytes = fs::read(&mask_path).map_err(|e| {
+                        format!(
+                            "Alpha mask for asset '{}' was listed but could not be read at {}: {e}",
+                            name,
+                            mask_path.display()
+                        )
+                    })?;
+                    if !is_png(&mask_bytes) {
+                        return Err(format!(
+                            "Alpha mask for asset '{}' is not a valid PNG.",
+                            name
+                        ));
+                    }
+                    Some(png_data_url(&mask_bytes)?)
+                }
+                _ => None,
+            };
+            let data_url = png_data_url(&bytes)?;
+            let asset = match (store_assets, project_dir.as_ref()) {
+                (true, Some(project_dir)) => {
+                    let (id, relative_path) =
+                        write_asset_file(project_dir, "generated", &name, "png", &bytes)?;
+                    Some(add_asset(
+                        project_dir,
+                        ProjectAsset {
+                            id,
+                            kind: "generated".into(),
+                            name: name.clone(),
+                            relative_path,
+                            created_at: now_id(),
+                            prompt: Some(format!(
+                                "Extracted workflow asset from source: {user_prompt}"
+                            )),
+                            source_file_name: Path::new(&layer.file)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .map(str::to_string),
+                            width: None,
+                            height: None,
+                            mime: Some("image/png".into()),
+                        },
+                    )?)
+                }
+                _ => None,
+            };
+            layers.push(DecoupledLayerResult {
+                name,
+                data_url,
+                alpha_mask_data_url,
+                key_color: layer.key_color,
+                x: layer.x,
+                y: layer.y,
+                opacity: layer.opacity,
+                visible: layer.visible,
+                asset,
+            });
+        }
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(DecoupleImageResult {
+            layers,
+            thread_id: None,
+            notes: manifest.notes,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+async fn compose_antigravity_workflow(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    project_path: Option<String>,
+    sources: Vec<WorkflowSourceImage>,
+    run_id: String,
+    model: Option<String>,
+    approval_mode: Option<String>,
+) -> Result<GeneratedImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter a composition prompt.".into());
+    }
+    if sources.is_empty() {
+        return Err("Add at least one asset node before generating.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+        let options = antigravity_command_options(model, approval_mode);
+        let run_id = if run_id.trim().is_empty() {
+            format!("antigravity-workflow-{}", now_id())
+        } else {
+            run_id
+        };
+        let (project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(&project_path, "antigravity-workflow")?;
+        let workspace_path = project_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .unwrap_or(job_path.as_path())
+            .to_path_buf();
+        let new_antigravity_project = project_dir.is_none();
+        let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
+        let input_dir = job_path.join("inputs");
+        fs::create_dir_all(&input_dir)
+            .map_err(|e| format!("Failed to create workflow input folder: {e}"))?;
+        let mut source_names = Vec::new();
+        for (index, source) in sources.into_iter().enumerate() {
+            if !is_png(&source.bytes) {
+                return Err(format!(
+                    "Workflow asset '{}' is not a PNG image.",
+                    source.name
+                ));
+            }
+            let name = if source.name.trim().is_empty() {
+                format!("asset-{}", index + 1)
+            } else {
+                source.name.chars().take(64).collect::<String>()
+            };
+            let path = input_dir.join(format!("{}-{}.png", index + 1, safe_stem(&name)));
+            fs::write(&path, &source.bytes)
+                .map_err(|e| format!("Failed to write workflow source image: {e}"))?;
+            source_names.push(name);
+        }
+
+        emit_codex_progress(
+            &app,
+            &run_id,
+            "Starting local Antigravity workflow composition",
+        );
+        let run = run_antigravity(
+            &antigravity_bin,
+            &workspace_path,
+            &job_path,
+            &antigravity_workflow_prompt(prompt.trim(), &source_names, &job_dir),
+            &options,
+            new_antigravity_project,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.clone(),
+        )?;
+        if !run.output.status.success() {
+            return Err(command_failure(
+                "Antigravity workflow composition",
+                &run.output,
+            ));
+        }
+        let result_path = job_path.join("result.png");
+        let data_url = read_png_data_url(&result_path)?;
+        let asset = if let Some(project_dir) = project_dir {
+            let bytes = fs::read(&result_path).map_err(|e| {
+                format!("Failed to read Antigravity composed image for project storage: {e}")
+            })?;
+            let (id, relative_path) =
+                write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
+            Some(add_asset(
+                &project_dir,
+                ProjectAsset {
+                    id,
+                    kind: "generated".into(),
+                    name: format!(
+                        "Workflow: {}",
+                        prompt.trim().chars().take(48).collect::<String>()
+                    ),
+                    relative_path,
+                    created_at: now_id(),
+                    prompt: Some(prompt.trim().into()),
+                    source_file_name: Some("result.png".into()),
+                    width: None,
+                    height: None,
+                    mime: Some("image/png".into()),
+                },
+            )?)
+        } else {
+            None
+        };
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Done");
+        let assets = asset.iter().cloned().collect();
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+async fn project_open_folder(project_path: String) -> Result<ProjectState, String> {
+    let path = PathBuf::from(project_path.trim());
+    tauri::async_runtime::spawn_blocking(move || project_state(&path))
+        .await
+        .map_err(|e| format!("Task error: {e}"))?
 }
 
 #[tauri::command]
@@ -3584,14 +4530,17 @@ async fn project_delete_asset(
         let asset = manifest.assets.remove(index);
         let source = project_dir.join(&asset.relative_path);
         if source.exists() {
-            let trash = project_dir.join(".paintnode").join("trash").join(format!(
-                "{}-{}",
-                now_id(),
-                source
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("asset")
-            ));
+            let trash = project_dir
+                .join(PAINTNODE_WORK_DIR)
+                .join("trash")
+                .join(format!(
+                    "{}-{}",
+                    now_id(),
+                    source
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("asset")
+                ));
             if let Some(parent) = trash.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create trash folder: {e}"))?;
@@ -3670,44 +4619,39 @@ async fn project_write_document_path(
 #[tauri::command]
 async fn project_save_document_as(
     project_path: Option<String>,
+    target_path: String,
     name: String,
     previous_name: Option<String>,
-    dialog_title: Option<String>,
     bytes: Vec<u8>,
-) -> Result<Option<SavedDocumentResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<Option<SavedDocumentResult>, String> {
+) -> Result<SavedDocumentResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<SavedDocumentResult, String> {
         let project_dir = project_path
             .as_deref()
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
-        let default_name = safe_document_file_name(&name);
-        let dialog_title = dialog_title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .unwrap_or("Save OpenRaster Document");
-        let mut dialog = rfd::FileDialog::new()
-            .set_title(dialog_title)
-            .add_filter("OpenRaster", &["ora"])
-            .set_file_name(&default_name);
-
-        if let Some(project_dir) = &project_dir {
-            let documents_dir = project_dir.join("documents");
-            fs::create_dir_all(&documents_dir)
-                .map_err(|e| format!("Failed to create documents folder: {e}"))?;
-            dialog = dialog.set_directory(documents_dir);
+        let mut path = PathBuf::from(target_path.trim());
+        if path.as_os_str().is_empty() {
+            return Err("No save path was selected.".into());
         }
-
-        let Some(mut path) = dialog.save_file() else {
-            return Ok(None);
-        };
-        if !path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("ora"))
-        {
-            path.set_extension("ora");
+        let is_workflow = name.trim().to_ascii_lowercase().ends_with(".cxflow.json");
+        let has_expected_extension =
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|file_name| {
+                    let lower = file_name.to_ascii_lowercase();
+                    if is_workflow {
+                        lower.ends_with(".cxflow.json")
+                    } else {
+                        lower.ends_with(".ora")
+                    }
+                });
+        if !has_expected_extension {
+            if is_workflow {
+                path.set_extension("cxflow.json");
+            } else {
+                path.set_extension("ora");
+            }
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -3741,10 +4685,10 @@ async fn project_save_document_as(
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("Untitled")
             .to_string();
-        Ok(Some(SavedDocumentResult {
+        Ok(SavedDocumentResult {
             relative_path: display_path,
             name,
-        }))
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -4044,6 +4988,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let menu = build_app_menu(app.handle())?;
             app.handle().set_menu(menu)?;
@@ -4065,11 +5010,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate_image,
             detect_codex,
+            detect_antigravity,
             generate_codex_image,
             generate_codex_fill_image,
             generate_codex_retouch_image,
             decouple_codex_image,
             compose_codex_workflow,
+            generate_antigravity_image,
+            generate_antigravity_fill_image,
+            generate_antigravity_retouch_image,
+            decouple_antigravity_image,
+            compose_antigravity_workflow,
             project_open_folder,
             project_refresh,
             project_store_asset_bytes,
@@ -4311,6 +5262,167 @@ mod tests {
             assert!(args.contains(&"service_tier=\"fast\"".to_string()));
             assert!(args.contains(&"features.fast_mode=true".to_string()));
         }
+    }
+
+    #[test]
+    fn antigravity_command_applies_model_and_skip_permission_options() {
+        let job = TempJobDir::new("paintnode-antigravity-options-test").expect("temp dir");
+        let options = antigravity_command_options(
+            Some("Gemini 3.5 Flash (High)".to_string()),
+            Some("skipPermissions".to_string()),
+        );
+        let command = build_antigravity_command(
+            "agy",
+            job.path(),
+            job.path(),
+            "make an image",
+            &options,
+            true,
+            true,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_current_dir(), Some(job.path()));
+        assert!(args.contains(&"--new-project".to_string()));
+        let add_dir_idx = args
+            .iter()
+            .position(|arg| arg == "--add-dir")
+            .expect("Antigravity workspace dir flag should be present");
+        assert_eq!(
+            args[add_dir_idx + 1],
+            job.path().to_string_lossy().to_string()
+        );
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        let model_idx = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("model flag should be present");
+        assert_eq!(args[model_idx + 1], "Gemini 3.5 Flash (High)");
+        assert!(args.contains(&"-p".to_string()));
+    }
+
+    #[test]
+    fn antigravity_auto_model_omits_model_flag() {
+        let job = TempJobDir::new("paintnode-antigravity-auto-test").expect("temp dir");
+        let options =
+            antigravity_command_options(Some("auto".to_string()), Some("default".to_string()));
+        let command = build_antigravity_command(
+            "agy",
+            job.path(),
+            job.path(),
+            "make an image",
+            &options,
+            true,
+            false,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_current_dir(), Some(job.path()));
+        assert!(args.contains(&"--new-project".to_string()));
+        assert!(args.contains(&"--add-dir".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"-p".to_string()));
+    }
+
+    #[test]
+    fn antigravity_project_runs_use_project_root_without_new_project() {
+        let project = TempJobDir::new("paintnode-antigravity-project-test").expect("project dir");
+        let job_path = project
+            .path()
+            .join(PAINTNODE_WORK_DIR)
+            .join(ANTIGRAVITY_RUNS_DIR)
+            .join("antigravity-test");
+        fs::create_dir_all(&job_path).expect("job dir");
+        let options = antigravity_command_options(None, Some("skipPermissions".to_string()));
+        let command = build_antigravity_command(
+            "agy",
+            project.path(),
+            &job_path,
+            "make an image",
+            &options,
+            false,
+            false,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_current_dir(), Some(project.path()));
+        assert!(!args.contains(&"--new-project".to_string()));
+        let add_dir_idx = args
+            .iter()
+            .position(|arg| arg == "--add-dir")
+            .expect("Antigravity job dir flag should be present");
+        assert_eq!(
+            args[add_dir_idx + 1],
+            job_path.to_string_lossy().to_string()
+        );
+    }
+
+    #[test]
+    fn project_agent_job_paths_are_visible_and_vendor_specific() {
+        let project = TempJobDir::new("paintnode-visible-agent-job-test").expect("project dir");
+        let codex_job = project_agent_run_dir(project.path(), CODEX_RUNS_DIR, "codex-retouch")
+            .expect("codex job");
+        let antigravity_job =
+            project_agent_run_dir(project.path(), ANTIGRAVITY_RUNS_DIR, "antigravity-retouch")
+                .expect("antigravity job");
+
+        for (job_path, vendor_dir) in [
+            (codex_job.as_path(), CODEX_RUNS_DIR),
+            (antigravity_job.as_path(), ANTIGRAVITY_RUNS_DIR),
+        ] {
+            let relative = job_path
+                .strip_prefix(project.path())
+                .expect("relative job path");
+            let mut components = relative.components();
+            let first_component = components.next().expect("work dir component");
+            let first_name = first_component.as_os_str().to_string_lossy();
+            let second_component = components.next().expect("vendor dir component");
+            let second_name = second_component.as_os_str().to_string_lossy();
+
+            assert_eq!(first_name, PAINTNODE_WORK_DIR);
+            assert!(!first_name.starts_with('.'));
+            assert_eq!(second_name, vendor_dir);
+            assert!(!second_name.starts_with('.'));
+        }
+    }
+
+    #[test]
+    fn antigravity_prompts_require_result_file_without_codex_cache_contract() {
+        let retouch = antigravity_retouch_prompt(
+            "remove glare",
+            false,
+            false,
+            "paintnode/antigravity-runs/job-1",
+        );
+        assert!(retouch.contains("result.png"));
+        assert!(retouch.contains("paintnode/antigravity-runs/job-1/source.png"));
+        assert!(retouch.contains("paintnode/antigravity-runs/job-1/edit_target.png"));
+        assert!(retouch.contains("paintnode/antigravity-runs/job-1/mask.png"));
+        assert!(!retouch.contains("Codex's generated-images cache"));
+        assert!(!retouch.contains("Use $imagegen"));
+        assert!(!retouch.contains(
+            "Do not create, edit, copy, verify, or delete files in the working directory"
+        ));
+
+        let workflow = antigravity_workflow_prompt(
+            "compose scene",
+            &["asset".to_string()],
+            "paintnode/antigravity-runs/job-2",
+        );
+        assert!(workflow.contains("result.png"));
+        assert!(workflow.contains("paintnode/antigravity-runs/job-2/inputs/"));
+        assert!(!workflow.contains("Codex's generated-images cache"));
+        assert!(!workflow.contains("Do not create, edit, or delete files in the working directory"));
     }
 
     #[test]

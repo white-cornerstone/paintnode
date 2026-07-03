@@ -76,6 +76,7 @@ export { default as ImageGlobe } from '@fluentui/svg-icons/icons/image_globe_24_
 export { default as Settings } from '@fluentui/svg-icons/icons/settings_24_regular.svg?raw';
 export { default as Video } from '@fluentui/svg-icons/icons/video_24_regular.svg?raw';
 export { default as SquareHintSparkles } from '@fluentui/svg-icons/icons/square_hint_sparkles_24_regular.svg?raw';
+export { default as Bot } from '@fluentui/svg-icons/icons/bot_24_regular.svg?raw';
 
 // Panel rail
 export { default as ColorPalette } from '@fluentui/svg-icons/icons/color_24_regular.svg?raw';

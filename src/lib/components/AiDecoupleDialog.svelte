@@ -3,13 +3,23 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
+  import { aiRunOptionsFromSettings } from '../state/settings';
   import { workflow } from '../state/workflow.svelte';
-  import { decoupleCodexImage, isDesktop, type DecoupledLayerResult, type ProjectAsset } from '../integrations/desktop';
+  import {
+    codexConfigFromRunOptions,
+    decoupleCodexImage,
+    decoupleAntigravityImage,
+    antigravityConfigFromRunOptions,
+    isDesktop,
+    type DecoupledLayerResult,
+    type ProjectAsset,
+  } from '../integrations/desktop';
   import { Copy } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -20,7 +30,7 @@
   const DEFAULT_PROMPT =
     'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
 
-  let codexBin = $state(settings.value.ai.codexBin);
+  let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let prompt = $state(DEFAULT_PROMPT);
   let addToWorkflow = $state(true);
   let placeOnCanvas = $state(false);
@@ -159,7 +169,10 @@
       error = 'Open a project folder, or enable placing extracted assets on the canvas.';
       return;
     }
-    settings.update({ ai: { codexBin } });
+    if (runOptions.provider === 'custom') {
+      error = 'Asset extraction is currently available with Local Codex or Antigravity CLI.';
+      return;
+    }
 
     busy = true;
     progress = 'Preparing source layer...';
@@ -178,19 +191,20 @@
 
     try {
       const sourcePng = await canvasPngBytes(sourceLayer.canvas);
-      const result = await decoupleCodexImage(
-        {
-          bin: codexBin,
-          projectPath: project.path,
-          runId,
-          model: settings.value.ai.model,
-          reasoningEffort: settings.value.ai.reasoningEffort,
-          serviceTier: settings.value.ai.serviceTier,
-        },
-        sourcePng,
-        prompt.trim() || DEFAULT_PROMPT,
-        false,
-      );
+      const result =
+        runOptions.provider === 'antigravity'
+          ? await decoupleAntigravityImage(
+              antigravityConfigFromRunOptions(runOptions, project.path, runId),
+              sourcePng,
+              prompt.trim() || DEFAULT_PROMPT,
+              false,
+            )
+          : await decoupleCodexImage(
+              codexConfigFromRunOptions(runOptions, project.path, runId),
+              sourcePng,
+              prompt.trim() || DEFAULT_PROMPT,
+              false,
+            );
       progress = 'Cleaning and saving extracted assets...';
       const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
       const extractedAssets: ProjectAsset[] = [];
@@ -250,10 +264,17 @@
       </p>
     {/if}
 
-    <label class="dlg-field">
-      <span>Codex command (optional)</span>
-      <input type="text" bind:value={codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-    </label>
+    {#if runOptions.provider === 'codex'}
+      <label class="dlg-field">
+        <span>Codex command (optional)</span>
+        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
+      </label>
+    {:else if runOptions.provider === 'antigravity'}
+      <label class="dlg-field">
+        <span>Antigravity command (optional)</span>
+        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
+      </label>
+    {/if}
 
     <label class="dlg-field">
       <span>Asset guidance</span>
@@ -312,6 +333,8 @@
     {/if}
 
     <div class="dlg-actions">
+      <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>Cancel</button>
       <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !editor.activeLayer}>
         {busy ? 'Extracting...' : 'Extract'}
@@ -406,5 +429,8 @@
     white-space: pre-wrap;
     color: #ffd6d6;
     font-size: 11px;
+  }
+  .dlg-action-spacer {
+    flex: 1;
   }
 </style>

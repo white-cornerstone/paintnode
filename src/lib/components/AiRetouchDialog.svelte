@@ -3,11 +3,20 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
-  import { generateCodexRetouchImage, isDesktop, writeProjectDocumentPath } from '../integrations/desktop';
+  import { aiRunOptionsFromSettings } from '../state/settings';
+  import {
+    codexConfigFromRunOptions,
+    antigravityConfigFromRunOptions,
+    generateCodexRetouchImage,
+    generateAntigravityRetouchImage,
+    isDesktop,
+    writeProjectDocumentPath,
+  } from '../integrations/desktop';
   import { Copy } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -15,7 +24,7 @@
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
-  let codexBin = $state(settings.value.ai.codexBin);
+  let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let prompt = $state(editor.pendingAiRetouch?.prompt ?? '');
   let busy = $state(false);
   let error = $state('');
@@ -46,6 +55,12 @@ Visible PaintNode annotations:
 ${notes.join('\n')}
 
 Use these annotations as direct user instructions for the regions they point to.`;
+  }
+
+  function providerRunDir(): string {
+    if (runOptions.provider === 'antigravity') return 'antigravity-runs';
+    if (runOptions.provider === 'custom') return 'custom-runs';
+    return 'codex-runs';
   }
 
   function clearProgressListener() {
@@ -80,7 +95,7 @@ Use these annotations as direct user instructions for the regions they point to.
 
   async function saveDebugInputs(bytes: NonNullable<Awaited<ReturnType<typeof editor.prepareAiRetouchInput>>>, requestPrompt: string): Promise<string | null> {
     if (!settings.value.workspace.keepAiRunInputs || !project.path || !request) return null;
-    const dir = `.paintnode/codex-runs/retouch-inputs-${Date.now()}`;
+    const dir = `paintnode/${providerRunDir()}/retouch-inputs-${Date.now()}`;
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: bytes.sourcePng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/mask.png`, bytes: bytes.maskPng });
@@ -114,7 +129,10 @@ Use these annotations as direct user instructions for the regions they point to.
       error = 'Enter a retouch prompt.';
       return;
     }
-    settings.update({ ai: { codexBin } });
+    if (runOptions.provider === 'custom') {
+      error = 'AI Retouch is currently available with Local Codex or Antigravity CLI.';
+      return;
+    }
     busy = true;
     let debugDir: string | null = null;
     progress = 'Preparing AI retouch inputs...';
@@ -137,22 +155,26 @@ Use these annotations as direct user instructions for the regions they point to.
       debugDir = await saveDebugInputs(bytes, prompt.trim());
       if (debugDir) progress = `Saved retouch inputs: ${debugDir}`;
       const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
-      const generated = await generateCodexRetouchImage(
-        {
-          bin: codexBin,
-          projectPath: project.path,
-          runId,
-          model: settings.value.ai.model,
-          reasoningEffort: settings.value.ai.reasoningEffort,
-          serviceTier: settings.value.ai.serviceTier,
-        },
-        bytes.sourcePng,
-        bytes.editTargetPng,
-        bytes.maskPng,
-        bytes.annotatedSourcePng,
-        bytes.referencePng,
-        retouchPrompt,
-      );
+      const generated =
+        runOptions.provider === 'antigravity'
+          ? await generateAntigravityRetouchImage(
+              antigravityConfigFromRunOptions(runOptions, project.path, runId),
+              bytes.sourcePng,
+              bytes.editTargetPng,
+              bytes.maskPng,
+              bytes.annotatedSourcePng,
+              bytes.referencePng,
+              retouchPrompt,
+            )
+          : await generateCodexRetouchImage(
+              codexConfigFromRunOptions(runOptions, project.path, runId),
+              bytes.sourcePng,
+              bytes.editTargetPng,
+              bytes.maskPng,
+              bytes.annotatedSourcePng,
+              bytes.referencePng,
+              retouchPrompt,
+            );
       const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
       if (generated.asset || savedAssetCount > 0) await project.refresh();
       const blob = await (await fetch(generated.dataUrl)).blob();
@@ -217,10 +239,17 @@ Use these annotations as direct user instructions for the regions they point to.
       </div>
     {/if}
 
-    <label class="dlg-field">
-      <span>Codex command (optional)</span>
-      <input type="text" bind:value={codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-    </label>
+    {#if runOptions.provider === 'codex'}
+      <label class="dlg-field">
+        <span>Codex command (optional)</span>
+        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
+      </label>
+    {:else if runOptions.provider === 'antigravity'}
+      <label class="dlg-field">
+        <span>Antigravity command (optional)</span>
+        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
+      </label>
+    {/if}
 
     <label class="dlg-field">
       <span>Retouch prompt</span>
@@ -229,7 +258,7 @@ Use these annotations as direct user instructions for the regions they point to.
 
     <p class="hint">
       PaintNode sends the full canvas, the current photo edit target, the selected AI mask, and any
-      sampled reference to Codex. The generated pixels are inserted as a new layer and the mask remains reusable.
+      sampled reference to the selected local AI provider. The generated pixels are inserted as a new layer and the mask remains reusable.
     </p>
 
     {#if busy}
@@ -258,6 +287,8 @@ Use these annotations as direct user instructions for the regions they point to.
     {/if}
 
     <div class="dlg-actions">
+      <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      <span class="dlg-action-spacer"></span>
       <button onclick={close}>Cancel</button>
       <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !request}>
         {busy ? 'Running...' : 'Run'}
@@ -370,5 +401,8 @@ Use these annotations as direct user instructions for the regions they point to.
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+  }
+  .dlg-action-spacer {
+    flex: 1;
   }
 </style>

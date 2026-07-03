@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { CODEX_MODEL_OPTIONS, defaultSettings, normalizeSettings, parseSettingsJson } from './settings';
+import {
+  CODEX_MODEL_OPTIONS,
+  ANTIGRAVITY_MODEL_OPTIONS,
+  aiRunOptionsFromSettings,
+  defaultSettings,
+  normalizeSettings,
+  parseSettingsJson,
+} from './settings';
 
 describe('settings normalization', () => {
   it('uses GPT-5.5 as the default model', () => {
@@ -17,7 +24,14 @@ describe('settings normalization', () => {
   it('normalizes valid saved settings and clamps canvas dimensions', () => {
     const normalized = normalizeSettings({
       general: { autosaveEnabled: false, autosaveIntervalMs: 120_000 },
-      ai: { provider: 'custom', model: 'gpt-5.4-mini', reasoningEffort: 'high', serviceTier: 'fast' },
+      ai: {
+        provider: 'antigravity',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'high',
+        serviceTier: 'fast',
+        antigravityModel: 'Gemini 3.5 Flash (High)',
+        antigravityApprovalMode: 'default',
+      },
       workspace: {
         defaultCanvasWidth: 20_000,
         defaultCanvasHeight: -5,
@@ -28,10 +42,12 @@ describe('settings normalization', () => {
 
     expect(normalized.general.autosaveEnabled).toBe(false);
     expect(normalized.general.autosaveIntervalMs).toBe(120_000);
-    expect(normalized.ai.provider).toBe('custom');
+    expect(normalized.ai.provider).toBe('antigravity');
     expect(normalized.ai.model).toBe('gpt-5.4-mini');
     expect(normalized.ai.reasoningEffort).toBe('high');
     expect(normalized.ai.serviceTier).toBe('fast');
+    expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (High)');
+    expect(normalized.ai.antigravityApprovalMode).toBe('default');
     expect(normalized.workspace.defaultCanvasWidth).toBe(8192);
     expect(normalized.workspace.defaultCanvasHeight).toBe(1);
     expect(normalized.workspace.defaultBackground).toBe('white');
@@ -44,5 +60,56 @@ describe('settings normalization', () => {
 
   it('recovers from malformed JSON', () => {
     expect(parseSettingsJson('{not json').ai.model).toBe('gpt-5.5');
+  });
+
+  it('keeps Codex as the default provider and exposes Antigravity model defaults', () => {
+    const defaults = defaultSettings();
+    expect(defaults.ai.provider).toBe('codex');
+    expect(defaults.ai.antigravityModel).toBe('auto');
+    expect(defaults.ai.antigravityApprovalMode).toBe('skipPermissions');
+    expect(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id)).toContain('Gemini 3.5 Flash (High)');
+  });
+
+  it('falls back to safe Antigravity defaults for unknown saved Antigravity settings', () => {
+    const normalized = normalizeSettings({
+      ai: { provider: 'antigravity', antigravityModel: 'antigravity-1-old', antigravityApprovalMode: 'wild' },
+    });
+
+    expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.antigravityModel).toBe('auto');
+    expect(normalized.ai.antigravityApprovalMode).toBe('skipPermissions');
+  });
+
+  it('migrates old Gemini provider settings to Antigravity settings', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        provider: 'gemini',
+        geminiBin: '/bin/gemini',
+        geminiModel: 'Gemini 3.5 Flash (Medium)',
+        geminiApprovalMode: 'default',
+      },
+    });
+
+    expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.antigravityBin).toBe('/bin/gemini');
+    expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (Medium)');
+    expect(normalized.ai.antigravityApprovalMode).toBe('default');
+  });
+
+  it('creates per-run AI options from settings without mutating defaults', () => {
+    const value = normalizeSettings({
+      ai: {
+        provider: 'antigravity',
+        codexBin: '/bin/codex',
+        antigravityBin: '/bin/agy',
+        antigravityModel: 'Gemini 3.1 Pro (High)',
+      },
+    });
+
+    const runOptions = aiRunOptionsFromSettings(value);
+    runOptions.provider = 'codex';
+
+    expect(runOptions.antigravityBin).toBe('/bin/agy');
+    expect(value.ai.provider).toBe('antigravity');
   });
 });

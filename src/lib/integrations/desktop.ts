@@ -1,5 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { CodexModelId, ReasoningEffort, ServiceTier } from '../state/settings';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import type {
+  AiRunOptions,
+  CodexModelId,
+  AntigravityApprovalMode,
+  AntigravityModelId,
+  ReasoningEffort,
+  ServiceTier,
+} from '../state/settings';
 
 /** True when running inside the Tauri desktop shell (vs. a plain browser tab). */
 export function isDesktop(): boolean {
@@ -9,6 +17,26 @@ export function isDesktop(): boolean {
       '__TAURI__' in window ||
       (window as unknown as { isTauri?: boolean }).isTauri === true)
   );
+}
+
+function safeStem(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || 'untitled';
+}
+
+function safeDocumentDialogName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.toLowerCase().endsWith('.cxflow.json')) {
+    const stem = trimmed.replace(/\.json$/i, '').replace(/\.cxflow$/i, '');
+    return `${safeStem(stem)}.cxflow.json`;
+  }
+  const fileName = trimmed.split(/[\\/]/).pop() || trimmed;
+  const stem = fileName.replace(/\.[^.]*$/, '');
+  return `${safeStem(stem || name)}.ora`;
 }
 
 export interface GeneratorConfig {
@@ -31,6 +59,19 @@ export interface CodexGeneratorConfig {
   reasoningEffort?: ReasoningEffort | null;
   /** Speed tier selected in PaintNode settings. */
   serviceTier?: ServiceTier | null;
+}
+
+export interface AntigravityGeneratorConfig {
+  /** Optional path to the local Antigravity CLI binary. Empty uses the Rust-side defaults. */
+  bin?: string;
+  /** Optional PaintNode project folder. Generated output is saved there when present. */
+  projectPath?: string | null;
+  /** Per-request id used to filter progress events. */
+  runId?: string;
+  /** Antigravity model selected in PaintNode settings. "auto" lets Antigravity CLI choose. */
+  model: AntigravityModelId;
+  /** Whether to skip Antigravity permission prompts inside PaintNode's temporary job folder. */
+  approvalMode?: AntigravityApprovalMode | null;
 }
 
 export interface CodexDetectionResult {
@@ -146,11 +187,51 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
   };
 }
 
+function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
+  return {
+    bin: config.bin?.trim() ? config.bin.trim() : null,
+    projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
+    runId: config.runId?.trim() ? config.runId.trim() : null,
+    model: config.model,
+    approvalMode: config.approvalMode ?? 'skipPermissions',
+  };
+}
+
+export function codexConfigFromRunOptions(options: AiRunOptions, projectPath?: string | null, runId?: string): CodexGeneratorConfig {
+  return {
+    bin: options.codexBin,
+    projectPath,
+    runId,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    serviceTier: options.serviceTier,
+  };
+}
+
+export function antigravityConfigFromRunOptions(options: AiRunOptions, projectPath?: string | null, runId?: string): AntigravityGeneratorConfig {
+  return {
+    bin: options.antigravityBin,
+    projectPath,
+    runId,
+    model: options.antigravityModel,
+    approvalMode: options.antigravityApprovalMode,
+  };
+}
+
 export async function detectCodex(bin?: string): Promise<CodexDetectionResult> {
   if (!isDesktop()) {
     throw new Error('Codex detection is only available in the desktop app.');
   }
   return invoke<CodexDetectionResult>('detect_codex', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+export async function detectAntigravity(bin?: string): Promise<CodexDetectionResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity detection is only available in the desktop app.');
+  }
+  return invoke<CodexDetectionResult>('detect_antigravity', {
     bin: bin?.trim() ? bin.trim() : null,
   });
 }
@@ -279,9 +360,116 @@ export async function composeCodexWorkflow(
   });
 }
 
+export async function generateAntigravityImage(
+  config: AntigravityGeneratorConfig,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity image generation is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_antigravity_image', {
+    ...antigravityInvokeConfig({ ...config, runId }),
+    prompt,
+    runId,
+  });
+}
+
+export async function generateAntigravityFillImage(
+  config: AntigravityGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity generative fill is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-fill-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_antigravity_fill_image', {
+    ...antigravityInvokeConfig({ ...config, runId }),
+    prompt,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    runId,
+  });
+}
+
+export async function generateAntigravityRetouchImage(
+  config: AntigravityGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  annotatedSourcePng: Uint8Array | null | undefined,
+  referencePng: Uint8Array | null | undefined,
+  prompt: string,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity AI retouch is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-retouch-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_antigravity_retouch_image', {
+    ...antigravityInvokeConfig({ ...config, runId }),
+    prompt,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    annotatedSourcePng: annotatedSourcePng ? Array.from(annotatedSourcePng) : null,
+    referencePng: referencePng ? Array.from(referencePng) : null,
+    runId,
+  });
+}
+
+export async function decoupleAntigravityImage(
+  config: AntigravityGeneratorConfig,
+  sourcePng: Uint8Array,
+  prompt: string,
+  storeAssets = true,
+): Promise<DecoupleImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity image decoupling is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-decouple-${Date.now()}`;
+  return invoke<DecoupleImageResult>('decouple_antigravity_image', {
+    ...antigravityInvokeConfig({ ...config, runId }),
+    prompt,
+    sourcePng: Array.from(sourcePng),
+    runId,
+    storeAssets,
+  });
+}
+
+export async function composeAntigravityWorkflow(
+  config: AntigravityGeneratorConfig,
+  prompt: string,
+  sources: WorkflowSourceImage[],
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity workflow composition is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-workflow-${Date.now()}`;
+  return invoke<GeneratedImageResult>('compose_antigravity_workflow', {
+    ...antigravityInvokeConfig({ ...config, runId }),
+    prompt,
+    sources: sources.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
+  });
+}
+
 export async function openProjectFolder(): Promise<ProjectState | null> {
   if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
-  return invoke<ProjectState | null>('project_open_folder');
+  const selected = await openDialog({
+    title: 'Open PaintNode Project Folder',
+    directory: true,
+    multiple: false,
+    canCreateDirectories: true,
+  });
+  if (!selected || Array.isArray(selected)) return null;
+  return invoke<ProjectState>('project_open_folder', { projectPath: selected });
 }
 
 export async function refreshProject(projectPath: string): Promise<ProjectState> {
@@ -355,11 +543,25 @@ export async function saveProjectDocumentAs(args: {
   bytes: Uint8Array;
 }): Promise<SavedDocumentResult | null> {
   if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
-  return invoke<SavedDocumentResult | null>('project_save_document_as', {
+  const defaultName = safeDocumentDialogName(args.name);
+  const isWorkflow = defaultName.toLowerCase().endsWith('.cxflow.json');
+  const defaultPath = args.projectPath?.trim()
+    ? `${args.projectPath.trim()}/documents/${defaultName}`
+    : defaultName;
+  const targetPath = await saveDialog({
+    title: args.dialogTitle?.trim() ? args.dialogTitle.trim() : isWorkflow ? 'Save Workflow Board' : 'Save OpenRaster Document',
+    defaultPath,
+    filters: isWorkflow
+      ? [{ name: 'PaintNode Workflow', extensions: ['json'] }]
+      : [{ name: 'OpenRaster', extensions: ['ora'] }],
+    canCreateDirectories: true,
+  });
+  if (!targetPath) return null;
+  return invoke<SavedDocumentResult>('project_save_document_as', {
     projectPath: args.projectPath?.trim() ? args.projectPath.trim() : null,
+    targetPath,
     name: args.name,
     previousName: args.previousName?.trim() ? args.previousName.trim() : null,
-    dialogTitle: args.dialogTitle?.trim() ? args.dialogTitle.trim() : null,
     bytes: Array.from(args.bytes),
   });
 }

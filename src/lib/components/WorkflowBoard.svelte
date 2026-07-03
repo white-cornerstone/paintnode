@@ -3,8 +3,16 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
+  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { composeCodexWorkflow, isDesktop, type ProjectAsset } from '../integrations/desktop';
+  import {
+    codexConfigFromRunOptions,
+    composeCodexWorkflow,
+    composeAntigravityWorkflow,
+    antigravityConfigFromRunOptions,
+    isDesktop,
+    type ProjectAsset,
+  } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
@@ -18,6 +26,7 @@
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
+  import { aiRunOptionsFromSettings } from '../state/settings';
   import { ui } from '../state/ui.svelte';
   import { workflow, type WorkflowAssetNode, type WorkflowConnection, type WorkflowOutputNode } from '../state/workflow.svelte';
   import { Add, ArrowSync, CommentNote, Delete, Dismiss, DocumentSave, Edit, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
@@ -46,7 +55,7 @@
   };
 
   const desktop = isDesktop();
-  let codexBin = $state(settings.value.ai.codexBin);
+  let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let busy = $state(false);
   let progress = $state('');
   let error = $state('');
@@ -1348,7 +1357,10 @@
       error = 'Enter a composition prompt.';
       return;
     }
-    settings.update({ ai: { codexBin } });
+    if (runOptions.provider === 'custom') {
+      error = 'Workflow composition is currently available with Local Codex or Antigravity CLI.';
+      return;
+    }
 
     busy = true;
     progress = 'Preparing workflow assets...';
@@ -1423,18 +1435,10 @@ Use the storyboard as the layout reference. This is a generative synthesis task,
 Unless the user explicitly asks for an impossible or surreal composition, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction. If the user deliberately asks for something non-realistic, follow that request intentionally while keeping the result visually coherent.
 
 Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
-      const result = await composeCodexWorkflow(
-        {
-          bin: codexBin,
-          projectPath: project.path,
-          runId,
-          model: settings.value.ai.model,
-          reasoningEffort: settings.value.ai.reasoningEffort,
-          serviceTier: settings.value.ai.serviceTier,
-        },
-        prompt,
-        sources,
-      );
+      const result =
+        runOptions.provider === 'antigravity'
+          ? await composeAntigravityWorkflow(antigravityConfigFromRunOptions(runOptions, project.path, runId), prompt, sources)
+          : await composeCodexWorkflow(codexConfigFromRunOptions(runOptions, project.path, runId), prompt, sources);
       if (result.asset) {
         await project.refresh();
         workflow.setOutput(result.asset, targetOutput.id);
@@ -1793,10 +1797,20 @@ Human anatomy quality gate: if the final image contains a person, the arms, wris
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          <label>
-            <span>Codex command</span>
-            <input bind:value={codexBin} placeholder="codex or full path" />
-          </label>
+          {#if runOptions.provider === 'codex'}
+            <label>
+              <span>Codex command</span>
+              <input bind:value={runOptions.codexBin} placeholder="codex or full path" />
+            </label>
+          {:else if runOptions.provider === 'antigravity'}
+            <label>
+              <span>Antigravity command</span>
+              <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
+            </label>
+          {/if}
+          <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+            <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+          </div>
           {#if busy}<p class="progress">{progress}</p>{/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
@@ -2335,6 +2349,11 @@ Human anatomy quality gate: if the final image contains a person, the arms, wris
     padding: 8px;
     color: var(--text-dim);
     font-size: 12px;
+  }
+  .composition-ai-options {
+    display: flex;
+    justify-content: flex-start;
+    padding: 0 8px 8px;
   }
   .output-actions {
     justify-content: flex-end;

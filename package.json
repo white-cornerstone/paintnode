@@ -28,6 +28,7 @@
   "dependencies": {
     "@fluentui/svg-icons": "^1.1.330",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@xyflow/svelte": "^1.6.1",
     "@xyflow/system": "^0.0.78",
     "fflate": "0.8.3",
