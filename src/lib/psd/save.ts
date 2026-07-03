@@ -192,25 +192,189 @@ function layerToPsd(doc: PaintDocument, layer: Layer): PsdLayer | null {
   return psdLayer;
 }
 
+/**
+ * Blend mode to write for an imported layer: keep the original PSD mode (which may be
+ * one PaintNode only approximates, e.g. 'linear light') unless the user changed it.
+ */
+function psdBlendFor(layer: Layer): PsdLayer['blendMode'] {
+  const meta = layer.psd!;
+  if (layer.blendMode !== meta.imported.blendMode) return BLEND_TO_PSD[layer.blendMode] ?? 'normal';
+  return meta.layer.blendMode;
+}
+
+/** True when an imported layer's pixels are untouched since import. */
+export function isCleanPsdLayer(doc: PaintDocument, layer: Layer): boolean {
+  const meta = layer.psd;
+  if (!meta) return false;
+  if (layer.pixelRev !== meta.imported.pixelRev) return false;
+  // A PaintNode mask was attached after import — the layer record must be rebuilt.
+  if (doc.linkedMaskFor(layer)) return false;
+  return true;
+}
+
+function movedBy(layer: Layer): { dx: number; dy: number } {
+  const meta = layer.psd!;
+  return { dx: layer.x - meta.imported.x, dy: layer.y - meta.imported.y };
+}
+
+/**
+ * Re-emit the original parsed layer (with its `rawData` channels, so pixels and
+ * Photoshop-only blocks round-trip byte-identically), patching only the safe
+ * single-field edits PaintNode allows on imported layers.
+ */
+export function passthroughPsdLayer(layer: Layer): PsdLayer {
+  const meta = layer.psd!;
+  const src = meta.layer;
+  const out: PsdLayer = { ...src };
+  out.name = layer.name;
+  out.hidden = !layer.visible;
+  out.opacity = Math.max(0, Math.min(1, layer.opacity));
+  out.blendMode = psdBlendFor(layer);
+  const { dx, dy } = movedBy(layer);
+  // Locked layers cannot be moved in PaintNode (their internal transforms would
+  // desync), so a position patch only ever applies to editable raster layers.
+  if ((dx !== 0 || dy !== 0) && !meta.lockReason) {
+    out.top = (src.top ?? 0) + dy;
+    out.left = (src.left ?? 0) + dx;
+    out.bottom = (src.bottom ?? 0) + dy;
+    out.right = (src.right ?? 0) + dx;
+    if (src.mask && src.mask.positionRelativeToLayer !== true) {
+      out.mask = {
+        ...src.mask,
+        top: (src.mask.top ?? 0) + dy,
+        left: (src.mask.left ?? 0) + dx,
+        bottom: (src.mask.bottom ?? 0) + dy,
+        right: (src.mask.right ?? 0) + dx,
+      };
+    }
+  }
+  return out;
+}
+
+/** Rebuild an edited imported layer from its PaintNode canvas, keeping parsed metadata. */
+function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
+  const meta = layer.psd!;
+  const { rawData, imageData, canvas, children, top, left, bottom, right, mask, ...rest } = meta.layer;
+  const out: PsdLayer = {
+    ...rest,
+    name: layer.name,
+    left: layer.x,
+    top: layer.y,
+    opacity: Math.max(0, Math.min(1, layer.opacity)),
+    hidden: !layer.visible,
+    blendMode: psdBlendFor(layer),
+    canvas: layer.canvas,
+  };
+  const linked = linkedPsdMask(doc, layer);
+  if (linked) {
+    out.mask = linked;
+  } else if (mask && layer.psdMask) {
+    const { dx, dy } = movedBy(layer);
+    const maskCanvas = layer.psdMask.canvas;
+    out.mask = {
+      ...mask,
+      left: layer.psdMask.x + dx,
+      top: layer.psdMask.y + dy,
+      right: layer.psdMask.x + dx + maskCanvas.width,
+      bottom: layer.psdMask.y + dy + maskCanvas.height,
+      positionRelativeToLayer: false,
+      disabled: layer.psdMask.disabled,
+      imageData: maskImageDataForPsd(maskCanvas),
+    };
+  } else if (mask) {
+    out.mask = { ...mask };
+  }
+  return out;
+}
+
+function strippedGroupNode(group: PsdLayer): PsdLayer {
+  const { imageData, canvas, children, ...rest } = group;
+  return { ...rest, children: [] };
+}
+
+/**
+ * Build the PSD layer tree from the PaintNode stack. Imported layers re-emit their
+ * original data when untouched and are rebuilt from canvas when edited; the original
+ * group tree is reconstructed from each layer's recorded group chain. Layers created
+ * in PaintNode join the group of the layer directly below them in the stack.
+ */
+export function buildPsdChildren(doc: PaintDocument): PsdLayer[] {
+  const root: PsdLayer[] = [];
+  const groupNodes = new Map<PsdLayer, PsdLayer>();
+  let previousChain: PsdLayer[] = [];
+
+  const listFor = (chain: PsdLayer[]): PsdLayer[] => {
+    let list = root;
+    for (const group of chain) {
+      let node = groupNodes.get(group);
+      if (!node) {
+        node = strippedGroupNode(group);
+        groupNodes.set(group, node);
+        list.push(node);
+      }
+      list = node.children!;
+    }
+    return list;
+  };
+
+  for (const layer of doc.layers) {
+    const meta = layer.psd;
+    const node = meta
+      ? isCleanPsdLayer(doc, layer)
+        ? passthroughPsdLayer(layer)
+        : rebuildImportedLayer(doc, layer)
+      : layerToPsd(doc, layer);
+    if (!node) continue;
+    const chain = meta ? meta.groupPath : previousChain;
+    listFor(chain).push(node);
+    previousChain = chain;
+  }
+  return root;
+}
+
 export function buildPsdDocument(doc: PaintDocument, options: BuildPsdOptions = {}): Psd {
-  const children = doc.layers
-    .slice()
-    .map((layer) => layerToPsd(doc, layer))
-    .filter((layer): layer is PsdLayer => layer !== null);
+  const children = buildPsdChildren(doc);
+  const composite = options.compositeCanvas ?? compositeToCanvas(doc);
+  const versionInfo = {
+    hasRealMergedData: true,
+    writerName: 'PaintNode',
+    readerName: 'PaintNode',
+    fileVersion: 1,
+  };
+
+  if (doc.psdSource) {
+    // Pass document-level Photoshop resources through (linked smart-object files,
+    // guides, resolution, global light, …); regenerate the composite and thumbnail.
+    const {
+      children: sourceChildren,
+      canvas: sourceCanvas,
+      imageData: sourceImageData,
+      rawCompositeData,
+      width,
+      height,
+      ...rest
+    } = doc.psdSource.psd;
+    return {
+      ...rest,
+      width: doc.width,
+      height: doc.height,
+      children,
+      canvas: composite,
+      imageResources: {
+        ...(rest.imageResources ?? {}),
+        thumbnail: undefined,
+        thumbnailRaw: undefined,
+        versionInfo,
+      },
+    };
+  }
 
   return {
     width: doc.width,
     height: doc.height,
     children,
-    canvas: options.compositeCanvas ?? compositeToCanvas(doc),
-    imageResources: {
-      versionInfo: {
-        hasRealMergedData: true,
-        writerName: 'PaintNode',
-        readerName: 'PaintNode',
-        fileVersion: 1,
-      },
-    },
+    canvas: composite,
+    imageResources: { versionInfo },
   };
 }
 

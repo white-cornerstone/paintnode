@@ -30,7 +30,7 @@ resources (imageResources, linkedFiles, globalLayerMaskInfo) passed through.
 **Success Criteria**: Node round-trip test: write a PSD containing passthrough layers →
 readPsd again → channel bytes identical; group nesting restored; patches applied.
 **Tests**: `save.test.ts` additions + `roundtrip.test.ts`.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 3: Engine model + locked-layer guards
 **Goal**: `Layer.psd` passthrough meta + `locked` getter; `PaintDocument.psdSource`;
