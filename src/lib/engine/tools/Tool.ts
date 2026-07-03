@@ -18,6 +18,7 @@ export interface ToolHost {
   brushSize: number;
   brushHardness: number;
   brushOpacity: number;
+  aiRetouchBrushFeather: number;
   tolerance: number;
   selection: Selection | null;
   selectionMode: SelectionMode;
@@ -41,10 +42,6 @@ export interface ToolHost {
   aiRetouchPatchMode: 'source' | 'destination';
   /** AI Content-Aware Move: move a subject or extend/contract it. */
   aiRetouchMoveMode: 'move' | 'extend';
-  /** AI Red Eye: relative size of the pupil correction. */
-  aiRetouchPupilSize: number;
-  /** AI Red Eye: correction darkness. */
-  aiRetouchDarkenAmount: number;
   /** AI Healing Brush: sampled source point in document space. */
   aiRetouchHealingSource: { x: number; y: number } | null;
   setActiveStroke(stroke: ActiveStroke | null): void;

@@ -3,32 +3,35 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
-  import { DEFAULT_CUSTOM_GENERATOR_ARGS, type AiProvider } from '../state/settings';
+  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
   import {
+    codexConfigFromRunOptions,
+    antigravityConfigFromRunOptions,
     isDesktop,
     generateCodexFillImage,
     generateCodexImage,
+    generateAntigravityFillImage,
+    generateAntigravityImage,
     generateImage,
     writeProjectDocumentPath,
     type ProjectAsset,
+    type TargetDimensions,
   } from '../integrations/desktop';
   import { Copy } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type Provider = AiProvider;
   type CodexProgressPayload = { runId: string; message: string };
 
   const desktop = isDesktop();
 
-  let provider = $state<Provider>(settings.value.ai.provider);
-  let codexBin = $state(settings.value.ai.codexBin);
-  let bin = $state(settings.value.ai.customBin);
-  let argsText = $state(settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
+  let runOptions = $state(aiRunOptionsFromSettings(settings.value));
+  let argsText = $state(settings.value.ai.customGenerateArgsText || settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   let prompt = $state('');
   let busy = $state(false);
   let error = $state('');
@@ -72,7 +75,13 @@
     if (!doc) return base;
     return `${base}
 
-Canvas size requirement: generate the image to match the current PaintNode canvas exactly: ${doc.width}x${doc.height} pixels, landscape/portrait orientation and aspect ratio included. Do not crop, letterbox, pillarbox, or add extra margins beyond this canvas.`;
+Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image generator uses fixed aspect-ratio buckets, PaintNode may use a supported working canvas with this target area centered and crop that area after generation. Keep the meaningful composition inside the final PaintNode target area.`;
+  }
+
+  function targetDimensions(): TargetDimensions | null {
+    const doc = editor.doc;
+    if (!doc) return null;
+    return { width: doc.width, height: doc.height };
   }
 
   function defaultFillPrompt(): string {
@@ -83,9 +92,15 @@ Canvas size requirement: generate the image to match the current PaintNode canva
     return new TextEncoder().encode(text);
   }
 
+  function providerRunDir(): string {
+    if (runOptions.provider === 'antigravity') return 'antigravity-runs';
+    if (runOptions.provider === 'custom') return 'custom-runs';
+    return 'codex-runs';
+  }
+
   async function saveFillDebugInputs(fillInput: Awaited<ReturnType<typeof editor.prepareGenerativeFillInput>>, generationPrompt: string): Promise<string | null> {
     if (!settings.value.workspace.keepAiRunInputs || !fillInput || !project.path) return null;
-    const dir = `.paintnode/codex-runs/fill-inputs-${Date.now()}`;
+    const dir = `paintnode/${providerRunDir()}/fill-inputs-${Date.now()}`;
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: fillInput.sourcePng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: fillInput.editTargetPng });
     await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/mask.png`, bytes: fillInput.maskPng });
@@ -113,7 +128,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       error = 'Available only in the desktop app.';
       return;
     }
-    if (provider === 'custom' && !bin.trim()) {
+    if (runOptions.provider === 'custom' && !runOptions.customBin.trim()) {
       error = 'Enter the generator command.';
       return;
     }
@@ -122,19 +137,31 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       error = 'Enter a prompt.';
       return;
     }
-    if (provider === 'custom' && hasSelection) {
-      error = 'Mask-guided generative fill is currently available with Local Codex only.';
+    if (runOptions.provider === 'custom' && hasSelection) {
+      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity CLI.';
       return;
     }
-    settings.update({ ai: { provider, codexBin, customBin: bin, customArgsText: argsText } });
     const userPrompt = prompt.trim();
     busy = true;
     let fillDebugDir: string | null = null;
-    progress = provider === 'codex' ? 'Preparing Codex request...' : 'Running local generator...';
-    editor.flash(hasSelection ? 'Preparing generative fill...' : provider === 'codex' ? 'Generating with Codex...' : 'Generating image...');
+    progress =
+      runOptions.provider === 'codex'
+        ? 'Preparing Codex request...'
+        : runOptions.provider === 'antigravity'
+          ? 'Preparing Antigravity request...'
+          : 'Running local generator...';
+    editor.flash(
+      hasSelection
+        ? 'Preparing generative fill...'
+        : runOptions.provider === 'codex'
+          ? 'Generating with Codex...'
+          : runOptions.provider === 'antigravity'
+            ? 'Generating with Antigravity...'
+            : 'Generating image...',
+    );
     clearProgressListener();
-    const runId = provider === 'codex' ? createRunId() : '';
-    if (provider === 'codex') {
+    const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId() : '';
+    if (runOptions.provider === 'codex' || runOptions.provider === 'antigravity') {
       try {
         stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
           if (event.payload.runId === runId && event.payload.message.trim()) {
@@ -142,51 +169,53 @@ Canvas size requirement: generate the image to match the current PaintNode canva
           }
         });
       } catch {
-        progress = 'Local Codex is running...';
+        progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
       }
     }
     try {
       const fillInput = hasSelection ? await editor.prepareGenerativeFillInput() : null;
       if (hasSelection && !fillInput) throw new Error('The current selection has no editable pixels.');
       const generationPrompt = fillInput ? userPrompt || defaultFillPrompt() : promptWithCanvasSize(userPrompt);
+      const generationTarget = fillInput ? null : targetDimensions();
       fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt) : null;
       if (fillDebugDir) progress = `Saved fill inputs: ${fillDebugDir}`;
       if (fillInput) progress = fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...';
       const generated =
-        provider === 'codex'
+        runOptions.provider === 'codex'
           ? fillInput
             ? await generateCodexFillImage(
-                {
-                  bin: codexBin,
-                  projectPath: null,
-                  runId,
-                  model: settings.value.ai.model,
-                  reasoningEffort: settings.value.ai.reasoningEffort,
-                  serviceTier: settings.value.ai.serviceTier,
-                },
+                codexConfigFromRunOptions(runOptions, null, runId),
                 fillInput.sourcePng,
                 fillInput.editTargetPng,
                 fillInput.maskPng,
                 generationPrompt,
               )
             : await generateCodexImage(
-                {
-                  bin: codexBin,
-                  projectPath: project.path,
-                  runId,
-                  model: settings.value.ai.model,
-                  reasoningEffort: settings.value.ai.reasoningEffort,
-                  serviceTier: settings.value.ai.serviceTier,
-                },
+                codexConfigFromRunOptions(runOptions, project.path, runId),
                 generationPrompt,
+                generationTarget,
               )
-          : null;
+          : runOptions.provider === 'antigravity'
+            ? fillInput
+              ? await generateAntigravityFillImage(
+                  antigravityConfigFromRunOptions(runOptions, null, runId),
+                  fillInput.sourcePng,
+                  fillInput.editTargetPng,
+                  fillInput.maskPng,
+                  generationPrompt,
+                )
+              : await generateAntigravityImage(
+                  antigravityConfigFromRunOptions(runOptions, project.path, runId),
+                  generationPrompt,
+                  generationTarget,
+                )
+            : null;
       if (generated?.asset) await project.refresh();
       const dataUrl =
         generated?.dataUrl ??
         (await generateImage(
           {
-            bin: bin.trim(),
+            bin: runOptions.customBin.trim(),
             args: argsText
               .split('\n')
               .map((s) => s.trim())
@@ -254,10 +283,13 @@ Canvas size requirement: generate the image to match the current PaintNode canva
     {/if}
 
     <div class="provider-tabs" role="group" aria-label="Image generator">
-      <button class:active={provider === 'codex'} onclick={() => (provider = 'codex')}>
-        Local Codex
+      <button class:active={runOptions.provider === 'codex'} onclick={() => (runOptions.provider = 'codex')}>
+        Local Codex CLI
       </button>
-      <button class:active={provider === 'custom'} onclick={() => (provider = 'custom')}>
+      <button class:active={runOptions.provider === 'antigravity'} onclick={() => (runOptions.provider = 'antigravity')}>
+        Local Antigravity CLI
+      </button>
+      <button class:active={runOptions.provider === 'custom'} onclick={() => (runOptions.provider = 'custom')}>
         Custom CLI
       </button>
     </div>
@@ -267,20 +299,30 @@ Canvas size requirement: generate the image to match the current PaintNode canva
       <textarea bind:value={prompt} rows="3" placeholder="a serene mountain lake at sunset"></textarea>
     </label>
 
-    {#if provider === 'codex'}
+    {#if runOptions.provider === 'codex'}
       <label class="dlg-field">
         <span>Codex command (optional)</span>
-        <input type="text" bind:value={codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
+        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
       </label>
 
       <p class="hint">
         Uses your local Codex login. If this fails, run <code>codex login</code> in Terminal and try again.
         PaintNode copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.
       </p>
+    {:else if runOptions.provider === 'antigravity'}
+      <label class="dlg-field">
+        <span>Antigravity command (optional)</span>
+        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
+      </label>
+
+      <p class="hint">
+        Uses your local Antigravity CLI login. If this fails, run <code>agy</code> in Terminal and sign in.
+        PaintNode asks Antigravity to write a validated <code>result.png</code> in an isolated job folder.
+      </p>
     {:else}
       <label class="dlg-field">
         <span>Command (local CLI)</span>
-        <input type="text" bind:value={bin} placeholder="Full path to your image-gen CLI" spellcheck="false" />
+        <input type="text" bind:value={runOptions.customBin} placeholder="Full path to your image-gen CLI" spellcheck="false" />
       </label>
 
       <label class="dlg-field">
@@ -319,6 +361,8 @@ Canvas size requirement: generate the image to match the current PaintNode canva
     {/if}
 
     <div class="dlg-actions">
+      <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>Cancel</button>
       <button class="dlg-primary" onclick={run} disabled={busy || !desktop}>
         {busy ? 'Generating…' : 'Generate'}
@@ -330,7 +374,7 @@ Canvas size requirement: generate the image to match the current PaintNode canva
 <style>
   .provider-tabs {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 0;
     border: 1px solid var(--border-soft);
     border-radius: 4px;
@@ -457,5 +501,8 @@ Canvas size requirement: generate the image to match the current PaintNode canva
   textarea {
     resize: vertical;
     font-family: inherit;
+  }
+  .dlg-action-spacer {
+    flex: 1;
   }
 </style>

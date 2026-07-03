@@ -25,6 +25,7 @@ export interface AiRetouchBrushStroke {
   points: AiRetouchPoint[];
   size: number;
   hardness: number;
+  feather?: number;
   closedLoop?: boolean;
   reference?: Rect | null;
 }
@@ -46,8 +47,6 @@ export interface AiRetouchMoveRequest {
 export interface AiRetouchRedEyeRequest {
   kind: 'red-eye';
   bounds: Rect;
-  pupilSize: number;
-  darkenAmount: number;
 }
 
 export type AiRetouchGesture =
@@ -65,6 +64,8 @@ export interface AiRetouchRequest {
   source: HTMLCanvasElement;
   editTarget: HTMLCanvasElement;
   mask: HTMLCanvasElement;
+  annotatedSource: HTMLCanvasElement | null;
+  annotationNotes: string[];
   reference: HTMLCanvasElement | null;
   gesture: AiRetouchGesture;
 }
@@ -73,6 +74,8 @@ export interface AiRetouchInputBytes {
   sourcePng: Uint8Array;
   editTargetPng: Uint8Array;
   maskPng: Uint8Array;
+  annotatedSourcePng?: Uint8Array | null;
+  annotationNotes?: string[];
   referencePng?: Uint8Array | null;
 }
 
@@ -85,8 +88,6 @@ export interface AiRetouchMaskMetadata {
   promptSeed: string;
   patchMode?: AiRetouchPatchMode;
   moveMode?: AiRetouchMoveMode;
-  pupilSize?: number;
-  darkenAmount?: number;
   healingSource?: AiRetouchPoint | null;
   referenceRect?: Rect | null;
   destinationRect?: Rect | null;
@@ -107,8 +108,6 @@ export function cloneAiRetouchMetadata(metadata: AiRetouchMaskMetadata | null | 
     promptSeed: metadata.promptSeed,
     patchMode: metadata.patchMode,
     moveMode: metadata.moveMode,
-    pupilSize: metadata.pupilSize,
-    darkenAmount: metadata.darkenAmount,
     healingSource: clonePoint(metadata.healingSource),
     referenceRect: cloneRect(metadata.referenceRect),
     destinationRect: cloneRect(metadata.destinationRect),
@@ -128,6 +127,10 @@ export function nextAiRetouchTool(current: AiRetouchToolId, backwards = false): 
   const idx = Math.max(0, AI_RETOUCH_TOOL_ORDER.indexOf(current));
   const delta = backwards ? -1 : 1;
   return AI_RETOUCH_TOOL_ORDER[(idx + delta + AI_RETOUCH_TOOL_ORDER.length) % AI_RETOUCH_TOOL_ORDER.length];
+}
+
+export function effectiveAiRetouchMaskMode(mode: SelectionMode, hasActiveMask: boolean): SelectionMode {
+  return hasActiveMask && mode === 'new' ? 'add' : mode;
 }
 
 export function pointsBounds(points: AiRetouchPoint[], padding = 0): Rect | null {
@@ -190,8 +193,7 @@ export function aiRetouchPrompt(toolId: AiRetouchToolId, gesture: AiRetouchGestu
         : 'Move the selected subject from the masked source area to the referenced destination area. Recompose the image by filling the original hole and blending the moved subject naturally at its new location.';
     }
     case 'red-eye': {
-      const opts = gesture.kind === 'red-eye' ? gesture : { pupilSize: 50, darkenAmount: 50 };
-      return `Correct red or white flash reflection inside the masked eye area. Preserve the iris shape, eyelids, natural catchlights, and face texture. Pupil size strength ${Math.round(opts.pupilSize)}%, darken amount ${Math.round(opts.darkenAmount)}%.`;
+      return 'Retouch only the masked pupil reflection to remove red-eye or white flash glare. Restore a natural dark pupil and iris detail inside the pupil only. Keep all non-target content pixel-faithful to the source, regardless of what that content depicts. Do not alter composition, crop, lighting, color, sharpness, grain, surrounding anatomy, background, text, graphics, objects, borders, overlays, or any other unmasked image content. Do not perform general image enhancement.';
     }
   }
 }
@@ -239,7 +241,9 @@ export function makeStrokeMask(
     ctx.clearRect(0, 0, width, height);
     ctx.drawImage(soft, 0, 0);
   }
-  return mask;
+
+  const outerFeather = Math.max(0, Math.round(stroke.feather ?? 0));
+  return outerFeather > 0 ? featherRetouchMask(mask, outerFeather) : mask;
 }
 
 export function makeRectMask(width: number, height: number, rect: Rect, shape: 'rect' | 'ellipse' = 'rect'): HTMLCanvasElement | null {
@@ -307,6 +311,101 @@ export function maskContainsPoint(mask: HTMLCanvasElement, x: number, y: number)
 export function cloneMask(mask: HTMLCanvasElement): HTMLCanvasElement {
   const out = createCanvas(mask.width, mask.height);
   ctx2d(out).drawImage(mask, 0, 0);
+  return out;
+}
+
+function maskPixelCoverage(data: Uint8ClampedArray, offset: number): number {
+  const luminance = (data[offset] * 54 + data[offset + 1] * 183 + data[offset + 2] * 19 + 128) / 256;
+  return Math.round((luminance * data[offset + 3]) / 255);
+}
+
+function distanceTransform1d(source: Float64Array, length: number): Float64Array {
+  const out = new Float64Array(length);
+  const sites = new Int32Array(length);
+  const boundaries = new Float64Array(length + 1);
+  let k = 0;
+  sites[0] = 0;
+  boundaries[0] = Number.NEGATIVE_INFINITY;
+  boundaries[1] = Number.POSITIVE_INFINITY;
+
+  for (let q = 1; q < length; q++) {
+    let s = ((source[q] + q * q) - (source[sites[k]] + sites[k] * sites[k])) / (2 * q - 2 * sites[k]);
+    while (s <= boundaries[k]) {
+      k--;
+      s = ((source[q] + q * q) - (source[sites[k]] + sites[k] * sites[k])) / (2 * q - 2 * sites[k]);
+    }
+    k++;
+    sites[k] = q;
+    boundaries[k] = s;
+    boundaries[k + 1] = Number.POSITIVE_INFINITY;
+  }
+
+  k = 0;
+  for (let q = 0; q < length; q++) {
+    while (boundaries[k + 1] < q) k++;
+    const dx = q - sites[k];
+    out[q] = dx * dx + source[sites[k]];
+  }
+  return out;
+}
+
+function distanceSquaredFromCoverage(coverage: Uint8ClampedArray, width: number, height: number): Float64Array {
+  const inf = 1e20;
+  const count = width * height;
+  const temp = new Float64Array(count);
+  const dist = new Float64Array(count);
+  const column = new Float64Array(height);
+  const row = new Float64Array(width);
+
+  for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) {
+      column[y] = coverage[y * width + x] > 0 ? 0 : inf;
+    }
+    const transformed = distanceTransform1d(column, height);
+    for (let y = 0; y < height; y++) {
+      temp[y * width + x] = transformed[y];
+    }
+  }
+
+  for (let y = 0; y < height; y++) {
+    const offset = y * width;
+    for (let x = 0; x < width; x++) row[x] = temp[offset + x];
+    const transformed = distanceTransform1d(row, width);
+    for (let x = 0; x < width; x++) dist[offset + x] = transformed[x];
+  }
+
+  return dist;
+}
+
+export function featherRetouchMask(mask: HTMLCanvasElement, radius: number): HTMLCanvasElement {
+  const r = Math.max(0, Math.round(radius));
+  if (r <= 0) return cloneMask(mask);
+
+  const width = mask.width;
+  const height = mask.height;
+  const sourceCtx = ctx2d(mask, { willReadFrequently: true });
+  const source = sourceCtx.getImageData(0, 0, width, height);
+  const coverage = new Uint8ClampedArray(width * height);
+  for (let i = 0, p = 0; i < source.data.length; i += 4, p++) {
+    coverage[p] = maskPixelCoverage(source.data, i);
+  }
+
+  const distanceSquared = distanceSquaredFromCoverage(coverage, width, height);
+  const featherLimitSquared = r * r;
+  const out = createCanvas(width, height);
+  const outCtx = ctx2d(out);
+  const image = outCtx.createImageData(width, height);
+  for (let i = 0, p = 0; i < image.data.length; i += 4, p++) {
+    const grown =
+      distanceSquared[p] <= featherLimitSquared
+        ? Math.round(255 * (1 - Math.sqrt(distanceSquared[p]) / (r + 1)))
+        : 0;
+    image.data[i] = 255;
+    image.data[i + 1] = 255;
+    image.data[i + 2] = 255;
+    image.data[i + 3] = Math.max(coverage[p], grown);
+  }
+  outCtx.putImageData(image, 0, 0);
   return out;
 }
 

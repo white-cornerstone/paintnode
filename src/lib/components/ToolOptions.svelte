@@ -3,6 +3,7 @@
   import { ui } from '../state/ui.svelte';
   import { workflow, type WorkflowTool } from '../state/workflow.svelte';
   import type { SelectionMode } from '../engine/selection';
+  import { effectiveAiRetouchMaskMode } from '../engine/aiRetouch';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { Add, Dismiss, Info, MarqueeRect, SquareMultiple } from '../icons';
@@ -14,11 +15,16 @@
   const hasDrawingSurface = $derived(hasDocument || hasStoryboardEdit);
   const aiRetouchTools = ['spot-healing', 'remove', 'healing-brush', 'patch', 'content-aware-move', 'red-eye'];
   const aiRetouchBrushTools = ['spot-healing', 'remove', 'healing-brush'];
+  const AI_RETOUCH_FEATHER_MAX = 200;
   // Tools that share the round-brush controls (size / hardness / strength).
-  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge', ...aiRetouchBrushTools];
+  const brushTools = ['brush', 'eraser', 'clone', 'smudge', 'blur', 'sharpen', 'dodge', 'burn', 'sponge', ...aiRetouchBrushTools, 'red-eye'];
   const usesBrush = $derived(brushTools.includes(tool));
   const isAiRetouch = $derived(aiRetouchTools.includes(tool));
   const isAiRetouchBrush = $derived(aiRetouchBrushTools.includes(tool));
+  const usesAiRetouchSelectionMode = $derived(isAiRetouchBrush || tool === 'red-eye');
+  const effectiveSelectionMode = $derived(
+    isAiRetouch ? effectiveAiRetouchMaskMode(editor.selectionMode, !!editor.activeAiRetouchMaskLayer) : editor.selectionMode,
+  );
   const strengthLabel = $derived(
     tool === 'brush' || tool === 'eraser' || tool === 'clone'
       ? 'Opacity'
@@ -66,15 +72,20 @@
     document.addEventListener('pointerdown', closeTipOnOutsidePointer, true);
     return () => document.removeEventListener('pointerdown', closeTipOnOutsidePointer, true);
   });
+
+  function commitAiRetouchBrushFeather(): void {
+    const value = Number.isFinite(editor.aiRetouchBrushFeather) ? editor.aiRetouchBrushFeather : 0;
+    editor.aiRetouchBrushFeather = Math.max(0, Math.min(500, Math.round(value)));
+  }
 </script>
 
 {#snippet selectionModeButtons()}
   <div class="seg mode-seg" role="group" aria-label="Selection mode">
     {#each selectionModes as mode (mode.id)}
       <button
-        class:on={editor.selectionMode === mode.id}
+        class:on={effectiveSelectionMode === mode.id}
         aria-label={`${mode.label} selection`}
-        aria-pressed={editor.selectionMode === mode.id}
+        aria-pressed={effectiveSelectionMode === mode.id}
         use:tooltip={{ text: `${mode.label} selection`, placement: 'bottom' }}
         onclick={() => (editor.selectionMode = mode.id)}
       >
@@ -178,7 +189,7 @@
       <span class="divider"></span>
 
       {#if usesBrush}
-        {#if isAiRetouchBrush}
+        {#if usesAiRetouchSelectionMode}
           {@render selectionModeButtons()}
         {/if}
         <label class="opt">
@@ -187,12 +198,37 @@
           <input type="number" min="1" max="2000" bind:value={editor.brushSize} class="num" />
           <span class="unit">px</span>
         </label>
-        <label class="opt">
-          Hardness
-          <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
-          <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
-        </label>
-        {#if !isAiRetouchBrush}
+        {#if tool !== 'red-eye'}
+          <label class="opt">
+            Hardness
+            <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushHardness} />
+            <span class="val">{Math.round(editor.brushHardness * 100)}%</span>
+          </label>
+        {/if}
+        {#if isAiRetouchBrush}
+          <label class="opt">
+            Feather
+            <input
+              type="range"
+              min="0"
+              max={AI_RETOUCH_FEATHER_MAX}
+              step="1"
+              bind:value={editor.aiRetouchBrushFeather}
+              oninput={commitAiRetouchBrushFeather}
+            />
+            <input
+              type="number"
+              min="0"
+              max="500"
+              step="1"
+              bind:value={editor.aiRetouchBrushFeather}
+              class="num"
+              onchange={commitAiRetouchBrushFeather}
+            />
+            <span class="unit">px</span>
+          </label>
+        {/if}
+        {#if !isAiRetouchBrush && tool !== 'red-eye'}
           <label class="opt">
             {strengthLabel}
             <input type="range" min="0" max="1" step="0.01" bind:value={editor.brushOpacity} />
@@ -207,6 +243,8 @@
           {@render toolInfo('spot-healing', 'Paint over small flaws to create or refine an AI mask. Use the Contextual Task Bar to run AI Retouch.')}
         {:else if tool === 'remove'}
           {@render toolInfo('remove', 'Brush over or loop around the distraction to create or refine an AI mask. Use Add/Subtract modes to adjust it before running.')}
+        {:else if tool === 'red-eye'}
+          {@render toolInfo('red-eye', 'Click or drag around the pupil reflection to create or refine an AI mask. Run from the Contextual Task Bar.')}
         {:else if tool === 'clone'}
           <label class="opt"><input type="checkbox" bind:checked={editor.cloneAligned} /> Aligned</label>
           {@render toolInfo('clone', 'Alt-click to set the source, then paint.')}
@@ -250,19 +288,6 @@
       </div>
       <button onclick={() => editor.clearActiveAiRetouchMask()} disabled={!editor.activeAiRetouchMaskLayer}>Clear Mask</button>
       {@render toolInfo('content-aware-move', 'Draw or refine a subject mask, then drag inside it to place or extend it. Run from the Contextual Task Bar.')}
-    {:else if isAiRetouch && tool === 'red-eye'}
-      {@render selectionModeButtons()}
-      <label class="opt">
-        Pupil Size
-        <input type="range" min="1" max="100" bind:value={editor.aiRetouchPupilSize} />
-        <span class="val">{Math.round(editor.aiRetouchPupilSize)}%</span>
-      </label>
-      <label class="opt">
-        Darken
-        <input type="range" min="0" max="100" bind:value={editor.aiRetouchDarkenAmount} />
-        <span class="val">{Math.round(editor.aiRetouchDarkenAmount)}%</span>
-      </label>
-      {@render toolInfo('red-eye', 'Click or drag around an eye reflection to create or refine an AI mask. Run from the Contextual Task Bar.')}
     {:else if tool === 'marquee'}
       {@render selectionModeButtons()}
       <label class="opt">

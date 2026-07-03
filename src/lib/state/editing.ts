@@ -1,3 +1,5 @@
+import { readDesktopClipboardText, writeDesktopClipboardText } from '../integrations/desktop';
+
 type TextControl = HTMLInputElement | HTMLTextAreaElement;
 
 const TEXT_INPUT_TYPES = new Set([
@@ -29,6 +31,32 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   return editableElement(target) !== null;
 }
 
+let lastEditable: HTMLElement | null = null;
+
+function rememberEditable(target: EventTarget | null): void {
+  const el = editableElement(target);
+  if (el) lastEditable = el;
+}
+
+function forgetEditableIfOutside(target: EventTarget | null): void {
+  if (!editableElement(target)) lastEditable = null;
+}
+
+function activeEditableElement(doc: Document): HTMLElement | null {
+  const active = editableElement(doc.activeElement);
+  if (active) return active;
+  if (lastEditable?.ownerDocument === doc && lastEditable.isConnected) return lastEditable;
+  return null;
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('focusin', (event) => rememberEditable(event.target), true);
+  document.addEventListener('pointerdown', (event) => forgetEditableIfOutside(event.target), true);
+  document.addEventListener('keydown', (event) => {
+    if (!event.metaKey && !event.ctrlKey) forgetEditableIfOutside(event.target);
+  }, true);
+}
+
 function selectedText(el: TextControl): string {
   const start = el.selectionStart ?? 0;
   const end = el.selectionEnd ?? start;
@@ -42,7 +70,13 @@ function replaceSelection(el: TextControl, text: string): void {
   el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: text ? 'insertText' : 'deleteByCut', data: text || null }));
 }
 
+function insertEditableText(el: HTMLElement, text: string): void {
+  el.focus();
+  document.execCommand('insertText', false, text);
+}
+
 async function writeClipboard(text: string): Promise<boolean> {
+  if (await writeDesktopClipboardText(text)) return true;
   try {
     await navigator.clipboard?.writeText(text);
     return true;
@@ -52,6 +86,8 @@ async function writeClipboard(text: string): Promise<boolean> {
 }
 
 async function readClipboard(): Promise<string | null> {
+  const desktopText = await readDesktopClipboardText();
+  if (desktopText !== null) return desktopText;
   try {
     return (await navigator.clipboard?.readText()) ?? null;
   } catch {
@@ -60,7 +96,7 @@ async function readClipboard(): Promise<string | null> {
 }
 
 export function runEditableMenuAction(id: string, doc: Document = document): boolean {
-  const el = editableElement(doc.activeElement);
+  const el = activeEditableElement(doc);
   if (!el) return false;
 
   switch (id) {
@@ -84,14 +120,12 @@ export function runEditableMenuAction(id: string, doc: Document = document): boo
       }
       return true;
     case 'app:paste':
-      if (isTextControl(el)) {
-        void readClipboard().then((text) => {
-          if (text !== null) replaceSelection(el, text);
-          else document.execCommand('paste');
-        });
-      } else {
-        document.execCommand('paste');
-      }
+      void readClipboard().then((text) => {
+        if (text !== null) {
+          if (isTextControl(el)) replaceSelection(el, text);
+          else insertEditableText(el, text);
+        }
+      });
       return true;
     case 'app:undo':
       document.execCommand('undo');

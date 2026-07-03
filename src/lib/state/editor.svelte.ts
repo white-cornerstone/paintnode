@@ -76,7 +76,13 @@ import {
   type AiRetouchToolId,
 } from '../engine/aiRetouch';
 import { ui } from './ui.svelte';
-import { newAnnotation, type AnnotationItem, type AnnotationKind } from '../engine/annotations';
+import {
+  annotationInstructionNotes,
+  newAnnotation,
+  visibleAnnotations,
+  type AnnotationItem,
+  type AnnotationKind,
+} from '../engine/annotations';
 import { projectDocumentSourceKey, type DocumentSourceKey } from './documentSource';
 
 export interface PlacedImageResult {
@@ -278,6 +284,7 @@ export class EditorStore implements ToolHost {
   brushSize = $state(24);
   brushHardness = $state(0.85);
   brushOpacity = $state(1);
+  aiRetouchBrushFeather = $state(24);
   tolerance = $state(24);
   selection = $state<Selection | null>(null);
   selectionMode = $state<SelectionMode>('new');
@@ -303,8 +310,6 @@ export class EditorStore implements ToolHost {
   spongeMode = $state<'saturate' | 'desaturate'>('saturate');
   aiRetouchPatchMode = $state<AiRetouchPatchMode>('source');
   aiRetouchMoveMode = $state<AiRetouchMoveMode>('move');
-  aiRetouchPupilSize = $state(50);
-  aiRetouchDarkenAmount = $state(50);
   aiRetouchHealingSource = $state<{ x: number; y: number } | null>(null);
   lastAiRetouchTool = $state<AiRetouchToolId>('spot-healing');
   pendingAiRetouch = $state<AiRetouchRequest | null>(null);
@@ -802,9 +807,6 @@ export class EditorStore implements ToolHost {
     } else if (gesture.kind === 'move') {
       metadata.moveMode = gesture.mode;
       metadata.destinationRect = gesture.destination;
-    } else if (gesture.kind === 'red-eye') {
-      metadata.pupilSize = gesture.pupilSize;
-      metadata.darkenAmount = gesture.darkenAmount;
     }
     return metadata;
   }
@@ -940,6 +942,9 @@ export class EditorStore implements ToolHost {
     const metadata = layer?.aiRetouch;
     if (!doc || !layer || layer.kind !== 'ai-retouch-mask' || !metadata) return null;
     const source = compositeToCanvas(doc);
+    const annotationItems = doc.annotationsVisible ? visibleAnnotations(doc.annotations) : [];
+    const annotatedSource = annotationItems.length ? this.renderAnnotatedSource(source, annotationItems) : null;
+    const annotationNotes = annotationInstructionNotes(annotationItems, doc.width, doc.height);
     const bounds = maskBounds(layer.canvas);
     if (!bounds) return null;
     let mask = cloneMask(layer.canvas);
@@ -968,8 +973,6 @@ export class EditorStore implements ToolHost {
       gesture = {
         kind: 'red-eye',
         bounds,
-        pupilSize: metadata.pupilSize ?? this.aiRetouchPupilSize,
-        darkenAmount: metadata.darkenAmount ?? this.aiRetouchDarkenAmount,
       };
     } else {
       gesture = {
@@ -993,6 +996,8 @@ export class EditorStore implements ToolHost {
       source,
       editTarget,
       mask,
+      annotatedSource,
+      annotationNotes,
       maskLayerId: layer.id,
       reference,
       gesture,
@@ -1032,6 +1037,8 @@ export class EditorStore implements ToolHost {
       sourcePng: await canvasToPngBytes(request.source),
       editTargetPng: await canvasToPngBytes(request.editTarget),
       maskPng: await canvasToPngBytes(request.mask),
+      annotatedSourcePng: request.annotatedSource ? await canvasToPngBytes(request.annotatedSource) : null,
+      annotationNotes: request.annotationNotes,
       referencePng: request.reference ? await canvasToPngBytes(request.reference) : null,
     };
   }
@@ -2269,6 +2276,14 @@ export class EditorStore implements ToolHost {
     layer.touch();
     this.bump();
     this.invalidate();
+  }
+
+  private renderAnnotatedSource(source: HTMLCanvasElement, annotations: AnnotationItem[]): HTMLCanvasElement {
+    const annotated = createCanvas(source.width, source.height);
+    const ctx = ctx2d(annotated);
+    ctx.drawImage(source, 0, 0);
+    for (const item of annotations) this.drawAnnotationToContext(ctx, item);
+    return annotated;
   }
 
   private drawAnnotationToContext(ctx: CanvasRenderingContext2D, item: AnnotationItem): void {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { settings } from '../state/settings.svelte';
   import { BLEND_MODES } from '../engine/types';
   import type { Layer } from '../engine/Layer.svelte';
   import LayerThumb from './LayerThumb.svelte';
@@ -13,6 +14,8 @@
   type LayerPanelRow =
     | { kind: 'layer'; layer: Layer; parent?: undefined }
     | { kind: 'linked-mask'; layer: Layer; parent: Layer };
+
+  const LAYER_DRAG_START_DISTANCE = 8;
 
   let {
     collapsed = $bindable(false),
@@ -33,10 +36,10 @@
     offsetY: number;
     width: number;
     height: number;
+    displayIndex: number;
     dragging: boolean;
   } | null>(null);
   let suppressClick = $state(false);
-  let annotationsExpanded = $state(true);
   let opacityOpen = $state(false);
   let opacityDraft = $state<string | null>(null);
   let opacityControl: HTMLDivElement | null = null;
@@ -61,6 +64,7 @@
   const activeRasterLayer = $derived(editor.activeToolId !== 'annotation' && !editor.selectedAnnotationId ? active : null);
   const activeOpacityPercent = $derived(Math.round((activeRasterLayer?.opacity ?? 1) * 100));
   const annotationCount = $derived(editor.doc?.annotations.length ?? 0);
+  const annotationsExpanded = $derived(settings.value.workspace.layerAnnotationsExpanded);
   const draggedLayer = $derived(dragFromId ? rows.find((row) => row.layer.id === dragFromId)?.layer ?? null : null);
   const activeSourceAsset = $derived(
     activeRasterLayer?.sourceAssetId
@@ -79,6 +83,9 @@
   }
   function selectAnnotationObject(item: AnnotationItem) {
     editor.selectAnnotation(item.id);
+  }
+  function setAnnotationsExpanded(expanded: boolean): void {
+    settings.update({ workspace: { layerAnnotationsExpanded: expanded } });
   }
   function annotationIcon(item: AnnotationItem): string {
     if (item.kind === 'arrow') return ArrowTrending;
@@ -210,17 +217,21 @@
       offsetY: e.clientY - rect.top,
       width: rect.width,
       height: rect.height,
+      displayIndex,
       dragging: false,
     };
-    dragFromId = layer.id;
-    dragInsertSlot = displayIndex;
   }
 
   function onLayerPointerMove(e: PointerEvent) {
     if (!pointerDrag || pointerDrag.pointerId !== e.pointerId) return;
 
     const distance = Math.hypot(e.clientX - pointerDrag.startX, e.clientY - pointerDrag.startY);
-    if (!pointerDrag.dragging && distance < 4) return;
+    if (!pointerDrag.dragging && distance < LAYER_DRAG_START_DISTANCE) return;
+
+    if (!pointerDrag.dragging) {
+      dragFromId = pointerDrag.layerId;
+      dragInsertSlot = pointerDrag.displayIndex;
+    }
 
     pointerDrag = { ...pointerDrag, currentX: e.clientX, currentY: e.clientY, dragging: true };
     e.preventDefault();
@@ -351,7 +362,7 @@
           use:tooltip={{ text: annotationsExpanded ? 'Collapse annotations' : 'Expand annotations', placement: 'right' }}
           onclick={(e) => {
             e.stopPropagation();
-            annotationsExpanded = !annotationsExpanded;
+            setAnnotationsExpanded(!annotationsExpanded);
           }}
         >
           <Icon svg={annotationsExpanded ? ChevronDown : ChevronRight} size={15} />
@@ -661,6 +672,8 @@
     width: 100%;
   }
   .list {
+    --layer-selected-bg: color-mix(in srgb, var(--bg-elevated) 94%, #fff 6%);
+
     flex: 1;
     overflow-y: auto;
     min-height: 60px;
@@ -678,7 +691,8 @@
     background: var(--bg-panel-2);
   }
   .layer.active {
-    background: var(--accent-dim);
+    background: var(--layer-selected-bg);
+    color: var(--text-bright);
   }
   .layer.linked-parent-row {
     border-bottom-color: color-mix(in srgb, var(--border) 70%, transparent);
@@ -690,7 +704,7 @@
     background: color-mix(in srgb, var(--bg-panel) 88%, #000 12%);
   }
   .layer.linked-mask-row.active {
-    background: var(--accent-dim);
+    background: var(--layer-selected-bg);
   }
   .layer.insert-before {
     box-shadow: inset 0 2px 0 var(--accent);
@@ -772,7 +786,10 @@
     background: color-mix(in srgb, var(--bg-panel) 88%, #000 12%);
   }
   .annotation-child-row.active {
-    background: var(--accent-dim);
+    background: var(--layer-selected-bg);
+  }
+  .annotation-layer-row.active {
+    background: var(--layer-selected-bg);
   }
   .child-indent {
     flex: none;

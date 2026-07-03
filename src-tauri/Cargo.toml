@@ -25,5 +25,7 @@ tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-rfd = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-dialog = "2.7.1"
+arboard = "3.6"
+sysinfo = "0.30"

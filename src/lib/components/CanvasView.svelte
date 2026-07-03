@@ -13,7 +13,10 @@
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import ContextualTaskBar from './ContextualTaskBar.svelte';
+  import Icon from './Icon.svelte';
+  import { tooltip } from '../actions/tooltip';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
+  import { Dismiss } from '../icons';
 
   let canvasEl: HTMLCanvasElement;
   let containerEl: HTMLDivElement;
@@ -799,6 +802,19 @@
       <div class="canvas-edge-overlay" style={canvasEdgeStyle()} aria-hidden="true"></div>
     {/if}
   {/if}
+  {#if ui.workspaceFocusMode && ui.workspaceFocusHintVisible}
+    <div class="focus-mode-hint" role="status">
+      <span>Workspace focus mode. Press Tab again to exit.</span>
+      <button
+        type="button"
+        aria-label="Hide workspace focus message"
+        use:tooltip={{ text: 'Hide message', placement: 'bottom' }}
+        onclick={() => ui.dismissWorkspaceFocusHint()}
+      >
+        <Icon svg={Dismiss} size={13} />
+      </button>
+    </div>
+  {/if}
   <div class="scroll-space" style:width={`${scrollW}px`} style:height={`${scrollH}px`}></div>
   {#if !editor.doc}
     <div class="empty-workspace" class:dragover={dragOverEmpty}>
@@ -821,7 +837,7 @@
   {#if editor.textEdit && overlayBox}
     <TextEditorOverlay box={overlayBox} />
   {/if}
-  {#if !editor.textEdit && !interacting && !panning && !annotationDraft && !transformDrag && !selectionDrag}
+  {#if !ui.workspaceFocusMode && !editor.textEdit && !interacting && !panning && !annotationDraft && !transformDrag && !selectionDrag}
     {@const taskBarAnchor = contextualTaskBarAnchor()}
     {#if taskBarAnchor}
       <ContextualTaskBar anchor={taskBarAnchor} />
@@ -850,6 +866,43 @@
     z-index: 0;
     pointer-events: none;
     cursor: inherit;
+  }
+  .focus-mode-hint {
+    position: sticky;
+    z-index: 8;
+    top: 14px;
+    left: 50%;
+    width: fit-content;
+    max-width: min(520px, calc(100% - 32px));
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 5px 6px 5px 10px;
+    border: 1px solid color-mix(in srgb, var(--border) 78%, #fff 10%);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-panel) 86%, transparent);
+    color: color-mix(in srgb, var(--text) 82%, #fff 12%);
+    font-size: 12px;
+    line-height: 18px;
+    box-shadow: 0 6px 16px rgb(0 0 0 / 0.18);
+  }
+  .focus-mode-hint button {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: color-mix(in srgb, var(--text) 74%, #fff 8%);
+  }
+  .focus-mode-hint button:hover {
+    background: var(--bg-elevated);
+    color: var(--text);
   }
   .transform-preview {
     position: absolute;

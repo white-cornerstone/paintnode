@@ -1,6 +1,7 @@
 import {
   AI_RETOUCH_TOOL_NAMES,
   combineRetouchMask,
+  effectiveAiRetouchMaskMode,
   maskBounds,
   maskContainsPoint,
   makeRectMask,
@@ -52,7 +53,7 @@ export class AiRetouchTool implements Tool {
   }
 
   get usesBrushCursor(): boolean {
-    return this.id === 'spot-healing' || this.id === 'remove' || this.id === 'healing-brush';
+    return this.id === 'spot-healing' || this.id === 'remove' || this.id === 'healing-brush' || this.id === 'red-eye';
   }
 
   pointerDown(e: PointerInfo): void {
@@ -66,12 +67,15 @@ export class AiRetouchTool implements Tool {
       return;
     }
 
+    const active = this.host.activeLayer;
     this.start = p;
     this.points = [p];
     this.draggingExistingMask = null;
-    this.mode = selectionModeFromModifiers(this.host.selectionMode, e);
+    this.mode = effectiveAiRetouchMaskMode(
+      selectionModeFromModifiers(this.host.selectionMode, e),
+      active?.kind === 'ai-retouch-mask',
+    );
 
-    const active = this.host.activeLayer;
     if (
       (this.id === 'patch' || this.id === 'content-aware-move') &&
       active?.kind === 'ai-retouch-mask' &&
@@ -154,6 +158,7 @@ export class AiRetouchTool implements Tool {
       points: this.points,
       size: Math.max(1, this.host.brushSize),
       hardness: this.host.brushHardness,
+      feather: Math.max(0, this.host.aiRetouchBrushFeather),
       closedLoop: this.id === 'remove' && closeEnoughToLoop(this.points, Math.max(1, this.host.brushSize)),
     });
   }
@@ -178,6 +183,7 @@ export class AiRetouchTool implements Tool {
       points: this.points.slice(),
       size,
       hardness: this.host.brushHardness,
+      feather: Math.max(0, this.host.aiRetouchBrushFeather),
       closedLoop: this.id === 'remove' && closeEnoughToLoop(this.points, size),
       reference: this.host.aiRetouchHealingSource ? referenceRect(this.host.aiRetouchHealingSource, size * 4, docW, docH) : null,
     } as const;
@@ -272,8 +278,6 @@ export class AiRetouchTool implements Tool {
     this.host.commitAiRetouchMaskGesture('red-eye', {
       kind: 'red-eye',
       bounds,
-      pupilSize: this.host.aiRetouchPupilSize,
-      darkenAmount: this.host.aiRetouchDarkenAmount,
     }, mask, this.mode);
   }
 
