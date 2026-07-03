@@ -1,7 +1,12 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
-  import { workflow, type WorkflowTool } from '../state/workflow.svelte';
+  import { workflow } from '../state/workflow.svelte';
+  import { tooltip } from '../actions/tooltip';
+  import { isDesktop, readAppMemoryInfo, type AppMemoryInfo } from '../integrations/desktop';
+  import Icon from './Icon.svelte';
+  import { DeveloperBoard } from '../icons';
 
   const doc = $derived(editor.doc);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!doc);
@@ -9,16 +14,38 @@
   const hasZoomSurface = $derived(hasDocument || hasWorkflow);
   const pct = $derived(Math.round((hasWorkflow ? workflow.zoom : ui.zoom) * 100));
   const layerCount = $derived(doc?.layers.length ?? 0);
-  const workflowToolNames: Record<WorkflowTool, string> = {
-    hand: 'Hand',
-    zoom: 'Zoom',
-    asset: 'Asset Node',
-    composition: 'Composition Node',
-    output: 'Output Node',
-  };
 
   let editing = $state(false);
   let draft = $state('');
+  let memoryInfo = $state<AppMemoryInfo | null>(null);
+  const memoryLabel = $derived(memoryInfo ? formatBytes(memoryInfo.residentBytes) : '');
+  const memoryTooltip = $derived(
+    memoryInfo
+      ? `Resident memory used by PaintNode desktop process tree (${memoryInfo.processCount} process${memoryInfo.processCount === 1 ? '' : 'es'}).`
+      : '',
+  );
+
+  function formatBytes(bytes: number): string {
+    const mb = bytes / 1024 / 1024;
+    if (mb < 1024) return `${Math.max(1, Math.round(mb))} MB`;
+    return `${(mb / 1024).toFixed(1)} GB`;
+  }
+
+  onMount(() => {
+    if (!isDesktop()) return;
+
+    let disposed = false;
+    const refresh = async () => {
+      const info = await readAppMemoryInfo();
+      if (!disposed) memoryInfo = info;
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 3000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  });
 
   function startEdit(e: FocusEvent) {
     if (!hasZoomSurface) return;
@@ -73,8 +100,13 @@
   {/if}
   <span class="spacer"></span>
   <span class="item dim">{hasDocument ? `${layerCount} layer${layerCount === 1 ? '' : 's'}` : ''}</span>
-  <span class="sep"></span>
-  <span class="item dim">{hasDocument ? editor.activeTool.name : hasWorkflow ? workflowToolNames[workflow.tool] : ''}</span>
+  {#if memoryLabel}
+    <span class="sep"></span>
+    <span class="item dim memory" aria-label={`RAM ${memoryLabel}`} use:tooltip={{ text: memoryTooltip, placement: 'top' }}>
+      <Icon svg={DeveloperBoard} size={13} />
+      <span>{memoryLabel}</span>
+    </span>
+  {/if}
 </footer>
 
 <style>
@@ -136,5 +168,10 @@
   }
   .dim {
     color: var(--text-dim);
+  }
+  .memory {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
 </style>

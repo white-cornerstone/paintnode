@@ -11,6 +11,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, System};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter};
 
@@ -176,6 +177,13 @@ struct CodexDetectionResult {
     path: Option<String>,
     version: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppMemoryInfo {
+    resident_bytes: u64,
+    process_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3474,6 +3482,44 @@ fn clipboard_write_text(text: String) -> Result<(), String> {
         .map_err(|error| format!("Clipboard write failed: {error}"))
 }
 
+#[tauri::command]
+fn app_memory_info() -> Result<AppMemoryInfo, String> {
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    let root_pid = Pid::from_u32(std::process::id());
+    let mut resident_bytes = 0_u64;
+    let mut process_count = 0_usize;
+
+    for (pid, process) in system.processes() {
+        let mut current = Some(*pid);
+        let mut depth = 0;
+        let mut belongs_to_app = false;
+
+        while let Some(candidate) = current {
+            if candidate == root_pid {
+                belongs_to_app = true;
+                break;
+            }
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            current = system.process(candidate).and_then(|item| item.parent());
+        }
+
+        if belongs_to_app {
+            resident_bytes = resident_bytes.saturating_add(process.memory());
+            process_count += 1;
+        }
+    }
+
+    Ok(AppMemoryInfo {
+        resident_bytes,
+        process_count,
+    })
+}
+
 /// Run a user-configured local command to generate an image, then return it as a PNG data URL.
 ///
 /// Security model: the command + args come from the app's own settings (local, user-entered),
@@ -6315,6 +6361,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             clipboard_read_text,
             clipboard_write_text,
+            app_memory_info,
             generate_image,
             detect_codex,
             detect_antigravity,

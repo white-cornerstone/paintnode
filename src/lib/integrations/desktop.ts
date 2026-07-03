@@ -39,6 +39,15 @@ export async function writeDesktopClipboardText(text: string): Promise<boolean> 
   }
 }
 
+export async function readAppMemoryInfo(): Promise<AppMemoryInfo | null> {
+  if (!isDesktop()) return null;
+  try {
+    return await invoke<AppMemoryInfo>('app_memory_info');
+  } catch {
+    return null;
+  }
+}
+
 function safeStem(value: string): string {
   const cleaned = value
     .trim()
@@ -183,6 +192,11 @@ export interface StoredAssetResult {
 export interface SavedDocumentResult {
   relativePath: string;
   name: string;
+}
+
+export interface AppMemoryInfo {
+  residentBytes: number;
+  processCount: number;
 }
 
 export interface NativeDroppedFile {
