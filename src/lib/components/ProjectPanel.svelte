@@ -223,8 +223,10 @@
         const bytes = await project.readFile(file);
         const { doc, notices } = await loadPsd(bufferFrom(bytes));
         doc.name = file.name.replace(/\.psd$/i, '');
-        // No markSaved: File ▸ Save writes .ora; Export PSD round-trips to Photoshop.
-        editor.openDocument(doc, true, sourceKey);
+        // The document stays .psd, but no savedPath is adopted: the first Save
+        // prompts for a name, so overwriting the opened file is an explicit choice.
+        const session = editor.openDocument(doc, true, sourceKey);
+        session.saveFormat = 'psd';
         editor.flash(notices.length ? `Opened ${file.name} — ${notices.join('; ')}` : `Opened ${file.name}`);
         return;
       }

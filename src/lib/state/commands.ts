@@ -122,9 +122,11 @@ async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenedFileI
   } else if (isPsd(file)) {
     const { doc, notices } = await loadPsd(await file.arrayBuffer());
     doc.name = file.name.replace(/\.psd$/i, '');
-    // Never adopt the .psd path as the save target: File ▸ Save writes .ora.
-    // Round-tripping back to Photoshop goes through File ▸ Export PSD.
-    editor.openDocument(doc, true, file.sourceKey);
+    // The document stays .psd, but the original path is never adopted as the
+    // save target: the first Save prompts for a name, so overwriting the
+    // opened file is an explicit choice.
+    const session = editor.openDocument(doc, true, file.sourceKey);
+    session.saveFormat = 'psd';
     return { result: 'opened', notices };
   } else {
     await openImageAsDocument(file);
@@ -336,6 +338,79 @@ export async function saveCopyOraCommand(): Promise<void> {
   }
 }
 
+/** File ▸ Save for PSD-opened documents — stays .psd; passthrough keeps Photoshop data. */
+async function savePsdDocumentCommand(): Promise<void> {
+  const doc = editor.doc;
+  const session = editor.activeDocument;
+  if (!doc) return;
+  try {
+    editor.flash('Saving .psd…');
+    const name = `${doc.name || 'untitled'}.psd`;
+    if (isDesktop()) {
+      const bytes = await savePsdBytes(doc);
+      if (session?.savedPath) {
+        const relativePath = await project.saveDocumentToPath(session.savedPath, bytes);
+        editor.markSaved(relativePath);
+        editor.flash(`Saved ${relativePath}`);
+        return;
+      }
+      // First save after opening a .psd always asks for a name, so overwriting
+      // the original file is an explicit choice, not the default.
+      const result = await project.saveDocumentAs(name, bytes, doc.name);
+      if (result) {
+        editor.renameActiveDocument(result.name);
+        editor.markSaved(result.relativePath);
+        editor.flash(`Saved ${result.relativePath}`);
+      } else {
+        editor.flash('Save canceled');
+      }
+      return;
+    }
+    downloadBlob(await savePsd(doc), name);
+    editor.markSaved(null);
+    editor.flash('Saved .psd');
+  } catch (e) {
+    editor.flash('Save failed: ' + (e as Error).message);
+  }
+}
+
+async function savePsdCopyCommand(): Promise<void> {
+  const doc = editor.doc;
+  if (!doc) return;
+  try {
+    editor.flash('Saving copy…');
+    const name = `${doc.name || 'untitled'}.psd`;
+    if (isDesktop()) {
+      const bytes = await savePsdBytes(doc);
+      const result = await project.saveDocumentAs(name, bytes, null, 'Save a Copy');
+      editor.flash(result ? `Saved copy ${result.relativePath}` : 'Save copy canceled');
+      return;
+    }
+    downloadBlob(await savePsd(doc), name);
+    editor.flash('Saved copy');
+  } catch (e) {
+    editor.flash('Save copy failed: ' + (e as Error).message);
+  }
+}
+
+/** File ▸ Save — routes to the document's native format (.psd docs stay .psd). */
+export async function saveDocumentCommand(): Promise<void> {
+  if (editor.activeDocument?.saveFormat === 'psd') {
+    await savePsdDocumentCommand();
+    return;
+  }
+  await saveOraCommand();
+}
+
+/** File ▸ Save a Copy — same format routing as Save. */
+export async function saveDocumentCopyCommand(): Promise<void> {
+  if (editor.activeDocument?.saveFormat === 'psd') {
+    await savePsdCopyCommand();
+    return;
+  }
+  await saveCopyOraCommand();
+}
+
 export async function saveWorkflowCommand(): Promise<void> {
   try {
     window.dispatchEvent(new Event('paintnode:workflow-before-save'));
@@ -365,7 +440,7 @@ export async function saveActiveCommand(): Promise<void> {
     await saveWorkflowCommand();
     return;
   }
-  await saveOraCommand();
+  await saveDocumentCommand();
 }
 
 export async function saveActiveCopyCommand(): Promise<void> {
@@ -373,7 +448,7 @@ export async function saveActiveCopyCommand(): Promise<void> {
     await saveWorkflowAsCommand();
     return;
   }
-  await saveCopyOraCommand();
+  await saveDocumentCopyCommand();
 }
 
 export async function autosaveOpenDocuments(): Promise<void> {

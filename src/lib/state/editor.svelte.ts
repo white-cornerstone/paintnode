@@ -250,6 +250,13 @@ export interface DocumentSession {
   hasSavedBaseline: boolean;
   /** Remembered "embed fonts?" choice for this document (null = ask on next save). */
   embedFonts: boolean | null;
+  /**
+   * Format File ▸ Save writes for this document. Documents opened from a .psd
+   * stay .psd; everything else saves .ora. While `savedPath` is null the first
+   * save always prompts for a name, so overwriting the original file is an
+   * explicit user choice rather than the default.
+   */
+  saveFormat: 'ora' | 'psd';
 }
 
 interface LayerStackSnapshot {
@@ -468,6 +475,7 @@ export class EditorStore implements ToolHost {
       sourceKey,
       hasSavedBaseline,
       embedFonts: null,
+      saveFormat: 'ora',
     };
   }
 

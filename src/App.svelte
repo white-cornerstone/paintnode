@@ -45,7 +45,7 @@
     importImageCommand,
     openCommand,
     openDocumentPaths,
-    saveOraCommand,
+    saveDocumentCommand,
     saveActiveCommand,
     saveActiveCopyCommand,
     saveWorkflowCommand,
@@ -228,7 +228,7 @@
     const session = editor.documents.find((documentSession) => documentSession.id === id);
     if (!session) return true;
     editor.switchDocument(id);
-    await saveOraCommand();
+    await saveDocumentCommand();
     const updated = editor.documents.find((documentSession) => documentSession.id === id);
     return !updated || !editor.hasUnsavedChanges(updated);
   }
