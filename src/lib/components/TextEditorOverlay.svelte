@@ -193,7 +193,10 @@
       italic: cs.fontStyle === 'italic' || cs.fontStyle.startsWith('oblique'),
       underline: deco.includes('underline'),
       strikethrough: deco.includes('line-through'),
-      tracking: cs.letterSpacing && cs.letterSpacing !== 'normal' ? Math.round(parseFloat(cs.letterSpacing)) || 0 : 0,
+      tracking:
+        cs.letterSpacing && cs.letterSpacing !== 'normal'
+          ? Math.round((parseFloat(cs.letterSpacing) || 0) * 100) / 100
+          : 0,
       leading,
       horizontalScale: dataNum(el, 'pn-hscale', 100),
       verticalScale: dataNum(el, 'pn-vscale', 100),
@@ -372,7 +375,7 @@
   }
   function wrapSelection(
     decorate: (span: HTMLSpanElement) => void,
-    afterAttach?: (span: HTMLSpanElement) => void,
+    afterAttach: ((span: HTMLSpanElement) => void) | null = null,
   ): void {
     restore();
     ensureSelection();
@@ -397,7 +400,17 @@
     refreshToolbar();
   }
   function wrapStyle(prop: 'fontSize' | 'letterSpacing', value: string): void {
-    wrapSelection((span) => (span.style[prop] = value));
+    const cssName = prop === 'fontSize' ? 'font-size' : 'letter-spacing';
+    wrapSelection(
+      (span) => span.style.setProperty(cssName, value),
+      // The wrapper must win: clear the property from wrapped descendants, whose
+      // inline values would otherwise override the cascade (Photoshop semantics —
+      // setting size/tracking on a selection applies to all of it).
+      (span) =>
+        span.querySelectorAll('*').forEach((el) => {
+          if (el instanceof HTMLElement) el.style.removeProperty(cssName);
+        }),
+    );
   }
   /**
    * Wrap the selection in a span carrying a data attribute (+ CSS approximation),
