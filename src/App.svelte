@@ -207,7 +207,7 @@
   }
 
   function documentDisplayName(session: DocumentSession): string {
-    return session.doc.name || 'Untitled';
+    return editor.documentFileName(session);
   }
 
   function unsavedWorkItems(): UnsavedWorkItem[] {

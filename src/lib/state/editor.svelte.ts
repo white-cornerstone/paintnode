@@ -257,6 +257,8 @@ export interface DocumentSession {
    * explicit user choice rather than the default.
    */
   saveFormat: 'ora' | 'psd';
+  /** Extension of the file this document was loaded from (e.g. 'psd', 'png'), if any. */
+  sourceExtension: string | null;
 }
 
 interface LayerStackSnapshot {
@@ -476,7 +478,22 @@ export class EditorStore implements ToolHost {
       hasSavedBaseline,
       embedFonts: null,
       saveFormat: 'ora',
+      sourceExtension: null,
     };
+  }
+
+  /**
+   * File name shown for a session (tabs, save prompts): the saved file's real
+   * name once saved, else the loaded file's name with its extension, else the
+   * plain document name for brand-new documents.
+   */
+  documentFileName(session: DocumentSession): string {
+    const name = session.doc.name || 'Untitled';
+    if (session.savedPath) {
+      const base = session.savedPath.split('/').pop();
+      if (base) return base;
+    }
+    return session.sourceExtension ? `${name}.${session.sourceExtension}` : name;
   }
 
   private documentMatchesSource(session: DocumentSession, sourceKey: DocumentSourceKey): boolean {

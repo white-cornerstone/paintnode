@@ -103,7 +103,8 @@ async function openImageAsDocument(file: OpenableDocumentFile): Promise<void> {
   bmp.close();
   doc.layers = [layer];
   doc.activeLayerId = layer.id;
-  editor.openDocument(doc, true, file.sourceKey);
+  const session = editor.openDocument(doc, true, file.sourceKey);
+  session.sourceExtension = file.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? null;
 }
 
 interface OpenedFileInfo {
@@ -118,6 +119,7 @@ async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenedFileI
     const doc = await loadOra(await file.arrayBuffer());
     doc.name = file.name.replace(/\.ora$/i, '');
     const session = editor.openDocument(doc, true, file.sourceKey);
+    session.sourceExtension = 'ora';
     if (file.savedPath) session.savedPath = file.savedPath;
   } else if (isPsd(file)) {
     const { doc, notices } = await loadPsd(await file.arrayBuffer());
@@ -127,6 +129,7 @@ async function openDocumentFile(file: OpenableDocumentFile): Promise<OpenedFileI
     // opened file is an explicit choice.
     const session = editor.openDocument(doc, true, file.sourceKey);
     session.saveFormat = 'psd';
+    session.sourceExtension = 'psd';
     return { result: 'opened', notices };
   } else {
     await openImageAsDocument(file);
@@ -305,6 +308,7 @@ export async function saveOraCommand(): Promise<void> {
     const blob = await saveOra(doc, embed);
     downloadBlob(blob, name);
     editor.markSaved(null);
+    if (session) session.sourceExtension = 'ora';
     editor.flash(`Saved .ora${oraSaveNote(doc)}`);
   } catch (e) {
     editor.flash('Save failed: ' + (e as Error).message);
@@ -368,6 +372,7 @@ async function savePsdDocumentCommand(): Promise<void> {
     }
     downloadBlob(await savePsd(doc), name);
     editor.markSaved(null);
+    if (session) session.sourceExtension = 'psd';
     editor.flash('Saved .psd');
   } catch (e) {
     editor.flash('Save failed: ' + (e as Error).message);

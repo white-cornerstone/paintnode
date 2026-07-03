@@ -11,7 +11,7 @@
   let dragOverTabs = $state(false);
 
   function documentName(session: DocumentSession): string {
-    return session.doc.name || 'Untitled';
+    return editor.documentFileName(session);
   }
 
   function documentNameWithMarker(session: DocumentSession): string {

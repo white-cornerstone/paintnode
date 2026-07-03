@@ -227,6 +227,7 @@
         // prompts for a name, so overwriting the opened file is an explicit choice.
         const session = editor.openDocument(doc, true, sourceKey);
         session.saveFormat = 'psd';
+        session.sourceExtension = 'psd';
         editor.flash(notices.length ? `Opened ${file.name} — ${notices.join('; ')}` : `Opened ${file.name}`);
         return;
       }

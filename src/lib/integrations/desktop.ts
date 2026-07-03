@@ -604,7 +604,13 @@ export async function saveProjectDocumentAs(args: {
     ? `${args.projectPath.trim()}/documents/${defaultName}`
     : defaultName;
   const targetPath = await saveDialog({
-    title: args.dialogTitle?.trim() ? args.dialogTitle.trim() : isWorkflow ? 'Save Workflow Board' : 'Save OpenRaster Document',
+    title: args.dialogTitle?.trim()
+      ? args.dialogTitle.trim()
+      : isWorkflow
+        ? 'Save Workflow Board'
+        : isPsd
+          ? 'Save Photoshop Document'
+          : 'Save OpenRaster Document',
     defaultPath,
     filters: isWorkflow
       ? [{ name: 'PaintNode Workflow', extensions: ['json'] }]
