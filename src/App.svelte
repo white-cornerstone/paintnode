@@ -21,7 +21,7 @@
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import Icon from './lib/components/Icon.svelte';
-  import { tooltip } from './lib/actions/tooltip';
+  import { tooltip, truncatedTooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
@@ -107,7 +107,7 @@
     | 'channels'
     | 'paths';
   type PanelDef = { id: PanelId; title: string; icon: string; grow?: boolean };
-  type PanelGroupId = 'presets' | 'edits' | 'structure';
+  type PanelGroupId = 'presets' | 'edits' | 'type' | 'structure';
   type PanelGroupDef = { id: PanelGroupId; panels: PanelDef[]; grow?: boolean };
   const panelGroups: PanelGroupDef[] = [
     {
@@ -124,9 +124,14 @@
       panels: [
         { id: 'properties', title: 'Properties', icon: Options },
         { id: 'adjustments', title: 'Adjustments', icon: DataHistogram },
+        { id: 'libraries', title: 'Libraries', icon: Library },
+      ],
+    },
+    {
+      id: 'type',
+      panels: [
         { id: 'character', title: 'Character', icon: TextFont },
         { id: 'paragraph', title: 'Paragraph', icon: TextParagraphIcon },
-        { id: 'libraries', title: 'Libraries', icon: Library },
       ],
     },
     {
@@ -142,11 +147,13 @@
   let activePanelByGroup = $state<Record<PanelGroupId, PanelId>>({
     presets: 'color',
     edits: 'properties',
+    type: 'character',
     structure: 'layers',
   });
   let collapsedPanelGroups = $state<Record<PanelGroupId, boolean>>({
     presets: false,
     edits: false,
+    type: false,
     structure: false,
   });
 
@@ -640,6 +647,7 @@
         aria-selected={isActive}
         aria-expanded={closePeeked ? peekedPanel === panel.id : isActive && !collapsedPanelGroups[group.id]}
         onclick={() => (closePeeked ? clickPeekPanelTab(group, panel.id) : clickExpandedPanelTab(group, panel.id))}
+        use:truncatedTooltip={{ text: panel.title, placement: 'bottom' }}
       >
         {panel.title}
       </button>
