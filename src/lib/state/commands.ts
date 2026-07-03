@@ -1,6 +1,7 @@
 import { editor, type DocumentSession } from './editor.svelte';
 import { loadOra } from '../ora/load';
 import { saveOra, type EmbeddedFont } from '../ora/save';
+import { savePsd, savePsdBytes } from '../psd/save';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { compositeToCanvas } from '../engine/compositor';
@@ -71,6 +72,11 @@ interface OpenableDocumentFile {
 }
 
 type OpenFileResult = 'opened' | 'focused';
+
+function exportFileName(name: string, ext: 'png' | 'psd'): string {
+  const stem = (name || 'untitled').replace(/\.(ora|psd|png|jpe?g|webp)$/i, '') || 'untitled';
+  return `${stem}.${ext}`;
+}
 
 function fileToOpenable(file: File): OpenableDocumentFile {
   return {
@@ -366,9 +372,30 @@ export async function exportPngCommand(): Promise<void> {
   if (!doc) return;
   try {
     const blob = await canvasToPngBlob(compositeToCanvas(doc));
-    downloadBlob(blob, `${doc.name || 'untitled'}.png`);
+    downloadBlob(blob, exportFileName(doc.name, 'png'));
     editor.flash('Exported PNG');
   } catch (e) {
     editor.flash('Export failed: ' + (e as Error).message);
+  }
+}
+
+/** File ▸ Export PSD (layered Photoshop handoff) */
+export async function exportPsdCommand(): Promise<void> {
+  const doc = editor.doc;
+  if (!doc) return;
+  try {
+    editor.flash('Exporting PSD…');
+    const name = exportFileName(doc.name, 'psd');
+    if (isDesktop()) {
+      const bytes = await savePsdBytes(doc);
+      const result = await project.saveDocumentAs(name, bytes, null, 'Export Photoshop Document');
+      editor.flash(result ? `Exported ${result.relativePath}` : 'Export canceled');
+      return;
+    }
+    const blob = await savePsd(doc);
+    downloadBlob(blob, name);
+    editor.flash('Exported PSD');
+  } catch (e) {
+    editor.flash('PSD export failed: ' + (e as Error).message);
   }
 }

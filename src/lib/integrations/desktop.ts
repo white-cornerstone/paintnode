@@ -64,8 +64,9 @@ function safeDocumentDialogName(name: string): string {
     return `${safeStem(stem)}.cxflow.json`;
   }
   const fileName = trimmed.split(/[\\/]/).pop() || trimmed;
-  const stem = fileName.replace(/\.[^.]*$/, '');
-  return `${safeStem(stem || name)}.ora`;
+  const ext = fileName.toLowerCase().endsWith('.psd') ? 'psd' : 'ora';
+  const stem = fileName.replace(/\.(ora|psd)$/i, '').replace(/\.[^.]*$/, '');
+  return `${safeStem(stem || name)}.${ext}`;
 }
 
 export interface GeneratorConfig {
@@ -598,6 +599,7 @@ export async function saveProjectDocumentAs(args: {
   if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
   const defaultName = safeDocumentDialogName(args.name);
   const isWorkflow = defaultName.toLowerCase().endsWith('.cxflow.json');
+  const isPsd = defaultName.toLowerCase().endsWith('.psd');
   const defaultPath = args.projectPath?.trim()
     ? `${args.projectPath.trim()}/documents/${defaultName}`
     : defaultName;
@@ -606,6 +608,8 @@ export async function saveProjectDocumentAs(args: {
     defaultPath,
     filters: isWorkflow
       ? [{ name: 'PaintNode Workflow', extensions: ['json'] }]
+      : isPsd
+        ? [{ name: 'Photoshop Document', extensions: ['psd'] }]
       : [{ name: 'OpenRaster', extensions: ['ora'] }],
     canCreateDirectories: true,
   });

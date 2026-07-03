@@ -41,6 +41,7 @@
   import {
     autosaveOpenDocuments,
     exportPngCommand,
+    exportPsdCommand,
     importImageCommand,
     openCommand,
     openDocumentPaths,
@@ -340,6 +341,9 @@
         break;
       case 'app:export-png':
         void exportPngCommand();
+        break;
+      case 'app:export-psd':
+        void exportPsdCommand();
         break;
       case 'app:close-document':
         void closeActiveDocument();
