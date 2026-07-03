@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Action } from 'svelte/action';
   import Panel from './Panel.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
@@ -120,6 +121,34 @@
   function metaFor(file: ProjectFile): string {
     return `${kindLabel(file)} · ${formatSize(file.size)}`;
   }
+
+  function isTextCropped(node: HTMLElement): boolean {
+    return node.scrollWidth - node.clientWidth > 1 || node.scrollHeight - node.clientHeight > 1;
+  }
+
+  const croppedNameTooltip: Action<HTMLElement, string> = (node, name) => {
+    const tip = tooltip(node, { text: '', placement: 'top' });
+
+    const updateTip = () => {
+      if (tip) tip.update?.({ text: isTextCropped(node) ? name : '', placement: 'top' });
+    };
+
+    node.addEventListener('pointerenter', updateTip);
+    node.addEventListener('focus', updateTip);
+    updateTip();
+
+    return {
+      update(nextName: string) {
+        name = nextName;
+        updateTip();
+      },
+      destroy() {
+        node.removeEventListener('pointerenter', updateTip);
+        node.removeEventListener('focus', updateTip);
+        if (tip) tip.destroy?.();
+      },
+    };
+  };
 
   function formatDate(ms: number | null | undefined): string {
     if (!ms) return '-';
@@ -304,7 +333,7 @@
       oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}
     >
       {@render fileThumb(file, actionLabel)}
-      <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
+      <button class="file-name" use:croppedNameTooltip={file.name} onclick={() => void openFile(file)}>{file.name}</button>
     </div>
   {:else}
     <div class="file-row" role="listitem" oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}>
