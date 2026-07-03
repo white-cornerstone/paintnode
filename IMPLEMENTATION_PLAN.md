@@ -41,7 +41,7 @@ convertible text layers as editable `kind: 'text'` keeping the original bitmap +
 passthrough; export maps all new fields back and sets `invalidateTextLayers`
 only when a text layer is actually (re)written.
 **Tests**: mapping units/bail-outs; round-trip PSD text fixture.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 4: End-to-end verification
 **Goal**: fixture PSD with styled text opened in the running app; text editable;

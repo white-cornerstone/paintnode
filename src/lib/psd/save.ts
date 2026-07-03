@@ -294,6 +294,8 @@ function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
     blendMode: psdBlendFor(layer),
     canvas: layer.canvas,
   };
+  // Edited imported text: replace the parsed Photoshop text data with ours.
+  if (layer.kind === 'text' && layer.text) out.text = textModelToPsdText(layer.text, layer);
   const linked = linkedPsdMask(doc, layer);
   if (linked) {
     out.mask = linked;
@@ -412,12 +414,26 @@ export function buildPsdDocument(doc: PaintDocument, options: BuildPsdOptions = 
   };
 }
 
+/**
+ * True when any text layer is (re)written rather than passed through — Photoshop
+ * must then re-render text on open (its standard "update text layers" prompt).
+ */
+export function needsTextInvalidation(doc: PaintDocument): boolean {
+  return doc.layers.some(
+    (layer) =>
+      layer.kind === 'text' &&
+      layer.text &&
+      (!layer.psd || (layer.psd.lockReason === null && !isCleanPsdLayer(doc, layer))),
+  );
+}
+
 export async function savePsdBytes(doc: PaintDocument): Promise<Uint8Array> {
   const { writePsdUint8Array } = await import('ag-psd');
   const psd = buildPsdDocument(doc);
   return writePsdUint8Array(psd, {
     generateThumbnail: true,
     noBackground: true,
+    invalidateTextLayers: needsTextInvalidation(doc),
   });
 }
 

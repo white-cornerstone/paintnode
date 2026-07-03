@@ -11,8 +11,9 @@ import type { Layer as AgPsdLayer, PixelData } from 'ag-psd';
 import { PaintDocument } from '../engine/Document.svelte';
 import { Layer } from '../engine/Layer.svelte';
 import { clamp, createCanvas, ctx2d } from '../engine/types';
-import type { PsdLayerMaskState, PsdLayerSource } from '../engine/psdSource';
-import { flattenPsdTree, importNotices, psdLockReason, psdToBlend } from './import';
+import type { PsdLayerMaskState, PsdLayerSource, PsdLockReason } from '../engine/psdSource';
+import { textBounds } from '../engine/text/render';
+import { flattenPsdTree, importNotices, psdLockReason, psdTextToModel, psdToBlend } from './import';
 
 export interface PsdImportResult {
   doc: PaintDocument;
@@ -134,17 +135,32 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
   for (const item of flat) {
     const src = item.layer;
     const blend = psdToBlend(src.blendMode);
-    const lockReason = psdLockReason(src);
+    let lockReason: PsdLockReason | null = psdLockReason(src);
+    // Representable text layers become editable PaintNode text instead of locked.
+    const textModel = lockReason === 'text' && src.text ? psdTextToModel(src.text) : null;
+    if (textModel) lockReason = null;
     const canvas = getLayerCanvas(src);
-    const layer = new Layer(
-      Math.max(1, canvas?.width ?? 1),
-      Math.max(1, canvas?.height ?? 1),
-      src.name || 'Layer',
-      undefined,
-      src.left ?? 0,
-      src.top ?? 0,
-    );
-    if (canvas) layer.ctx.drawImage(canvas, 0, 0);
+    // Text layers use a document-sized canvas at (0,0) like PaintNode-native text,
+    // so the existing edit/commit pipeline re-renders them in place.
+    const layer = textModel
+      ? new Layer(psd.width, psd.height, src.name || 'Layer')
+      : new Layer(
+          Math.max(1, canvas?.width ?? 1),
+          Math.max(1, canvas?.height ?? 1),
+          src.name || 'Layer',
+          undefined,
+          src.left ?? 0,
+          src.top ?? 0,
+        );
+    if (canvas) layer.ctx.drawImage(canvas, textModel ? (src.left ?? 0) : 0, textModel ? (src.top ?? 0) : 0);
+    if (textModel) {
+      // Anchor the model so PaintNode's own layout lands on the PSD pixel bounds.
+      const bounds = textBounds(textModel);
+      textModel.x = (src.left ?? 0) - bounds.x;
+      textModel.y = (src.top ?? 0) - bounds.y;
+      layer.kind = 'text';
+      layer.text = textModel;
+    }
     layer.opacity = clamp(src.opacity ?? 1, 0, 1);
     layer.visible = item.visible;
     layer.blendMode = blend.mode;
@@ -178,7 +194,21 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
   doc.layers = layers;
   doc.activeLayerId = layers[layers.length - 1].id;
 
-  const notices = importNotices(flat);
+  // Classify text layers by whether they actually converted, so counts are honest.
+  const classify = (l: AgPsdLayer): PsdLockReason | null => {
+    const reason = psdLockReason(l);
+    if (reason === 'text' && l.text && psdTextToModel(l.text)) return null;
+    return reason;
+  };
+  const notices = importNotices(flat, classify);
+  const editableText = flat.filter(
+    (item) => psdLockReason(item.layer) === 'text' && classify(item.layer) === null,
+  ).length;
+  if (editableText > 0) {
+    notices.push(
+      `${editableText} text layer${editableText === 1 ? ' is' : 's are'} editable; Photoshop re-renders edited text on next open`,
+    );
+  }
   doc.psdSource = { psd, notices };
   return { doc, notices };
 }
