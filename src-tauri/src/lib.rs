@@ -764,6 +764,24 @@ fn safe_document_file_name(name: &str) -> String {
     format!("{}.ora", safe_stem(stem))
 }
 
+fn saved_document_display_name(path: &Path, fallback_name: &str, is_workflow: bool) -> String {
+    let Some(file_name) = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return fallback_name.to_string();
+    };
+    if is_workflow {
+        return file_name.to_string();
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(fallback_name)
+        .to_string()
+}
+
 fn remove_autosave_for_name(project_path: &Path, name: &str) {
     let file_name = safe_document_file_name(name);
     let stem = Path::new(&file_name)
@@ -6030,12 +6048,7 @@ async fn project_save_document_as(
         } else {
             path.to_string_lossy().to_string()
         };
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or("Untitled")
-            .to_string();
+        let name = saved_document_display_name(&path, "Untitled", is_workflow);
         Ok(SavedDocumentResult {
             relative_path: display_path,
             name,
@@ -7321,6 +7334,18 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["tram-2.ora"]);
+    }
+
+    #[test]
+    fn saved_document_display_name_preserves_workflow_suffix() {
+        assert_eq!(
+            saved_document_display_name(Path::new("/tmp/sketch.ora"), "Untitled", false),
+            "sketch"
+        );
+        assert_eq!(
+            saved_document_display_name(Path::new("/tmp/board.cxflow.json"), "Untitled", true),
+            "board.cxflow.json"
+        );
     }
 
     #[test]
