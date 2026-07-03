@@ -1059,7 +1059,7 @@
   .panel-toggle:hover {
     color: var(--text-bright);
   }
-  /* Edge-collapsed dock: keep panel labels (Photoshop icon+label rail) */
+  /* Edge-collapsed dock: keep panel labels in the icon+label rail. */
   .dock-rail {
     display: flex;
     flex-direction: column;

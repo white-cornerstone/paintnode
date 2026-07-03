@@ -175,7 +175,7 @@
 
   const nameOf = (id: string) => editor.tools[id]?.name ?? id;
 
-  // Remembered active member per flyout group (Photoshop shows the last-used tool of a group).
+  // Remembered active member per flyout group so the last-used tool stays surfaced.
   let lastMember = $state<Record<string, string>>({
     focus: 'blur',
     toning: 'dodge',

@@ -22,11 +22,11 @@ export type BlendMode =
 export interface BlendModeOption {
   value: BlendMode;
   label: string;
-  /** Group separator before this item (Photoshop-style grouping). */
+  /** Group separator before this item. */
   group?: boolean;
 }
 
-/** Ordered, grouped list for the blend-mode dropdown (mirrors Photoshop ordering). */
+/** Ordered, grouped list for the blend-mode dropdown. */
 export const BLEND_MODES: BlendModeOption[] = [
   { value: 'source-over', label: 'Normal' },
   { value: 'darken', label: 'Darken', group: true },

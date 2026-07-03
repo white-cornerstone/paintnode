@@ -21,7 +21,6 @@
     Settings,
     Sparkle,
     SquareHintSparkles,
-    Video,
   } from '../icons';
 
   interface Anchor {
@@ -194,10 +193,6 @@
     menuOpen = false;
   }
 
-  function watchQuickVideo(): void {
-    menuOpen = false;
-    window.open('https://helpx.adobe.com/photoshop/desktop/get-started/learn-the-basics/boost-workflows-with-the-contextual-task-bar.html', '_blank', 'noopener,noreferrer');
-  }
 </script>
 
 {#if ui.contextualTaskBarVisible}
@@ -253,10 +248,6 @@
         <button role="menuitem" onclick={togglePinned}>
           <Icon svg={pinned ? PinOff : Pin} size={16} />
           <span>{pinned ? 'Unpin bar position' : 'Pin bar position'}</span>
-        </button>
-        <button role="menuitem" onclick={watchQuickVideo}>
-          <Icon svg={Video} size={16} />
-          <span>Watch quick video</span>
         </button>
       </div>
     {/if}

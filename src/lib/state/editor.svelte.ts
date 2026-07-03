@@ -2127,7 +2127,7 @@ export class EditorStore implements ToolHost {
     }
     layer.suppressed = false;
     if (blank) {
-      // All text deleted → remove the layer (Photoshop-style), unless it's the only one.
+      // All text deleted → remove the layer, unless it's the only one.
       if (doc.layers.length > 1) {
         this.structural('Delete Text', () => doc.remove(layer.id));
       } else {

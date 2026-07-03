@@ -169,7 +169,7 @@ function alphaAt(mask: HTMLCanvasElement, x: number, y: number): number {
 }
 
 describe('AI retouch request helpers', () => {
-  it('cycles through the Photoshop-style J retouch tools', () => {
+  it('cycles through the J retouch tools', () => {
     expect(nextAiRetouchTool('spot-healing')).toBe('remove');
     expect(nextAiRetouchTool('red-eye')).toBe('spot-healing');
     expect(nextAiRetouchTool('spot-healing', true)).toBe('red-eye');
