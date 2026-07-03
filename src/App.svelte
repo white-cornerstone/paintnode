@@ -16,6 +16,8 @@
   import LibrariesPanel from './lib/components/LibrariesPanel.svelte';
   import ChannelsPanel from './lib/components/ChannelsPanel.svelte';
   import PathsPanel from './lib/components/PathsPanel.svelte';
+  import CharacterPanel from './lib/components/CharacterPanel.svelte';
+  import ParagraphPanel from './lib/components/ParagraphPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import Icon from './lib/components/Icon.svelte';
@@ -36,6 +38,8 @@
     Layers,
     Library,
     Options,
+    TextFont,
+    TextParagraphIcon,
   } from './lib/icons';
   import { installKeyboard } from './lib/state/keyboard';
   import {
@@ -96,6 +100,8 @@
     | 'patterns'
     | 'properties'
     | 'adjustments'
+    | 'character'
+    | 'paragraph'
     | 'libraries'
     | 'layers'
     | 'channels'
@@ -118,6 +124,8 @@
       panels: [
         { id: 'properties', title: 'Properties', icon: Options },
         { id: 'adjustments', title: 'Adjustments', icon: DataHistogram },
+        { id: 'character', title: 'Character', icon: TextFont },
+        { id: 'paragraph', title: 'Paragraph', icon: TextParagraphIcon },
         { id: 'libraries', title: 'Libraries', icon: Library },
       ],
     },
@@ -606,6 +614,10 @@
     <PropertiesPanel {collapsed} {onToggle} />
   {:else if id === 'adjustments'}
     <AdjustmentsPanel {collapsed} {onToggle} />
+  {:else if id === 'character'}
+    <CharacterPanel {collapsed} {onToggle} />
+  {:else if id === 'paragraph'}
+    <ParagraphPanel {collapsed} {onToggle} />
   {:else if id === 'libraries'}
     <LibrariesPanel {collapsed} {onToggle} />
   {:else if id === 'layers'}

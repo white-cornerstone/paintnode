@@ -31,7 +31,7 @@ selection (via overlay) or the selected text layer (via applyTextEdit); overlay
 CSS/dataset round-trip for new attributes; `CharacterPanel.svelte` +
 `ParagraphPanel.svelte` registered in the right-dock 'edits' tab group, reflecting
 the caret/selection style; font style dropdown (Regular/Italic/Bold/Bold Italic).
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 3: Editable PSD text import/export
 **Goal**: pure `psdTextToModel` mapping (fonts from PostScript names, styles,

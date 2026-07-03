@@ -30,7 +30,9 @@ import {
   defaultStyle,
   isBlankModel,
   textLayerName,
+  type TextAntiAlias,
   type TextModel,
+  type TextParagraph,
   type TextStyle,
 } from '../engine/text/model';
 import { renderTextToCanvas, textBounds } from '../engine/text/render';
@@ -335,6 +337,12 @@ export class EditorStore implements ToolHost {
   lastFontSize = $state(72);
   /** Set by the text overlay so other UI (e.g. canvas clicks) can commit the edit. */
   private textCommitFn: (() => void) | null = null;
+  /** Set by the text overlay so panels can restyle the live selection. */
+  private textStyleApplier: ((patch: Partial<TextStyle>) => void) | null = null;
+  private textParagraphApplier: ((patch: Partial<Omit<TextParagraph, 'runs'>>) => void) | null = null;
+  /** Style/paragraph under the caret while editing (set by the overlay for the panels). */
+  liveTextStyle = $state<TextStyle | null>(null);
+  liveTextParagraph = $state<Omit<TextParagraph, 'runs'> | null>(null);
 
   activeToolId = $state('brush');
   flashMessage = $state('');
@@ -2163,6 +2171,74 @@ export class EditorStore implements ToolHost {
   }
   commitActiveText(): void {
     this.textCommitFn?.();
+  }
+
+  /** Overlay registers appliers so the Character/Paragraph panels can restyle the live selection. */
+  registerTextStyleApplier(fn: ((patch: Partial<TextStyle>) => void) | null): void {
+    this.textStyleApplier = fn;
+  }
+  registerTextParagraphApplier(fn: ((patch: Partial<Omit<TextParagraph, 'runs'>>) => void) | null): void {
+    this.textParagraphApplier = fn;
+  }
+
+  /** The text layer the Character/Paragraph panels operate on when not editing. */
+  get panelTextLayer(): Layer | null {
+    if (this.textEdit) return null;
+    const layer = this.activeLayer;
+    return layer?.kind === 'text' && layer.text && !layer.locked ? layer : null;
+  }
+
+  /** Fold the layer offset into a cloned model (applyTextEdit resets x/y to 0). */
+  private clonedDocSpaceModel(layer: Layer): TextModel {
+    const model = cloneModel(layer.text!);
+    model.x += layer.x;
+    model.y += layer.y;
+    return model;
+  }
+
+  /** Apply character styling to the live selection or the whole selected text layer. */
+  applyCharacterStyle(patch: Partial<TextStyle>): void {
+    if (this.textEdit) {
+      this.textStyleApplier?.(patch);
+      return;
+    }
+    const layer = this.panelTextLayer;
+    if (!layer?.text) return;
+    const model = this.clonedDocSpaceModel(layer);
+    for (const paragraph of model.paragraphs) {
+      for (const run of paragraph.runs) {
+        Object.assign(run.style, patch);
+        if (patch.color) run.style.color = { ...patch.color };
+      }
+    }
+    this.applyTextEdit(layer, model);
+  }
+
+  /** Apply paragraph settings to the live selection or the whole selected text layer. */
+  applyParagraphStyle(patch: Partial<Omit<TextParagraph, 'runs'>>): void {
+    if (this.textEdit) {
+      this.textParagraphApplier?.(patch);
+      return;
+    }
+    const layer = this.panelTextLayer;
+    if (!layer?.text) return;
+    const model = this.clonedDocSpaceModel(layer);
+    for (const paragraph of model.paragraphs) Object.assign(paragraph, patch);
+    this.applyTextEdit(layer, model);
+  }
+
+  /** Set the (per-layer) Photoshop anti-alias mode, kept for PSD round trips. */
+  applyTextAntiAlias(mode: TextAntiAlias): void {
+    if (this.textEdit) {
+      this.textEdit.model.antiAlias = mode;
+      this.bump();
+      return;
+    }
+    const layer = this.panelTextLayer;
+    if (!layer?.text) return;
+    const model = this.clonedDocSpaceModel(layer);
+    model.antiAlias = mode;
+    this.applyTextEdit(layer, model);
   }
 
   /** Finish the active edit, applying `model` (undoable). */

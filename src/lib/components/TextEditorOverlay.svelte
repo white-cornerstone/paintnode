@@ -82,11 +82,11 @@
       0,
     );
     if (leading > 0) div.style.lineHeight = `${leading}px`;
-    if (p.firstLineIndent) div.style.textIndent = `${p.firstLineIndent}px`;
-    if (p.indentLeft) div.style.paddingLeft = `${p.indentLeft}px`;
-    if (p.indentRight) div.style.paddingRight = `${p.indentRight}px`;
-    if (p.spaceBefore) div.style.marginTop = `${p.spaceBefore}px`;
-    if (p.spaceAfter) div.style.marginBottom = `${p.spaceAfter}px`;
+    div.style.textIndent = p.firstLineIndent ? `${p.firstLineIndent}px` : '';
+    div.style.paddingLeft = p.indentLeft ? `${p.indentLeft}px` : '';
+    div.style.paddingRight = p.indentRight ? `${p.indentRight}px` : '';
+    div.style.marginTop = p.spaceBefore ? `${p.spaceBefore}px` : '';
+    div.style.marginBottom = p.spaceAfter ? `${p.spaceAfter}px` : '';
     div.setAttribute('data-pn-align', p.align);
     div.setAttribute('data-pn-indent-left', String(p.indentLeft));
     div.setAttribute('data-pn-indent-right', String(p.indentRight));
@@ -273,7 +273,14 @@
     if (!lines.length) {
       lines.push(defaultParagraph({ runs: [{ text: '', style: session?.baseStyle ?? defaultStyle() }] }));
     }
-    return { version: 1, x: Math.round(session!.model.x), y: Math.round(session!.model.y), paragraphs: lines };
+    const antiAlias = session?.model.antiAlias;
+    return {
+      version: 1,
+      x: Math.round(session!.model.x),
+      y: Math.round(session!.model.y),
+      paragraphs: lines,
+      ...(antiAlias ? { antiAlias } : {}),
+    };
   }
 
   // --- commit / cancel ---
@@ -361,12 +368,12 @@
   }
   function setAlign(a: TextAlign): void {
     curAlign = a;
-    restore();
-    ensureSelection();
-    document.execCommand(a === 'center' ? 'justifyCenter' : a === 'right' ? 'justifyRight' : 'justifyLeft');
-    refreshToolbar();
+    applyParagraphPatch({ align: a });
   }
-  function wrapStyle(prop: 'fontSize' | 'letterSpacing', value: string): void {
+  function wrapSelection(
+    decorate: (span: HTMLSpanElement) => void,
+    afterAttach?: (span: HTMLSpanElement) => void,
+  ): void {
     restore();
     ensureSelection();
     const sel = window.getSelection();
@@ -374,10 +381,11 @@
     const range = sel.getRangeAt(0);
     if (range.collapsed) return;
     const span = document.createElement('span');
-    span.style[prop] = value;
+    decorate(span);
     try {
       span.appendChild(range.extractContents());
       range.insertNode(span);
+      afterAttach?.(span);
       const nr = document.createRange();
       nr.selectNodeContents(span);
       sel.removeAllRanges();
@@ -388,6 +396,27 @@
     }
     refreshToolbar();
   }
+  function wrapStyle(prop: 'fontSize' | 'letterSpacing', value: string): void {
+    wrapSelection((span) => (span.style[prop] = value));
+  }
+  /**
+   * Wrap the selection in a span carrying a data attribute (+ CSS approximation),
+   * stripping the same attribute from wrapped descendants so the wrapper wins.
+   */
+  function wrapData(name: string, value: string, cssProps: [string, string][] = []): void {
+    wrapSelection(
+      (span) => {
+        span.setAttribute(`data-${name}`, value);
+        for (const [prop, cssValue] of cssProps) span.style.setProperty(prop, cssValue);
+      },
+      (span) => {
+        span.querySelectorAll(`[data-${name}]`).forEach((el) => {
+          el.removeAttribute(`data-${name}`);
+          if (el instanceof HTMLElement) for (const [prop] of cssProps) el.style.removeProperty(prop);
+        });
+      },
+    );
+  }
   function setSize(px: number): void {
     curSize = px;
     wrapStyle('fontSize', `${px}px`);
@@ -395,6 +424,70 @@
   function setTracking(px: number): void {
     curTracking = px;
     wrapStyle('letterSpacing', `${px}px`);
+  }
+
+  /** Selection element for reading the current style (panel toggle semantics). */
+  function selectionElement(): Element | null {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) {
+      const n = sel.getRangeAt(0).startContainer;
+      return n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement;
+    }
+    return editable ?? null;
+  }
+
+  /** Character patch from the panels, applied to the live selection. */
+  function applyStylePatch(patch: Partial<TextStyle>): void {
+    restore();
+    ensureSelection();
+    const cur = styleOfEl(selectionElement());
+    if (patch.family !== undefined) exec('fontName', patch.family);
+    if (patch.color !== undefined) exec('foreColor', rgbToHex(patch.color));
+    if (patch.bold !== undefined && patch.bold !== cur.bold) exec('bold');
+    if (patch.italic !== undefined && patch.italic !== cur.italic) exec('italic');
+    if (patch.underline !== undefined && patch.underline !== cur.underline) exec('underline');
+    if (patch.strikethrough !== undefined && patch.strikethrough !== cur.strikethrough) exec('strikeThrough');
+    if (patch.size !== undefined) wrapStyle('fontSize', `${patch.size}px`);
+    if (patch.tracking !== undefined) wrapStyle('letterSpacing', `${patch.tracking}px`);
+    if (patch.leading !== undefined) wrapData('pn-leading', patch.leading === null ? 'auto' : String(patch.leading));
+    if (patch.horizontalScale !== undefined) wrapData('pn-hscale', String(patch.horizontalScale));
+    if (patch.verticalScale !== undefined) wrapData('pn-vscale', String(patch.verticalScale));
+    if (patch.baselineShift !== undefined) wrapData('pn-bshift', String(patch.baselineShift));
+    if (patch.caps !== undefined) {
+      wrapData('pn-caps', patch.caps, [
+        ['text-transform', patch.caps === 'all' ? 'uppercase' : 'none'],
+        ['font-variant-caps', patch.caps === 'small' ? 'small-caps' : 'normal'],
+      ]);
+    }
+    if (patch.script !== undefined) {
+      wrapData('pn-script', patch.script, [
+        ['vertical-align', patch.script === 'super' ? 'super' : patch.script === 'sub' ? 'sub' : 'baseline'],
+      ]);
+    }
+    refreshToolbar();
+  }
+
+  /** Blocks intersecting the selection (all blocks when nothing is selected). */
+  function selectedBlocks(): HTMLElement[] {
+    if (!editable) return [];
+    const blocks = Array.from(editable.querySelectorAll('div,p')).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement,
+    );
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return blocks;
+    const range = sel.getRangeAt(0);
+    const hit = blocks.filter((block) => range.intersectsNode(block));
+    return hit.length ? hit : blocks;
+  }
+
+  /** Paragraph patch from the panels/toolbar, applied to selected paragraphs. */
+  function applyParagraphPatch(patch: Partial<Omit<TextParagraph, 'runs'>>): void {
+    restore();
+    for (const block of selectedBlocks()) {
+      const merged = { ...paragraphFromBlock(block), ...patch, runs: [] };
+      applyParagraphAttrs(block, merged);
+    }
+    refreshToolbar();
   }
 
   function closestBlock(el: Element | null): Element | null {
@@ -407,13 +500,7 @@
   }
 
   function refreshToolbar(): void {
-    const sel = window.getSelection();
-    let el: Element | null = null;
-    if (sel && sel.rangeCount) {
-      const n = sel.getRangeAt(0).startContainer;
-      el = n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement;
-    }
-    el = el ?? editable ?? null;
+    const el = selectionElement();
     const st = styleOfEl(el);
     curFamily = st.family;
     curSize = st.size;
@@ -422,9 +509,12 @@
     curBold = st.bold;
     curItalic = st.italic;
     curUnderline = st.underline;
+    editor.liveTextStyle = st;
     const block = closestBlock(el) ?? editable;
     if (block instanceof HTMLElement) {
-      curAlign = paragraphFromBlock(block).align;
+      const paragraph = paragraphFromBlock(block);
+      curAlign = paragraph.align;
+      editor.liveTextParagraph = paragraph;
     }
   }
 
@@ -441,6 +531,8 @@
 
   onMount(() => {
     editor.registerTextCommit(doCommit);
+    editor.registerTextStyleApplier(applyStylePatch);
+    editor.registerTextParagraphApplier(applyParagraphPatch);
     document.addEventListener('selectionchange', onSelectionChange);
     if (session) buildFromModel(session.model);
     void tick().then(() => {
@@ -452,6 +544,10 @@
   });
   onDestroy(() => {
     editor.registerTextCommit(null);
+    editor.registerTextStyleApplier(null);
+    editor.registerTextParagraphApplier(null);
+    editor.liveTextStyle = null;
+    editor.liveTextParagraph = null;
     document.removeEventListener('selectionchange', onSelectionChange);
   });
 
