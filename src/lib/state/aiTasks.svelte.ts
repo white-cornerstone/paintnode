@@ -118,7 +118,11 @@ class AiTaskStore {
   private loadedProjectPaths = new Set<string>();
 
   get tasks(): AiTask[] {
-    return this.allTasks.filter((task) => task.projectPath === this.activeProjectPath);
+    // Tasks started with no project open (projectPath null) stay visible after
+    // a project is opened; otherwise a running task vanishes from the panel.
+    return this.allTasks.filter(
+      (task) => task.projectPath === this.activeProjectPath || task.projectPath === null,
+    );
   }
 
   create(draft: AiTaskDraft): AiTask {
@@ -215,7 +219,11 @@ class AiTaskStore {
 
   clearCompleted(): void {
     const projectPath = this.activeProjectPath;
-    this.allTasks = this.allTasks.filter((task) => task.projectPath !== projectPath || task.status !== 'completed');
+    // Clears everything the panel currently shows: the active project's tasks
+    // plus project-less (null-path) tasks.
+    this.allTasks = this.allTasks.filter(
+      (task) => (task.projectPath !== projectPath && task.projectPath !== null) || task.status !== 'completed',
+    );
     this.persistProject(projectPath);
   }
 

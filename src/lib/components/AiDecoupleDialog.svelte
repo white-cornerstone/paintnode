@@ -221,6 +221,7 @@
       aiTasks.setProgress(task.id, progress);
       editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
       clearProgressListener();
+      let progressListenerStale = false;
       const runId = createRunId();
       void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
         if (event.payload.runId === runId && event.payload.message.trim()) {
@@ -229,6 +230,12 @@
         }
       })
         .then((unlisten) => {
+          // The run may have finished before listen() resolved; unlisten
+          // immediately instead of leaking the registration.
+          if (progressListenerStale) {
+            unlisten();
+            return;
+          }
           stopProgress = unlisten;
         })
         .catch(() => {
@@ -302,6 +309,7 @@
       } finally {
         busy = false;
         progress = '';
+        progressListenerStale = true;
         clearProgressListener();
         runningTaskId = null;
       }
@@ -368,7 +376,10 @@
           step="1"
           value={taskDetail ? taskDetail.tolerance : tolerance}
           readonly={!!taskDetail}
-          oninput={(event) => (tolerance = event.currentTarget.valueAsNumber)}
+          oninput={(event) => {
+            const next = event.currentTarget.valueAsNumber;
+            if (Number.isFinite(next)) tolerance = Math.min(120, Math.max(0, next));
+          }}
         />
       </label>
     </div>

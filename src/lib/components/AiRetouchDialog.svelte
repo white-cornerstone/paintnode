@@ -76,9 +76,10 @@ Use these annotations as direct user instructions for the regions they point to.
 
   function focusTaskDocument(documentId: string | null): void {
     if (!documentId || editor.activeDocumentId === documentId) return;
-    if (editor.documents.some((session) => session.id === documentId)) {
-      editor.switchDocument(documentId);
+    if (!editor.documents.some((session) => session.id === documentId)) {
+      throw new Error('The document this task was started in has been closed.');
     }
+    editor.switchDocument(documentId);
   }
 
   function clearProgressListener() {
@@ -161,9 +162,6 @@ Use these annotations as direct user instructions for the regions they point to.
     busy = true;
     const targetDocumentId = editor.activeDocumentId;
     const taskProjectPath = project.path;
-    const maskLayer = editor.doc?.layers.find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask') ?? null;
-    const previousMaskLock = maskLayer?.userLocked ?? null;
-    if (maskLayer) maskLayer.userLocked = true;
     const task = aiTasks.create({
       kind: 'retouch',
       title: 'AI Retouch',
@@ -185,14 +183,19 @@ Use these annotations as direct user instructions for the regions they point to.
     onClose();
     const executeTask = async () => {
       let debugDir: string | null = null;
-      const retryMaskLayer = editor.documents
-        .flatMap((session) => session.doc.layers)
-        .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask');
-      if (retryMaskLayer) retryMaskLayer.userLocked = true;
+      const maskLayer =
+        editor.documents
+          .flatMap((session) => session.doc.layers)
+          .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask') ?? null;
+      // Captured per invocation so a retry restores the lock state the user
+      // had at that point, not the one from the original run.
+      const previousMaskLock = maskLayer ? maskLayer.userLocked : null;
+      if (maskLayer) maskLayer.userLocked = true;
       progress = 'Preparing AI retouch inputs...';
       aiTasks.setProgress(task.id, progress);
       editor.flash('Preparing AI retouch...');
       clearProgressListener();
+      let progressListenerStale = false;
       const runId = createRunId();
       void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
         if (event.payload.runId === runId && event.payload.message.trim()) {
@@ -201,6 +204,12 @@ Use these annotations as direct user instructions for the regions they point to.
         }
       })
         .then((unlisten) => {
+          // The run may have finished before listen() resolved; unlisten
+          // immediately instead of leaking the registration.
+          if (progressListenerStale) {
+            unlisten();
+            return;
+          }
           stopProgress = unlisten;
         })
         .catch(() => {
@@ -245,12 +254,13 @@ Use these annotations as direct user instructions for the regions they point to.
           ? await createImageBitmap(await (await fetch(generated.maskDataUrl)).blob())
           : null;
         focusTaskDocument(targetDocumentId);
-        editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
+        const insertedLayerId = editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
           assetId: generated.asset?.id ?? null,
           path: generated.asset?.relativePath ?? null,
         }, maskBmp, maskBmp?.width ?? 0, maskBmp?.height ?? 0);
         maskBmp?.close();
         bmp.close();
+        if (!insertedLayerId) throw new Error('Unable to place the AI retouch result in the document.');
         editor.flash(
           savedAssetCount > 0
             ? `AI retouch added; ${savedAssetCount} generated asset${savedAssetCount === 1 ? '' : 's'} saved`
@@ -269,6 +279,7 @@ Use these annotations as direct user instructions for the regions they point to.
         if (currentMaskLayer && previousMaskLock !== null) currentMaskLayer.userLocked = previousMaskLock;
         busy = false;
         progress = '';
+        progressListenerStale = true;
         clearProgressListener();
         runningTaskId = null;
       }

@@ -182,6 +182,20 @@ describe('passthroughPsdLayer', () => {
     expect(src.protected).toEqual({ composite: true, position: true });
   });
 
+  it('clears transparencyProtected when unlocking a layer locked via transparency protection', () => {
+    const src: AgPsdLayer = { name: 'A', transparencyProtected: true, protected: { transparency: false } };
+    const layer = fakeLayer({
+      userLocked: false,
+      psd: { layer: src, imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over', locked: true } },
+    });
+
+    const out = passthroughPsdLayer(layer);
+
+    expect(out.transparencyProtected).toBe(false);
+    expect(out.protected).toBeUndefined();
+    expect(src.transparencyProtected).toBe(true);
+  });
+
   it('keeps the own hidden flag of visible children inside hidden groups', () => {
     // Effective visibility at import was false (hidden ancestor group), the layer's
     // own flag is not hidden — untouched round trip must not patch it.

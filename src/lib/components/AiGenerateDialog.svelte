@@ -115,9 +115,10 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
 
   function focusTaskDocument(documentId: string | null): void {
     if (!documentId || editor.activeDocumentId === documentId) return;
-    if (editor.documents.some((session) => session.id === documentId)) {
-      editor.switchDocument(documentId);
+    if (!editor.documents.some((session) => session.id === documentId)) {
+      throw new Error('The document this task was started in has been closed.');
     }
+    editor.switchDocument(documentId);
   }
 
   async function saveFillDebugInputs(
@@ -209,6 +210,7 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
               : 'Generating image...',
       );
       clearProgressListener();
+      let progressListenerStale = false;
       const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId() : '';
       if (runOptions.provider === 'codex' || runOptions.provider === 'antigravity') {
         void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
@@ -218,6 +220,12 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
           }
         })
           .then((unlisten) => {
+            // The run may have finished before listen() resolved; unlisten
+            // immediately instead of leaking the registration.
+            if (progressListenerStale) {
+              unlisten();
+              return;
+            }
             stopProgress = unlisten;
           })
           .catch(() => {
@@ -226,6 +234,9 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
           });
       }
       try {
+        // On retry another document may be active; the fill input must come
+        // from the document the task was started in.
+        focusTaskDocument(targetDocumentId);
         const fillInput = hasSelection ? await editor.prepareGenerativeFillInput() : null;
         if (hasSelection && !fillInput) throw new Error('The current selection has no editable pixels.');
         const generationPrompt = fillInput ? userPrompt || defaultFillPrompt() : promptWithCanvasSize(userPrompt);
@@ -330,6 +341,7 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
       } finally {
         busy = false;
         progress = '';
+        progressListenerStale = true;
         clearProgressListener();
         runningTaskId = null;
       }

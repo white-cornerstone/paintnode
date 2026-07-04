@@ -65,7 +65,10 @@ class ProjectStore {
     this.error = '';
     this.busy = true;
     try {
-      this.setProject(await refreshProject(path));
+      const state = await refreshProject(path);
+      // Background tasks refresh the project they were started in; if the user
+      // has since opened a different project, don't switch them back to it.
+      if (!this.current || this.path === path) this.setProject(state);
     } catch (e) {
       this.error = (e as Error)?.message ?? String(e);
     } finally {

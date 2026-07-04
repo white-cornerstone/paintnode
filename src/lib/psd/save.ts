@@ -198,14 +198,16 @@ function applyLayerLock(out: PsdLayer, layer: Layer): void {
     return;
   }
   if (!importedLocked) return;
+  // Check the imported flags before normalizedProtected collapses an all-false
+  // object to undefined, or the transparencyProtected lock variant survives unlock.
+  if (out.transparencyProtected === true && out.protected?.transparency === false) {
+    out.transparencyProtected = false;
+  }
   out.protected = normalizedProtected({
     ...(out.protected ?? {}),
     composite: false,
     position: false,
   });
-  if (out.transparencyProtected === true && out.protected?.transparency === false) {
-    out.transparencyProtected = false;
-  }
 }
 
 function layerToPsd(doc: PaintDocument, layer: Layer): PsdLayer | null {
