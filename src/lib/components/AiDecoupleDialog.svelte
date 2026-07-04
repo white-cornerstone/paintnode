@@ -1,9 +1,15 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
+  import {
+    AiProgressListener,
+    copyTextToClipboard,
+    createRunId,
+    focusTaskDocument,
+    providerLabel,
+  } from './aiTaskDialog';
   import { tooltip } from '../actions/tooltip';
   import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -25,8 +31,6 @@
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
-  type CodexProgressPayload = { runId: string; message: string };
-
   const desktop = isDesktop();
   const DEFAULT_PROMPT =
     'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
@@ -39,14 +43,13 @@
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);
-  let progress = $state('');
   let notes = $state('');
-  let stopProgress: UnlistenFn | null = null;
+  const progressListener = new AiProgressListener();
   let runningTaskId: string | null = null;
   const task = $derived(aiTasks.find(taskId));
   const taskDetail = $derived(task?.detail.kind === 'decouple' ? task.detail : null);
   const currentError = $derived(task?.error ?? error);
-  const currentProgress = $derived(task?.progress ?? progress);
+  const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
   const currentNotes = $derived(taskDetail?.notes ?? notes);
 
@@ -54,34 +57,13 @@
     if (!project.path && addToWorkflow) addToWorkflow = false;
   });
 
-  function createRunId(): string {
-    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-    return `decouple-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
-
-  function clearProgressListener() {
-    stopProgress?.();
-    stopProgress = null;
-  }
-
   onDestroy(() => {
-    if (!runningTaskId) clearProgressListener();
+    if (!runningTaskId) progressListener.clear();
   });
 
   async function copyError() {
     if (!currentError) return;
-    try {
-      await navigator.clipboard.writeText(currentError);
-    } catch {
-      const area = document.createElement('textarea');
-      area.value = currentError;
-      area.style.position = 'fixed';
-      area.style.opacity = '0';
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand('copy');
-      area.remove();
-    }
+    await copyTextToClipboard(currentError);
     copied = true;
     window.setTimeout(() => (copied = false), 1200);
   }
@@ -95,17 +77,6 @@
       canvas.toBlob((next) => (next ? resolve(next) : reject(new Error('Could not encode asset PNG.'))), 'image/png');
     });
     return blob;
-  }
-
-  function providerLabel(): string {
-    return runOptions.provider === 'antigravity' ? 'Local Antigravity CLI' : 'Local Codex CLI';
-  }
-
-  function focusTaskDocument(documentId: string | null): void {
-    if (!documentId || editor.activeDocumentId === documentId) return;
-    if (editor.documents.some((session) => session.id === documentId)) {
-      editor.switchDocument(documentId);
-    }
   }
 
   async function layerToImport(layer: DecoupledLayerResult): Promise<DecoupledLayerImport> {
@@ -201,11 +172,11 @@
     const task = aiTasks.create({
       kind: 'decouple',
       title: 'Extract Assets',
-      subtitle: `${sourceLayer.name} · ${providerLabel()}`,
+      subtitle: `${sourceLayer.name} · ${providerLabel(runOptions.provider)}`,
       progress: 'Preparing source layer...',
       detail: {
         kind: 'decouple',
-        providerLabel: providerLabel(),
+        providerLabel: providerLabel(runOptions.provider),
         prompt: prompt.trim() || DEFAULT_PROMPT,
         sourceLayerName: sourceLayer.name,
         addToWorkflow,
@@ -217,31 +188,18 @@
     runningTaskId = task.id;
     onClose();
     const executeTask = async () => {
-      progress = 'Preparing source layer...';
-      aiTasks.setProgress(task.id, progress);
+      aiTasks.setProgress(task.id, 'Preparing source layer...');
       editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
-      clearProgressListener();
-      let progressListenerStale = false;
-      const runId = createRunId();
-      void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-        if (event.payload.runId === runId && event.payload.message.trim()) {
-          progress = event.payload.message.trim();
-          aiTasks.setProgress(task.id, progress);
-        }
-      })
-        .then((unlisten) => {
-          // The run may have finished before listen() resolved; unlisten
-          // immediately instead of leaking the registration.
-          if (progressListenerStale) {
-            unlisten();
-            return;
-          }
-          stopProgress = unlisten;
-        })
-        .catch(() => {
-          progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-          aiTasks.setProgress(task.id, progress);
-        });
+      const runId = createRunId('decouple');
+      progressListener.start(
+        runId,
+        (message) => aiTasks.setProgress(task.id, message),
+        () =>
+          aiTasks.setProgress(
+            task.id,
+            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
+          ),
+      );
 
       try {
         const sourcePng = await canvasPngBytes(sourceLayer.canvas);
@@ -259,8 +217,7 @@
                 prompt.trim() || DEFAULT_PROMPT,
                 false,
               );
-        progress = 'Cleaning and saving extracted assets...';
-        aiTasks.setProgress(task.id, progress);
+        aiTasks.setProgress(task.id, 'Cleaning and saving extracted assets...');
         const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
         const extractedAssets: ProjectAsset[] = [];
         for (const item of imports) {
@@ -288,7 +245,9 @@
           }
           workflow.show();
         }
-        focusTaskDocument(targetDocumentId);
+        // Not required: the extracted assets are already saved to the project,
+        // so a closed document only skips the optional canvas placement.
+        focusTaskDocument(targetDocumentId, false);
         const inserted = placeOnCanvas
           ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
           : 0;
@@ -308,14 +267,12 @@
         editor.flash('Asset extraction failed');
       } finally {
         busy = false;
-        progress = '';
-        progressListenerStale = true;
-        clearProgressListener();
+        progressListener.clear();
         runningTaskId = null;
       }
     };
     aiTasks.setRetry(task.id, executeTask);
-    window.setTimeout(() => void executeTask(), 0);
+    void executeTask();
   }
 </script>
 

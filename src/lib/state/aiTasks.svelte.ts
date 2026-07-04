@@ -1,3 +1,4 @@
+import { isRecord } from './settings';
 import { ui } from './ui.svelte';
 
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
@@ -69,10 +70,6 @@ type StoredAiTask = Omit<AiTask, 'retry'>;
 
 function storageKey(projectPath: string): string {
   return `${TASKS_STORAGE_PREFIX}${encodeURIComponent(projectPath)}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | null {
@@ -154,15 +151,10 @@ class AiTaskStore {
   setProgress(id: string, progress: string): void {
     const task = this.find(id);
     if (!task) return;
+    // In-memory only: progress can stream many times per second, and a running
+    // task's persisted progress is discarded on load anyway. Status
+    // transitions (create/complete/fail) persist the task list.
     task.progress = progress;
-    this.persistProject(task.projectPath);
-  }
-
-  setSubtitle(id: string, subtitle: string): void {
-    const task = this.find(id);
-    if (!task) return;
-    task.subtitle = subtitle;
-    this.persistProject(task.projectPath);
   }
 
   setDecoupleNotes(id: string, notes: string): void {

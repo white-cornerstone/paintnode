@@ -1,9 +1,16 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
+  import {
+    AiProgressListener,
+    copyTextToClipboard,
+    createRunId,
+    focusTaskDocument,
+    providerLabel,
+    providerRunDir,
+  } from './aiTaskDialog';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
   import { editor } from '../state/editor.svelte';
@@ -27,8 +34,6 @@
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
-  type CodexProgressPayload = { runId: string; message: string };
-
   const desktop = isDesktop();
 
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
@@ -37,43 +42,21 @@
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);
-  let progress = $state('');
-  let stopProgress: UnlistenFn | null = null;
+  const progressListener = new AiProgressListener();
   let runningTaskId: string | null = null;
   const task = $derived(aiTasks.find(taskId));
   const taskDetail = $derived(task?.detail.kind === 'generate' ? task.detail : null);
   const currentError = $derived(task?.error ?? error);
-  const currentProgress = $derived(task?.progress ?? progress);
+  const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
 
-  function createRunId(): string {
-    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-    return `codex-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
-
-  function clearProgressListener() {
-    stopProgress?.();
-    stopProgress = null;
-  }
-
   onDestroy(() => {
-    if (!runningTaskId) clearProgressListener();
+    if (!runningTaskId) progressListener.clear();
   });
 
   async function copyError() {
     if (!currentError) return;
-    try {
-      await navigator.clipboard.writeText(currentError);
-    } catch {
-      const area = document.createElement('textarea');
-      area.value = currentError;
-      area.style.position = 'fixed';
-      area.style.opacity = '0';
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand('copy');
-      area.remove();
-    }
+    await copyTextToClipboard(currentError);
     copied = true;
     window.setTimeout(() => (copied = false), 1200);
   }
@@ -101,33 +84,13 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
     return new TextEncoder().encode(text);
   }
 
-  function providerRunDir(): string {
-    if (runOptions.provider === 'antigravity') return 'antigravity-runs';
-    if (runOptions.provider === 'custom') return 'custom-runs';
-    return 'codex-runs';
-  }
-
-  function providerLabel(): string {
-    if (runOptions.provider === 'antigravity') return 'Local Antigravity CLI';
-    if (runOptions.provider === 'custom') return 'Custom CLI';
-    return 'Local Codex CLI';
-  }
-
-  function focusTaskDocument(documentId: string | null): void {
-    if (!documentId || editor.activeDocumentId === documentId) return;
-    if (!editor.documents.some((session) => session.id === documentId)) {
-      throw new Error('The document this task was started in has been closed.');
-    }
-    editor.switchDocument(documentId);
-  }
-
   async function saveFillDebugInputs(
     fillInput: Awaited<ReturnType<typeof editor.prepareGenerativeFillInput>>,
     generationPrompt: string,
     projectPath: string | null,
   ): Promise<string | null> {
     if (!settings.value.workspace.keepAiRunInputs || !fillInput || !projectPath) return null;
-    const dir = `paintnode/${providerRunDir()}/fill-inputs-${Date.now()}`;
+    const dir = `paintnode/${providerRunDir(runOptions.provider)}/fill-inputs-${Date.now()}`;
     await writeProjectDocumentPath({ projectPath, path: `${dir}/source.png`, bytes: fillInput.sourcePng });
     await writeProjectDocumentPath({ projectPath, path: `${dir}/edit_target.png`, bytes: fillInput.editTargetPng });
     await writeProjectDocumentPath({ projectPath, path: `${dir}/mask.png`, bytes: fillInput.maskPng });
@@ -175,7 +138,7 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
     const task = aiTasks.create({
       kind: 'generate',
       title: hasSelection ? 'Generative Fill' : 'Generate Image',
-      subtitle: providerLabel(),
+      subtitle: providerLabel(runOptions.provider),
       progress:
         runOptions.provider === 'codex'
           ? 'Preparing Codex request...'
@@ -184,7 +147,7 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
             : 'Running local generator...',
       detail: {
         kind: 'generate',
-        providerLabel: providerLabel(),
+        providerLabel: providerLabel(runOptions.provider),
         prompt: userPrompt || defaultFillPrompt(),
         fillMode: hasSelection,
       },
@@ -193,13 +156,14 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
     onClose();
     const executeTask = async () => {
       let fillDebugDir: string | null = null;
-      progress =
+      aiTasks.setProgress(
+        task.id,
         runOptions.provider === 'codex'
           ? 'Preparing Codex request...'
           : runOptions.provider === 'antigravity'
             ? 'Preparing Antigravity request...'
-            : 'Running local generator...';
-      aiTasks.setProgress(task.id, progress);
+            : 'Running local generator...',
+      );
       editor.flash(
         hasSelection
           ? 'Preparing generative fill...'
@@ -209,29 +173,18 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
               ? 'Generating with Antigravity...'
               : 'Generating image...',
       );
-      clearProgressListener();
-      let progressListenerStale = false;
-      const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId() : '';
+      progressListener.clear();
+      const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId('generate') : '';
       if (runOptions.provider === 'codex' || runOptions.provider === 'antigravity') {
-        void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-          if (event.payload.runId === runId && event.payload.message.trim()) {
-            progress = event.payload.message.trim();
-            aiTasks.setProgress(task.id, progress);
-          }
-        })
-          .then((unlisten) => {
-            // The run may have finished before listen() resolved; unlisten
-            // immediately instead of leaking the registration.
-            if (progressListenerStale) {
-              unlisten();
-              return;
-            }
-            stopProgress = unlisten;
-          })
-          .catch(() => {
-            progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-            aiTasks.setProgress(task.id, progress);
-          });
+        progressListener.start(
+          runId,
+          (message) => aiTasks.setProgress(task.id, message),
+          () =>
+            aiTasks.setProgress(
+              task.id,
+              runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
+            ),
+        );
       }
       try {
         // On retry another document may be active; the fill input must come
@@ -243,12 +196,13 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
         const generationTarget = fillInput ? null : targetDimensions();
         fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt, taskProjectPath) : null;
         if (fillDebugDir) {
-          progress = `Saved fill inputs: ${fillDebugDir}`;
-          aiTasks.setProgress(task.id, progress);
+          aiTasks.setProgress(task.id, `Saved fill inputs: ${fillDebugDir}`);
         }
         if (fillInput) {
-          progress = fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...';
-          aiTasks.setProgress(task.id, progress);
+          aiTasks.setProgress(
+            task.id,
+            fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...',
+          );
         }
         const generated =
           runOptions.provider === 'codex'
@@ -340,14 +294,12 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
         editor.flash('Generation failed');
       } finally {
         busy = false;
-        progress = '';
-        progressListenerStale = true;
-        clearProgressListener();
+        progressListener.clear();
         runningTaskId = null;
       }
     };
     aiTasks.setRetry(task.id, executeTask);
-    window.setTimeout(() => void executeTask(), 0);
+    void executeTask();
   }
 </script>
 
