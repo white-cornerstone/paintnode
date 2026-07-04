@@ -5,6 +5,7 @@
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { projectDocumentSourceKey } from '../state/documentSource';
   import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
@@ -197,69 +198,76 @@
 
   async function openFile(file: ProjectFile) {
     try {
-      if (isOra(file)) {
-        const sourceKey = projectDocumentSourceKey(file.relativePath);
-        if (editor.focusDocumentBySource(sourceKey)) {
-          editor.flash(`${file.name} is already open`);
-          return;
-        }
+      await ui.withLoading(`Opening ${file.name}…`, () => openFileInner(file));
+    } catch (e) {
+      editor.flash('Open project file failed: ' + ((e as Error)?.message ?? String(e)));
+    }
+  }
 
-        const bytes = await project.readFile(file);
-        const doc = await loadOra(bufferFrom(bytes));
-        doc.name = file.name.replace(/\.ora$/i, '');
-        editor.openDocument(doc, true, sourceKey);
-        editor.markSaved(file.relativePath);
-        editor.flash(`Opened ${file.name}`);
+  async function openFileInner(file: ProjectFile) {
+    if (isOra(file)) {
+      const sourceKey = projectDocumentSourceKey(file.relativePath);
+      if (editor.focusDocumentBySource(sourceKey)) {
+        editor.flash(`${file.name} is already open`);
         return;
       }
 
-      if (isPsd(file)) {
-        const sourceKey = projectDocumentSourceKey(file.relativePath);
-        if (editor.focusDocumentBySource(sourceKey)) {
-          editor.flash(`${file.name} is already open`);
-          return;
-        }
+      const bytes = await project.readFile(file);
+      const doc = await loadOra(bufferFrom(bytes));
+      doc.name = file.name.replace(/\.ora$/i, '');
+      editor.openDocument(doc, true, sourceKey);
+      editor.markSaved(file.relativePath);
+      editor.flash(`Opened ${file.name}`);
+      return;
+    }
 
-        const bytes = await project.readFile(file);
-        const { doc, notices } = await loadPsd(bufferFrom(bytes));
-        doc.name = file.name.replace(/\.psd$/i, '');
-        // The document stays .psd, but no savedPath is adopted: the first Save
-        // prompts for a name, so overwriting the opened file is an explicit choice.
-        const session = editor.openDocument(doc, true, sourceKey);
-        session.saveFormat = 'psd';
-        session.sourceExtension = 'psd';
-        editor.flash(notices.length ? `Opened ${file.name} — ${notices.join('; ')}` : `Opened ${file.name}`);
+    if (isPsd(file)) {
+      const sourceKey = projectDocumentSourceKey(file.relativePath);
+      if (editor.focusDocumentBySource(sourceKey)) {
+        editor.flash(`${file.name} is already open`);
         return;
       }
 
-      if (isWorkflow(file)) {
-        const bytes = await project.readFile(file);
-        workflow.openFromBytes(bytes, file.relativePath, file.name.replace(/\.cxflow\.json$/i, ''));
-        editor.flash(`Opened ${file.name}`);
-        return;
-      }
+      const bytes = await project.readFile(file);
+      const { doc, notices } = await loadPsd(bufferFrom(bytes));
+      doc.name = file.name.replace(/\.psd$/i, '');
+      // The document stays .psd, but no savedPath is adopted: the first Save
+      // prompts for a name, so overwriting the opened file is an explicit choice.
+      const session = editor.openDocument(doc, true, sourceKey);
+      session.saveFormat = 'psd';
+      session.sourceExtension = 'psd';
+      editor.flash(notices.length ? `Opened ${file.name} — ${notices.join('; ')}` : `Opened ${file.name}`);
+      return;
+    }
 
-      if (isImage(file)) {
-        const bytes = await project.readFile(file);
-        const bmp = await bytesToBitmap(bytes, file.mime ?? 'image/png');
+    if (isWorkflow(file)) {
+      const bytes = await project.readFile(file);
+      workflow.openFromBytes(bytes, file.relativePath, file.name.replace(/\.cxflow\.json$/i, ''));
+      editor.flash(`Opened ${file.name}`);
+      return;
+    }
+
+    if (isImage(file)) {
+      const bytes = await project.readFile(file);
+      const bmp = await bytesToBitmap(bytes, file.mime ?? 'image/png');
+      try {
         const asset = assetFor(file);
         const placed = editor.placeImage(bmp, bmp.width, bmp.height, file.name.replace(/\.[^.]+$/, ''), {
           assetId: asset?.id ?? null,
           path: file.relativePath,
         });
-        bmp.close();
         editor.flash(
           placed.oversized
             ? `Placed ${file.name} full-size; use Move or Image > Reveal All`
             : `Placed ${file.name}`,
         );
-        return;
+      } finally {
+        bmp.close();
       }
-
-      await project.revealFile(file);
-    } catch (e) {
-      editor.flash('Open project file failed: ' + ((e as Error)?.message ?? String(e)));
+      return;
     }
+
+    await project.revealFile(file);
   }
 
   async function revealFile(file: ProjectFile) {
@@ -302,15 +310,17 @@
     if (!selected.length) return;
     let imported = 0;
     try {
-      for (const file of selected) {
-        const bmp = await createImageBitmap(file);
-        try {
-          await project.storeImportedFile(file, bmp.width, bmp.height);
-        } finally {
-          bmp.close();
+      await ui.withLoading(selected.length === 1 ? `Importing ${selected[0].name}…` : 'Importing images…', async () => {
+        for (const file of selected) {
+          const bmp = await createImageBitmap(file);
+          try {
+            await project.storeImportedFile(file, bmp.width, bmp.height);
+          } finally {
+            bmp.close();
+          }
+          imported += 1;
         }
-        imported += 1;
-      }
+      });
       editor.flash(imported === 1 ? `Imported ${selected[0].name}` : `Imported ${imported} images`);
     } catch (e) {
       editor.flash('Import image failed: ' + ((e as Error)?.message ?? String(e)));
@@ -504,7 +514,7 @@
           <button
             aria-label="Refresh project"
             use:tooltip={{ text: 'Refresh project', placement: 'left' }}
-            onclick={() => void project.refresh()}
+            onclick={() => void ui.withLoading('Refreshing project…', () => project.refresh())}
           >
             <Icon svg={ArrowSync} size={15} />
           </button>

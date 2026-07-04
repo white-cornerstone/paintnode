@@ -1,7 +1,8 @@
 import {
   deleteProjectAsset,
   isDesktop,
-  openProjectFolder,
+  openProjectFolderAt,
+  pickProjectFolder,
   readProjectFile,
   readProjectAsset,
   refreshProject,
@@ -15,6 +16,7 @@ import {
   type ProjectFile,
   type ProjectState,
 } from '../integrations/desktop';
+import { ui } from './ui.svelte';
 
 const KEY = 'paintnode.projectPath';
 
@@ -31,7 +33,7 @@ class ProjectStore {
     if (!isDesktop()) return;
     const path = localStorage.getItem(KEY);
     if (!path) return;
-    await this.refresh(path);
+    await ui.withLoading('Loading project…', () => this.refresh(path));
   }
 
   async openFolder(): Promise<void> {
@@ -42,8 +44,10 @@ class ProjectStore {
     }
     this.busy = true;
     try {
-      const state = await openProjectFolder();
-      if (state) this.setProject(state);
+      // Pick first: the indicator should cover the scan, not the OS dialog.
+      const selected = await pickProjectFolder();
+      if (!selected) return;
+      this.setProject(await ui.withLoading('Opening project…', () => openProjectFolderAt(selected)));
     } catch (e) {
       this.error = (e as Error)?.message ?? String(e);
     } finally {
@@ -51,6 +55,11 @@ class ProjectStore {
     }
   }
 
+  /**
+   * Re-scan the project folder. Silent — it also runs as a background side
+   * effect (autosave, post-import); user-initiated call sites wrap it in
+   * ui.withLoading to surface the wait.
+   */
   async refresh(path = this.path): Promise<void> {
     if (!path || !isDesktop()) return;
     this.error = '';

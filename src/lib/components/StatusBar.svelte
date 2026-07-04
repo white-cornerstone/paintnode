@@ -99,6 +99,13 @@
     <span class="flash">{editor.flashMessage}</span>
   {/if}
   <span class="spacer"></span>
+  {#if ui.loadingLabel}
+    <span class="loading" role="status">
+      <span class="loading-label">{ui.loadingLabel}</span>
+      <span class="loading-bar"><span class="loading-fill"></span></span>
+    </span>
+    <span class="sep"></span>
+  {/if}
   <span class="item dim">{hasDocument ? `${layerCount} layer${layerCount === 1 ? '' : 's'}` : ''}</span>
   {#if memoryLabel}
     <span class="sep"></span>
@@ -173,5 +180,51 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+  }
+  .loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    /* Sub-250ms waits never mount at all (ui.beginLoading's anti-flash delay);
+       this is just a quick fade for the ones that do. */
+    animation: loading-appear 120ms ease-out both;
+  }
+  .loading-label {
+    color: var(--text-dim);
+  }
+  .loading-bar {
+    position: relative;
+    width: 110px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border-soft);
+    overflow: hidden;
+  }
+  .loading-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 40%;
+    border-radius: 2px;
+    background: var(--accent);
+    /* Sweep with transform (not `left`) so it composites without per-frame layout. */
+    animation: loading-sweep 1.2s ease-in-out infinite;
+  }
+  @keyframes loading-sweep {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(250%);
+    }
+  }
+  @keyframes loading-appear {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 </style>

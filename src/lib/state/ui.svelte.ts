@@ -1,4 +1,6 @@
 // Lightweight reactive UI state (status bar readouts + which modal dialog is open).
+import { LoadingTracker } from './loading';
+
 export type DialogId =
   | 'new'
   | 'about'
@@ -37,6 +39,14 @@ class UiState {
   contextualTaskBarVisible = $state(true);
   contextualTaskBarResetToken = $state(0);
 
+  // Background waits (project scan, document decode) surfaced in the status bar.
+  // Null until a wait outlives the tracker's anti-flash delay, so short waits
+  // never mount the indicator (or its screen-reader live region) at all.
+  loadingLabel = $state<string | null>(null);
+  private loadingTracker = new LoadingTracker((label) => {
+    this.loadingLabel = label;
+  });
+
   // Font-embed prompt shown on save when text uses imported (embeddable) fonts.
   fontEmbed = $state<FontEmbedPrompt | null>(null);
   private fontEmbedResolver: ((v: FontEmbedChoice) => void) | null = null;
@@ -74,6 +84,25 @@ class UiState {
   resetContextualTaskBarPosition(): void {
     this.contextualTaskBarVisible = true;
     this.contextualTaskBarResetToken += 1;
+  }
+
+  /**
+   * Register a background wait so the status bar can show a loading indicator.
+   * Returns a disposer to call when the work finishes; prefer withLoading,
+   * which pairs the two for you.
+   */
+  beginLoading(label: string): () => void {
+    return this.loadingTracker.begin(label);
+  }
+
+  /** Run fn with a loading indicator registered for its duration. */
+  async withLoading<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const done = this.beginLoading(label);
+    try {
+      return await fn();
+    } finally {
+      done();
+    }
   }
 
   /** Show the embed prompt and resolve with the user's choice. */
