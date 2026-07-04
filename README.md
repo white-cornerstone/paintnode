@@ -47,6 +47,84 @@ machine.
   </a>
 </p>
 
+## Feature Gallery
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="https://paintnode.com/assets/prompt-fragment.png" alt="PaintNode prompt panel for generating an image">
+      <br>
+      <strong>Prompt inside the editor</strong>
+      <br>
+      Start from the canvas, a selection, a mask, or a project asset and send the job to your local AI CLI.
+    </td>
+    <td width="50%">
+      <img src="https://paintnode.com/assets/model-menu-fragment.png" alt="PaintNode model and provider menu">
+      <br>
+      <strong>Choose the provider per run</strong>
+      <br>
+      Use app defaults, then override provider, model, reasoning effort, or service tier when a specific task needs it.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="https://paintnode.com/assets/retouch-fragment.png" alt="PaintNode AI retouch dialog with source, mask, and result previews">
+      <br>
+      <strong>Review retouch results</strong>
+      <br>
+      Compare the source, mask, and generated result before committing an AI retouch back into the document.
+    </td>
+    <td width="50%">
+      <img src="https://paintnode.com/assets/project-panel-fragment.png" alt="PaintNode project panel with documents, storyboards, workflows, autosaves, and tasks">
+      <br>
+      <strong>Keep project assets together</strong>
+      <br>
+      Documents, storyboards, workflows, autosaves, and AI tasks stay organized around the current project.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="https://paintnode.com/assets/provider-fragment.png" alt="PaintNode provider settings for Codex CLI and Antigravity">
+      <br>
+      <strong>Codex CLI and Antigravity</strong>
+      <br>
+      Run different providers on the same project through separate tasks, assets, and layers.
+    </td>
+    <td width="50%">
+      <img src="https://paintnode.com/assets/paintnode-editor.png" alt="PaintNode full editor with canvas, panels, layers, and project tasks">
+      <br>
+      <strong>A real editing workspace</strong>
+      <br>
+      Layers, masks, selections, color controls, project files, and exports sit around the AI workflow.
+    </td>
+  </tr>
+</table>
+
+### Annotation-Guided Retouching
+
+Annotations are not just visual comments. Visible annotation text is passed into
+AI retouch requests as direct user instructions for the regions the annotations
+point to.
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src=".github/readme/annotation-guides-before.jpg" alt="PaintNode annotation layer marking several bus number regions to change to 123">
+      <br>
+      <strong>Mark exactly what should change</strong>
+      <br>
+      Use arrows, memos, and callouts to point the agent at the precise regions that need work.
+    </td>
+    <td width="50%">
+      <img src=".github/readme/annotation-guides-after.jpg" alt="PaintNode after AI retouch, with annotated bus numbers changed to 123">
+      <br>
+      <strong>Reduce missed or over-broad edits</strong>
+      <br>
+      Pair annotation notes with an AI retouch brush mask so the agent sees both the target pixels and the requested outcome.
+    </td>
+  </tr>
+</table>
+
 ## What You Can Do
 
 | Workflow | What happens |
