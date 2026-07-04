@@ -3,6 +3,7 @@ name = "paintnode"
 version = "0.1.0"
 description = "An AI companion workspace for local model CLIs and OpenRaster documents."
 authors = ["White Cornerstone Pty Ltd"]
+license = "GPL-3.0-or-later"
 publish = false
 repository = "https://github.com/white-cornerstone/paintnode"
 edition = "2021"

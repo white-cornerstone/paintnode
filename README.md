@@ -133,4 +133,6 @@ Please report security issues privately. See [SECURITY.md](SECURITY.md).
 
 ## License
 
-No open-source license has been selected yet. Until a license is added, all rights are reserved by White Cornerstone Pty Ltd.
+PaintNode source code is licensed under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+The PaintNode name, logo, icon, signing identity, release channels, website, and other brand assets are not licensed under the GPL. See [TRADEMARKS.md](TRADEMARKS.md) for the brand policy.

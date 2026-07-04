@@ -9,7 +9,7 @@
     "url": "https://github.com/white-cornerstone/paintnode.git"
   },
   "author": "White Cornerstone Pty Ltd",
-  "license": "UNLICENSED",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -20,6 +20,12 @@ npm test
 
 Both must pass. `npm run check` must report 0 errors and 0 warnings.
 
+## Contribution License
+
+Unless explicitly stated otherwise, contributions are submitted under the same license as PaintNode: GNU General Public License v3.0 or later.
+
+The PaintNode name, logo, icon, release channels, and other brand assets are reserved by White Cornerstone Pty Ltd. See [TRADEMARKS.md](TRADEMARKS.md).
+
 ## Code Guidelines
 
 - Keep framework-agnostic engine logic in `src/lib/engine/`.
