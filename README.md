@@ -20,6 +20,10 @@
   <a href="docs/release.md">Release docs</a>
 </p>
 
+> PaintNode is still a very early first version. Some tools and modules are not
+> complete yet, and the editor will keep improving step by step across future
+> releases.
+
 PaintNode is a free, open-source, backend-free raster image editor for people
 who already use AI CLIs. Start from a blank canvas, an image, a mask, or a
 layered project, mark the exact areas that need attention, then ask Codex CLI or
