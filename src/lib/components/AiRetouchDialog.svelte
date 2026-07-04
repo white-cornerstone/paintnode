@@ -11,7 +11,7 @@
     focusTaskDocument,
     providerLabel,
     providerRunDir,
-  } from './aiTaskDialog';
+  } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
   import { editor } from '../state/editor.svelte';
@@ -339,7 +339,7 @@ Use these annotations as direct user instructions for the regions they point to.
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={close}>{task ? 'Close' : 'Cancel'}</button>
-      {#if task?.status === 'error' && task.retry}
+      {#if task && aiTasks.canRetry(task)}
         <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
       {/if}
       {#if !task}

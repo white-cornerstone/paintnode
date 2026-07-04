@@ -2,7 +2,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { editor } from '../state/editor.svelte';
 import type { AiProvider } from '../state/settings';
 
-/** Shared support for the AI task dialogs (Generate, Retouch, Extract Assets). */
+/** Shared support for the background AI tasks and their dialogs (Generate, Retouch, Extract Assets). */
 
 export type CodexProgressPayload = { runId: string; message: string };
 
