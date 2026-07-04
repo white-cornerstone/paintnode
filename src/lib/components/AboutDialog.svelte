@@ -15,14 +15,14 @@
     </section>
 
     <section class="summary">
-      <p>A server-free, professional raster image editor.</p>
+      <p>An AI companion workspace for local model CLIs and layered visual work.</p>
       <p>
-        Documents use the open <strong>OpenRaster (.ora)</strong> format, so your layered files stay portable
-        across Krita, GIMP, MyPaint and other ORA-capable apps.
+        PaintNode lets Codex CLI, Agy, and future local providers work beside you on the same document
+        through project assets, masks, tasks, and layers.
       </p>
       <p>
-        Core editing, file I/O, and export run on your device. Optional integrations can search Openverse
-        online for open-license images or pass selected project data to your configured local AI CLI provider.
+        Documents use the open <strong>OpenRaster (.ora)</strong> format, keeping layered files portable while
+        avoiding a PaintNode-hosted model backend or extra API billing layer.
       </p>
     </section>
 

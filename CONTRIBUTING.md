@@ -1,6 +1,6 @@
 # Contributing
 
-PaintNode is currently in early MVP development. Contributions and issue reports are welcome once the repository is public, but please keep changes focused and aligned with the app's local-first editor architecture.
+PaintNode is currently in early MVP development. Contributions and issue reports are welcome once the repository is public, but please keep changes focused and aligned with the app's AI-companion architecture for local model CLIs and layered documents.
 
 ## Development Setup
 

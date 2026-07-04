@@ -1,7 +1,7 @@
 [package]
 name = "paintnode"
 version = "0.1.0"
-description = "A professional OpenRaster image editor."
+description = "An AI companion workspace for local model CLIs and OpenRaster documents."
 authors = ["White Cornerstone Pty Ltd"]
 publish = false
 repository = "https://github.com/white-cornerstone/paintnode"

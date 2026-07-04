@@ -32,8 +32,8 @@
     "targets": "all",
     "category": "GraphicsAndDesign",
     "copyright": "© 2026 PaintNode",
-    "shortDescription": "OpenRaster image editor",
-    "longDescription": "A professional raster image editor that uses the open OpenRaster (.ora) format.",
+    "shortDescription": "AI companion canvas",
+    "longDescription": "An AI companion workspace where local model CLIs can work with layered OpenRaster documents.",
     "macOS": {
       "minimumSystemVersion": "10.15",
       "files": {

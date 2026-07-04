@@ -1,21 +1,37 @@
 # PaintNode
 
-PaintNode is a backend-free raster image editor built for layered, local-first image work. It uses the open OpenRaster (`.ora`) format as its native document format, so projects stay portable across ORA-capable tools while keeping PaintNode's desktop workflow fast and self-contained.
+PaintNode is an AI companion workspace for visual work. It gives local AI CLIs, such as Codex CLI and Agy, a real productive surface: a layered canvas, project assets, masks, selections, and OpenRaster (`.ora`) documents that can be edited, inspected, and handed back to the user.
+
+Most creative AI tools either bundle their own image model or ask users to bring API keys. PaintNode takes a different path. It works with the AI command-line tools users already trust and already have configured, so the editor becomes the meeting place between human intent, existing AI subscriptions or local credentials, and a document that remains under the user's control.
 
 ![PaintNode icon](src-tauri/icons/icon.png)
 
+## Product Direction
+
+PaintNode is not intended to be another traditional image-editor alternative with AI sprinkled on top. The goal is to introduce a new workflow for model CLIs inside real creative tooling:
+
+- The user keeps a normal layered document open.
+- Codex CLI, Agy, and future local providers can work side by side.
+- Each AI run can produce or modify project assets and document layers.
+- The user reviews, edits, masks, composites, and exports the result in the same workspace.
+- PaintNode does not host a model backend or add another API-billing layer.
+
+The image editor surface matters because AI output needs a place to become production work. Layers, masks, file I/O, and OpenRaster compatibility are the shared canvas for that collaboration.
+
 ## Highlights
 
-- Layered raster editing with OpenRaster (`.ora`) load and save.
-- Desktop app packaging with Tauri, Svelte 5, TypeScript, and Vite.
+- Local AI companion flows for generation, fill, retouching, asset extraction, and workflow composition.
+- Provider settings for existing local CLIs, including Codex CLI and Agy, with per-run overrides.
+- Side-by-side AI work on the same project through separate assets, tasks, and layers.
+- Layered OpenRaster (`.ora`) documents for portable, user-owned creative files.
 - Local-first file I/O, PNG/PSD export paths, and project asset management.
-- Optional local AI CLI integrations for generation, retouching, extraction, and workflow composition.
+- Tauri desktop app built with Svelte 5, TypeScript, Rust, and Canvas2D.
 - macOS Quick Look extensions for ORA thumbnail and preview support.
 - Signed app updates through Tauri updater and GitHub Releases.
 
 ## Status
 
-PaintNode is in early MVP development. Public releases are intended to be usable, but the editor surface, file compatibility, and packaging flow are still evolving.
+PaintNode is in early MVP development. Public releases are intended to test the AI-companion workflow, local CLI integrations, document model, and packaging flow. The editor surface, provider contracts, and file compatibility are still evolving.
 
 The current release channel is hosted on GitHub Releases:
 
@@ -38,6 +54,7 @@ Requirements:
 - Node.js 22 or newer
 - Rust stable
 - macOS for signed/notarized macOS release builds
+- Optional local AI CLIs for AI features, such as Codex CLI or Agy
 
 Install dependencies:
 

@@ -2,7 +2,7 @@
   "name": "paintnode",
   "version": "0.1.0",
   "private": true,
-  "description": "A backend-free desktop raster image editor using the open OpenRaster (.ora) format.",
+  "description": "An AI companion workspace for local model CLIs and layered OpenRaster documents.",
   "homepage": "https://paintnode.com",
   "repository": {
     "type": "git",
