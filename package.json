@@ -2,7 +2,14 @@
   "name": "paintnode",
   "version": "0.1.0",
   "private": true,
-  "description": "A backend-free raster image editor for the web using the OpenRaster (.ora) format.",
+  "description": "A backend-free desktop raster image editor using the open OpenRaster (.ora) format.",
+  "homepage": "https://paintnode.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/white-cornerstone/paintnode.git"
+  },
+  "author": "White Cornerstone Pty Ltd",
+  "license": "UNLICENSED",
   "type": "module",
   "scripts": {
     "dev": "vite",

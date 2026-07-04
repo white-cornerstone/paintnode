@@ -2,9 +2,9 @@
 name = "paintnode"
 version = "0.1.0"
 description = "A professional OpenRaster image editor."
-authors = ["PaintNode"]
-license = ""
-repository = ""
+authors = ["White Cornerstone Pty Ltd"]
+publish = false
+repository = "https://github.com/white-cornerstone/paintnode"
 edition = "2021"
 rust-version = "1.77.2"
 
