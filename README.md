@@ -75,7 +75,7 @@ machine.
       Compare the source, mask, and generated result before committing an AI retouch back into the document.
     </td>
     <td width="50%">
-      <img src="https://paintnode.com/assets/project-panel-fragment.png" alt="PaintNode project panel with documents, storyboards, workflows, autosaves, and tasks">
+      <img src=".github/readme/project-panel-short.jpg" alt="PaintNode project panel showing autosaves and generated assets">
       <br>
       <strong>Keep project assets together</strong>
       <br>
