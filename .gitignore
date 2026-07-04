@@ -9,3 +9,4 @@ dist-ssr
 # Local AI-agent instructions. Keep the tracked examples as the public baseline.
 /AGENTS.md
 /CLAUDE.md
+/.claude/
