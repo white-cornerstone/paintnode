@@ -12,7 +12,8 @@ export type DialogId =
   | 'aiRetouch'
   | 'aiDecouple'
   | 'stockImages'
-  | 'settings';
+  | 'settings'
+  | 'update';
 
 export type AiTaskDialogKind = 'generate' | 'retouch' | 'decouple';
 

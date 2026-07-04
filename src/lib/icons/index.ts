@@ -62,6 +62,7 @@ export { default as Folder } from '@fluentui/svg-icons/icons/folder_24_regular.s
 export { default as FolderOpen } from '@fluentui/svg-icons/icons/folder_open_24_regular.svg?raw';
 export { default as OpenFolder } from '@fluentui/svg-icons/icons/open_folder_24_regular.svg?raw';
 export { default as Open } from '@fluentui/svg-icons/icons/open_24_regular.svg?raw';
+export { default as ArrowDownload } from '@fluentui/svg-icons/icons/arrow_download_24_regular.svg?raw';
 export { default as ArrowSync } from '@fluentui/svg-icons/icons/arrow_sync_24_regular.svg?raw';
 export { default as Link } from '@fluentui/svg-icons/icons/link_24_regular.svg?raw';
 export { default as LinkDismiss } from '@fluentui/svg-icons/icons/link_dismiss_24_regular.svg?raw';

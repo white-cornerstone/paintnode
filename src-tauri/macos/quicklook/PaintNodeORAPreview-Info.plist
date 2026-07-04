@@ -9,7 +9,7 @@
   <key>CFBundleExecutable</key>
   <string>PaintNodeORAPreview</string>
   <key>CFBundleIdentifier</key>
-  <string>com.paintnode.app.ora-preview</string>
+  <string>com.paintnode.editor.ora-preview</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:mac:signed": "bash scripts/build-macos-signed.sh"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.1.2",
@@ -30,6 +31,8 @@
     "@fluentui/svg-icons": "^1.1.330",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@xyflow/svelte": "^1.6.1",
     "@xyflow/system": "^0.0.78",
     "ag-psd": "^31.0.2",

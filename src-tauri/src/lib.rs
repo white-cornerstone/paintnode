@@ -6386,6 +6386,20 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         Some("CmdOrCtrl+,"),
     )?;
+    let app_check_updates = MenuItem::with_id(
+        app,
+        "app:check-updates",
+        "Check for Updates...",
+        true,
+        None::<&str>,
+    )?;
+    let help_check_updates = MenuItem::with_id(
+        app,
+        "app:check-updates",
+        "Check for Updates...",
+        true,
+        None::<&str>,
+    )?;
     let help_about =
         MenuItem::with_id(app, "app:help-about", "About PaintNode", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "app:quit", "Quit PaintNode", true, Some("CmdOrCtrl+Q"))?;
@@ -6397,6 +6411,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &about,
             &settings,
+            &app_check_updates,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -6493,7 +6508,16 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         ],
     )?;
     let view = Submenu::with_items(app, "View", true, &[&zoom_in, &zoom_out, &fit, &actual])?;
-    let help = Submenu::with_items(app, "Help", true, &[&help_about])?;
+    let help = Submenu::with_items(
+        app,
+        "Help",
+        true,
+        &[
+            &help_check_updates,
+            &PredefinedMenuItem::separator(app)?,
+            &help_about,
+        ],
+    )?;
 
     Menu::with_items(
         app,
@@ -6507,7 +6531,12 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             let menu = build_app_menu(app.handle())?;
             app.handle().set_menu(menu)?;
             app.handle().on_menu_event(|app, event| {

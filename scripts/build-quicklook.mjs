@@ -15,6 +15,11 @@ if (process.platform !== 'darwin') {
 }
 
 const sdk = execFileSync('xcrun', ['--sdk', 'macosx', '--show-sdk-path'], { encoding: 'utf8' }).trim();
+const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || '-';
+const signingArgs =
+  signingIdentity === '-'
+    ? ['--force', '--sign', '-', '--entitlements', entitlements]
+    : ['--force', '--sign', signingIdentity, '--timestamp', '--options', 'runtime', '--entitlements', entitlements];
 const archs = (process.env.PAINTNODE_QUICKLOOK_ARCHS || 'arm64,x86_64')
   .split(',')
   .map((arch) => arch.trim())
@@ -84,7 +89,7 @@ for (const ext of extensions) {
   }
   execFileSync(
     'codesign',
-    ['--force', '--sign', '-', '--entitlements', entitlements, join(buildDir, `${ext.name}.appex`)],
+    [...signingArgs, join(buildDir, `${ext.name}.appex`)],
     { stdio: 'inherit' },
   );
   console.log(`[quicklook] built ${ext.name}.appex for ${archs.join(', ')}`);

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
+  import { appUpdater } from '../state/updater.svelte';
   import { ui } from '../state/ui.svelte';
   import {
     openCommand,
@@ -150,6 +151,7 @@
       label: 'Help',
       items: [
         { label: 'Settings…', shortcut: '⌘,', action: () => ui.open('settings') },
+        { label: 'Check for Updates…', action: () => { ui.open('update'); void appUpdater.checkForUpdates(); } },
         { sep: true },
         { label: 'About PaintNode', action: () => ui.open('about') },
       ],

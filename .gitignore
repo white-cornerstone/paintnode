@@ -3,4 +3,5 @@ dist
 dist-ssr
 .DS_Store
 *.local
+.env*.local
 .vite

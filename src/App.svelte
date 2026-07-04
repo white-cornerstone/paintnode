@@ -64,6 +64,7 @@
   import { project } from './lib/state/project.svelte';
   import { settings } from './lib/state/settings.svelte';
   import { ui } from './lib/state/ui.svelte';
+  import { appUpdater } from './lib/state/updater.svelte';
   import { workflow } from './lib/state/workflow.svelte';
   import { runEditableMenuAction } from './lib/state/editing';
 
@@ -88,6 +89,7 @@
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
+  const loadUpdateDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/UpdateDialog.svelte');
   const loadFontEmbedDialog: LazyComponentLoader = () => import('./lib/components/FontEmbedDialog.svelte');
   const loadRasterizeTypeDialog: LazyComponentLoader = () => import('./lib/components/RasterizeTypeDialog.svelte');
   const loadSaveChangesDialog: LazyComponentLoader = () => import('./lib/components/SaveChangesDialog.svelte');
@@ -456,6 +458,10 @@
       case 'app:settings':
         ui.open('settings');
         break;
+      case 'app:check-updates':
+        ui.open('update');
+        void appUpdater.checkForUpdates();
+        break;
       case 'app:quit':
         void requestApplicationClose();
         break;
@@ -527,6 +533,7 @@
     let unlistenClose: UnlistenFn | null = null;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
+      window.setTimeout(() => void appUpdater.checkForUpdates(), 2500);
       void listen<string>('app-menu', (event) => runAppMenuAction(event.payload)).then((unlisten) => {
         unlistenMenu = unlisten;
       });
@@ -815,6 +822,8 @@
   {@render lazyDialog(loadStockImagesDialog)}
 {:else if ui.dialog === 'settings'}
   {@render lazyDialog(loadSettingsDialog)}
+{:else if ui.dialog === 'update'}
+  {@render lazyDialog(loadUpdateDialog)}
 {/if}
 
 {#if ui.fontEmbed}

@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { editor } from '../state/editor.svelte';
+  import { appUpdater } from '../state/updater.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { tooltip } from '../actions/tooltip';
   import { isDesktop, readAppMemoryInfo, type AppMemoryInfo } from '../integrations/desktop';
   import Icon from './Icon.svelte';
-  import { DeveloperBoard } from '../icons';
+  import { ArrowDownload, DeveloperBoard } from '../icons';
 
   const doc = $derived(editor.doc);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!doc);
@@ -107,6 +108,18 @@
     <span class="sep"></span>
   {/if}
   <span class="item dim">{hasDocument ? `${layerCount} layer${layerCount === 1 ? '' : 's'}` : ''}</span>
+  {#if appUpdater.available}
+    <span class="sep"></span>
+    <button
+      class="update-button"
+      type="button"
+      onclick={() => ui.open('update')}
+      use:tooltip={{ text: `Install PaintNode ${appUpdater.version}`, placement: 'top' }}
+    >
+      <Icon svg={ArrowDownload} size={13} />
+      <span>Update</span>
+    </button>
+  {/if}
   {#if memoryLabel}
     <span class="sep"></span>
     <span class="item dim memory" aria-label={`RAM ${memoryLabel}`} use:tooltip={{ text: memoryTooltip, placement: 'top' }}>
@@ -180,6 +193,20 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+  }
+  .update-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 18px;
+    border-color: var(--accent-dim);
+    background: transparent;
+    color: var(--accent);
+    padding: 1px 7px;
+    font-size: 11px;
+  }
+  .update-button:hover {
+    background: var(--bg-elevated);
   }
   .loading {
     display: inline-flex;
