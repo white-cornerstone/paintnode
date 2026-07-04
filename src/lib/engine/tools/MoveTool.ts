@@ -24,7 +24,7 @@ export class MoveTool implements Tool {
       return;
     }
     if (layer.locked) {
-      this.host.flash('Photoshop-only layer is locked; PaintNode preserves it for PSD export');
+      this.host.flash(layer.psdLocked ? 'Photoshop-only layer is locked; PaintNode preserves it for PSD export' : 'Layer is locked');
       return;
     }
     this.startX = e.x;

@@ -16,6 +16,7 @@ interface FakeLayerInit {
   blendMode?: string;
   pixelRev?: number;
   maskEnabled?: boolean;
+  userLocked?: boolean;
   psd?: Partial<PsdLayerSource> & { layer: AgPsdLayer };
   psdMask?: Layer['psdMask'];
 }
@@ -41,6 +42,7 @@ function fakeLayer(init: FakeLayerInit): Layer {
     kind: 'raster',
     pixelRev: init.pixelRev ?? 1,
     maskEnabled: init.maskEnabled ?? true,
+    userLocked: init.userLocked ?? false,
     canvas,
     psd,
     psdMask: init.psdMask ?? null,
@@ -154,6 +156,32 @@ describe('passthroughPsdLayer', () => {
     expect(src.mask?.disabled).toBeUndefined();
   });
 
+  it('adds PSD protection flags when an imported layer is user-locked', () => {
+    const src: AgPsdLayer = { name: 'A', protected: { transparency: true } };
+    const layer = fakeLayer({
+      userLocked: true,
+      psd: { layer: src, imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over', locked: false } },
+    });
+
+    const out = passthroughPsdLayer(layer);
+
+    expect(out.protected).toEqual({ transparency: true, composite: true, position: true });
+    expect(src.protected).toEqual({ transparency: true });
+  });
+
+  it('removes imported PSD edit locks when the layer is unlocked', () => {
+    const src: AgPsdLayer = { name: 'A', protected: { composite: true, position: true } };
+    const layer = fakeLayer({
+      userLocked: false,
+      psd: { layer: src, imported: { x: 0, y: 0, pixelRev: 1, blendMode: 'source-over', locked: true } },
+    });
+
+    const out = passthroughPsdLayer(layer);
+
+    expect(out.protected).toBeUndefined();
+    expect(src.protected).toEqual({ composite: true, position: true });
+  });
+
   it('keeps the own hidden flag of visible children inside hidden groups', () => {
     // Effective visibility at import was false (hidden ancestor group), the layer's
     // own flag is not hidden — untouched round trip must not patch it.
@@ -258,6 +286,16 @@ describe('isCleanPsdLayer', () => {
   it('goes dirty when the parent moves under its document-anchored mask', () => {
     const { layer, mask } = maskedLayer({ layerX: 10 });
     expect(isCleanPsdLayer(fakeDoc([layer], null, () => mask), layer)).toBe(false);
+  });
+});
+
+describe('buildPsdChildren layer locks', () => {
+  it('exports PaintNode locked layers as PSD edit and position locks', () => {
+    const layer = fakeLayer({ userLocked: true });
+
+    const [out] = buildPsdChildren(fakeDoc([layer]));
+
+    expect(out.protected).toEqual({ composite: true, position: true });
   });
 });
 

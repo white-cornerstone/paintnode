@@ -182,6 +182,32 @@ function linkedPsdMask(doc: PaintDocument, layer: Layer): PsdLayer['mask'] {
   };
 }
 
+function normalizedProtected(flags: PsdLayer['protected']): PsdLayer['protected'] {
+  if (!flags) return undefined;
+  return flags.transparency || flags.composite || flags.position || flags.artboards ? flags : undefined;
+}
+
+function applyLayerLock(out: PsdLayer, layer: Layer): void {
+  const importedLocked = layer.psd?.imported.locked === true;
+  if (layer.userLocked) {
+    out.protected = normalizedProtected({
+      ...(out.protected ?? {}),
+      composite: true,
+      position: true,
+    });
+    return;
+  }
+  if (!importedLocked) return;
+  out.protected = normalizedProtected({
+    ...(out.protected ?? {}),
+    composite: false,
+    position: false,
+  });
+  if (out.transparencyProtected === true && out.protected?.transparency === false) {
+    out.transparencyProtected = false;
+  }
+}
+
 function layerToPsd(doc: PaintDocument, layer: Layer): PsdLayer | null {
   if (layer.kind === 'ai-retouch-mask') return null;
 
@@ -195,6 +221,7 @@ function layerToPsd(doc: PaintDocument, layer: Layer): PsdLayer | null {
     canvas: layer.canvas,
     mask: linkedPsdMask(doc, layer),
   };
+  applyLayerLock(psdLayer, layer);
 
   // Vertical text exports as pixels only: ag-psd's vertical TySh writing can
   // produce broken PSD files, so we never write text data for it.
@@ -297,6 +324,7 @@ export function passthroughPsdLayer(layer: Layer): PsdLayer {
       out.mask = { ...(out.mask ?? src.mask), disabled };
     }
   }
+  applyLayerLock(out, layer);
   return out;
 }
 
@@ -345,6 +373,7 @@ function rebuildImportedLayer(doc: PaintDocument, layer: Layer): PsdLayer {
     // it, so the rebuilt layer intentionally has no mask.)
     out.mask = { ...mask };
   }
+  applyLayerLock(out, layer);
   return out;
 }
 

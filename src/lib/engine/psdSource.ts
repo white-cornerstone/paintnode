@@ -53,6 +53,8 @@ export interface PsdLayerSource {
     visible?: boolean;
     /** Linked mask layer created at import from the PSD layer mask, if any. */
     mask?: { layerId: string; pixelRev: number; x: number; y: number } | null;
+    /** PaintNode's full layer lock state imported from PSD protection flags. */
+    locked?: boolean;
   };
 }
 

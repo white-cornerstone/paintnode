@@ -271,10 +271,10 @@ async function documentBytes(doc: PaintDocument, embed: EmbeddedFont[] = []): Pr
 
 /**
  * Honesty note appended to .ora save confirmations: Photoshop-only passthrough
- * data (locked layers) lives only in memory and in PSD exports, not in .ora.
+ * data lives only in memory and in PSD exports, not in .ora.
  */
 function oraSaveNote(doc: PaintDocument): string {
-  return doc.layers.some((l) => l.locked)
+  return doc.layers.some((l) => l.psdLocked)
     ? ' — Photoshop-only layers are kept in PSD exports, not in .ora'
     : '';
 }

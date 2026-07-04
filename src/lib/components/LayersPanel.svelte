@@ -8,7 +8,7 @@
   import Icon from './Icon.svelte';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, LinkDismiss, LockClosed, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
+  import { Eye, EyeOff, Add, SquareMultiple, Merge, ArrowUp, ArrowDown, Delete, Link, LinkDismiss, LockClosed, LockOpen, TextT, CommentNote, ChevronDown, ChevronRight, ArrowTrending, Note, Tag, Textbox, PaintBrushSparkle } from '../icons';
   import type { AnnotationItem } from '../engine/annotations';
   import { PSD_LOCK_LABELS } from '../engine/psdSource';
 
@@ -105,8 +105,17 @@
   }
   function lockTooltip(l: Layer): string {
     const reason = l.psd?.lockReason;
+    if (l.userLocked && !reason) return 'Unlock layer';
     const label = reason ? PSD_LOCK_LABELS[reason] : 'Photoshop-only layer';
     return `${label} from Photoshop — editing is disabled so it survives PSD export unchanged`;
+  }
+  function activeLockTooltip(): string {
+    if (!activeRasterLayer) return 'Lock layer';
+    if (activeRasterLayer.psdLocked) return lockTooltip(activeRasterLayer);
+    return activeRasterLayer.userLocked ? 'Unlock layer' : 'Lock layer';
+  }
+  function canToggleLock(layer: Layer | null): layer is Layer {
+    return !!layer && !layer.psdLocked;
   }
   function clampPercent(p: number): number {
     if (!Number.isFinite(p)) return activeOpacityPercent;
@@ -301,6 +310,16 @@
           <option value={m.value}>{m.label}</option>
         {/each}
       </select>
+      <button
+        class="lock-toggle"
+        class:active={activeRasterLayer?.locked}
+        aria-label={activeRasterLayer?.userLocked ? 'Unlock layer' : 'Lock layer'}
+        use:tooltip={{ text: activeLockTooltip(), placement: 'top' }}
+        onclick={() => activeRasterLayer && editor.toggleLayerLocked(activeRasterLayer)}
+        disabled={!canToggleLock(activeRasterLayer)}
+      >
+        <Icon svg={activeRasterLayer?.locked ? LockClosed : LockOpen} size={15} />
+      </button>
       <label class="opacity-label" for="layer-opacity">Opacity:</label>
       <div class="opacity-control" bind:this={opacityControl}>
         <div class="opacity-value" class:disabled={!activeRasterLayer}>
@@ -477,7 +496,26 @@
 
         <div class="thumb-wrap">
           <LayerThumb layer={row.layer} compact={row.kind === 'linked-mask'} />
-          {#if row.layer.kind === 'text'}
+          {#if row.layer.userLocked && !row.layer.psdLocked}
+            <button
+              class="type-badge lock-badge lock-action"
+              aria-label="Unlock layer"
+              use:tooltip={{ text: 'Unlock layer', placement: 'right' }}
+              onclick={(e) => {
+                e.stopPropagation();
+                editor.setLayerLocked(row.layer, false);
+              }}
+            >
+              <Icon svg={LockClosed} size={11} />
+            </button>
+          {:else if row.layer.psdLocked}
+            <span
+              class="type-badge lock-badge"
+              use:tooltip={{ text: lockTooltip(row.layer), placement: 'right' }}
+            >
+              <Icon svg={LockClosed} size={11} label="Locked Photoshop layer" />
+            </span>
+          {:else if row.layer.kind === 'text'}
             <span
               class="type-badge"
               use:tooltip={{ text: 'Editable type layer', placement: 'right' }}
@@ -490,13 +528,6 @@
               use:tooltip={{ text: linkedMaskLabel(row), placement: 'right' }}
             >
               <Icon svg={PaintBrushSparkle} size={11} />
-            </span>
-          {:else if row.layer.locked}
-            <span
-              class="type-badge lock-badge"
-              use:tooltip={{ text: lockTooltip(row.layer), placement: 'right' }}
-            >
-              <Icon svg={LockClosed} size={11} label="Locked Photoshop layer" />
             </span>
           {/if}
         </div>
@@ -531,13 +562,13 @@
       <Icon svg={Add} size={17} />
     </button>
     <button
-      use:tooltip={{ text: activeRasterLayer?.locked ? 'Locked Photoshop layers cannot be duplicated' : 'Duplicate layer', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Unlock layer to duplicate' : 'Duplicate layer', placement: 'top' }}
       aria-label="Duplicate layer"
       onclick={() => activeRasterLayer && editor.duplicateLayer(activeRasterLayer.id)}
       disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={SquareMultiple} size={17} /></button
     >
     <button
-      use:tooltip={{ text: activeRasterLayer?.locked ? 'Locked Photoshop layers cannot be merged' : 'Merge down', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Unlock layer to merge' : 'Merge down', placement: 'top' }}
       aria-label="Merge down"
       onclick={() => activeRasterLayer && editor.mergeDown(activeRasterLayer.id)}
       disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={Merge} size={17} /></button
@@ -550,23 +581,23 @@
     >
     <span class="spacer"></span>
     <button
-      use:tooltip={{ text: 'Move layer up', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Unlock layer to move' : 'Move layer up', placement: 'top' }}
       aria-label="Move layer up"
       onclick={() => activeRasterLayer && editor.moveLayer(activeRasterLayer.id, 1)}
-      disabled={!activeRasterLayer}><Icon svg={ArrowUp} size={16} /></button
+      disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={ArrowUp} size={16} /></button
     >
     <button
-      use:tooltip={{ text: 'Move layer down', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Unlock layer to move' : 'Move layer down', placement: 'top' }}
       aria-label="Move layer down"
       onclick={() => activeRasterLayer && editor.moveLayer(activeRasterLayer.id, -1)}
-      disabled={!activeRasterLayer}><Icon svg={ArrowDown} size={16} /></button
+      disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={ArrowDown} size={16} /></button
     >
     <button
       class="del"
-      use:tooltip={{ text: 'Delete layer', placement: 'top' }}
+      use:tooltip={{ text: activeRasterLayer?.locked ? 'Unlock layer to delete' : 'Delete layer', placement: 'top' }}
       aria-label="Delete layer"
       onclick={() => activeRasterLayer && editor.deleteLayer(activeRasterLayer.id)}
-      disabled={!activeRasterLayer}><Icon svg={Delete} size={16} /></button
+      disabled={!activeRasterLayer || activeRasterLayer.locked}><Icon svg={Delete} size={16} /></button
     >
   </footer>
 </Panel>
@@ -579,17 +610,17 @@
 
     <div class="thumb-wrap">
       <LayerThumb layer={draggedLayer} />
-      {#if draggedLayer.kind === 'text'}
+      {#if draggedLayer.locked}
+        <span class="type-badge lock-badge">
+          <Icon svg={LockClosed} size={11} />
+        </span>
+      {:else if draggedLayer.kind === 'text'}
         <span class="type-badge">
           <Icon svg={TextT} size={11} />
         </span>
       {:else if draggedLayer.kind === 'ai-retouch-mask'}
         <span class="type-badge mask-badge">
           <Icon svg={PaintBrushSparkle} size={11} />
-        </span>
-      {:else if draggedLayer.locked}
-        <span class="type-badge lock-badge">
-          <Icon svg={LockClosed} size={11} />
         </span>
       {/if}
     </div>
@@ -608,7 +639,7 @@
   .layer-settings {
     position: relative;
     display: grid;
-    grid-template-columns: minmax(90px, 1fr) auto auto;
+    grid-template-columns: minmax(90px, 1fr) 28px auto auto;
     align-items: center;
     gap: 6px;
   }
@@ -620,6 +651,17 @@
   .opacity-label {
     color: var(--text-dim);
     white-space: nowrap;
+  }
+  .lock-toggle {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    color: var(--text-dim);
+  }
+  .lock-toggle.active {
+    color: #f2c14e;
   }
   .opacity-control {
     position: relative;
@@ -866,6 +908,13 @@
   }
   .lock-badge {
     color: #f2c14e;
+  }
+  .lock-action {
+    padding: 0;
+  }
+  .lock-action:hover {
+    background: color-mix(in srgb, var(--bg-elevated) 80%, #f2c14e 20%);
+    border-color: color-mix(in srgb, var(--border) 55%, #f2c14e 45%);
   }
   .name {
     flex: 1;

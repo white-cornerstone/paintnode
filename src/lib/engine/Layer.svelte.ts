@@ -24,6 +24,8 @@ export class Layer {
   sourcePath = $state<string | null>(null);
   maskLayerId = $state<string | null>(null);
   maskEnabled = $state(true);
+  /** User-toggleable full layer lock. Photoshop-only import locks live in `psd`. */
+  userLocked = $state(false);
   /** 'text' = editable text layer (see `text`); 'raster' = plain pixels. */
   kind = $state<LayerKind>('raster');
   /** Editable text model when `kind === 'text'`, else null. */
@@ -66,8 +68,13 @@ export class Layer {
   }
 
   /** True for Photoshop-only layers PaintNode preserves but cannot edit. */
-  get locked(): boolean {
+  get psdLocked(): boolean {
     return this.psd?.lockReason != null;
+  }
+
+  /** True when the layer should reject edits in PaintNode. */
+  get locked(): boolean {
+    return this.userLocked || this.psdLocked;
   }
 
   /** Mark pixels dirty (call after drawing into `ctx`). */
@@ -102,6 +109,7 @@ export class Layer {
     copy.sourcePath = this.sourcePath;
     copy.maskLayerId = this.maskLayerId;
     copy.maskEnabled = this.maskEnabled;
+    copy.userLocked = this.userLocked;
     copy.kind = this.kind;
     copy.text = this.text ? cloneModel(this.text) : null;
     copy.aiRetouch = cloneAiRetouchMetadata(this.aiRetouch);

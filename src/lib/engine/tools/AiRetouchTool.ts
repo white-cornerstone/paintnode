@@ -68,6 +68,10 @@ export class AiRetouchTool implements Tool {
     }
 
     const active = this.host.activeLayer;
+    if (active?.kind === 'ai-retouch-mask' && active.locked) {
+      this.host.flash(active.psdLocked ? 'Photoshop-only layer is locked; PaintNode preserves it for PSD export' : 'Layer is locked');
+      return;
+    }
     this.start = p;
     this.points = [p];
     this.draggingExistingMask = null;
