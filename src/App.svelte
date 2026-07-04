@@ -730,10 +730,16 @@
             {#if panels.value.projectCollapsed}
               <div class="project-rail">
                 <button
+                  class="panel-toggle expand"
+                  onclick={() => panels.setProjectCollapsed(false)}
+                  use:tooltip={{ text: 'Expand panels', placement: 'left' }}
+                  aria-label="Expand panels"
+                ><Icon svg={ChevronDoubleLeft} size={16} /></button>
+                <button
                   class="rail-icon"
                   onclick={() => panels.setProjectCollapsed(false)}
-                  use:tooltip={{ text: 'Expand project', placement: 'left' }}
-                  aria-label="Expand project"
+                  use:tooltip={{ text: 'Project', placement: 'left' }}
+                  aria-label="Project"
                 >
                   <Icon svg={Folder} size={18} />
                 </button>
@@ -743,8 +749,8 @@
                 <button
                   class="panel-toggle"
                   onclick={() => panels.setProjectCollapsed(true)}
-                  use:tooltip={{ text: 'Collapse project', placement: 'left' }}
-                  aria-label="Collapse project"
+                  use:tooltip={{ text: 'Collapse panels', placement: 'left' }}
+                  aria-label="Collapse panels"
                 ><Icon svg={ChevronDoubleRight} size={16} /></button>
               </div>
               <ProjectPanel />
@@ -888,7 +894,11 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding-top: 5px;
+    padding-top: 4px;
+  }
+  .project-rail .panel-toggle.expand {
+    align-self: flex-end;
+    margin: 0 5px 4px 0;
   }
   .rail-icon {
     display: grid;
