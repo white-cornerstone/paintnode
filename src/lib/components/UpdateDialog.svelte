@@ -28,7 +28,10 @@
         </div>
       </div>
       {#if appUpdater.body}
-        <div class="notes">{appUpdater.body}</div>
+        <section class="notes-panel" aria-label="Release notes">
+          <h3>Release notes</h3>
+          <div class="notes">{appUpdater.body}</div>
+        </section>
       {/if}
       <div class="actions">
         <button type="button" onclick={checkNow}>
@@ -147,9 +150,23 @@
     font-size: 12px;
     line-height: 1.45;
   }
+  .notes-panel {
+    display: grid;
+    gap: 6px;
+    min-height: 0;
+  }
+  h3 {
+    margin: 0;
+    color: var(--text-bright);
+    font-size: 12px;
+    line-height: 1.25;
+    font-weight: 700;
+  }
   .notes {
-    max-height: 180px;
-    overflow: auto;
+    max-height: min(160px, 34vh);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 10px;
     border: 1px solid var(--border-soft);
     border-radius: 5px;
@@ -158,6 +175,7 @@
     font-size: 12px;
     line-height: 1.45;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .progress {
     height: 6px;

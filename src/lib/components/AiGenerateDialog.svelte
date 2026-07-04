@@ -188,7 +188,7 @@
 
     <div class="dlg-actions">
       {#if !task}
-        <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+        <AiRunOptionsControl bind:options={runOptions} disabled={busy} antigravityModelScope="image" />
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>

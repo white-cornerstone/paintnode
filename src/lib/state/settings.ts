@@ -23,6 +23,10 @@ export const ANTIGRAVITY_MODEL_OPTIONS = [
   { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B Medium' },
 ] as const;
 
+// Antigravity image generation is a tool the selected agent can invoke. The
+// agy model list therefore remains the agent model list for image runs.
+export const ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS = ANTIGRAVITY_MODEL_OPTIONS;
+
 export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
 export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';

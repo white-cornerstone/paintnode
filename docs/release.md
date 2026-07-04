@@ -16,9 +16,14 @@ PaintNode uses GitHub Releases as the Tauri updater backend.
 ## Release Flow
 
 1. Update versions in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
-2. Commit the release.
-3. Push a tag such as `paintnode-v0.1.1`.
-4. GitHub Actions publishes `PaintNode v0.1.1` with app bundles, updater artifacts, and `latest.json`.
+2. Add release notes at `docs/release-notes/<version>.md`.
+3. Commit the release.
+4. Push a tag such as `paintnode-v0.1.1`.
+5. GitHub Actions publishes `PaintNode v0.1.1` with app bundles, updater artifacts, and `latest.json`.
+
+The release notes file becomes both the GitHub release body and the notes shown in
+the in-app updater dialog. The workflow fails if the file is missing so placeholder
+text does not ship to users.
 
 The app checks:
 

@@ -505,6 +505,7 @@ fn mime_for_path(path: &Path) -> Option<String> {
         "jpg" | "jpeg" => Some("image/jpeg".into()),
         "webp" => Some("image/webp".into()),
         "gif" => Some("image/gif".into()),
+        "psd" => Some("image/vnd.adobe.photoshop".into()),
         _ => None,
     }
 }
@@ -6629,6 +6630,25 @@ mod tests {
             project_thumbnail_cache_path(project.path(), &path, PROJECT_THUMBNAIL_MAX_EDGE)
                 .expect("cache path");
         assert!(cache_path.exists(), "thumbnail should be cached");
+    }
+
+    #[test]
+    fn psd_project_file_preview_enters_thumbnail_pipeline() {
+        let project = TempJobDir::new("paintnode-psd-thumbnail-test").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let image = image::RgbaImage::from_fn(240, 120, |x, y| {
+            image::Rgba([x as u8, y as u8, 180, 255])
+        });
+        let bytes = encode_rgba_png(image, "psd extension preview source").expect("source png");
+        let path = project.path().join("documents").join("mock.psd");
+        fs::write(&path, bytes).expect("write source");
+
+        assert_eq!(mime_for_path(&path).as_deref(), Some("image/vnd.adobe.photoshop"));
+        let preview = preview_data_url_for_project_file(project.path(), &path, None)
+            .expect("psd extension should not be rejected before thumbnail generation");
+        assert!(preview.starts_with("data:image/png;base64,"));
+        let (width, height) = png_dimensions_from_data_url(&preview);
+        assert_eq!(width.max(height), PROJECT_THUMBNAIL_MAX_EDGE);
     }
 
     #[test]

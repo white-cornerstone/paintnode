@@ -40,6 +40,22 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Load release notes
+        id: release_notes
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          NOTES_FILE="docs/release-notes/${VERSION}.md"
+          if [[ ! -f "$NOTES_FILE" ]]; then
+            echo "Missing release notes: $NOTES_FILE" >&2
+            echo "Create this file before tagging the release. It becomes the GitHub release body and updater notes." >&2
+            exit 1
+          fi
+          {
+            echo "body<<__PAINTNODE_RELEASE_NOTES__"
+            cat "$NOTES_FILE"
+            echo "__PAINTNODE_RELEASE_NOTES__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Prepare App Store Connect key
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -82,10 +98,7 @@ jobs:
         with:
           tagName: paintnode-v__VERSION__
           releaseName: PaintNode v__VERSION__
-          releaseBody: |
-            PaintNode desktop release.
-
-            The app checks this GitHub Release for signed updater metadata.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true

@@ -4,6 +4,7 @@
   import { tooltip } from '../actions/tooltip';
   import {
     CODEX_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS,
     ANTIGRAVITY_MODEL_OPTIONS,
     type AiProvider,
     type AiRunOptions,
@@ -16,7 +17,13 @@
   } from '../state/settings';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
 
-  let { options = $bindable<AiRunOptions>(), disabled = false }: { options: AiRunOptions; disabled?: boolean } = $props();
+  type AntigravityModelScope = 'all' | 'image';
+
+  let {
+    options = $bindable<AiRunOptions>(),
+    disabled = false,
+    antigravityModelScope = 'all',
+  }: { options: AiRunOptions; disabled?: boolean; antigravityModelScope?: AntigravityModelScope } = $props();
 
   const reasoningEfforts: { value: ReasoningEffort; label: string; short: string }[] = [
     { value: 'minimal', label: 'Minimal', short: 'Min' },
@@ -59,8 +66,12 @@
   const codexModelLabel = $derived(CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label.replace('GPT-', '') ?? options.model);
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
+  const antigravityModelOptions = $derived(
+    antigravityModelScope === 'image' ? ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS : ANTIGRAVITY_MODEL_OPTIONS,
+  );
+  const antigravityModelTitle = $derived(antigravityModelScope === 'image' ? 'Agent model' : 'Model');
   const antigravityModelLabel = $derived(
-    ANTIGRAVITY_MODEL_OPTIONS.find((item) => item.id === options.antigravityModel)?.label ?? options.antigravityModel,
+    antigravityModelOptions.find((item) => item.id === options.antigravityModel)?.label ?? 'Auto',
   );
   const summary = $derived.by(() => {
     if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${autonomyShort}`;
@@ -179,6 +190,12 @@
     void updateMenuPosition();
   });
 
+  $effect(() => {
+    if (options.provider !== 'antigravity') return;
+    if (antigravityModelOptions.some((item) => item.id === options.antigravityModel)) return;
+    options = { ...options, antigravityModel: 'auto' };
+  });
+
   $effect(() => () => cleanupFloatingMenus());
 </script>
 
@@ -279,13 +296,13 @@
           </div>
         {/if}
         <button type="button" onclick={() => (submenu = submenu === 'antigravityModel' ? null : 'antigravityModel')}>
-          <span>Model</span>
-          <span class="value">{ANTIGRAVITY_MODEL_OPTIONS.find((item) => item.id === options.antigravityModel)?.label}</span>
+          <span>{antigravityModelTitle}</span>
+          <span class="value">{antigravityModelLabel}</span>
           <Icon svg={ChevronRight} size={14} />
         </button>
         {#if submenu === 'antigravityModel'}
           <div class="subitems">
-            {#each ANTIGRAVITY_MODEL_OPTIONS as item (item.id)}
+            {#each antigravityModelOptions as item (item.id)}
               <button type="button" class:active={options.antigravityModel === item.id} onclick={() => setAntigravityModel(item.id)}>
                 <span>{item.label}</span>
                 {#if options.antigravityModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
