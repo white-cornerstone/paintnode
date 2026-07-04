@@ -514,7 +514,8 @@ export async function composeAntigravityWorkflow(
   });
 }
 
-export async function openProjectFolder(): Promise<ProjectState | null> {
+/** Show the OS directory picker; null when the user cancels. */
+export async function pickProjectFolder(): Promise<string | null> {
   if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
   const selected = await openDialog({
     title: 'Open PaintNode Project Folder',
@@ -522,8 +523,12 @@ export async function openProjectFolder(): Promise<ProjectState | null> {
     multiple: false,
     canCreateDirectories: true,
   });
-  if (!selected || Array.isArray(selected)) return null;
-  return invoke<ProjectState>('project_open_folder', { projectPath: selected });
+  return !selected || Array.isArray(selected) ? null : selected;
+}
+
+export async function openProjectFolderAt(projectPath: string): Promise<ProjectState> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  return invoke<ProjectState>('project_open_folder', { projectPath });
 }
 
 export async function refreshProject(projectPath: string): Promise<ProjectState> {

@@ -1474,7 +1474,7 @@ Human anatomy quality gate: if the final image contains a person, the arms, wris
         <button
           aria-label="Refresh project"
           use:tooltip={{ text: 'Refresh project', placement: 'right' }}
-          onclick={() => void project.refresh()}
+          onclick={() => void ui.withLoading('Refreshing project…', () => project.refresh())}
         >
           <Icon svg={ArrowSync} size={14} />
         </button>

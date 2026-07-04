@@ -185,8 +185,9 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    /* Delay the fade-in so sub-250ms waits never flash an indicator. */
-    animation: loading-appear 120ms ease-out 250ms both;
+    /* Sub-250ms waits never mount at all (ui.beginLoading's anti-flash delay);
+       this is just a quick fade for the ones that do. */
+    animation: loading-appear 120ms ease-out both;
   }
   .loading-label {
     color: var(--text-dim);
@@ -203,17 +204,19 @@
     position: absolute;
     top: 0;
     bottom: 0;
+    left: 0;
     width: 40%;
     border-radius: 2px;
     background: var(--accent);
+    /* Sweep with transform (not `left`) so it composites without per-frame layout. */
     animation: loading-sweep 1.2s ease-in-out infinite;
   }
   @keyframes loading-sweep {
     from {
-      left: -40%;
+      transform: translateX(-100%);
     }
     to {
-      left: 100%;
+      transform: translateX(250%);
     }
   }
   @keyframes loading-appear {

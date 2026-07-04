@@ -152,18 +152,15 @@ async function openDocumentFileInputs(files: OpenableDocumentFile[]): Promise<vo
     let focused = 0;
     const notices: string[] = [];
     for (const file of supported) {
-      const done = ui.beginLoading(`Opening ${file.name}…`);
-      try {
-        const info = await openDocumentFile(file);
-        if (info.result === 'opened') opened++;
-        else focused++;
-        notices.push(...info.notices);
-      } finally {
-        done();
-      }
+      const info = await ui.withLoading(`Opening ${file.name}…`, () => openDocumentFile(file));
+      if (info.result === 'opened') opened++;
+      else focused++;
+      notices.push(...info.notices.map((notice) => (supported.length === 1 ? notice : `${file.name}: ${notice}`)));
     }
     if (notices.length) {
-      editor.flash(`Opened ${supported[0].name} — ${notices.join('; ')}`);
+      const openedLabel =
+        supported.length === 1 ? `Opened ${supported[0].name}` : `Opened ${opened} file${opened === 1 ? '' : 's'}`;
+      editor.flash(`${openedLabel} — ${notices.join('; ')}`);
     } else if (opened && focused) {
       editor.flash(`Opened ${opened} file${opened === 1 ? '' : 's'}; focused ${focused} already open`);
     } else if (focused) {
@@ -215,26 +212,28 @@ export async function importImageCommand(): Promise<void> {
   if (!editor.doc) return;
   const file = await openFile('image/png,image/jpeg,image/webp,image/gif');
   if (!file) return;
-  const done = ui.beginLoading(`Placing ${file.name}…`);
   try {
-    const bmp = await createImageBitmap(file);
-    const asset = await project.storeImportedFile(file, bmp.width, bmp.height);
-    const placed = editor.placeImage(bmp, bmp.width, bmp.height, file.name.replace(/\.[^.]+$/, ''), {
-      assetId: asset?.id ?? null,
-      path: asset?.relativePath ?? null,
+    await ui.withLoading(`Placing ${file.name}…`, async () => {
+      const bmp = await createImageBitmap(file);
+      try {
+        const asset = await project.storeImportedFile(file, bmp.width, bmp.height);
+        const placed = editor.placeImage(bmp, bmp.width, bmp.height, file.name.replace(/\.[^.]+$/, ''), {
+          assetId: asset?.id ?? null,
+          path: asset?.relativePath ?? null,
+        });
+        editor.flash(
+          placed.oversized
+            ? `Placed ${file.name} full-size; use Move or Image > Reveal All to show hidden edges`
+            : asset
+              ? `Placed ${file.name} and saved it to the project`
+              : `Placed ${file.name}`,
+        );
+      } finally {
+        bmp.close();
+      }
     });
-    bmp.close();
-    editor.flash(
-      placed.oversized
-        ? `Placed ${file.name} full-size; use Move or Image > Reveal All to show hidden edges`
-        : asset
-          ? `Placed ${file.name} and saved it to the project`
-          : `Placed ${file.name}`,
-    );
   } catch (e) {
     editor.flash('Import failed: ' + (e as Error).message);
-  } finally {
-    done();
   }
 }
 
