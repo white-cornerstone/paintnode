@@ -5,6 +5,7 @@
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
@@ -19,7 +20,7 @@
   } from '../integrations/desktop';
   import { Copy } from '../icons';
 
-  let { onClose }: { onClose: () => void } = $props();
+  let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
   type CodexProgressPayload = { runId: string; message: string };
 
@@ -31,11 +32,17 @@
   let copied = $state(false);
   let progress = $state('');
   let stopProgress: UnlistenFn | null = null;
+  let runningTaskId: string | null = null;
 
+  const task = $derived(aiTasks.find(taskId));
+  const taskDetail = $derived(task?.detail.kind === 'retouch' ? task.detail : null);
+  const currentError = $derived(task?.error ?? error);
+  const currentProgress = $derived(task?.progress ?? progress);
+  const currentBusy = $derived(task?.status === 'running' || busy);
   const request = $derived(editor.pendingAiRetouch);
-  const sourcePreview = $derived(request?.source.toDataURL('image/png') ?? '');
-  const maskPreview = $derived(request?.mask.toDataURL('image/png') ?? '');
-  const referencePreview = $derived(request?.reference?.toDataURL('image/png') ?? '');
+  const sourcePreview = $derived(taskDetail?.sourcePreview ?? request?.source.toDataURL('image/png') ?? '');
+  const maskPreview = $derived(taskDetail?.maskPreview ?? request?.mask.toDataURL('image/png') ?? '');
+  const referencePreview = $derived(taskDetail?.referencePreview ?? request?.reference?.toDataURL('image/png') ?? '');
 
   function createRunId(): string {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -63,25 +70,38 @@ Use these annotations as direct user instructions for the regions they point to.
     return 'codex-runs';
   }
 
+  function providerLabel(): string {
+    return runOptions.provider === 'antigravity' ? 'Local Antigravity CLI' : 'Local Codex CLI';
+  }
+
+  function focusTaskDocument(documentId: string | null): void {
+    if (!documentId || editor.activeDocumentId === documentId) return;
+    if (editor.documents.some((session) => session.id === documentId)) {
+      editor.switchDocument(documentId);
+    }
+  }
+
   function clearProgressListener() {
     stopProgress?.();
     stopProgress = null;
   }
 
-  onDestroy(clearProgressListener);
+  onDestroy(() => {
+    if (!runningTaskId) clearProgressListener();
+  });
 
   function close(): void {
-    editor.dismissAiRetouch();
+    if (!task) editor.dismissAiRetouch();
     onClose();
   }
 
   async function copyError() {
-    if (!error) return;
+    if (!currentError) return;
     try {
-      await navigator.clipboard.writeText(error);
+      await navigator.clipboard.writeText(currentError);
     } catch {
       const area = document.createElement('textarea');
-      area.value = error;
+      area.value = currentError;
       area.style.position = 'fixed';
       area.style.opacity = '0';
       document.body.appendChild(area);
@@ -93,22 +113,27 @@ Use these annotations as direct user instructions for the regions they point to.
     window.setTimeout(() => (copied = false), 1200);
   }
 
-  async function saveDebugInputs(bytes: NonNullable<Awaited<ReturnType<typeof editor.prepareAiRetouchInput>>>, requestPrompt: string): Promise<string | null> {
-    if (!settings.value.workspace.keepAiRunInputs || !project.path || !request) return null;
+  async function saveDebugInputs(
+    bytes: NonNullable<Awaited<ReturnType<typeof editor.prepareAiRetouchInput>>>,
+    requestPrompt: string,
+    activeRequest: NonNullable<typeof request>,
+    projectPath: string | null,
+  ): Promise<string | null> {
+    if (!settings.value.workspace.keepAiRunInputs || !projectPath) return null;
     const dir = `paintnode/${providerRunDir()}/retouch-inputs-${Date.now()}`;
-    await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/source.png`, bytes: bytes.sourcePng });
-    await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
-    await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/mask.png`, bytes: bytes.maskPng });
+    await writeProjectDocumentPath({ projectPath, path: `${dir}/source.png`, bytes: bytes.sourcePng });
+    await writeProjectDocumentPath({ projectPath, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
+    await writeProjectDocumentPath({ projectPath, path: `${dir}/mask.png`, bytes: bytes.maskPng });
     if (bytes.annotatedSourcePng) {
-      await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/annotated_source.png`, bytes: bytes.annotatedSourcePng });
+      await writeProjectDocumentPath({ projectPath, path: `${dir}/annotated_source.png`, bytes: bytes.annotatedSourcePng });
     }
     if (bytes.referencePng) {
-      await writeProjectDocumentPath({ projectPath: project.path, path: `${dir}/reference.png`, bytes: bytes.referencePng });
+      await writeProjectDocumentPath({ projectPath, path: `${dir}/reference.png`, bytes: bytes.referencePng });
     }
     await writeProjectDocumentPath({
-      projectPath: project.path,
+      projectPath,
       path: `${dir}/prompt.txt`,
-      bytes: textBytes(`${request.toolName}\n\n${promptWithAnnotationNotes(requestPrompt, bytes.annotationNotes)}`),
+      bytes: textBytes(`${activeRequest.toolName}\n\n${promptWithAnnotationNotes(requestPrompt, bytes.annotationNotes)}`),
     });
     return dir;
   }
@@ -134,6 +159,30 @@ Use these annotations as direct user instructions for the regions they point to.
       return;
     }
     busy = true;
+    const targetDocumentId = editor.activeDocumentId;
+    const taskProjectPath = project.path;
+    const maskLayer = editor.doc?.layers.find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask') ?? null;
+    const previousMaskLock = maskLayer?.userLocked ?? null;
+    if (maskLayer) maskLayer.userLocked = true;
+    const task = aiTasks.create({
+      kind: 'retouch',
+      title: 'AI Retouch',
+      subtitle: `${active.toolName} · ${providerLabel()}`,
+      progress: 'Preparing AI retouch inputs...',
+      detail: {
+        kind: 'retouch',
+        providerLabel: providerLabel(),
+        prompt: prompt.trim(),
+        toolName: active.toolName,
+        gestureKind: active.gesture.kind,
+        sourcePreview,
+        maskPreview,
+        referencePreview,
+      },
+    });
+    runningTaskId = task.id;
+    editor.dismissAiRetouch();
+    onClose();
     let debugDir: string | null = null;
     progress = 'Preparing AI retouch inputs...';
     editor.flash('Preparing AI retouch...');
@@ -143,22 +192,27 @@ Use these annotations as direct user instructions for the regions they point to.
       stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
         if (event.payload.runId === runId && event.payload.message.trim()) {
           progress = event.payload.message.trim();
+          aiTasks.setProgress(task.id, progress);
         }
       });
     } catch {
       progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
+      aiTasks.setProgress(task.id, progress);
     }
 
     try {
       const bytes = await editor.prepareAiRetouchInput(active);
       if (!bytes) throw new Error('Unable to prepare AI retouch input.');
-      debugDir = await saveDebugInputs(bytes, prompt.trim());
-      if (debugDir) progress = `Saved retouch inputs: ${debugDir}`;
+      debugDir = await saveDebugInputs(bytes, prompt.trim(), active, taskProjectPath);
+      if (debugDir) {
+        progress = `Saved retouch inputs: ${debugDir}`;
+        aiTasks.setProgress(task.id, progress);
+      }
       const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
       const generated =
         runOptions.provider === 'antigravity'
           ? await generateAntigravityRetouchImage(
-              antigravityConfigFromRunOptions(runOptions, project.path, runId),
+              antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
               bytes.sourcePng,
               bytes.editTargetPng,
               bytes.maskPng,
@@ -167,7 +221,7 @@ Use these annotations as direct user instructions for the regions they point to.
               retouchPrompt,
             )
           : await generateCodexRetouchImage(
-              codexConfigFromRunOptions(runOptions, project.path, runId),
+              codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
               bytes.sourcePng,
               bytes.editTargetPng,
               bytes.maskPng,
@@ -176,12 +230,13 @@ Use these annotations as direct user instructions for the regions they point to.
               retouchPrompt,
             );
       const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
-      if (generated.asset || savedAssetCount > 0) await project.refresh();
+      if (generated.asset || savedAssetCount > 0) await project.refresh(taskProjectPath);
       const blob = await (await fetch(generated.dataUrl)).blob();
       const bmp = await createImageBitmap(blob);
       const maskBmp = generated.maskDataUrl
         ? await createImageBitmap(await (await fetch(generated.maskDataUrl)).blob())
         : null;
+      focusTaskDocument(targetDocumentId);
       editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
         assetId: generated.asset?.id ?? null,
         path: generated.asset?.relativePath ?? null,
@@ -193,15 +248,21 @@ Use these annotations as direct user instructions for the regions they point to.
           ? `AI retouch added; ${savedAssetCount} generated asset${savedAssetCount === 1 ? '' : 's'} saved`
           : 'AI retouch added',
       );
-      onClose();
+      aiTasks.complete(task.id, 'AI retouch added');
     } catch (e) {
       const message = (e as Error)?.message ?? String(e);
       error = debugDir ? `${message}\n\nRetouch input files were saved at:\n${debugDir}` : message;
+      aiTasks.fail(task.id, error);
       editor.flash('AI retouch failed');
     } finally {
+      const currentMaskLayer = editor.documents
+        .flatMap((session) => session.doc.layers)
+        .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask');
+      if (currentMaskLayer && previousMaskLock !== null) currentMaskLayer.userLocked = previousMaskLock;
       busy = false;
       progress = '';
       clearProgressListener();
+      runningTaskId = null;
     }
   }
 </script>
@@ -215,7 +276,12 @@ Use these annotations as direct user instructions for the regions they point to.
       </p>
     {/if}
 
-    {#if request}
+    {#if taskDetail}
+      <div class="summary">
+        <strong>{taskDetail.toolName}</strong>
+        <span>{taskDetail.gestureKind} · {taskDetail.providerLabel}</span>
+      </div>
+    {:else if request}
       <div class="summary">
         <strong>{request.toolName}</strong>
         <span>{request.gesture.kind}</span>
@@ -239,12 +305,12 @@ Use these annotations as direct user instructions for the regions they point to.
       </div>
     {/if}
 
-    {#if runOptions.provider === 'codex'}
+    {#if !taskDetail && runOptions.provider === 'codex'}
       <label class="dlg-field">
         <span>Codex command (optional)</span>
         <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
       </label>
-    {:else if runOptions.provider === 'antigravity'}
+    {:else if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
         <span>Antigravity command (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
@@ -253,7 +319,11 @@ Use these annotations as direct user instructions for the regions they point to.
 
     <label class="dlg-field">
       <span>Retouch prompt</span>
-      <textarea bind:value={prompt} rows="5" spellcheck="true"></textarea>
+      {#if taskDetail}
+        <textarea value={taskDetail.prompt} rows="5" readonly></textarea>
+      {:else}
+        <textarea bind:value={prompt} rows="5" spellcheck="true"></textarea>
+      {/if}
     </label>
 
     <p class="hint">
@@ -261,14 +331,19 @@ Use these annotations as direct user instructions for the regions they point to.
       sampled reference to the selected local AI provider. The generated pixels are inserted as a new layer and the mask remains reusable.
     </p>
 
-    {#if busy}
+    {#if currentBusy}
       <div class="progress-line" role="status" aria-live="polite">
         <span class="progress-dot" aria-hidden="true"></span>
-        <span>{progress}</span>
+        <span>{currentProgress}</span>
+      </div>
+    {:else if task}
+      <div class="progress-line done" role="status" aria-live="polite">
+        <span class="progress-dot" aria-hidden="true"></span>
+        <span>{currentProgress}</span>
       </div>
     {/if}
 
-    {#if error}
+    {#if currentError}
       <div class="error-box">
         <div class="error-head">
           <span>AI retouch failed</span>
@@ -282,17 +357,21 @@ Use these annotations as direct user instructions for the regions they point to.
             <Icon svg={Copy} size={15} />
           </button>
         </div>
-        <pre>{error}</pre>
+        <pre>{currentError}</pre>
       </div>
     {/if}
 
     <div class="dlg-actions">
-      <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      {#if !task}
+        <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      {/if}
       <span class="dlg-action-spacer"></span>
-      <button onclick={close}>Cancel</button>
-      <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !request}>
-        {busy ? 'Running...' : 'Run'}
-      </button>
+      <button onclick={close}>{task ? 'Close' : 'Cancel'}</button>
+      {#if !task}
+        <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !request}>
+          {busy ? 'Running...' : 'Run'}
+        </button>
+      {/if}
     </div>
   </div>
 </Modal>
@@ -368,6 +447,10 @@ Use these annotations as direct user instructions for the regions they point to.
     border-radius: 50%;
     background: var(--accent);
     box-shadow: 0 0 0 4px rgba(74, 144, 226, 0.18);
+  }
+  .progress-line.done .progress-dot {
+    background: #58c488;
+    box-shadow: none;
   }
   .error-box {
     border: 1px solid rgba(255, 96, 96, 0.45);

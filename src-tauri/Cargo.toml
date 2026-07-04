@@ -1,8 +1,8 @@
 [package]
-name = "app"
+name = "paintnode"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A professional OpenRaster image editor."
+authors = ["PaintNode"]
 license = ""
 repository = ""
 edition = "2021"
@@ -11,8 +11,12 @@ rust-version = "1.77.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "app_lib"
+name = "paintnode_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "PaintNode"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

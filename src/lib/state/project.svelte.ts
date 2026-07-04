@@ -97,7 +97,17 @@ class ProjectStore {
     width?: number,
     height?: number,
   ): Promise<ProjectAsset | null> {
-    const path = this.path;
+    return this.storeGeneratedBlobAt(this.path, blob, name, prompt, width, height);
+  }
+
+  async storeGeneratedBlobAt(
+    path: string | null,
+    blob: Blob,
+    name: string,
+    prompt?: string | null,
+    width?: number,
+    height?: number,
+  ): Promise<ProjectAsset | null> {
     if (!path) return null;
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const result = await storeProjectAssetBytes({

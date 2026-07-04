@@ -55,6 +55,7 @@ export { default as ArchiveClock } from '@fluentui/svg-icons/icons/archive_clock
 export { default as Apps } from '@fluentui/svg-icons/icons/apps_24_regular.svg?raw';
 export { default as AppsList } from '@fluentui/svg-icons/icons/apps_list_24_regular.svg?raw';
 export { default as AppsListDetail } from '@fluentui/svg-icons/icons/apps_list_detail_24_regular.svg?raw';
+export { default as TaskList } from '@fluentui/svg-icons/icons/task_list_ltr_24_regular.svg?raw';
 export { default as Document } from '@fluentui/svg-icons/icons/document_24_regular.svg?raw';
 export { default as Folder } from '@fluentui/svg-icons/icons/folder_24_regular.svg?raw';
 export { default as FolderOpen } from '@fluentui/svg-icons/icons/folder_open_24_regular.svg?raw';

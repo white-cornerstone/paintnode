@@ -1,65 +1,79 @@
 <script lang="ts">
-  import Icon from './Icon.svelte';
   import Modal from './Modal.svelte';
-  import { PaintBrush } from '../icons';
+  import appIcon from '../../../src-tauri/icons/icon.png?url';
+  import packageInfo from '../../../package.json';
 
   let { onClose }: { onClose: () => void } = $props();
 </script>
 
-<Modal title="About PaintNode" {onClose} width={420}>
+<Modal title="About PaintNode" {onClose} width={460}>
   <div class="about">
-    <h2><Icon svg={PaintBrush} size={18} /> PaintNode</h2>
-    <p>A server-free, professional raster image editor.</p>
-    <p>
-      Documents use the open <strong>OpenRaster (.ora)</strong> format, so your layered files stay portable
-      across Krita, GIMP, MyPaint and other ORA-capable apps.
-    </p>
-    <p>
-      Core editing, file I/O, and export run on your device. Optional integrations can search Openverse
-      online for open-license images or pass selected project data to your configured local AI CLI provider.
-    </p>
-    <ul>
-      <li>Layers with blend modes &amp; opacity</li>
-      <li>Brush, eraser, bucket fill, eyedropper, move</li>
-      <li>Pan / zoom, non-destructive undo / redo</li>
-      <li>Open &amp; save .ora, export PNG</li>
-      <li>Openverse image search and local AI CLI workflows</li>
-    </ul>
+    <section class="identity" aria-label="PaintNode">
+      <img class="app-icon" src={appIcon} alt="" aria-hidden="true" />
+      <h2>PaintNode</h2>
+      <p class="version">Version {packageInfo.version}</p>
+    </section>
+
+    <section class="summary">
+      <p>A server-free, professional raster image editor.</p>
+      <p>
+        Documents use the open <strong>OpenRaster (.ora)</strong> format, so your layered files stay portable
+        across Krita, GIMP, MyPaint and other ORA-capable apps.
+      </p>
+      <p>
+        Core editing, file I/O, and export run on your device. Optional integrations can search Openverse
+        online for open-license images or pass selected project data to your configured local AI CLI provider.
+      </p>
+    </section>
+
     <p class="tech">Built with Svelte 5 · TypeScript · Canvas2D · fflate — no PaintNode-hosted backend.</p>
-    <div class="actions"><button class="primary" onclick={onClose}>Close</button></div>
   </div>
 </Modal>
 
 <style>
-  .about h2 {
+  .about {
+    padding: 26px 14px 10px;
+  }
+  .identity {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 6px;
-    margin: 0 0 8px;
-    color: var(--accent);
+    gap: 8px;
+    margin-bottom: 24px;
   }
-  .about p {
-    margin: 0 0 10px;
-    line-height: 1.5;
+  .app-icon {
+    width: 76px;
+    height: 76px;
+    display: block;
+    flex: 0 0 auto;
   }
-  .about ul {
-    margin: 0 0 10px;
-    padding-left: 18px;
-    line-height: 1.6;
+  .identity h2 {
+    margin: 4px 0 0;
+    color: var(--text-bright);
+    font-size: 22px;
+    line-height: 1.1;
+    font-weight: 700;
+  }
+  .version {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .summary {
+    max-width: 374px;
+    margin: 0 auto;
+  }
+  .summary p {
+    margin: 0 0 11px;
+    line-height: 1.52;
     color: var(--text);
   }
   .tech {
+    max-width: 374px;
+    margin: 16px auto 0;
     color: var(--text-dim);
     font-size: 11px;
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    margin-top: 6px;
-  }
-  .primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    line-height: 1.45;
+    text-align: center;
   }
 </style>

@@ -14,6 +14,8 @@ export type DialogId =
   | 'stockImages'
   | 'settings';
 
+export type AiTaskDialogKind = 'generate' | 'retouch' | 'decouple';
+
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
 
@@ -33,6 +35,7 @@ class UiState {
   cursor = $state<{ x: number; y: number } | null>(null);
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
+  aiTaskDialog = $state<{ kind: AiTaskDialogKind; id: string } | null>(null);
   activeSurface = $state<'document' | 'workflow'>('document');
   workspaceFocusMode = $state(false);
   workspaceFocusHintVisible = $state(false);
@@ -54,10 +57,21 @@ class UiState {
   private saveChangesResolver: ((v: SaveChangesChoice) => void) | null = null;
 
   open(id: DialogId): void {
+    this.aiTaskDialog = null;
     this.dialog = id;
+  }
+  openAiTask(kind: AiTaskDialogKind, id: string): void {
+    this.aiTaskDialog = { kind, id };
+    this.dialog =
+      kind === 'generate'
+        ? 'aiGenerate'
+        : kind === 'retouch'
+          ? 'aiRetouch'
+          : 'aiDecouple';
   }
   close(): void {
     this.dialog = null;
+    this.aiTaskDialog = null;
   }
   showDocument(): void {
     this.activeSurface = 'document';
