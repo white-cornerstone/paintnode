@@ -15,6 +15,7 @@ import {
   type ProjectFile,
   type ProjectState,
 } from '../integrations/desktop';
+import { ui } from './ui.svelte';
 
 const KEY = 'paintnode.projectPath';
 
@@ -41,6 +42,7 @@ class ProjectStore {
       return;
     }
     this.busy = true;
+    const done = ui.beginLoading('Opening project…');
     try {
       const state = await openProjectFolder();
       if (state) this.setProject(state);
@@ -48,6 +50,7 @@ class ProjectStore {
       this.error = (e as Error)?.message ?? String(e);
     } finally {
       this.busy = false;
+      done();
     }
   }
 
@@ -55,12 +58,14 @@ class ProjectStore {
     if (!path || !isDesktop()) return;
     this.error = '';
     this.busy = true;
+    const done = ui.beginLoading('Loading project…');
     try {
       this.setProject(await refreshProject(path));
     } catch (e) {
       this.error = (e as Error)?.message ?? String(e);
     } finally {
       this.busy = false;
+      done();
     }
   }
 

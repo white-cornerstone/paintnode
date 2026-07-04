@@ -152,10 +152,15 @@ async function openDocumentFileInputs(files: OpenableDocumentFile[]): Promise<vo
     let focused = 0;
     const notices: string[] = [];
     for (const file of supported) {
-      const info = await openDocumentFile(file);
-      if (info.result === 'opened') opened++;
-      else focused++;
-      notices.push(...info.notices);
+      const done = ui.beginLoading(`Opening ${file.name}…`);
+      try {
+        const info = await openDocumentFile(file);
+        if (info.result === 'opened') opened++;
+        else focused++;
+        notices.push(...info.notices);
+      } finally {
+        done();
+      }
     }
     if (notices.length) {
       editor.flash(`Opened ${supported[0].name} — ${notices.join('; ')}`);
@@ -210,6 +215,7 @@ export async function importImageCommand(): Promise<void> {
   if (!editor.doc) return;
   const file = await openFile('image/png,image/jpeg,image/webp,image/gif');
   if (!file) return;
+  const done = ui.beginLoading(`Placing ${file.name}…`);
   try {
     const bmp = await createImageBitmap(file);
     const asset = await project.storeImportedFile(file, bmp.width, bmp.height);
@@ -227,6 +233,8 @@ export async function importImageCommand(): Promise<void> {
     );
   } catch (e) {
     editor.flash('Import failed: ' + (e as Error).message);
+  } finally {
+    done();
   }
 }
 

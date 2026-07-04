@@ -27,6 +27,11 @@ export interface SaveChangesPrompt {
   total: number;
 }
 
+interface LoadingTask {
+  id: number;
+  label: string;
+}
+
 class UiState {
   cursor = $state<{ x: number; y: number } | null>(null);
   zoom = $state(1);
@@ -36,6 +41,10 @@ class UiState {
   workspaceFocusHintVisible = $state(false);
   contextualTaskBarVisible = $state(true);
   contextualTaskBarResetToken = $state(0);
+
+  // Background waits (project scan, document decode) surfaced in the status bar.
+  private loadingTasks = $state<LoadingTask[]>([]);
+  private loadingSeq = 0;
 
   // Font-embed prompt shown on save when text uses imported (embeddable) fonts.
   fontEmbed = $state<FontEmbedPrompt | null>(null);
@@ -74,6 +83,24 @@ class UiState {
   resetContextualTaskBarPosition(): void {
     this.contextualTaskBarVisible = true;
     this.contextualTaskBarResetToken += 1;
+  }
+
+  /**
+   * Register a background wait so the status bar can show a loading indicator.
+   * Returns a disposer to call when the work finishes (use try/finally).
+   * Overlapping waits stack; the most recent label is the one displayed.
+   */
+  beginLoading(label: string): () => void {
+    const id = ++this.loadingSeq;
+    this.loadingTasks = [...this.loadingTasks, { id, label }];
+    return () => {
+      this.loadingTasks = this.loadingTasks.filter((task) => task.id !== id);
+    };
+  }
+
+  /** Label of the most recent in-flight wait, or null when idle. */
+  get loadingLabel(): string | null {
+    return this.loadingTasks[this.loadingTasks.length - 1]?.label ?? null;
   }
 
   /** Show the embed prompt and resolve with the user's choice. */

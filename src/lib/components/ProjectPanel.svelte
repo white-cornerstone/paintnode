@@ -5,6 +5,7 @@
   import { tooltip } from '../actions/tooltip';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
+  import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { projectDocumentSourceKey } from '../state/documentSource';
   import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
@@ -196,6 +197,7 @@
   }
 
   async function openFile(file: ProjectFile) {
+    const done = ui.beginLoading(`Opening ${file.name}…`);
     try {
       if (isOra(file)) {
         const sourceKey = projectDocumentSourceKey(file.relativePath);
@@ -259,6 +261,8 @@
       await project.revealFile(file);
     } catch (e) {
       editor.flash('Open project file failed: ' + ((e as Error)?.message ?? String(e)));
+    } finally {
+      done();
     }
   }
 
@@ -301,6 +305,7 @@
     const selected = await openFiles('image/png,image/jpeg,image/webp,image/gif', true);
     if (!selected.length) return;
     let imported = 0;
+    const done = ui.beginLoading(selected.length === 1 ? `Importing ${selected[0].name}…` : 'Importing images…');
     try {
       for (const file of selected) {
         const bmp = await createImageBitmap(file);
@@ -314,6 +319,8 @@
       editor.flash(imported === 1 ? `Imported ${selected[0].name}` : `Imported ${imported} images`);
     } catch (e) {
       editor.flash('Import image failed: ' + ((e as Error)?.message ?? String(e)));
+    } finally {
+      done();
     }
   }
 </script>
