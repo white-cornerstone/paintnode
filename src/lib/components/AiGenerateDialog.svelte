@@ -8,6 +8,7 @@
   import { aiTasks } from '../state/aiTasks.svelte';
   import { editor } from '../state/editor.svelte';
   import { settings } from '../state/settings.svelte';
+  import { ui } from '../state/ui.svelte';
   import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
   import { Copy } from '../icons';
@@ -18,7 +19,8 @@
 
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let argsText = $state(settings.value.ai.customGenerateArgsText || settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
-  let prompt = $state('');
+  // A prompt handed off by the AI setup wizard pre-fills the dialog once.
+  let prompt = $state(ui.consumeAiGeneratePrefill() ?? '');
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);

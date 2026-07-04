@@ -84,6 +84,13 @@ export { default as Video } from '@fluentui/svg-icons/icons/video_24_regular.svg
 export { default as SquareHintSparkles } from '@fluentui/svg-icons/icons/square_hint_sparkles_24_regular.svg?raw';
 export { default as Bot } from '@fluentui/svg-icons/icons/bot_24_regular.svg?raw';
 
+// AI setup wizard
+export { default as CheckmarkCircle } from '@fluentui/svg-icons/icons/checkmark_circle_24_regular.svg?raw';
+export { default as ErrorCircle } from '@fluentui/svg-icons/icons/error_circle_24_regular.svg?raw';
+export { default as Rocket } from '@fluentui/svg-icons/icons/rocket_24_regular.svg?raw';
+export { default as ChevronLeft } from '@fluentui/svg-icons/icons/chevron_left_24_regular.svg?raw';
+export { default as Code } from '@fluentui/svg-icons/icons/code_24_regular.svg?raw';
+
 // Panel rail
 export { default as ColorPalette } from '@fluentui/svg-icons/icons/color_24_regular.svg?raw';
 export { default as ColorFill } from '@fluentui/svg-icons/icons/color_fill_24_regular.svg?raw';

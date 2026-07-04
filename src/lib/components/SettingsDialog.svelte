@@ -19,6 +19,7 @@
     type ServiceTier,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
+  import { ui } from '../state/ui.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -194,6 +195,10 @@
           <h2>AI</h2>
           <p>Defaults for local AI image generation, retouching, extraction, and workflows.</p>
         </div>
+
+        <button type="button" class="secondary" onclick={() => ui.open('aiSetup')}>
+          Open setup assistant…
+        </button>
 
         <label class="field">
           <span>Default image provider</span>

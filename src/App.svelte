@@ -44,6 +44,7 @@
     TextParagraphIcon,
     TaskList,
   } from './lib/icons';
+  import { AI_SETUP_STORAGE_KEY, shouldOfferAiSetup } from './lib/state/aiSetup';
   import { installKeyboard } from './lib/state/keyboard';
   import {
     autosaveOpenDocuments,
@@ -88,6 +89,7 @@
   const loadAiGenerateDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
   const loadAiRetouchDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
+  const loadAiSetupWizard: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiSetupWizard.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
   const loadUpdateDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/UpdateDialog.svelte');
@@ -545,6 +547,10 @@
     const disposeKeyboard = installKeyboard();
     ui.contextualTaskBarVisible = settings.value.general.showContextualTaskBarOnStartup;
     if (settings.value.general.reopenLastProject) void project.restore();
+    // First-time desktop users get the AI setup wizard once; it marks itself seen.
+    if (shouldOfferAiSetup(settings.value, localStorage.getItem(AI_SETUP_STORAGE_KEY), desktop)) {
+      ui.open('aiSetup');
+    }
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
     let unlistenNativeOpenFiles: UnlistenFn | null = null;
@@ -852,6 +858,8 @@
   {@render lazyAiDialog(loadAiRetouchDialog)}
 {:else if ui.dialog === 'aiDecouple'}
   {@render lazyAiDialog(loadAiDecoupleDialog)}
+{:else if ui.dialog === 'aiSetup'}
+  {@render lazyDialog(loadAiSetupWizard)}
 {:else if ui.dialog === 'stockImages'}
   {@render lazyDialog(loadStockImagesDialog)}
 {:else if ui.dialog === 'settings'}

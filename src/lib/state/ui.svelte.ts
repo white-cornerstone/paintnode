@@ -11,6 +11,7 @@ export type DialogId =
   | 'aiGenerate'
   | 'aiRetouch'
   | 'aiDecouple'
+  | 'aiSetup'
   | 'stockImages'
   | 'settings'
   | 'update';
@@ -57,9 +58,22 @@ class UiState {
   saveChanges = $state<SaveChangesPrompt | null>(null);
   private saveChangesResolver: ((v: SaveChangesChoice) => void) | null = null;
 
+  // One-shot prompt handoff into the next AI Generate dialog (e.g. from the
+  // setup wizard). Consumed on dialog mount, so it is plain non-reactive state.
+  private aiGeneratePrefill: string | null = null;
+
   open(id: DialogId): void {
     this.aiTaskDialog = null;
     this.dialog = id;
+  }
+  openAiGenerate(prefillPrompt: string | null = null): void {
+    this.aiGeneratePrefill = prefillPrompt;
+    this.open('aiGenerate');
+  }
+  consumeAiGeneratePrefill(): string | null {
+    const value = this.aiGeneratePrefill;
+    this.aiGeneratePrefill = null;
+    return value;
   }
   openAiTask(kind: AiTaskDialogKind, id: string): void {
     this.aiTaskDialog = { kind, id };
