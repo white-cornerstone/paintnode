@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/social-preview.svg" alt="PaintNode" width="720">
+</p>
+
 # PaintNode
 
 Use Codex CLI and Antigravity inside a real image editor.
@@ -5,8 +9,6 @@ Use Codex CLI and Antigravity inside a real image editor.
 PaintNode is a desktop editor for people who already use AI CLIs. Start with a canvas, image, mask, or layered project, ask Codex CLI or Antigravity to generate or edit pixels, then keep the result as editable layers and project assets.
 
 No hosted PaintNode model. No extra API-key billing layer. PaintNode uses the CLI login and subscriptions you already have configured on your machine.
-
-![PaintNode icon](src-tauri/icons/icon.png)
 
 ## What You Can Do
 
