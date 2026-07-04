@@ -2,7 +2,7 @@
   "name": "paintnode",
   "version": "0.1.0",
   "private": true,
-  "description": "An AI companion workspace for local model CLIs and layered OpenRaster documents.",
+  "description": "Use Codex CLI and Antigravity to generate and edit image layers with your existing CLI login.",
   "homepage": "https://paintnode.com",
   "repository": {
     "type": "git",

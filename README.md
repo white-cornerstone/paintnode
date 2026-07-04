@@ -1,28 +1,35 @@
 # PaintNode
 
-PaintNode is an AI companion workspace for visual work. It gives local AI CLIs, such as Codex CLI and Antigravity, a real productive surface: a layered canvas, project assets, masks, selections, and OpenRaster (`.ora`) documents that can be edited, inspected, and handed back to the user.
+Use Codex CLI and Antigravity inside a real image editor.
 
-Most creative AI tools either bundle their own image model or ask users to bring API keys. PaintNode takes a different path. It works with the AI command-line tools users already trust and already have configured, so the editor becomes the meeting place between human intent, existing AI subscriptions or local credentials, and a document that remains under the user's control.
+PaintNode is a desktop editor for people who already use AI CLIs. Start with a canvas, image, mask, or layered project, ask Codex CLI or Antigravity to generate or edit pixels, then keep the result as editable layers and project assets.
+
+No hosted PaintNode model. No extra API-key billing layer. PaintNode uses the CLI login and subscriptions you already have configured on your machine.
 
 ![PaintNode icon](src-tauri/icons/icon.png)
 
-## Product Direction
+## What You Can Do
 
-PaintNode is not intended to be another traditional image-editor alternative with AI sprinkled on top. The goal is to introduce a new workflow for model CLIs inside real creative tooling:
+- Generate a new image from a prompt and place it directly on the canvas.
+- Use a mask to fill or replace part of an existing image.
+- Retouch a selected area while keeping the original document open.
+- Extract foreground objects or useful assets into project files.
+- Let Codex CLI and Antigravity work on the same project in separate runs.
+- Keep results in layered OpenRaster (`.ora`) documents, with PNG and PSD export paths.
 
-- The user keeps a normal layered document open.
-- Codex CLI, Antigravity, and future local providers can work side by side.
-- Each AI run can produce or modify project assets and document layers.
-- The user reviews, edits, masks, composites, and exports the result in the same workspace.
-- PaintNode does not host a model backend or add another API-billing layer.
+## Who It Is For
 
-The image editor surface matters because AI output needs a place to become production work. Layers, masks, file I/O, and OpenRaster compatibility are the shared canvas for that collaboration.
+- Codex CLI or Antigravity users who want AI image work to land in an editable document instead of a folder of loose PNGs.
+- Developers and designers making app mockups, product visuals, game assets, storyboards, or marketing images.
+- People who want local file control and their existing CLI setup, not another hosted AI image account.
+
+PaintNode is not trying to be a full Photoshop replacement. It is focused on making AI CLI output useful inside a practical image-editing workflow: layers, masks, selections, assets, project files, review, edit, export.
 
 ## Highlights
 
-- Local AI companion flows for generation, fill, retouching, asset extraction, and workflow composition.
+- AI image flows for generation, fill, retouching, asset extraction, and workflow composition.
 - Provider settings for existing local CLIs, including Codex CLI and Antigravity, with per-run overrides.
-- Side-by-side AI work on the same project through separate assets, tasks, and layers.
+- Side-by-side Codex and Antigravity work on the same project through separate assets, tasks, and layers.
 - Layered OpenRaster (`.ora`) documents for portable, user-owned creative files.
 - Local-first file I/O, PNG/PSD export paths, and project asset management.
 - Tauri desktop app built with Svelte 5, TypeScript, Rust, and Canvas2D.
@@ -31,7 +38,7 @@ The image editor surface matters because AI output needs a place to become produ
 
 ## Status
 
-PaintNode is in early MVP development. Public releases are intended to test the AI-companion workflow, local CLI integrations, document model, and packaging flow. The editor surface, provider contracts, and file compatibility are still evolving.
+PaintNode is in early MVP development. Public releases are intended to test the Codex CLI and Antigravity image workflows, the layered document model, and the desktop packaging/update flow. The editor surface, provider contracts, and file compatibility are still evolving.
 
 The current release channel is hosted on GitHub Releases:
 

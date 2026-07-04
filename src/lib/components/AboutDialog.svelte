@@ -15,14 +15,14 @@
     </section>
 
     <section class="summary">
-      <p>An AI companion workspace for local model CLIs and layered visual work.</p>
+      <p>Use Codex CLI and Antigravity to generate and edit image layers.</p>
       <p>
-        PaintNode lets Codex CLI, Antigravity, and future local providers work beside you on the same document
-        through project assets, masks, tasks, and layers.
+        PaintNode keeps AI results in the editor as layers, masks, project assets, and OpenRaster documents
+        instead of leaving you with loose output files.
       </p>
       <p>
-        Documents use the open <strong>OpenRaster (.ora)</strong> format, keeping layered files portable while
-        avoiding a PaintNode-hosted model backend or extra API billing layer.
+        It uses your existing local CLI login and avoids a PaintNode-hosted model backend or extra API billing
+        layer.
       </p>
     </section>
 
