@@ -33,7 +33,7 @@ The PaintNode name, logo, icon, release channels, and other brand assets are res
 - Prefer pure functions and dependency injection for engine logic so it stays unit-testable.
 - Use Fluent System Icons through `src/lib/icons/index.ts` and the shared `Icon.svelte` wrapper.
 - Icon-only controls need the shared tooltip action and an `aria-label`.
-- Follow `AGENTS.md` and `design.md` for project-specific UI and architecture conventions.
+- Follow `AGENTS.md.example` and `design.md` for project-specific UI and architecture conventions.
 
 ## Release Changes
 

@@ -3,7 +3,7 @@
 // All icons MUST come from @fluentui/svg-icons (the official Microsoft Fluent System
 // Icons set — the same icons @fluentui/react-icons is generated from). Add a new icon by
 // finding its file in node_modules/@fluentui/svg-icons/icons and re-exporting it here, then
-// render it with <Icon svg={Name} />. Do not hand-write inline <svg> markup. See AGENTS.md.
+// render it with <Icon svg={Name} />. Do not hand-write inline <svg> markup. See AGENTS.md.example.
 //
 // Naming convention: `<name>_<size>_<style>.svg`. We standardize on the 24px regular set
 // and size at the call site via the <Icon size> prop.

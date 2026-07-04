@@ -4,7 +4,7 @@
    * (e.g. `import { PaintBrush } from '../icons'`). The icon inherits the current text
    * color via `currentColor` and is sized by the `size` prop.
    *
-   * Do NOT hand-write inline <svg> markup elsewhere — see AGENTS.md (Icons guideline).
+   * Do NOT hand-write inline <svg> markup elsewhere — see AGENTS.md.example (Icons guideline).
    */
   interface Props {
     svg: string;

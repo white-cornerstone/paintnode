@@ -1,4 +1,7 @@
-# AGENTS.md
+# AGENTS.md.example
+
+Copy this file to `AGENTS.md` for local agent use. The local `AGENTS.md` is ignored by git so
+each contributor can keep personal AI-agent instructions without replacing this shared example.
 
 Guidance for AI agents and contributors working on **PaintNode** — a backend-free,
 professional raster image editor (Svelte 5 + TypeScript + Vite) that uses the open
