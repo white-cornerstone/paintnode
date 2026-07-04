@@ -5,3 +5,6 @@
 
 # Throwaway dev-port override written by scripts/tauri-dev.mjs
 /.tauri.dev.json
+
+# Generated macOS Quick Look extension bundles
+/macos/quicklook/build/
