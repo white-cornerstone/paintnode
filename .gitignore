@@ -1,8 +1,15 @@
 node_modules
 dist
 dist-ssr
+.svelte-kit
+coverage
 .DS_Store
+*.log
+*.tsbuildinfo
 *.local
+.env
+.env.*
+!.env.example
 .env*.local
 .vite
 
@@ -10,3 +17,18 @@ dist-ssr
 /AGENTS.md
 /CLAUDE.md
 /.claude/
+/.codex/
+/.cursor/
+
+# Local editor/project state
+/.vscode/
+/.idea/
+*.code-workspace
+
+# Local signing material
+*.p8
+*.p12
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
