@@ -30,6 +30,7 @@
     Channel,
     ChevronDoubleLeft,
     ChevronDoubleRight,
+    ArrowDownload,
     ColorBackground,
     ColorFill,
     ColorPalette,
@@ -485,6 +486,11 @@
     };
   }
 
+  function preventWebviewContextMenu(event: MouseEvent): void {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+  }
+
   function nativeDropPaths(payload: unknown): string[] {
     if (Array.isArray(payload)) return payload.filter((path): path is string => typeof path === 'string');
     const paths = (payload as NativeDropPayload | null)?.paths;
@@ -568,12 +574,14 @@
       expandRightPanels();
     };
     window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('contextmenu', preventWebviewContextMenu);
     window.addEventListener('paintnode:show-properties-panel', showPropertiesPanel);
     return () => {
       unlistenMenu?.();
       unlistenClose?.();
       unlistenNativeDrops.forEach((unlisten) => unlisten());
       window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('contextmenu', preventWebviewContextMenu);
       window.removeEventListener('paintnode:show-properties-panel', showPropertiesPanel);
       disposeKeyboard();
     };
@@ -666,6 +674,18 @@
   {#if desktop}
     <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
       <div class="desktop-title">PaintNode</div>
+      {#if appUpdater.available}
+        <button
+          class="titlebar-update"
+          type="button"
+          onclick={() => ui.open('update')}
+          onpointerdown={(event) => event.stopPropagation()}
+          use:tooltip={{ text: `Install PaintNode ${appUpdater.version}`, placement: 'bottom' }}
+        >
+          <Icon svg={ArrowDownload} size={14} />
+          <span>Update</span>
+        </button>
+      {/if}
     </div>
   {:else if !ui.workspaceFocusMode}
     <MenuBar />
@@ -861,6 +881,36 @@
     font-size: 13px;
     font-weight: 700;
     pointer-events: none;
+  }
+  .titlebar-update {
+    position: absolute;
+    right: 12px;
+    top: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    min-width: 86px;
+    height: 24px;
+    padding: 0 11px;
+    border: 1px solid color-mix(in srgb, #0a84ff 84%, #fff 16%);
+    border-radius: 5px;
+    background: #0a84ff;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.16) inset;
+  }
+  .titlebar-update:hover {
+    background: #1b8dff;
+  }
+  .titlebar-update:active {
+    background: #006fd6;
+  }
+  .titlebar-update:focus-visible {
+    outline: 2px solid color-mix(in srgb, #0a84ff 60%, #fff 40%);
+    outline-offset: 2px;
   }
   .middle {
     flex: 1;

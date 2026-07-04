@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CODEX_MODEL_OPTIONS,
+  ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS,
   ANTIGRAVITY_MODEL_OPTIONS,
   aiRunOptionsFromSettings,
   defaultSettings,
@@ -71,6 +72,12 @@ describe('settings normalization', () => {
     expect(defaults.ai.antigravityModel).toBe('auto');
     expect(defaults.ai.antigravityApprovalMode).toBe('skipPermissions');
     expect(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id)).toContain('Gemini 3.5 Flash (High)');
+  });
+
+  it('keeps all Antigravity agent models available for image runs', () => {
+    expect(ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS.map((option) => option.id)).toEqual(
+      ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id),
+    );
   });
 
   it('falls back to safe Antigravity defaults for unknown saved Antigravity settings', () => {
