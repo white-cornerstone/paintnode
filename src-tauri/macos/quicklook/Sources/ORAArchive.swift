@@ -3,9 +3,18 @@ import zlib
 
 enum ORAArchive {
     private static let pngSignature = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-    private static let preferredEntries = ["Thumbnails/thumbnail.png", "mergedimage.png"]
+    private static let previewEntries = ["mergedimage.png", "Thumbnails/thumbnail.png"]
+    private static let thumbnailEntries = ["Thumbnails/thumbnail.png", "mergedimage.png"]
 
     static func previewPNGData(from url: URL) -> Data? {
+        pngData(from: url, preferredEntries: previewEntries)
+    }
+
+    static func thumbnailPNGData(from url: URL) -> Data? {
+        pngData(from: url, preferredEntries: thumbnailEntries)
+    }
+
+    private static func pngData(from url: URL, preferredEntries: [String]) -> Data? {
         guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
             return nil
         }

@@ -6,7 +6,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
         for request: QLFileThumbnailRequest,
         _ handler: @escaping (QLThumbnailReply?, Error?) -> Void,
     ) {
-        guard let data = ORAArchive.previewPNGData(from: request.fileURL),
+        guard let data = ORAArchive.thumbnailPNGData(from: request.fileURL),
               let image = NSImage(data: data)
         else {
             handler(nil, nil)

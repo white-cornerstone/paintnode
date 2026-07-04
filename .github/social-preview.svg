@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">PaintNode</title>
+  <desc id="desc">PaintNode social preview image with the app icon and product tagline.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#120b25"/>
+      <stop offset="0.52" stop-color="#26124c"/>
+      <stop offset="1" stop-color="#10171c"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="172" y1="88" x2="1108" y2="552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a174c"/>
+      <stop offset="0.48" stop-color="#4b1f7a"/>
+      <stop offset="1" stop-color="#1b1236"/>
+    </linearGradient>
+    <linearGradient id="stroke-a" x1="145" y1="405" x2="520" y2="285" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff6bd6"/>
+      <stop offset="0.54" stop-color="#c15dff"/>
+      <stop offset="1" stop-color="#8f62ff"/>
+    </linearGradient>
+    <linearGradient id="stroke-b" x1="145" y1="350" x2="520" y2="252" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7b5dff"/>
+      <stop offset="0.5" stop-color="#965fff"/>
+      <stop offset="1" stop-color="#ff75da"/>
+    </linearGradient>
+    <linearGradient id="node" x1="342" y1="145" x2="506" y2="309" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.52" stop-color="#eed6ff"/>
+      <stop offset="1" stop-color="#ffb2ea"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="26" stdDeviation="30" flood-color="#0b0520" flood-opacity="0.46"/>
+    </filter>
+    <filter id="node-shadow" x="-45%" y="-45%" width="190%" height="190%">
+      <feDropShadow dx="0" dy="13" stdDeviation="14" flood-color="#16042a" flood-opacity="0.44"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <path d="M0 520c180-72 338-84 512-28 213 69 386 58 768-103v251H0z" fill="#47d3c2" opacity="0.12"/>
+  <path d="M0 94c185 52 348 47 490-15 154-67 336-85 541-20 90 29 173 43 249 39V0H0z" fill="#ff6bd6" opacity="0.08"/>
+
+  <g filter="url(#shadow)">
+    <rect x="86" y="88" width="430" height="430" rx="96" fill="url(#panel)"/>
+    <path d="M118 404c77-42 144-61 212-56 67 5 109 32 171-2" fill="none" stroke="url(#stroke-a)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M119 346c66-37 129-55 203-49 72 6 113 30 178 0" fill="none" stroke="url(#stroke-b)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" opacity="0.82"/>
+    <path d="M332 181l50 79 74-28" fill="none" stroke="#ffe6ff" stroke-width="21" stroke-linecap="round" stroke-linejoin="round" opacity="0.82"/>
+  </g>
+
+  <g filter="url(#node-shadow)">
+    <circle cx="332" cy="181" r="37" fill="url(#node)"/>
+    <circle cx="382" cy="260" r="26" fill="url(#node)" opacity="0.92"/>
+    <circle cx="456" cy="232" r="29" fill="url(#node)" opacity="0.98"/>
+  </g>
+
+  <g fill="#f9f7ff">
+    <text x="590" y="256" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="94" font-weight="750" letter-spacing="0">PaintNode</text>
+    <text x="594" y="328" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="34" font-weight="500" fill="#e7dfff">Use AI CLIs inside a real image editor.</text>
+    <text x="594" y="386" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="25" font-weight="500" fill="#9ff4e8">OpenRaster layers. Local files. No hosted PaintNode model.</text>
+  </g>
+</svg>

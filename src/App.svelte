@@ -545,12 +545,10 @@
       if (appWindow) {
         void appWindow.onCloseRequested(async (event) => {
           if (quitApproved) return;
+          event.preventDefault();
           if (quitGuardRunning) {
-            event.preventDefault();
             return;
           }
-          if (!hasUnsavedWork()) return;
-          event.preventDefault();
           await requestApplicationClose();
         }).then((unlisten) => {
           unlistenClose = unlisten;
