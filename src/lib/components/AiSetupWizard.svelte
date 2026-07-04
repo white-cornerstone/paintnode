@@ -6,24 +6,29 @@
   import {
     ANTIGRAVITY_MODEL_OPTIONS,
     CODEX_MODEL_OPTIONS,
+    type AiAutonomyLevel,
     type AntigravityModelId,
     type CodexModelId,
+    type ReasoningEffort,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
   import { editor } from '../state/editor.svelte';
+  import { project } from '../state/project.svelte';
   import { ui } from '../state/ui.svelte';
-  import { CheckmarkCircle, ChevronLeft, Code, ErrorCircle, Rocket, Sparkle } from '../icons';
+  import { CheckmarkCircle, ChevronLeft, Code, ErrorCircle, FolderAdd, Rocket, Sparkle } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
 
   type WizardProvider = 'codex' | 'antigravity';
-  type Step = 1 | 2 | 3;
+  type Step = 1 | 2 | 3 | 4;
+  type DetectState = { status: 'checking' | 'found' | 'missing'; result: CodexDetectionResult | null };
 
   const desktop = isDesktop();
   const steps = [
     { number: 1, label: 'Pick your AI' },
-    { number: 2, label: 'Connect' },
-    { number: 3, label: 'Create!' },
+    { number: 2, label: 'Configure' },
+    { number: 3, label: 'Project' },
+    { number: 4, label: 'Create!' },
   ] as const;
   const providerCards: { id: WizardProvider; icon: string; title: string; command: string; description: string }[] = [
     {
@@ -40,6 +45,19 @@
       command: 'agy',
       description: 'Uses your local Antigravity sign-in to generate images with Gemini models.',
     },
+  ];
+  const reasoningEfforts: { value: ReasoningEffort; label: string }[] = [
+    { value: 'minimal', label: 'Minimal' },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+    { value: 'xhigh', label: 'Extra High' },
+  ];
+  const autonomyLevels: { value: AiAutonomyLevel; label: string }[] = [
+    { value: 'low', label: 'Low autonomy' },
+    { value: 'guided', label: 'Guided tools' },
+    { value: 'open', label: 'Open-ended' },
+    { value: 'unmanaged', label: 'Unmanaged' },
   ];
   const starterPrompts = [
     {
@@ -58,53 +76,80 @@
 
   let step = $state<Step>(1);
   let provider = $state<WizardProvider>(settings.value.ai.provider === 'antigravity' ? 'antigravity' : 'codex');
+  let userPicked = false;
+  let codexDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
+  let agyDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
   let manualBin = $state('');
-  let detectBusy = $state(false);
-  let detection = $state<CodexDetectionResult | null>(null);
   let firstPrompt = $state(starterPrompts[0].prompt);
 
   const providerName = $derived(provider === 'antigravity' ? 'Antigravity' : 'Codex');
   const providerCommand = $derived(provider === 'antigravity' ? 'agy' : 'codex');
+  const selectedDetect = $derived(provider === 'antigravity' ? agyDetect : codexDetect);
+
+  if (desktop) {
+    void runDetection('codex', settings.value.ai.codexBin);
+    void runDetection('antigravity', settings.value.ai.antigravityBin);
+  }
 
   function textValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
   }
 
   function dismiss(): void {
-    // Reaching the last step means a CLI was connected — count that as done.
-    markAiSetupSeen(step === 3 ? 'completed' : 'dismissed');
+    // Reaching the project step means a CLI was connected — count that as done.
+    markAiSetupSeen(step >= 3 ? 'completed' : 'dismissed');
     onClose();
   }
 
-  function beginDetection(): void {
-    manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;
-    step = 2;
-    void runDetection();
-  }
-
-  async function runDetection(): Promise<void> {
-    detection = null;
-    if (!desktop) return;
-    detectBusy = true;
+  async function runDetection(target: WizardProvider, bin: string): Promise<void> {
+    const setState = (value: DetectState) => {
+      if (target === 'antigravity') agyDetect = value;
+      else codexDetect = value;
+    };
+    if (!desktop) {
+      setState({ status: 'missing', result: null });
+      return;
+    }
+    setState({ status: 'checking', result: null });
     try {
-      const result = provider === 'antigravity' ? await detectAntigravity(manualBin) : await detectCodex(manualBin);
-      detection = result;
+      const result = target === 'antigravity' ? await detectAntigravity(bin) : await detectCodex(bin);
       if (result.found && result.path) {
-        manualBin = result.path;
         settings.update({
-          ai: provider === 'antigravity' ? { provider, antigravityBin: result.path } : { provider, codexBin: result.path },
+          ai: target === 'antigravity' ? { antigravityBin: result.path } : { codexBin: result.path },
         });
       }
+      setState({ status: result.found ? 'found' : 'missing', result });
     } catch (error) {
-      detection = {
-        found: false,
-        path: null,
-        version: null,
-        error: (error as Error)?.message ?? String(error),
-      };
-    } finally {
-      detectBusy = false;
+      setState({
+        status: 'missing',
+        result: { found: false, path: null, version: null, error: (error as Error)?.message ?? String(error) },
+      });
     }
+    maybeAutoSelect();
+  }
+
+  // Until the user picks a card themselves, steer the selection toward the
+  // provider that is actually installed.
+  function maybeAutoSelect(): void {
+    if (userPicked) return;
+    const other: WizardProvider = provider === 'antigravity' ? 'codex' : 'antigravity';
+    const otherDetect = other === 'antigravity' ? agyDetect : codexDetect;
+    if (selectedDetect.status === 'missing' && otherDetect.status === 'found') provider = other;
+  }
+
+  function pickProvider(id: WizardProvider): void {
+    userPicked = true;
+    provider = id;
+  }
+
+  function confirmProvider(): void {
+    settings.update({ ai: { provider } });
+    manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;
+    step = 2;
+  }
+
+  function chooseProjectFolder(): void {
+    void project.openFolder();
   }
 
   function createFirstImage(): void {
@@ -123,7 +168,7 @@
   }
 </script>
 
-<Modal title="AI Setup Assistant" onClose={dismiss} width={540}>
+<Modal title="AI Setup Assistant" onClose={dismiss} width={560}>
   <div class="wizard">
     <ol class="steps" aria-label="Setup progress">
       {#each steps as item (item.number)}
@@ -146,27 +191,44 @@
         <div>
           <h2>Welcome to PaintNode!</h2>
           <p>
-            PaintNode teams up with an AI CLI that runs right on your computer — your own sign-in, your own machine.
-            Pick the one you use and we'll have you painting with AI in under a minute.
+            PaintNode teams up with an AI CLI that runs right on your computer — your own sign-in, your own
+            machine. We're checking both for you now; pick the one you'd like as your default.
           </p>
         </div>
       </div>
 
-      <div class="provider-cards" role="radiogroup" aria-label="AI provider">
+      <div class="provider-cards" role="radiogroup" aria-label="Default AI provider">
         {#each providerCards as card (card.id)}
+          {@const detect = card.id === 'antigravity' ? agyDetect : codexDetect}
           <button
             type="button"
             class="provider-card"
             class:selected={provider === card.id}
             role="radio"
             aria-checked={provider === card.id}
-            onclick={() => (provider = card.id)}
+            onclick={() => pickProvider(card.id)}
           >
             <span class="card-icon"><Icon svg={card.icon} size={22} /></span>
             <span class="card-body">
               <strong>{card.title}</strong>
               <small>{card.description}</small>
               <code>{card.command}</code>
+              {#if detect.status === 'checking'}
+                <span class="card-status checking" role="status">
+                  <span class="mini-dot" aria-hidden="true"></span>
+                  <span>Checking…</span>
+                </span>
+              {:else if detect.status === 'found'}
+                <span class="card-status ok">
+                  <Icon svg={CheckmarkCircle} size={13} />
+                  <span>Connected{detect.result?.version ? ` · ${detect.result.version}` : ''}</span>
+                </span>
+              {:else}
+                <span class="card-status miss">
+                  <Icon svg={ErrorCircle} size={13} />
+                  <span>{desktop ? 'Not detected yet' : 'Desktop app only'}</span>
+                </span>
+              {/if}
             </span>
           </button>
         {/each}
@@ -175,14 +237,17 @@
       <div class="actions">
         <button type="button" class="quiet" onclick={dismiss}>Maybe later</button>
         <span class="spacer"></span>
-        <button type="button" class="primary" onclick={beginDetection}>Let's go</button>
+        <button type="button" class="primary" onclick={confirmProvider}>Let's go</button>
       </div>
     {:else if step === 2}
       <div class="hero">
         <span class="hero-icon"><Icon svg={Sparkle} size={26} /></span>
         <div>
-          <h2>Let's find {providerName} on your computer</h2>
-          <p>PaintNode checks the usual install spots and saves the result to your settings automatically.</p>
+          <h2>Set up {providerName}, your new default</h2>
+          <p>
+            Choose the model and how much freedom {providerName} gets. These defaults apply to every AI run —
+            change them anytime in Settings → AI.
+          </p>
         </div>
       </div>
 
@@ -191,33 +256,45 @@
           The setup assistant can only detect CLIs in the desktop app. Launch PaintNode desktop
           (<code>npm run tauri:dev</code>) to finish this step.
         </p>
-      {:else if detectBusy}
+      {:else if selectedDetect.status === 'checking'}
         <div class="progress-line" role="status" aria-live="polite">
           <span class="progress-dot" aria-hidden="true"></span>
           <span>Searching the usual places for <code>{providerCommand}</code>…</span>
         </div>
-      {:else if detection?.found}
+      {:else if selectedDetect.status === 'found'}
         <div class="result ok">
           <span class="result-icon"><Icon svg={CheckmarkCircle} size={20} /></span>
           <div>
-            <strong>Found {detection.version || providerName}!</strong>
-            <small>Saved <code>{detection.path}</code> to your settings — one step to go.</small>
+            <strong>{selectedDetect.result?.version || providerName} is connected!</strong>
+            <small>Saved <code>{selectedDetect.result?.path}</code> to your settings.</small>
           </div>
         </div>
 
         {#if provider === 'codex'}
-          <label class="field">
-            <span>Model</span>
-            <select
-              value={settings.value.ai.model}
-              onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
-            >
-              {#each CODEX_MODEL_OPTIONS as option (option.id)}
-                <option value={option.id}>{option.label}</option>
-              {/each}
-            </select>
-            <small>You can change this anytime in Settings → AI.</small>
-          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span>Model</span>
+              <select
+                value={settings.value.ai.model}
+                onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
+              >
+                {#each CODEX_MODEL_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="field">
+              <span>Reasoning effort</span>
+              <select
+                value={settings.value.ai.reasoningEffort}
+                onchange={(event) => settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
+              >
+                {#each reasoningEfforts as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
         {:else}
           <label class="field">
             <span>Model</span>
@@ -229,10 +306,23 @@
                 <option value={option.id}>{option.label}</option>
               {/each}
             </select>
-            <small>Auto lets Antigravity choose. You can change this anytime in Settings → AI.</small>
+            <small>Auto lets Antigravity choose its configured default model.</small>
           </label>
         {/if}
-      {:else if detection}
+
+        <label class="field">
+          <span>Autonomy</span>
+          <select
+            value={settings.value.ai.autonomyLevel}
+            onchange={(event) => settings.update({ ai: { autonomyLevel: textValue(event) as AiAutonomyLevel } })}
+          >
+            {#each autonomyLevels as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </select>
+          <small>How much room the local agent gets to build tools during a run. Low is the safest start.</small>
+        </label>
+      {:else}
         <div class="result miss">
           <span class="result-icon"><Icon svg={ErrorCircle} size={20} /></span>
           <div>
@@ -251,8 +341,8 @@
           </div>
         </div>
 
-        {#if detection.error}
-          <p class="detail">{detection.error}</p>
+        {#if selectedDetect.result?.error}
+          <p class="detail">{selectedDetect.result.error}</p>
         {/if}
 
         <div class="detect-row">
@@ -267,7 +357,7 @@
               spellcheck="false"
             />
           </label>
-          <button type="button" onclick={() => void runDetection()}>Try again</button>
+          <button type="button" onclick={() => void runDetection(provider, manualBin)}>Try again</button>
         </div>
       {/if}
 
@@ -277,7 +367,60 @@
           <span>Back</span>
         </button>
         <span class="spacer"></span>
-        <button type="button" class="primary" disabled={!detection?.found} onclick={() => (step = 3)}>Continue</button>
+        <button type="button" class="primary" disabled={selectedDetect.status !== 'found'} onclick={() => (step = 3)}>
+          Continue
+        </button>
+      </div>
+    {:else if step === 3}
+      <div class="hero">
+        <span class="hero-icon"><Icon svg={FolderAdd} size={24} /></span>
+        <div>
+          <h2>Give your artwork a home</h2>
+          <p>
+            Choose (or create) a project folder. Generated images, autosave recovery copies, and AI run
+            files all live there — tidy, local, and easy to find.
+          </p>
+        </div>
+      </div>
+
+      {#if !desktop}
+        <p class="notice">Project folders are available in the desktop app.</p>
+      {:else if project.path}
+        <div class="result ok">
+          <span class="result-icon"><Icon svg={CheckmarkCircle} size={20} /></span>
+          <div>
+            <strong>Project ready!</strong>
+            <small><code>{project.path}</code></small>
+          </div>
+        </div>
+        <button type="button" class="secondary" onclick={chooseProjectFolder} disabled={project.busy}>
+          Choose a different folder…
+        </button>
+      {:else if project.busy}
+        <div class="progress-line" role="status" aria-live="polite">
+          <span class="progress-dot" aria-hidden="true"></span>
+          <span>Opening project folder…</span>
+        </div>
+      {:else}
+        <button type="button" class="choose-folder" onclick={chooseProjectFolder}>
+          <Icon svg={FolderAdd} size={16} />
+          <span>Choose or create a project folder…</span>
+        </button>
+        {#if project.error}
+          <p class="detail">{project.error}</p>
+        {/if}
+      {/if}
+
+      <div class="actions">
+        <button type="button" class="quiet back" onclick={() => (step = 2)}>
+          <Icon svg={ChevronLeft} size={14} />
+          <span>Back</span>
+        </button>
+        <span class="spacer"></span>
+        <button type="button" class="quiet" onclick={() => (step = 4)}>Skip for now</button>
+        <button type="button" class="primary" disabled={desktop && !project.path} onclick={() => (step = 4)}>
+          Continue
+        </button>
       </div>
     {:else}
       <div class="hero">
@@ -312,7 +455,7 @@
       <p class="detail">You can generate again anytime from the AI menu — AI → Generate Image.</p>
 
       <div class="actions">
-        <button type="button" class="quiet back" onclick={() => (step = 2)}>
+        <button type="button" class="quiet back" onclick={() => (step = 3)}>
           <Icon svg={ChevronLeft} size={14} />
           <span>Back</span>
         </button>
@@ -459,8 +602,35 @@
     border-radius: 3px;
     font-size: 10px;
   }
+  .result code {
+    overflow-wrap: anywhere;
+  }
   .card-body code {
     align-self: flex-start;
+  }
+  .card-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 2px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .card-status.checking {
+    color: var(--text-dim);
+  }
+  .card-status.ok {
+    color: #9fdf9f;
+  }
+  .card-status.miss {
+    color: var(--text-dim);
+  }
+  .mini-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--accent);
+    animation: setup-pulse 1s ease-in-out infinite;
   }
   .notice,
   .detail {
@@ -491,6 +661,13 @@
     background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
     color: var(--text);
     font-size: 11px;
+  }
+  .progress-line code {
+    color: var(--text-bright);
+    background: var(--bg-panel-2);
+    padding: 0 3px;
+    border-radius: 3px;
+    font-size: 10px;
   }
   .progress-dot {
     width: 8px;
@@ -574,11 +751,34 @@
     color: var(--text-dim);
     font-size: 11px;
   }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+  }
   .detect-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px;
     align-items: end;
+  }
+  .choose-folder {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 10px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border-soft));
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text);
+  }
+  .choose-folder:hover {
+    border-color: var(--accent);
+    color: var(--text-bright);
+  }
+  .secondary {
+    align-self: flex-start;
   }
   .chips {
     display: flex;
