@@ -16,9 +16,19 @@ Run:
 ```bash
 npm run check
 npm test
+npm run build
 ```
 
-Both must pass. `npm run check` must report 0 errors and 0 warnings.
+All three must pass. `npm run check` must report 0 errors and 0 warnings.
+
+## Pull Requests
+
+- Keep pull requests focused on one bug fix, feature, or documentation change.
+- Fill in the pull request template and describe the validation you ran.
+- Wait for CI to pass before requesting review.
+- Do not include secrets, signing assets, private keys, or local environment files.
+- Changes to release signing, updater behavior, or GitHub Actions require extra
+  maintainer review.
 
 ## Contribution License
 
