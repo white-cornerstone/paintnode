@@ -61,9 +61,15 @@
     return x || 1;
   }
 
+  function normalizedDimension(value: number): number {
+    return Number.isFinite(value) ? Math.max(1, Math.round(value)) : 1;
+  }
+
   function ratioLabel(width: number, height: number): string {
-    const divisor = gcd(width, height);
-    return `${Math.round(width / divisor)}:${Math.round(height / divisor)}`;
+    const safeWidth = normalizedDimension(width);
+    const safeHeight = normalizedDimension(height);
+    const divisor = gcd(safeWidth, safeHeight);
+    return `${Math.round(safeWidth / divisor)}:${Math.round(safeHeight / divisor)}`;
   }
 
   function isAgyFriendly(width: number, height: number): boolean {
@@ -78,6 +84,15 @@
 
   function presetMeta(width: number, height: number): string {
     return `${width} x ${height} px`;
+  }
+
+  function previewFrameStyle(width: number, height: number, maxWidth = 112, maxHeight = 72): string {
+    const safeWidth = normalizedDimension(width);
+    const safeHeight = normalizedDimension(height);
+    const scale = Math.min(maxWidth / safeWidth, maxHeight / safeHeight);
+    const previewWidth = Math.max(34, Math.round(safeWidth * scale));
+    const previewHeight = Math.max(34, Math.round(safeHeight * scale));
+    return `--preview-width: ${previewWidth}px; --preview-height: ${previewHeight}px;`;
   }
 
   function uniqueImagePresets(presets: ImagePreset[]): ImagePreset[] {
@@ -294,11 +309,20 @@
           <div class="preset-grid">
             {#each filteredImagePresets as preset (preset.id)}
               <button
-                class="preset-tile"
+                class="preset-tile image-preset-tile"
                 class:selected={selectedImageId === preset.id}
                 onclick={() => chooseImagePreset(preset)}
               >
-                <Icon svg={ImageAdd} size={44} />
+                <span class="preset-preview" aria-hidden="true">
+                  <span
+                    class="document-shape"
+                    style={previewFrameStyle(preset.width, preset.height)}
+                  >
+                    <span class="document-fold"></span>
+                    <span class="document-tick document-tick-horizontal"></span>
+                    <span class="document-tick document-tick-vertical"></span>
+                  </span>
+                </span>
                 <span>{preset.name}</span>
                 <small>{preset.meta}</small>
                 <span class="preset-badges" aria-label={`Compatibility: ${presetBadges(preset).join(', ') || 'Manual'}`}>
@@ -525,8 +549,83 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent) inset;
   }
+  .image-preset-tile {
+    grid-template-rows: 88px auto auto 20px;
+    min-height: 184px;
+    padding-top: 15px;
+  }
   .preset-tile :global(svg) {
     color: var(--text-dim);
+  }
+  .preset-preview {
+    width: 146px;
+    height: 88px;
+    display: grid;
+    place-items: center;
+  }
+  .document-shape {
+    position: relative;
+    width: var(--preview-width);
+    height: var(--preview-height);
+    border: 3px solid color-mix(in srgb, var(--text-dim) 72%, var(--text));
+    border-radius: 4px;
+    border-top-right-radius: 1px;
+    background: transparent;
+    color: color-mix(in srgb, var(--text-dim) 72%, var(--text));
+  }
+  .document-fold {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: clamp(12px, 22%, 24px);
+    aspect-ratio: 1;
+    background: var(--bg-panel);
+    overflow: hidden;
+    z-index: 1;
+  }
+  .image-preset-tile:hover .document-fold {
+    background: var(--bg-elevated);
+  }
+  .document-fold::before {
+    content: '';
+    position: absolute;
+    left: 1px;
+    top: 1px;
+    width: 142%;
+    height: 3px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: rotate(45deg);
+    transform-origin: left center;
+  }
+  .document-fold::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: calc(100% - 2px);
+    height: calc(100% - 2px);
+    border-left: 3px solid currentColor;
+    border-bottom: 3px solid currentColor;
+    border-bottom-left-radius: 2px;
+  }
+  .document-tick {
+    position: absolute;
+    display: block;
+    border-radius: 999px;
+    background: currentColor;
+  }
+  .document-tick-horizontal {
+    top: 18%;
+    left: -28px;
+    width: 22px;
+    height: 3px;
+  }
+  .document-tick-vertical {
+    top: -28px;
+    left: 18%;
+    width: 3px;
+    height: 22px;
   }
   .preset-tile span {
     font-weight: 700;
