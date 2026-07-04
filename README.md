@@ -1,6 +1,6 @@
 # PaintNode
 
-PaintNode is an AI companion workspace for visual work. It gives local AI CLIs, such as Codex CLI and Agy, a real productive surface: a layered canvas, project assets, masks, selections, and OpenRaster (`.ora`) documents that can be edited, inspected, and handed back to the user.
+PaintNode is an AI companion workspace for visual work. It gives local AI CLIs, such as Codex CLI and Antigravity, a real productive surface: a layered canvas, project assets, masks, selections, and OpenRaster (`.ora`) documents that can be edited, inspected, and handed back to the user.
 
 Most creative AI tools either bundle their own image model or ask users to bring API keys. PaintNode takes a different path. It works with the AI command-line tools users already trust and already have configured, so the editor becomes the meeting place between human intent, existing AI subscriptions or local credentials, and a document that remains under the user's control.
 
@@ -11,7 +11,7 @@ Most creative AI tools either bundle their own image model or ask users to bring
 PaintNode is not intended to be another traditional image-editor alternative with AI sprinkled on top. The goal is to introduce a new workflow for model CLIs inside real creative tooling:
 
 - The user keeps a normal layered document open.
-- Codex CLI, Agy, and future local providers can work side by side.
+- Codex CLI, Antigravity, and future local providers can work side by side.
 - Each AI run can produce or modify project assets and document layers.
 - The user reviews, edits, masks, composites, and exports the result in the same workspace.
 - PaintNode does not host a model backend or add another API-billing layer.
@@ -21,7 +21,7 @@ The image editor surface matters because AI output needs a place to become produ
 ## Highlights
 
 - Local AI companion flows for generation, fill, retouching, asset extraction, and workflow composition.
-- Provider settings for existing local CLIs, including Codex CLI and Agy, with per-run overrides.
+- Provider settings for existing local CLIs, including Codex CLI and Antigravity, with per-run overrides.
 - Side-by-side AI work on the same project through separate assets, tasks, and layers.
 - Layered OpenRaster (`.ora`) documents for portable, user-owned creative files.
 - Local-first file I/O, PNG/PSD export paths, and project asset management.
@@ -54,7 +54,7 @@ Requirements:
 - Node.js 22 or newer
 - Rust stable
 - macOS for signed/notarized macOS release builds
-- Optional local AI CLIs for AI features, such as Codex CLI or Agy
+- Optional local AI CLIs for AI features, such as Codex CLI or Antigravity
 
 Install dependencies:
 

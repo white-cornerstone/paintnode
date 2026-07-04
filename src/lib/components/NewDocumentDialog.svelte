@@ -49,7 +49,7 @@
     },
     {
       id: 'agy',
-      label: 'Agy',
+      label: 'Antigravity',
       tooltip: 'Show aspect ratios that best fit Antigravity image generation.',
     },
   ];
@@ -155,7 +155,7 @@
   function presetBadges(preset: ImagePreset): string[] {
     const badges: string[] = [];
     if (isCodexFriendly(preset.width, preset.height)) badges.push('Codex');
-    if (isAgyFriendly(preset.width, preset.height)) badges.push('Agy');
+    if (isAgyFriendly(preset.width, preset.height)) badges.push('Antigravity');
     return badges;
   }
 

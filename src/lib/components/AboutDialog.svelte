@@ -17,7 +17,7 @@
     <section class="summary">
       <p>An AI companion workspace for local model CLIs and layered visual work.</p>
       <p>
-        PaintNode lets Codex CLI, Agy, and future local providers work beside you on the same document
+        PaintNode lets Codex CLI, Antigravity, and future local providers work beside you on the same document
         through project assets, masks, tasks, and layers.
       </p>
       <p>
