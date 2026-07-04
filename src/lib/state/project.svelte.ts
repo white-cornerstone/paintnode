@@ -93,16 +93,6 @@ class ProjectStore {
     return result.asset;
   }
 
-  async storeGeneratedBlob(
-    blob: Blob,
-    name: string,
-    prompt?: string | null,
-    width?: number,
-    height?: number,
-  ): Promise<ProjectAsset | null> {
-    return this.storeGeneratedBlobAt(this.path, blob, name, prompt, width, height);
-  }
-
   async storeGeneratedBlobAt(
     path: string | null,
     blob: Blob,

@@ -1,3 +1,5 @@
+import { isRecord } from './settings';
+
 export const PANELS_STORAGE_KEY = 'paintnode.panels';
 
 /** Which panels live in which right-dock group. Single source of truth for panel/group ids. */
@@ -37,10 +39,6 @@ export function defaultPanelLayout(): PanelLayout {
       structure: false,
     },
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function booleanOrDefault(value: unknown, fallback: boolean): boolean {

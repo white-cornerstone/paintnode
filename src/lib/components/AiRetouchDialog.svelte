@@ -1,9 +1,17 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
+  import {
+    AiProgressListener,
+    canvasPreviewDataUrl,
+    copyTextToClipboard,
+    createRunId,
+    focusTaskDocument,
+    providerLabel,
+    providerRunDir,
+  } from './aiTaskDialog';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
   import { editor } from '../state/editor.svelte';
@@ -22,32 +30,24 @@
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
-  type CodexProgressPayload = { runId: string; message: string };
-
   const desktop = isDesktop();
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let prompt = $state(editor.pendingAiRetouch?.prompt ?? '');
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);
-  let progress = $state('');
-  let stopProgress: UnlistenFn | null = null;
+  const progressListener = new AiProgressListener();
   let runningTaskId: string | null = null;
 
   const task = $derived(aiTasks.find(taskId));
   const taskDetail = $derived(task?.detail.kind === 'retouch' ? task.detail : null);
   const currentError = $derived(task?.error ?? error);
-  const currentProgress = $derived(task?.progress ?? progress);
+  const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
   const request = $derived(editor.pendingAiRetouch);
-  const sourcePreview = $derived(taskDetail?.sourcePreview ?? request?.source.toDataURL('image/png') ?? '');
-  const maskPreview = $derived(taskDetail?.maskPreview ?? request?.mask.toDataURL('image/png') ?? '');
-  const referencePreview = $derived(taskDetail?.referencePreview ?? request?.reference?.toDataURL('image/png') ?? '');
-
-  function createRunId(): string {
-    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-    return `retouch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
+  const sourcePreview = $derived(taskDetail?.sourcePreview ?? (request ? canvasPreviewDataUrl(request.source) : ''));
+  const maskPreview = $derived(taskDetail?.maskPreview ?? (request ? canvasPreviewDataUrl(request.mask) : ''));
+  const referencePreview = $derived(taskDetail?.referencePreview ?? (request?.reference ? canvasPreviewDataUrl(request.reference) : ''));
 
   function textBytes(text: string): Uint8Array {
     return new TextEncoder().encode(text);
@@ -64,31 +64,8 @@ ${notes.join('\n')}
 Use these annotations as direct user instructions for the regions they point to.`;
   }
 
-  function providerRunDir(): string {
-    if (runOptions.provider === 'antigravity') return 'antigravity-runs';
-    if (runOptions.provider === 'custom') return 'custom-runs';
-    return 'codex-runs';
-  }
-
-  function providerLabel(): string {
-    return runOptions.provider === 'antigravity' ? 'Local Antigravity CLI' : 'Local Codex CLI';
-  }
-
-  function focusTaskDocument(documentId: string | null): void {
-    if (!documentId || editor.activeDocumentId === documentId) return;
-    if (!editor.documents.some((session) => session.id === documentId)) {
-      throw new Error('The document this task was started in has been closed.');
-    }
-    editor.switchDocument(documentId);
-  }
-
-  function clearProgressListener() {
-    stopProgress?.();
-    stopProgress = null;
-  }
-
   onDestroy(() => {
-    if (!runningTaskId) clearProgressListener();
+    if (!runningTaskId) progressListener.clear();
   });
 
   function close(): void {
@@ -98,18 +75,7 @@ Use these annotations as direct user instructions for the regions they point to.
 
   async function copyError() {
     if (!currentError) return;
-    try {
-      await navigator.clipboard.writeText(currentError);
-    } catch {
-      const area = document.createElement('textarea');
-      area.value = currentError;
-      area.style.position = 'fixed';
-      area.style.opacity = '0';
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand('copy');
-      area.remove();
-    }
+    await copyTextToClipboard(currentError);
     copied = true;
     window.setTimeout(() => (copied = false), 1200);
   }
@@ -121,7 +87,7 @@ Use these annotations as direct user instructions for the regions they point to.
     projectPath: string | null,
   ): Promise<string | null> {
     if (!settings.value.workspace.keepAiRunInputs || !projectPath) return null;
-    const dir = `paintnode/${providerRunDir()}/retouch-inputs-${Date.now()}`;
+    const dir = `paintnode/${providerRunDir(runOptions.provider)}/retouch-inputs-${Date.now()}`;
     await writeProjectDocumentPath({ projectPath, path: `${dir}/source.png`, bytes: bytes.sourcePng });
     await writeProjectDocumentPath({ projectPath, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
     await writeProjectDocumentPath({ projectPath, path: `${dir}/mask.png`, bytes: bytes.maskPng });
@@ -165,11 +131,11 @@ Use these annotations as direct user instructions for the regions they point to.
     const task = aiTasks.create({
       kind: 'retouch',
       title: 'AI Retouch',
-      subtitle: `${active.toolName} · ${providerLabel()}`,
+      subtitle: `${active.toolName} · ${providerLabel(runOptions.provider)}`,
       progress: 'Preparing AI retouch inputs...',
       detail: {
         kind: 'retouch',
-        providerLabel: providerLabel(),
+        providerLabel: providerLabel(runOptions.provider),
         prompt: prompt.trim(),
         toolName: active.toolName,
         gestureKind: active.gesture.kind,
@@ -191,39 +157,25 @@ Use these annotations as direct user instructions for the regions they point to.
       // had at that point, not the one from the original run.
       const previousMaskLock = maskLayer ? maskLayer.userLocked : null;
       if (maskLayer) maskLayer.userLocked = true;
-      progress = 'Preparing AI retouch inputs...';
-      aiTasks.setProgress(task.id, progress);
+      aiTasks.setProgress(task.id, 'Preparing AI retouch inputs...');
       editor.flash('Preparing AI retouch...');
-      clearProgressListener();
-      let progressListenerStale = false;
-      const runId = createRunId();
-      void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-        if (event.payload.runId === runId && event.payload.message.trim()) {
-          progress = event.payload.message.trim();
-          aiTasks.setProgress(task.id, progress);
-        }
-      })
-        .then((unlisten) => {
-          // The run may have finished before listen() resolved; unlisten
-          // immediately instead of leaking the registration.
-          if (progressListenerStale) {
-            unlisten();
-            return;
-          }
-          stopProgress = unlisten;
-        })
-        .catch(() => {
-          progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-          aiTasks.setProgress(task.id, progress);
-        });
+      const runId = createRunId('retouch');
+      progressListener.start(
+        runId,
+        (message) => aiTasks.setProgress(task.id, message),
+        () =>
+          aiTasks.setProgress(
+            task.id,
+            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
+          ),
+      );
 
       try {
         const bytes = await editor.prepareAiRetouchInput(active);
         if (!bytes) throw new Error('Unable to prepare AI retouch input.');
         debugDir = await saveDebugInputs(bytes, prompt.trim(), active, taskProjectPath);
         if (debugDir) {
-          progress = `Saved retouch inputs: ${debugDir}`;
-          aiTasks.setProgress(task.id, progress);
+          aiTasks.setProgress(task.id, `Saved retouch inputs: ${debugDir}`);
         }
         const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
         const generated =
@@ -278,14 +230,12 @@ Use these annotations as direct user instructions for the regions they point to.
           .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask');
         if (currentMaskLayer && previousMaskLock !== null) currentMaskLayer.userLocked = previousMaskLock;
         busy = false;
-        progress = '';
-        progressListenerStale = true;
-        clearProgressListener();
+        progressListener.clear();
         runningTaskId = null;
       }
     };
     aiTasks.setRetry(task.id, executeTask);
-    window.setTimeout(() => void executeTask(), 0);
+    void executeTask();
   }
 </script>
 
