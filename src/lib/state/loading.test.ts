@@ -34,6 +34,14 @@ describe('LoadingTracker', () => {
     expect(label()).toBeNull();
   });
 
+  it('can surface a user-initiated wait immediately', () => {
+    const { tracker, label } = create();
+    const done = tracker.begin('Saving example.ora…', { immediate: true });
+    expect(label()).toBe('Saving example.ora…');
+    done();
+    expect(label()).toBeNull();
+  });
+
   it('shows the most recent visible wait when waits overlap', () => {
     const { tracker, label } = create();
     const doneOuter = tracker.begin('Importing images…');

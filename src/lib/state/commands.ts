@@ -279,6 +279,11 @@ function oraSaveNote(doc: PaintDocument): string {
     : '';
 }
 
+function oraSaveFileName(doc: PaintDocument, session: DocumentSession | null): string {
+  const fileName = session ? editor.documentFileName(session) : `${doc.name || 'untitled'}.ora`;
+  return /\.ora$/i.test(fileName) ? fileName : `${doc.name || 'untitled'}.ora`;
+}
+
 /** File ▸ Save — prompts once, then overwrites the same file on later saves. */
 export async function saveOraCommand(): Promise<void> {
   const doc = editor.doc;
@@ -290,33 +295,39 @@ export async function saveOraCommand(): Promise<void> {
       editor.flash('Save canceled');
       return;
     }
-    editor.flash('Saving .ora…');
-    const name = `${doc.name || 'untitled'}.ora`;
-    const bytes = await documentBytes(doc, embed);
-    if (isDesktop()) {
-      if (session?.savedPath) {
-        const relativePath = await project.saveDocumentToPath(session.savedPath, bytes);
-        editor.markSaved(relativePath);
-        editor.flash(`Saved ${relativePath}${oraSaveNote(doc)}`);
-        return;
-      }
+    const name = oraSaveFileName(doc, session);
+    editor.flash(`Saving ${name}…`);
+    await ui.withLoading(
+      `Saving ${name}…`,
+      async () => {
+        const bytes = await documentBytes(doc, embed);
+        if (isDesktop()) {
+          if (session?.savedPath) {
+            const relativePath = await project.saveDocumentToPath(session.savedPath, bytes);
+            editor.markSaved(relativePath);
+            editor.flash(`Saved ${relativePath}${oraSaveNote(doc)}`);
+            return;
+          }
 
-      const previousName = doc.name;
-      const result = await project.saveDocumentAs(name, bytes, previousName);
-      if (result) {
-        editor.renameActiveDocument(result.name);
-        editor.markSaved(result.relativePath);
-        editor.flash(`Saved ${result.relativePath}${oraSaveNote(doc)}`);
-      } else {
-        editor.flash('Save canceled');
-      }
-      return;
-    }
-    const blob = await saveOra(doc, embed);
-    downloadBlob(blob, name);
-    editor.markSaved(null);
-    if (session) session.sourceExtension = 'ora';
-    editor.flash(`Saved .ora${oraSaveNote(doc)}`);
+          const previousName = doc.name;
+          const result = await project.saveDocumentAs(name, bytes, previousName);
+          if (result) {
+            editor.renameActiveDocument(result.name);
+            editor.markSaved(result.relativePath);
+            editor.flash(`Saved ${result.relativePath}${oraSaveNote(doc)}`);
+          } else {
+            editor.flash('Save canceled');
+          }
+          return;
+        }
+        const blob = await saveOra(doc, embed);
+        downloadBlob(blob, name);
+        editor.markSaved(null);
+        if (session) session.sourceExtension = 'ora';
+        editor.flash(`Saved ${name}${oraSaveNote(doc)}`);
+      },
+      { immediate: true },
+    );
   } catch (e) {
     editor.flash('Save failed: ' + (e as Error).message);
   }

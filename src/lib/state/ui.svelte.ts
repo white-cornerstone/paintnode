@@ -1,5 +1,5 @@
 // Lightweight reactive UI state (status bar readouts + which modal dialog is open).
-import { LoadingTracker } from './loading';
+import { LoadingTracker, type LoadingOptions } from './loading';
 
 export type DialogId =
   | 'new'
@@ -91,13 +91,13 @@ class UiState {
    * Returns a disposer to call when the work finishes; prefer withLoading,
    * which pairs the two for you.
    */
-  beginLoading(label: string): () => void {
-    return this.loadingTracker.begin(label);
+  beginLoading(label: string, options?: LoadingOptions): () => void {
+    return this.loadingTracker.begin(label, options);
   }
 
   /** Run fn with a loading indicator registered for its duration. */
-  async withLoading<T>(label: string, fn: () => Promise<T>): Promise<T> {
-    const done = this.beginLoading(label);
+  async withLoading<T>(label: string, fn: () => Promise<T>, options?: LoadingOptions): Promise<T> {
+    const done = this.beginLoading(label, options);
     try {
       return await fn();
     } finally {
