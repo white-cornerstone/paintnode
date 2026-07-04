@@ -26,7 +26,10 @@
       </p>
     </section>
 
-    <p class="tech">Built with Svelte 5 · TypeScript · Canvas2D · fflate — no PaintNode-hosted backend.</p>
+    <p class="tech">
+      Built with Svelte 5 · TypeScript · Canvas2D · fflate
+      <span>no PaintNode-hosted backend.</span>
+    </p>
   </div>
 </Modal>
 
@@ -75,5 +78,8 @@
     font-size: 11px;
     line-height: 1.45;
     text-align: center;
+  }
+  .tech span {
+    display: block;
   }
 </style>
