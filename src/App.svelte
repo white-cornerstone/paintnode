@@ -56,6 +56,8 @@
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { isDesktop, quitApplication } from './lib/integrations/desktop';
+  import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, type PanelGroupId, type PanelId } from './lib/state/panels';
+  import { panels } from './lib/state/panels.svelte';
   import { project } from './lib/state/project.svelte';
   import { settings } from './lib/state/settings.svelte';
   import { ui } from './lib/state/ui.svelte';
@@ -88,74 +90,30 @@
 
   const desktop = isDesktop();
   const appWindow = desktop ? getCurrentWindow() : null;
-  let rightCollapsed = $state(false);
-  let projectCollapsed = $state(false);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
 
-  type PanelId =
-    | 'color'
-    | 'swatches'
-    | 'gradients'
-    | 'patterns'
-    | 'properties'
-    | 'adjustments'
-    | 'character'
-    | 'paragraph'
-    | 'libraries'
-    | 'layers'
-    | 'channels'
-    | 'paths';
   type PanelDef = { id: PanelId; title: string; icon: string; grow?: boolean };
-  type PanelGroupId = 'presets' | 'edits' | 'type' | 'structure';
   type PanelGroupDef = { id: PanelGroupId; panels: PanelDef[]; grow?: boolean };
-  const panelGroups: PanelGroupDef[] = [
-    {
-      id: 'presets',
-      panels: [
-        { id: 'color', title: 'Color', icon: ColorPalette },
-        { id: 'swatches', title: 'Swatches', icon: Grid },
-        { id: 'gradients', title: 'Gradients', icon: ColorFill },
-        { id: 'patterns', title: 'Patterns', icon: ColorBackground },
-      ],
-    },
-    {
-      id: 'edits',
-      panels: [
-        { id: 'properties', title: 'Properties', icon: Options },
-        { id: 'adjustments', title: 'Adjustments', icon: DataHistogram },
-        { id: 'libraries', title: 'Libraries', icon: Library },
-      ],
-    },
-    {
-      id: 'type',
-      panels: [
-        { id: 'character', title: 'Character', icon: TextFont },
-        { id: 'paragraph', title: 'Paragraph', icon: TextParagraphIcon },
-      ],
-    },
-    {
-      id: 'structure',
-      grow: true,
-      panels: [
-        { id: 'layers', title: 'Layers', icon: Layers, grow: true },
-        { id: 'channels', title: 'Channels', icon: Channel },
-        { id: 'paths', title: 'Paths', icon: Branch },
-      ],
-    },
-  ];
-  let activePanelByGroup = $state<Record<PanelGroupId, PanelId>>({
-    presets: 'color',
-    edits: 'properties',
-    type: 'character',
-    structure: 'layers',
-  });
-  let collapsedPanelGroups = $state<Record<PanelGroupId, boolean>>({
-    presets: false,
-    edits: false,
-    type: false,
-    structure: false,
-  });
+  const panelMeta: Record<PanelId, { title: string; icon: string; grow?: boolean }> = {
+    color: { title: 'Color', icon: ColorPalette },
+    swatches: { title: 'Swatches', icon: Grid },
+    gradients: { title: 'Gradients', icon: ColorFill },
+    patterns: { title: 'Patterns', icon: ColorBackground },
+    properties: { title: 'Properties', icon: Options },
+    adjustments: { title: 'Adjustments', icon: DataHistogram },
+    libraries: { title: 'Libraries', icon: Library },
+    character: { title: 'Character', icon: TextFont },
+    paragraph: { title: 'Paragraph', icon: TextParagraphIcon },
+    layers: { title: 'Layers', icon: Layers, grow: true },
+    channels: { title: 'Channels', icon: Channel },
+    paths: { title: 'Paths', icon: Branch },
+  };
+  const panelGroups: PanelGroupDef[] = PANEL_GROUP_IDS.map((id) => ({
+    id,
+    grow: id === 'structure',
+    panels: PANEL_GROUP_PANELS[id].map((panelId) => ({ id: panelId, ...panelMeta[panelId] })),
+  }));
 
   type NativeDropPosition = { x: number; y: number };
   type NativeDropPayload = {
@@ -168,20 +126,20 @@
   }
 
   function activePanel(group: PanelGroupDef): PanelId {
-    const active = activePanelByGroup[group.id];
+    const active = panels.value.activePanelByGroup[group.id];
     return group.panels.some((panel) => panel.id === active) ? active : group.panels[0].id;
   }
 
   function activatePanel(id: PanelId): void {
     const group = groupForPanel(id);
-    activePanelByGroup[group.id] = id;
-    collapsedPanelGroups[group.id] = false;
+    panels.setActivePanel(group.id, id);
+    panels.setGroupCollapsed(group.id, false);
   }
 
   function clickExpandedPanelTab(group: PanelGroupDef, id: PanelId): void {
     const isActive = activePanel(group) === id;
-    activePanelByGroup[group.id] = id;
-    collapsedPanelGroups[group.id] = isActive ? !collapsedPanelGroups[group.id] : false;
+    panels.setActivePanel(group.id, id);
+    panels.setGroupCollapsed(group.id, isActive ? !panels.value.collapsedGroups[group.id] : false);
   }
 
   function clickPeekPanelTab(group: PanelGroupDef, id: PanelId): void {
@@ -189,7 +147,7 @@
       closePeekedPanel();
       return;
     }
-    activePanelByGroup[group.id] = id;
+    panels.setActivePanel(group.id, id);
     peekedPanel = id;
   }
 
@@ -203,16 +161,16 @@
 
   function expandRightPanels(): void {
     peekedPanel = null;
-    rightCollapsed = false;
+    panels.setRightCollapsed(false);
   }
 
   function collapseRightPanels(): void {
     peekedPanel = null;
-    rightCollapsed = true;
+    panels.setRightCollapsed(true);
   }
 
   function peekPanel(id: PanelId): void {
-    rightCollapsed = true;
+    panels.setRightCollapsed(true);
     activatePanel(id);
     peekedPanel = peekedPanel === id ? null : id;
   }
@@ -604,7 +562,7 @@
   });
 
   $effect(() => {
-    if (!rightCollapsed) peekedPanel = null;
+    if (!panels.value.rightCollapsed) peekedPanel = null;
   });
 </script>
 
@@ -645,7 +603,7 @@
         class:active={isActive}
         role="tab"
         aria-selected={isActive}
-        aria-expanded={closePeeked ? peekedPanel === panel.id : isActive && !collapsedPanelGroups[group.id]}
+        aria-expanded={closePeeked ? peekedPanel === panel.id : isActive && !panels.value.collapsedGroups[group.id]}
         onclick={() => (closePeeked ? clickPeekPanelTab(group, panel.id) : clickExpandedPanelTab(group, panel.id))}
         use:truncatedTooltip={{ text: panel.title, placement: 'bottom' }}
       >
@@ -705,8 +663,8 @@
           {/if}
         </section>
         {#if hasDrawingPanels && !ui.workspaceFocusMode}
-          <aside class="right" class:collapsed={rightCollapsed}>
-            {#if rightCollapsed}
+          <aside class="right" class:collapsed={panels.value.rightCollapsed}>
+            {#if panels.value.rightCollapsed}
               <div class="dock-rail">
                 <button
                   class="panel-toggle expand"
@@ -753,10 +711,10 @@
                     class="panel-group"
                     class:separated={groupIndex > 0}
                     class:grow={group.grow}
-                    class:collapsed={collapsedPanelGroups[group.id]}
+                    class:collapsed={panels.value.collapsedGroups[group.id]}
                   >
                     {@render panelTabGroup(group)}
-                    {#if !collapsedPanelGroups[group.id]}
+                    {#if !panels.value.collapsedGroups[group.id]}
                       <div class="tab-content">
                         {@render rightPanel(activePanel(group), false, () => undefined)}
                       </div>
@@ -768,12 +726,12 @@
           </aside>
         {/if}
         {#if !ui.workspaceFocusMode}
-          <aside class="project-side" class:collapsed={projectCollapsed}>
-            {#if projectCollapsed}
+          <aside class="project-side" class:collapsed={panels.value.projectCollapsed}>
+            {#if panels.value.projectCollapsed}
               <div class="project-rail">
                 <button
                   class="rail-icon"
-                  onclick={() => (projectCollapsed = false)}
+                  onclick={() => panels.setProjectCollapsed(false)}
                   use:tooltip={{ text: 'Expand project', placement: 'left' }}
                   aria-label="Expand project"
                 >
@@ -784,7 +742,7 @@
               <div class="column-bar">
                 <button
                   class="panel-toggle"
-                  onclick={() => (projectCollapsed = true)}
+                  onclick={() => panels.setProjectCollapsed(true)}
                   use:tooltip={{ text: 'Collapse project', placement: 'left' }}
                   aria-label="Collapse project"
                 ><Icon svg={ChevronDoubleRight} size={16} /></button>
