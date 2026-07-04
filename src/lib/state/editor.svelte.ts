@@ -402,24 +402,24 @@ export class EditorStore implements ToolHost {
   get activeLayer(): Layer | null {
     return this.doc?.activeLayer ?? null;
   }
-  /** Flash-and-block helper: true when `layer` is a locked Photoshop-only layer. */
+  /** Flash-and-block helper: true when `layer` rejects direct edits. */
   blockIfLocked(layer: Layer | null | undefined): boolean {
     if (!layer?.locked) return false;
-    this.flash('Photoshop-only layer is locked; PaintNode preserves it for PSD export');
+    this.flash(layer.psdLocked ? 'Photoshop-only layer is locked; PaintNode preserves it for PSD export' : 'Layer is locked');
     return true;
   }
-  /** Blocks document-wide ops that cannot preserve locked Photoshop layers. */
+  /** Blocks document-wide ops that cannot preserve locked layers. */
   private blockIfAnyLocked(operation: string): boolean {
     if (!this.doc?.layers.some((l) => l.locked)) return false;
-    this.flash(`${operation} is disabled while the document has locked Photoshop layers`);
+    this.flash(`${operation} is disabled while the document has locked layers`);
     return true;
   }
-  /** Blocks transforms that would desync Photoshop-protected layers, masks, or clipping. */
+  /** Blocks transforms that would desync locked layers, Photoshop masks, or clipping. */
   private blockIfPsdProtectedDoc(operation: string): boolean {
     const doc = this.doc;
     if (!doc) return false;
     if (!doc.layers.some((l) => l.locked || l.psdMask || l.psd?.clipping)) return false;
-    this.flash(`${operation} is disabled while the document has Photoshop-protected layers`);
+    this.flash(`${operation} is disabled while the document has locked or Photoshop-protected layers`);
     return true;
   }
   get activeAiRetouchMaskLayer(): Layer | null {
@@ -599,6 +599,7 @@ export class EditorStore implements ToolHost {
   }
   setLayerMaskEnabled(layer: Layer, enabled: boolean): void {
     if (!layer.maskLayerId || layer.maskEnabled === enabled) return;
+    if (this.blockIfLocked(layer) || this.blockIfLocked(this.doc?.linkedMaskFor(layer))) return;
     const before = layer.maskEnabled;
     layer.maskEnabled = enabled;
     this.history.push({
@@ -622,6 +623,39 @@ export class EditorStore implements ToolHost {
   }
   toggleLayerVisible(layer: Layer): void {
     this.setLayerVisible(layer, !layer.visible);
+  }
+  private lockCascade(layer: Layer): Layer[] {
+    const mask = this.doc?.linkedMaskFor(layer);
+    return mask ? [layer, mask] : [layer];
+  }
+  setLayerLocked(layer: Layer, locked: boolean): void {
+    if (layer.psdLocked) {
+      this.flash('Photoshop-only layer cannot be unlocked in PaintNode');
+      return;
+    }
+    const targets = this.lockCascade(layer).filter((item) => !item.psdLocked);
+    if (targets.length === 0 || targets.every((item) => item.userLocked === locked)) return;
+    const before = targets.map((item) => ({ layer: item, locked: item.userLocked }));
+    const after = targets.map((item) => ({ layer: item, locked }));
+    for (const item of targets) item.userLocked = locked;
+    this.history.push({
+      label: locked ? 'Lock Layer' : 'Unlock Layer',
+      undo: () => {
+        for (const item of before) item.layer.userLocked = item.locked;
+        this.bump();
+        this.invalidate();
+      },
+      redo: () => {
+        for (const item of after) item.layer.userLocked = item.locked;
+        this.bump();
+        this.invalidate();
+      },
+    });
+    this.bump();
+    this.invalidate();
+  }
+  toggleLayerLocked(layer: Layer): void {
+    this.setLayerLocked(layer, !layer.userLocked);
   }
   setLayerOpacity(layer: Layer, opacity: number): void {
     const next = Math.max(0, Math.min(1, opacity));
@@ -890,6 +924,10 @@ export class EditorStore implements ToolHost {
     }
     const metadata = this.aiRetouchMetadataForGesture(toolId, gesture);
     const activeMask = this.activeAiRetouchMaskLayer;
+    if (this.blockIfLocked(activeMask)) {
+      this.setAiRetouchPreview(null);
+      return;
+    }
 
     if (!activeMask) {
       if (mode === 'subtract' || mode === 'intersect') {
@@ -1086,6 +1124,7 @@ export class EditorStore implements ToolHost {
   clearActiveAiRetouchMask(): void {
     const layer = this.activeAiRetouchMaskLayer;
     if (!layer) return;
+    if (this.blockIfLocked(layer)) return;
     const before = snapshotLayer(layer);
     layer.clear();
     const after = snapshotLayer(layer);
@@ -1358,6 +1397,7 @@ export class EditorStore implements ToolHost {
       nl.sourcePath = l.sourcePath;
       nl.maskLayerId = l.maskLayerId;
       nl.maskEnabled = l.maskEnabled;
+      nl.userLocked = l.userLocked;
       nl.kind = l.kind;
       nl.text = l.text ? cloneModel(l.text) : null;
       nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
@@ -1388,6 +1428,7 @@ export class EditorStore implements ToolHost {
     copy.sourcePath = layer.sourcePath;
     copy.maskLayerId = layer.maskLayerId;
     copy.maskEnabled = layer.maskEnabled;
+    copy.userLocked = layer.userLocked;
     copy.kind = layer.kind;
     copy.text = layer.text ? cloneModel(layer.text) : null;
     copy.aiRetouch = cloneAiRetouchMetadata(layer.aiRetouch);
@@ -1678,6 +1719,7 @@ export class EditorStore implements ToolHost {
           nl.blendMode = l.blendMode;
           nl.maskLayerId = l.maskLayerId;
           nl.maskEnabled = l.maskEnabled;
+          nl.userLocked = l.userLocked;
           // Text models are not rescaled, so text layers rasterize (as before);
           // mask-kind survives so linked masks keep working after the resize.
           nl.kind = l.kind === 'text' ? 'raster' : l.kind;
@@ -1791,6 +1833,7 @@ export class EditorStore implements ToolHost {
     if (!doc) return;
     const deletionIds = doc.linkedLayerDeletionIds(id);
     if (deletionIds.length === 0) return;
+    if (deletionIds.some((layerId) => this.blockIfLocked(doc.layers.find((layer) => layer.id === layerId)))) return;
     if (doc.layers.length - deletionIds.length <= 0) {
       this.flash('Cannot delete the only layer');
       return;
@@ -1822,9 +1865,13 @@ export class EditorStore implements ToolHost {
     this.invalidate();
   }
   moveLayer(id: string, delta: number): void {
+    const layer = this.doc?.layers.find((item) => item.id === id);
+    if (this.blockIfLocked(layer)) return;
     this.structural('Reorder Layer', () => this.doc!.move(id, delta));
   }
   reorderLayer(from: number, to: number): void {
+    const layer = this.doc?.layers[from];
+    if (this.blockIfLocked(layer)) return;
     this.structural('Reorder Layer', () => this.doc!.reorder(from, to));
   }
 
@@ -2161,7 +2208,7 @@ export class EditorStore implements ToolHost {
     const pad = 4;
     for (let i = doc.layers.length - 1; i >= 0; i--) {
       const l = doc.layers[i];
-      if (l.kind !== 'text' || !l.text || !l.visible) continue;
+      if (l.kind !== 'text' || !l.text || !l.visible || l.locked) continue;
       const b = textBounds(l.text);
       const rx = b.x + l.x;
       const ry = b.y + l.y;
@@ -2172,6 +2219,7 @@ export class EditorStore implements ToolHost {
 
   private beginEditLayer(layer: Layer): void {
     if (!layer.text) return;
+    if (this.blockIfLocked(layer)) return;
     this.doc?.setActive(layer.id);
     // Fold any layer offset (from the Move tool) into the working model's position.
     const model = cloneModel(layer.text);
@@ -2444,6 +2492,7 @@ export class EditorStore implements ToolHost {
     if (!doc) return;
     const layer = doc.layers.find((l) => l.id === id);
     if (!layer || layer.kind !== 'text') return;
+    if (this.blockIfLocked(layer)) return;
     const prevModel = layer.text;
     this.history.push({
       label: 'Rasterize Type',

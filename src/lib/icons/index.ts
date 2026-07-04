@@ -35,6 +35,7 @@ export { default as Checkmark } from '@fluentui/svg-icons/icons/checkmark_24_reg
 export { default as SquareMultiple } from '@fluentui/svg-icons/icons/square_multiple_24_regular.svg?raw';
 export { default as Merge } from '@fluentui/svg-icons/icons/merge_24_regular.svg?raw';
 export { default as LockClosed } from '@fluentui/svg-icons/icons/lock_closed_24_regular.svg?raw';
+export { default as LockOpen } from '@fluentui/svg-icons/icons/lock_open_24_regular.svg?raw';
 export { default as ArrowUp } from '@fluentui/svg-icons/icons/arrow_up_24_regular.svg?raw';
 export { default as ArrowDown } from '@fluentui/svg-icons/icons/arrow_down_24_regular.svg?raw';
 export { default as Delete } from '@fluentui/svg-icons/icons/delete_24_regular.svg?raw';
@@ -45,6 +46,7 @@ export { default as Image } from '@fluentui/svg-icons/icons/image_24_regular.svg
 export { default as ImageAdd } from '@fluentui/svg-icons/icons/image_add_24_regular.svg?raw';
 export { default as ImageEdit } from '@fluentui/svg-icons/icons/image_edit_24_regular.svg?raw';
 export { default as Board } from '@fluentui/svg-icons/icons/board_24_regular.svg?raw';
+export { default as Broom } from '@fluentui/svg-icons/icons/broom_24_regular.svg?raw';
 export { default as DeveloperBoard } from '@fluentui/svg-icons/icons/developer_board_24_regular.svg?raw';
 export { default as FolderAdd } from '@fluentui/svg-icons/icons/folder_add_24_regular.svg?raw';
 export { default as Copy } from '@fluentui/svg-icons/icons/copy_24_regular.svg?raw';
@@ -54,6 +56,7 @@ export { default as ArchiveClock } from '@fluentui/svg-icons/icons/archive_clock
 export { default as Apps } from '@fluentui/svg-icons/icons/apps_24_regular.svg?raw';
 export { default as AppsList } from '@fluentui/svg-icons/icons/apps_list_24_regular.svg?raw';
 export { default as AppsListDetail } from '@fluentui/svg-icons/icons/apps_list_detail_24_regular.svg?raw';
+export { default as TaskList } from '@fluentui/svg-icons/icons/task_list_ltr_24_regular.svg?raw';
 export { default as Document } from '@fluentui/svg-icons/icons/document_24_regular.svg?raw';
 export { default as Folder } from '@fluentui/svg-icons/icons/folder_24_regular.svg?raw';
 export { default as FolderOpen } from '@fluentui/svg-icons/icons/folder_open_24_regular.svg?raw';

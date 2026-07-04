@@ -6,6 +6,7 @@
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
@@ -22,7 +23,7 @@
   } from '../integrations/desktop';
   import { Copy } from '../icons';
 
-  let { onClose }: { onClose: () => void } = $props();
+  let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
   type CodexProgressPayload = { runId: string; message: string };
 
@@ -41,6 +42,13 @@
   let progress = $state('');
   let notes = $state('');
   let stopProgress: UnlistenFn | null = null;
+  let runningTaskId: string | null = null;
+  const task = $derived(aiTasks.find(taskId));
+  const taskDetail = $derived(task?.detail.kind === 'decouple' ? task.detail : null);
+  const currentError = $derived(task?.error ?? error);
+  const currentProgress = $derived(task?.progress ?? progress);
+  const currentBusy = $derived(task?.status === 'running' || busy);
+  const currentNotes = $derived(taskDetail?.notes ?? notes);
 
   $effect(() => {
     if (!project.path && addToWorkflow) addToWorkflow = false;
@@ -56,15 +64,17 @@
     stopProgress = null;
   }
 
-  onDestroy(clearProgressListener);
+  onDestroy(() => {
+    if (!runningTaskId) clearProgressListener();
+  });
 
   async function copyError() {
-    if (!error) return;
+    if (!currentError) return;
     try {
-      await navigator.clipboard.writeText(error);
+      await navigator.clipboard.writeText(currentError);
     } catch {
       const area = document.createElement('textarea');
-      area.value = error;
+      area.value = currentError;
       area.style.position = 'fixed';
       area.style.opacity = '0';
       document.body.appendChild(area);
@@ -85,6 +95,17 @@
       canvas.toBlob((next) => (next ? resolve(next) : reject(new Error('Could not encode asset PNG.'))), 'image/png');
     });
     return blob;
+  }
+
+  function providerLabel(): string {
+    return runOptions.provider === 'antigravity' ? 'Local Antigravity CLI' : 'Local Codex CLI';
+  }
+
+  function focusTaskDocument(documentId: string | null): void {
+    if (!documentId || editor.activeDocumentId === documentId) return;
+    if (editor.documents.some((session) => session.id === documentId)) {
+      editor.switchDocument(documentId);
+    }
   }
 
   async function layerToImport(layer: DecoupledLayerResult): Promise<DecoupledLayerImport> {
@@ -175,83 +196,126 @@
     }
 
     busy = true;
-    progress = 'Preparing source layer...';
-    editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
-    clearProgressListener();
-    const runId = createRunId();
-    try {
-      stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
+    const targetDocumentId = editor.activeDocumentId;
+    const taskProjectPath = project.path;
+    const task = aiTasks.create({
+      kind: 'decouple',
+      title: 'Extract Assets',
+      subtitle: `${sourceLayer.name} · ${providerLabel()}`,
+      progress: 'Preparing source layer...',
+      detail: {
+        kind: 'decouple',
+        providerLabel: providerLabel(),
+        prompt: prompt.trim() || DEFAULT_PROMPT,
+        sourceLayerName: sourceLayer.name,
+        addToWorkflow,
+        placeOnCanvas,
+        tolerance,
+        notes: '',
+      },
+    });
+    runningTaskId = task.id;
+    onClose();
+    const executeTask = async () => {
+      progress = 'Preparing source layer...';
+      aiTasks.setProgress(task.id, progress);
+      editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
+      clearProgressListener();
+      let progressListenerStale = false;
+      const runId = createRunId();
+      void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
         if (event.payload.runId === runId && event.payload.message.trim()) {
           progress = event.payload.message.trim();
+          aiTasks.setProgress(task.id, progress);
         }
-      });
-    } catch {
-      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-    }
+      })
+        .then((unlisten) => {
+          // The run may have finished before listen() resolved; unlisten
+          // immediately instead of leaking the registration.
+          if (progressListenerStale) {
+            unlisten();
+            return;
+          }
+          stopProgress = unlisten;
+        })
+        .catch(() => {
+          progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
+          aiTasks.setProgress(task.id, progress);
+        });
 
-    try {
-      const sourcePng = await canvasPngBytes(sourceLayer.canvas);
-      const result =
-        runOptions.provider === 'antigravity'
-          ? await decoupleAntigravityImage(
-              antigravityConfigFromRunOptions(runOptions, project.path, runId),
-              sourcePng,
-              prompt.trim() || DEFAULT_PROMPT,
-              false,
-            )
-          : await decoupleCodexImage(
-              codexConfigFromRunOptions(runOptions, project.path, runId),
-              sourcePng,
-              prompt.trim() || DEFAULT_PROMPT,
-              false,
-            );
-      progress = 'Cleaning and saving extracted assets...';
-      const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
-      const extractedAssets: ProjectAsset[] = [];
-      for (const item of imports) {
-        const blob = await canvasToPngBlob(item.source as HTMLCanvasElement);
-        const asset = await project.storeGeneratedBlob(
-          blob,
-          `${item.name || 'Extracted asset'}.png`,
-          `Extracted asset from ${sourceLayer.name}`,
-          item.width,
-          item.height,
-        );
-        item.sourceMeta = {
-          assetId: asset?.id ?? null,
-          path: asset?.relativePath ?? null,
-        };
-        if (asset) extractedAssets.push(asset);
-      }
-      const addedToWorkflow = addToWorkflow && extractedAssets.length > 0;
-      if (addedToWorkflow) {
-        if (!workflow.active) workflow.newBoard(`${sourceLayer.name} Assets`);
-        for (const asset of extractedAssets) workflow.addAsset(asset);
-        if (!workflow.prompt.trim()) {
-          workflow.setPrompt('Use these extracted assets as visual references to compose a new image.');
+      try {
+        const sourcePng = await canvasPngBytes(sourceLayer.canvas);
+        const result =
+          runOptions.provider === 'antigravity'
+            ? await decoupleAntigravityImage(
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                sourcePng,
+                prompt.trim() || DEFAULT_PROMPT,
+                false,
+              )
+            : await decoupleCodexImage(
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                sourcePng,
+                prompt.trim() || DEFAULT_PROMPT,
+                false,
+              );
+        progress = 'Cleaning and saving extracted assets...';
+        aiTasks.setProgress(task.id, progress);
+        const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
+        const extractedAssets: ProjectAsset[] = [];
+        for (const item of imports) {
+          const blob = await canvasToPngBlob(item.source as HTMLCanvasElement);
+          const asset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            blob,
+            `${item.name || 'Extracted asset'}.png`,
+            `Extracted asset from ${sourceLayer.name}`,
+            item.width,
+            item.height,
+          );
+          item.sourceMeta = {
+            assetId: asset?.id ?? null,
+            path: asset?.relativePath ?? null,
+          };
+          if (asset) extractedAssets.push(asset);
         }
-        workflow.show();
+        const addedToWorkflow = addToWorkflow && extractedAssets.length > 0;
+        if (addedToWorkflow) {
+          if (!workflow.active) workflow.newBoard(`${sourceLayer.name} Assets`);
+          for (const asset of extractedAssets) workflow.addAsset(asset);
+          if (!workflow.prompt.trim()) {
+            workflow.setPrompt('Use these extracted assets as visual references to compose a new image.');
+          }
+          workflow.show();
+        }
+        focusTaskDocument(targetDocumentId);
+        const inserted = placeOnCanvas
+          ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
+          : 0;
+        notes = result.notes ?? '';
+        aiTasks.setDecoupleNotes(task.id, notes);
+        editor.flash(
+          placeOnCanvas
+            ? `Extracted ${imports.length} assets and placed ${inserted} layers`
+            : addedToWorkflow
+              ? `Extracted ${imports.length} assets to workflow`
+              : `Extracted ${imports.length} assets`,
+        );
+        aiTasks.complete(task.id, `Extracted ${imports.length} assets`);
+      } catch (e) {
+        error = (e as Error)?.message ?? String(e);
+        aiTasks.fail(task.id, error);
+        editor.flash('Asset extraction failed');
+      } finally {
+        busy = false;
+        progress = '';
+        progressListenerStale = true;
+        clearProgressListener();
+        runningTaskId = null;
       }
-      const inserted = placeOnCanvas
-        ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
-        : 0;
-      notes = result.notes ?? '';
-      editor.flash(
-        placeOnCanvas
-          ? `Extracted ${imports.length} assets and placed ${inserted} layers`
-          : addedToWorkflow
-            ? `Extracted ${imports.length} assets to workflow`
-            : `Extracted ${imports.length} assets`,
-      );
-      onClose();
-    } catch (e) {
-      error = (e as Error)?.message ?? String(e);
-      editor.flash('Asset extraction failed');
-    } finally {
-      busy = false;
-      progress = '';
-      clearProgressListener();
-    }
+    };
+    aiTasks.setRetry(task.id, executeTask);
+    window.setTimeout(() => void executeTask(), 0);
   }
 </script>
 
@@ -264,12 +328,19 @@
       </p>
     {/if}
 
-    {#if runOptions.provider === 'codex'}
+    {#if taskDetail}
+      <div class="task-summary">
+        <strong>{taskDetail.sourceLayerName}</strong>
+        <span>{taskDetail.providerLabel}</span>
+      </div>
+    {/if}
+
+    {#if !taskDetail && runOptions.provider === 'codex'}
       <label class="dlg-field">
         <span>Codex command (optional)</span>
         <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
       </label>
-    {:else if runOptions.provider === 'antigravity'}
+    {:else if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
         <span>Antigravity command (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
@@ -278,23 +349,38 @@
 
     <label class="dlg-field">
       <span>Asset guidance</span>
-      <textarea bind:value={prompt} rows="4" spellcheck="true"></textarea>
+      {#if taskDetail}
+        <textarea value={taskDetail.prompt} rows="4" readonly></textarea>
+      {:else}
+        <textarea bind:value={prompt} rows="4" spellcheck="true"></textarea>
+      {/if}
     </label>
 
     <div class="split-row">
       <div class="check-stack">
         <label class="check-row">
-          <input type="checkbox" bind:checked={addToWorkflow} disabled={!project.path} />
+          <input type="checkbox" checked={taskDetail ? taskDetail.addToWorkflow : addToWorkflow} disabled={!!taskDetail || !project.path} onchange={(event) => (addToWorkflow = event.currentTarget.checked)} />
           <span>Add assets to workflow board</span>
         </label>
         <label class="check-row">
-          <input type="checkbox" bind:checked={placeOnCanvas} />
+          <input type="checkbox" checked={taskDetail ? taskDetail.placeOnCanvas : placeOnCanvas} disabled={!!taskDetail} onchange={(event) => (placeOnCanvas = event.currentTarget.checked)} />
           <span>Place extracted assets on canvas</span>
         </label>
       </div>
       <label class="compact-field">
         <span>Key tolerance</span>
-        <input type="number" min="0" max="120" step="1" bind:value={tolerance} />
+        <input
+          type="number"
+          min="0"
+          max="120"
+          step="1"
+          value={taskDetail ? taskDetail.tolerance : tolerance}
+          readonly={!!taskDetail}
+          oninput={(event) => {
+            const next = event.currentTarget.valueAsNumber;
+            if (Number.isFinite(next)) tolerance = Math.min(120, Math.max(0, next));
+          }}
+        />
       </label>
     </div>
 
@@ -303,18 +389,23 @@
       project, applies alpha masks when provided, and uses color-key cleanup only as a fallback.
     </p>
 
-    {#if busy}
+    {#if currentBusy}
       <div class="progress-line" role="status" aria-live="polite">
         <span class="progress-dot" aria-hidden="true"></span>
-        <span>{progress}</span>
+        <span>{currentProgress}</span>
+      </div>
+    {:else if task}
+      <div class="progress-line done" role="status" aria-live="polite">
+        <span class="progress-dot" aria-hidden="true"></span>
+        <span>{currentProgress}</span>
       </div>
     {/if}
 
-    {#if notes}
-      <p class="hint">{notes}</p>
+    {#if currentNotes}
+      <p class="hint">{currentNotes}</p>
     {/if}
 
-    {#if error}
+    {#if currentError}
       <div class="error-box">
         <div class="error-head">
           <span>Extraction failed</span>
@@ -328,17 +419,24 @@
             <Icon svg={Copy} size={15} />
           </button>
         </div>
-        <pre>{error}</pre>
+        <pre>{currentError}</pre>
       </div>
     {/if}
 
     <div class="dlg-actions">
-      <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      {#if !task}
+        <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+      {/if}
       <span class="dlg-action-spacer"></span>
-      <button onclick={onClose}>Cancel</button>
-      <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !editor.activeLayer}>
-        {busy ? 'Extracting...' : 'Extract'}
-      </button>
+      <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>
+      {#if task?.status === 'error' && task.retry}
+        <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
+      {/if}
+      {#if !task}
+        <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !editor.activeLayer}>
+          {busy ? 'Extracting...' : 'Extract'}
+        </button>
+      {/if}
     </div>
   </div>
 </Modal>
@@ -370,6 +468,28 @@
   .compact-field input {
     width: 100%;
   }
+  .task-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    padding: 7px 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .task-summary strong,
+  .task-summary span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .task-summary span {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
   .hint {
     margin: 0;
     color: var(--text-dim);
@@ -396,6 +516,10 @@
     border-radius: 50%;
     background: var(--accent);
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .progress-line.done .progress-dot {
+    background: #58c488;
+    box-shadow: none;
   }
   .error-box {
     border: 1px solid #7a2d2d;

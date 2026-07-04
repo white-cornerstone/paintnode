@@ -125,7 +125,7 @@
       editor.commitActiveText();
       return;
     }
-    // Locked Photoshop-only layers reject pixel edits (they are preserved as-is).
+    // Locked layers reject pixel edits.
     if (e.button === 0 && !spaceDown && editor.activeTool.editsPixels && editor.blockIfLocked(editor.activeLayer)) {
       return;
     }

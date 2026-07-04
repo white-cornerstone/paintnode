@@ -76,24 +76,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "app"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "base64 0.22.1",
- "image",
- "log",
- "serde",
- "serde_json",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-log",
- "zip",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2353,6 +2335,24 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "paintnode"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "base64 0.22.1",
+ "image",
+ "log",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-log",
+ "zip",
+]
 
 [[package]]
 name = "pango"

@@ -11,6 +11,10 @@ interface LoadingTask {
   visible: boolean;
 }
 
+export interface LoadingOptions {
+  immediate?: boolean;
+}
+
 export class LoadingTracker {
   private tasks: LoadingTask[] = [];
 
@@ -25,15 +29,18 @@ export class LoadingTracker {
    * Overlapping waits stack; the most recent one that has outlived the
    * anti-flash delay is the one displayed.
    */
-  begin(label: string): () => void {
-    const task: LoadingTask = { label, visible: false };
+  begin(label: string, options: LoadingOptions = {}): () => void {
+    const task: LoadingTask = { label, visible: options.immediate === true };
     this.tasks.push(task);
-    const timer = setTimeout(() => {
-      task.visible = true;
-      this.emit();
-    }, this.delayMs);
+    if (task.visible) this.emit();
+    const timer = options.immediate
+      ? null
+      : setTimeout(() => {
+          task.visible = true;
+          this.emit();
+        }, this.delayMs);
     return () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       const index = this.tasks.indexOf(task);
       if (index === -1) return; // disposer already called
       this.tasks.splice(index, 1);

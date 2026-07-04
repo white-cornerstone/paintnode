@@ -112,6 +112,12 @@ function linkedMaskLayerFor(
   return out;
 }
 
+function psdLayerFullLocked(src: AgPsdLayer): boolean {
+  const protectedFlags = src.protected;
+  if (protectedFlags?.composite === true && protectedFlags.position === true) return true;
+  return src.transparencyProtected === true && protectedFlags?.transparency === false;
+}
+
 /** Parse a Photoshop (.psd) file into a PaintDocument with passthrough state. */
 export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
   if (isPsb(buffer)) {
@@ -164,6 +170,7 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
     layer.opacity = clamp(src.opacity ?? 1, 0, 1);
     layer.visible = item.visible;
     layer.blendMode = blend.mode;
+    layer.userLocked = psdLayerFullLocked(src);
 
     let importedMask: PsdLayerSource['imported']['mask'] = null;
     if (lockReason) {
@@ -192,6 +199,7 @@ export async function loadPsd(buffer: ArrayBuffer): Promise<PsdImportResult> {
         blendMode: blend.mode,
         visible: layer.visible,
         mask: importedMask,
+        locked: layer.userLocked,
       },
     };
     layers.push(layer);

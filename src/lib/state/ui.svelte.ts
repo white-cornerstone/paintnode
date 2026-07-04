@@ -1,5 +1,5 @@
 // Lightweight reactive UI state (status bar readouts + which modal dialog is open).
-import { LoadingTracker } from './loading';
+import { LoadingTracker, type LoadingOptions } from './loading';
 
 export type DialogId =
   | 'new'
@@ -13,6 +13,8 @@ export type DialogId =
   | 'aiDecouple'
   | 'stockImages'
   | 'settings';
+
+export type AiTaskDialogKind = 'generate' | 'retouch' | 'decouple';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
@@ -33,6 +35,7 @@ class UiState {
   cursor = $state<{ x: number; y: number } | null>(null);
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
+  aiTaskDialog = $state<{ kind: AiTaskDialogKind; id: string } | null>(null);
   activeSurface = $state<'document' | 'workflow'>('document');
   workspaceFocusMode = $state(false);
   workspaceFocusHintVisible = $state(false);
@@ -54,10 +57,21 @@ class UiState {
   private saveChangesResolver: ((v: SaveChangesChoice) => void) | null = null;
 
   open(id: DialogId): void {
+    this.aiTaskDialog = null;
     this.dialog = id;
+  }
+  openAiTask(kind: AiTaskDialogKind, id: string): void {
+    this.aiTaskDialog = { kind, id };
+    this.dialog =
+      kind === 'generate'
+        ? 'aiGenerate'
+        : kind === 'retouch'
+          ? 'aiRetouch'
+          : 'aiDecouple';
   }
   close(): void {
     this.dialog = null;
+    this.aiTaskDialog = null;
   }
   showDocument(): void {
     this.activeSurface = 'document';
@@ -91,13 +105,13 @@ class UiState {
    * Returns a disposer to call when the work finishes; prefer withLoading,
    * which pairs the two for you.
    */
-  beginLoading(label: string): () => void {
-    return this.loadingTracker.begin(label);
+  beginLoading(label: string, options?: LoadingOptions): () => void {
+    return this.loadingTracker.begin(label, options);
   }
 
   /** Run fn with a loading indicator registered for its duration. */
-  async withLoading<T>(label: string, fn: () => Promise<T>): Promise<T> {
-    const done = this.beginLoading(label);
+  async withLoading<T>(label: string, fn: () => Promise<T>, options?: LoadingOptions): Promise<T> {
+    const done = this.beginLoading(label, options);
     try {
       return await fn();
     } finally {

@@ -19,6 +19,7 @@
   import CharacterPanel from './lib/components/CharacterPanel.svelte';
   import ParagraphPanel from './lib/components/ParagraphPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
+  import TasksPanel from './lib/components/TasksPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip, truncatedTooltip } from './lib/actions/tooltip';
@@ -40,6 +41,7 @@
     Options,
     TextFont,
     TextParagraphIcon,
+    TaskList,
   } from './lib/icons';
   import { installKeyboard } from './lib/state/keyboard';
   import {
@@ -57,6 +59,7 @@
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { isDesktop, quitApplication } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, type PanelGroupId, type PanelId } from './lib/state/panels';
+  import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
   import { project } from './lib/state/project.svelte';
   import { settings } from './lib/state/settings.svelte';
@@ -71,6 +74,7 @@
     LazyComponentModule<Props>
   >;
   type CloseableDialogProps = { onClose: () => void };
+  type AiDialogProps = CloseableDialogProps & { taskId?: string | null };
 
   const loadWorkflowBoard: LazyComponentLoader = () => import('./lib/components/WorkflowBoard.svelte');
   const loadNewDocumentDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/NewDocumentDialog.svelte');
@@ -79,9 +83,9 @@
   const loadBrightnessContrastDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/BrightnessContrastDialog.svelte');
   const loadHueSaturationDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/HueSaturationDialog.svelte');
   const loadGaussianBlurDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/GaussianBlurDialog.svelte');
-  const loadAiGenerateDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
-  const loadAiRetouchDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
-  const loadAiDecoupleDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
+  const loadAiGenerateDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
+  const loadAiRetouchDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
+  const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
   const loadFontEmbedDialog: LazyComponentLoader = () => import('./lib/components/FontEmbedDialog.svelte');
@@ -177,6 +181,10 @@
 
   function closePeekedPanel(): void {
     peekedPanel = null;
+  }
+
+  function showProjectSide(): void {
+    panels.setProjectCollapsed(false);
   }
 
   function documentDisplayName(session: DocumentSession): string {
@@ -507,6 +515,10 @@
     return () => window.clearInterval(autosave);
   });
 
+  $effect(() => {
+    aiTasks.setProjectPath(project.path);
+  });
+
   onMount(() => {
     const disposeKeyboard = installKeyboard();
     ui.contextualTaskBarVisible = settings.value.general.showContextualTaskBarOnStartup;
@@ -637,6 +649,13 @@
   {/await}
 {/snippet}
 
+{#snippet lazyAiDialog(loader: LazyComponentLoader<AiDialogProps>)}
+  {#await loader() then module}
+    {@const Dialog = module.default}
+    <Dialog onClose={() => ui.close()} taskId={ui.aiTaskDialog?.id ?? null} />
+  {/await}
+{/snippet}
+
 <div class="app" class:workspace-focus={ui.workspaceFocusMode}>
   {#if desktop}
     <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
@@ -730,10 +749,24 @@
             {#if panels.value.projectCollapsed}
               <div class="project-rail">
                 <button
+                  class="panel-toggle expand"
+                  onclick={showProjectSide}
+                  use:tooltip={{ text: 'Expand panels', placement: 'left' }}
+                  aria-label="Expand panels"
+                ><Icon svg={ChevronDoubleLeft} size={16} /></button>
+                <button
                   class="rail-icon"
-                  onclick={() => panels.setProjectCollapsed(false)}
-                  use:tooltip={{ text: 'Expand project', placement: 'left' }}
-                  aria-label="Expand project"
+                  onclick={showProjectSide}
+                  use:tooltip={{ text: 'Tasks', placement: 'left' }}
+                  aria-label="Tasks"
+                >
+                  <Icon svg={TaskList} size={18} />
+                </button>
+                <button
+                  class="rail-icon"
+                  onclick={showProjectSide}
+                  use:tooltip={{ text: 'Project', placement: 'left' }}
+                  aria-label="Project"
                 >
                   <Icon svg={Folder} size={18} />
                 </button>
@@ -743,11 +776,12 @@
                 <button
                   class="panel-toggle"
                   onclick={() => panels.setProjectCollapsed(true)}
-                  use:tooltip={{ text: 'Collapse project', placement: 'left' }}
-                  aria-label="Collapse project"
+                  use:tooltip={{ text: 'Collapse panels', placement: 'left' }}
+                  aria-label="Collapse panels"
                 ><Icon svg={ChevronDoubleRight} size={16} /></button>
               </div>
               <ProjectPanel />
+              <TasksPanel />
             {/if}
           </aside>
         {/if}
@@ -772,11 +806,11 @@
 {:else if ui.dialog === 'gaussianBlur'}
   {@render lazyDialog(loadGaussianBlurDialog)}
 {:else if ui.dialog === 'aiGenerate'}
-  {@render lazyDialog(loadAiGenerateDialog)}
+  {@render lazyAiDialog(loadAiGenerateDialog)}
 {:else if ui.dialog === 'aiRetouch'}
-  {@render lazyDialog(loadAiRetouchDialog)}
+  {@render lazyAiDialog(loadAiRetouchDialog)}
 {:else if ui.dialog === 'aiDecouple'}
-  {@render lazyDialog(loadAiDecoupleDialog)}
+  {@render lazyAiDialog(loadAiDecoupleDialog)}
 {:else if ui.dialog === 'stockImages'}
   {@render lazyDialog(loadStockImagesDialog)}
 {:else if ui.dialog === 'settings'}
@@ -888,7 +922,11 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding-top: 5px;
+    padding-top: 4px;
+  }
+  .project-rail .panel-toggle.expand {
+    align-self: flex-end;
+    margin: 0 5px 4px 0;
   }
   .rail-icon {
     display: grid;
