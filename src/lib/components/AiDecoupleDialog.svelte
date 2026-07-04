@@ -216,91 +216,98 @@
     });
     runningTaskId = task.id;
     onClose();
-    progress = 'Preparing source layer...';
-    editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
-    clearProgressListener();
-    const runId = createRunId();
-    try {
-      stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
+    const executeTask = async () => {
+      progress = 'Preparing source layer...';
+      aiTasks.setProgress(task.id, progress);
+      editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
+      clearProgressListener();
+      const runId = createRunId();
+      void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
         if (event.payload.runId === runId && event.payload.message.trim()) {
           progress = event.payload.message.trim();
           aiTasks.setProgress(task.id, progress);
         }
-      });
-    } catch {
-      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-      aiTasks.setProgress(task.id, progress);
-    }
+      })
+        .then((unlisten) => {
+          stopProgress = unlisten;
+        })
+        .catch(() => {
+          progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
+          aiTasks.setProgress(task.id, progress);
+        });
 
-    try {
-      const sourcePng = await canvasPngBytes(sourceLayer.canvas);
-      const result =
-        runOptions.provider === 'antigravity'
-          ? await decoupleAntigravityImage(
-              antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
-              sourcePng,
-              prompt.trim() || DEFAULT_PROMPT,
-              false,
-            )
-          : await decoupleCodexImage(
-              codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
-              sourcePng,
-              prompt.trim() || DEFAULT_PROMPT,
-              false,
-            );
-      progress = 'Cleaning and saving extracted assets...';
-      aiTasks.setProgress(task.id, progress);
-      const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
-      const extractedAssets: ProjectAsset[] = [];
-      for (const item of imports) {
-        const blob = await canvasToPngBlob(item.source as HTMLCanvasElement);
-        const asset = await project.storeGeneratedBlobAt(
-          taskProjectPath,
-          blob,
-          `${item.name || 'Extracted asset'}.png`,
-          `Extracted asset from ${sourceLayer.name}`,
-          item.width,
-          item.height,
-        );
-        item.sourceMeta = {
-          assetId: asset?.id ?? null,
-          path: asset?.relativePath ?? null,
-        };
-        if (asset) extractedAssets.push(asset);
-      }
-      const addedToWorkflow = addToWorkflow && extractedAssets.length > 0;
-      if (addedToWorkflow) {
-        if (!workflow.active) workflow.newBoard(`${sourceLayer.name} Assets`);
-        for (const asset of extractedAssets) workflow.addAsset(asset);
-        if (!workflow.prompt.trim()) {
-          workflow.setPrompt('Use these extracted assets as visual references to compose a new image.');
+      try {
+        const sourcePng = await canvasPngBytes(sourceLayer.canvas);
+        const result =
+          runOptions.provider === 'antigravity'
+            ? await decoupleAntigravityImage(
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                sourcePng,
+                prompt.trim() || DEFAULT_PROMPT,
+                false,
+              )
+            : await decoupleCodexImage(
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                sourcePng,
+                prompt.trim() || DEFAULT_PROMPT,
+                false,
+              );
+        progress = 'Cleaning and saving extracted assets...';
+        aiTasks.setProgress(task.id, progress);
+        const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
+        const extractedAssets: ProjectAsset[] = [];
+        for (const item of imports) {
+          const blob = await canvasToPngBlob(item.source as HTMLCanvasElement);
+          const asset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            blob,
+            `${item.name || 'Extracted asset'}.png`,
+            `Extracted asset from ${sourceLayer.name}`,
+            item.width,
+            item.height,
+          );
+          item.sourceMeta = {
+            assetId: asset?.id ?? null,
+            path: asset?.relativePath ?? null,
+          };
+          if (asset) extractedAssets.push(asset);
         }
-        workflow.show();
+        const addedToWorkflow = addToWorkflow && extractedAssets.length > 0;
+        if (addedToWorkflow) {
+          if (!workflow.active) workflow.newBoard(`${sourceLayer.name} Assets`);
+          for (const asset of extractedAssets) workflow.addAsset(asset);
+          if (!workflow.prompt.trim()) {
+            workflow.setPrompt('Use these extracted assets as visual references to compose a new image.');
+          }
+          workflow.show();
+        }
+        focusTaskDocument(targetDocumentId);
+        const inserted = placeOnCanvas
+          ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
+          : 0;
+        notes = result.notes ?? '';
+        aiTasks.setDecoupleNotes(task.id, notes);
+        editor.flash(
+          placeOnCanvas
+            ? `Extracted ${imports.length} assets and placed ${inserted} layers`
+            : addedToWorkflow
+              ? `Extracted ${imports.length} assets to workflow`
+              : `Extracted ${imports.length} assets`,
+        );
+        aiTasks.complete(task.id, `Extracted ${imports.length} assets`);
+      } catch (e) {
+        error = (e as Error)?.message ?? String(e);
+        aiTasks.fail(task.id, error);
+        editor.flash('Asset extraction failed');
+      } finally {
+        busy = false;
+        progress = '';
+        clearProgressListener();
+        runningTaskId = null;
       }
-      focusTaskDocument(targetDocumentId);
-      const inserted = placeOnCanvas
-        ? editor.insertDecoupledLayers(sourceLayer.id, imports, { hideSource: false })
-        : 0;
-      notes = result.notes ?? '';
-      aiTasks.setDecoupleNotes(task.id, notes);
-      editor.flash(
-        placeOnCanvas
-          ? `Extracted ${imports.length} assets and placed ${inserted} layers`
-          : addedToWorkflow
-            ? `Extracted ${imports.length} assets to workflow`
-            : `Extracted ${imports.length} assets`,
-      );
-      aiTasks.complete(task.id, `Extracted ${imports.length} assets`);
-    } catch (e) {
-      error = (e as Error)?.message ?? String(e);
-      aiTasks.fail(task.id, error);
-      editor.flash('Asset extraction failed');
-    } finally {
-      busy = false;
-      progress = '';
-      clearProgressListener();
-      runningTaskId = null;
-    }
+    };
+    aiTasks.setRetry(task.id, executeTask);
+    window.setTimeout(() => void executeTask(), 0);
   }
 </script>
 
@@ -411,6 +418,9 @@
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>
+      {#if task?.status === 'error' && task.retry}
+        <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
+      {/if}
       {#if !task}
         <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !editor.activeLayer}>
           {busy ? 'Extracting...' : 'Extract'}

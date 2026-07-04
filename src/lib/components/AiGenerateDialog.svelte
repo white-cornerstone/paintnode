@@ -190,145 +190,152 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
     });
     runningTaskId = task.id;
     onClose();
-    let fillDebugDir: string | null = null;
-    progress =
-      runOptions.provider === 'codex'
-        ? 'Preparing Codex request...'
-        : runOptions.provider === 'antigravity'
-          ? 'Preparing Antigravity request...'
-          : 'Running local generator...';
-    editor.flash(
-      hasSelection
-        ? 'Preparing generative fill...'
-        : runOptions.provider === 'codex'
-          ? 'Generating with Codex...'
+    const executeTask = async () => {
+      let fillDebugDir: string | null = null;
+      progress =
+        runOptions.provider === 'codex'
+          ? 'Preparing Codex request...'
           : runOptions.provider === 'antigravity'
-            ? 'Generating with Antigravity...'
-            : 'Generating image...',
-    );
-    clearProgressListener();
-    const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId() : '';
-    if (runOptions.provider === 'codex' || runOptions.provider === 'antigravity') {
-      try {
-        stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
+            ? 'Preparing Antigravity request...'
+            : 'Running local generator...';
+      aiTasks.setProgress(task.id, progress);
+      editor.flash(
+        hasSelection
+          ? 'Preparing generative fill...'
+          : runOptions.provider === 'codex'
+            ? 'Generating with Codex...'
+            : runOptions.provider === 'antigravity'
+              ? 'Generating with Antigravity...'
+              : 'Generating image...',
+      );
+      clearProgressListener();
+      const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId() : '';
+      if (runOptions.provider === 'codex' || runOptions.provider === 'antigravity') {
+        void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
           if (event.payload.runId === runId && event.payload.message.trim()) {
             progress = event.payload.message.trim();
             aiTasks.setProgress(task.id, progress);
           }
-        });
-      } catch {
-        progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-        aiTasks.setProgress(task.id, progress);
+        })
+          .then((unlisten) => {
+            stopProgress = unlisten;
+          })
+          .catch(() => {
+            progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
+            aiTasks.setProgress(task.id, progress);
+          });
       }
-    }
-    try {
-      const fillInput = hasSelection ? await editor.prepareGenerativeFillInput() : null;
-      if (hasSelection && !fillInput) throw new Error('The current selection has no editable pixels.');
-      const generationPrompt = fillInput ? userPrompt || defaultFillPrompt() : promptWithCanvasSize(userPrompt);
-      const generationTarget = fillInput ? null : targetDimensions();
-      fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt, taskProjectPath) : null;
-      if (fillDebugDir) {
-        progress = `Saved fill inputs: ${fillDebugDir}`;
-        aiTasks.setProgress(task.id, progress);
-      }
-      if (fillInput) {
-        progress = fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...';
-        aiTasks.setProgress(task.id, progress);
-      }
-      const generated =
-        runOptions.provider === 'codex'
-          ? fillInput
-            ? await generateCodexFillImage(
-                codexConfigFromRunOptions(runOptions, null, runId),
-                fillInput.sourcePng,
-                fillInput.editTargetPng,
-                fillInput.maskPng,
-                generationPrompt,
-              )
-            : await generateCodexImage(
-                codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
-                generationPrompt,
-                generationTarget,
-              )
-          : runOptions.provider === 'antigravity'
+      try {
+        const fillInput = hasSelection ? await editor.prepareGenerativeFillInput() : null;
+        if (hasSelection && !fillInput) throw new Error('The current selection has no editable pixels.');
+        const generationPrompt = fillInput ? userPrompt || defaultFillPrompt() : promptWithCanvasSize(userPrompt);
+        const generationTarget = fillInput ? null : targetDimensions();
+        fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt, taskProjectPath) : null;
+        if (fillDebugDir) {
+          progress = `Saved fill inputs: ${fillDebugDir}`;
+          aiTasks.setProgress(task.id, progress);
+        }
+        if (fillInput) {
+          progress = fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...';
+          aiTasks.setProgress(task.id, progress);
+        }
+        const generated =
+          runOptions.provider === 'codex'
             ? fillInput
-              ? await generateAntigravityFillImage(
-                  antigravityConfigFromRunOptions(runOptions, null, runId),
+              ? await generateCodexFillImage(
+                  codexConfigFromRunOptions(runOptions, null, runId),
                   fillInput.sourcePng,
                   fillInput.editTargetPng,
                   fillInput.maskPng,
                   generationPrompt,
                 )
-            : await generateAntigravityImage(
-                  antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+              : await generateCodexImage(
+                  codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
                   generationPrompt,
                   generationTarget,
                 )
+            : runOptions.provider === 'antigravity'
+              ? fillInput
+                ? await generateAntigravityFillImage(
+                    antigravityConfigFromRunOptions(runOptions, null, runId),
+                    fillInput.sourcePng,
+                    fillInput.editTargetPng,
+                    fillInput.maskPng,
+                    generationPrompt,
+                  )
+                : await generateAntigravityImage(
+                    antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                    generationPrompt,
+                    generationTarget,
+                  )
+              : null;
+        if (generated?.asset) await project.refresh(taskProjectPath);
+        const dataUrl =
+          generated?.dataUrl ??
+          (await generateImage(
+            {
+              bin: runOptions.customBin.trim(),
+              args: argsText
+                .split('\n')
+                .map((s) => s.trim())
+                .filter(Boolean),
+            },
+            generationPrompt,
+          ));
+        const blob = await (await fetch(dataUrl)).blob();
+        const bmp = await createImageBitmap(blob);
+        let fillAsset: ProjectAsset | null = null;
+        if (fillInput && taskProjectPath) {
+          const composite = editor.renderGenerativeFillComposite(bmp, bmp.width, bmp.height, fillInput.mask, fillInput.source);
+          if (!composite) throw new Error('Unable to prepare the generated fill preview.');
+          const compositeBlob = await canvasToBlob(composite);
+          fillAsset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            compositeBlob,
+            `Generative fill ${generationPrompt.slice(0, 48) || 'outpaint'}.png`,
+            generationPrompt,
+            composite.width,
+            composite.height,
+          );
+        }
+        const customAsset =
+          !fillInput && !generated && taskProjectPath
+            ? await project.storeGeneratedBlobAt(taskProjectPath, blob, `AI ${userPrompt.slice(0, 48) || 'generated'}.png`, generationPrompt, bmp.width, bmp.height)
             : null;
-      if (generated?.asset) await project.refresh(taskProjectPath);
-      const dataUrl =
-        generated?.dataUrl ??
-        (await generateImage(
-          {
-            bin: runOptions.customBin.trim(),
-            args: argsText
-              .split('\n')
-              .map((s) => s.trim())
-              .filter(Boolean),
-          },
-          generationPrompt,
-        ));
-      const blob = await (await fetch(dataUrl)).blob();
-      const bmp = await createImageBitmap(blob);
-      let fillAsset: ProjectAsset | null = null;
-      if (fillInput && taskProjectPath) {
-        const composite = editor.renderGenerativeFillComposite(bmp, bmp.width, bmp.height, fillInput.mask, fillInput.source);
-        if (!composite) throw new Error('Unable to prepare the generated fill preview.');
-        const compositeBlob = await canvasToBlob(composite);
-        fillAsset = await project.storeGeneratedBlobAt(
-          taskProjectPath,
-          compositeBlob,
-          `Generative fill ${generationPrompt.slice(0, 48) || 'outpaint'}.png`,
-          generationPrompt,
-          composite.width,
-          composite.height,
+        const sourceMeta = {
+          assetId: fillAsset?.id ?? generated?.asset?.id ?? customAsset?.id ?? null,
+          path: fillAsset?.relativePath ?? generated?.asset?.relativePath ?? customAsset?.relativePath ?? null,
+        };
+        focusTaskDocument(targetDocumentId);
+        const oversized = fillInput
+          ? false
+          : editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${userPrompt.slice(0, 24)}`, sourceMeta).oversized;
+        if (fillInput) {
+          editor.insertGenerativeFill(bmp, bmp.width, bmp.height, fillInput.mask, `Generative fill: ${generationPrompt.slice(0, 24)}`, sourceMeta);
+        }
+        bmp.close();
+        editor.flash(
+          fillInput
+            ? 'Generative fill added'
+            : oversized
+              ? 'Image generated full-size; use Move or Image > Reveal All to show hidden edges'
+              : 'Image generated',
         );
+        aiTasks.complete(task.id, fillInput ? 'Generative fill added' : 'Image generated');
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e);
+        error = fillDebugDir ? `${message}\n\nFill input files were saved at:\n${fillDebugDir}` : message;
+        aiTasks.fail(task.id, error);
+        editor.flash('Generation failed');
+      } finally {
+        busy = false;
+        progress = '';
+        clearProgressListener();
+        runningTaskId = null;
       }
-      const customAsset =
-        !fillInput && !generated && taskProjectPath
-          ? await project.storeGeneratedBlobAt(taskProjectPath, blob, `AI ${userPrompt.slice(0, 48) || 'generated'}.png`, generationPrompt, bmp.width, bmp.height)
-          : null;
-      const sourceMeta = {
-        assetId: fillAsset?.id ?? generated?.asset?.id ?? customAsset?.id ?? null,
-        path: fillAsset?.relativePath ?? generated?.asset?.relativePath ?? customAsset?.relativePath ?? null,
-      };
-      focusTaskDocument(targetDocumentId);
-      const oversized = fillInput
-        ? false
-        : editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${userPrompt.slice(0, 24)}`, sourceMeta).oversized;
-      if (fillInput) {
-        editor.insertGenerativeFill(bmp, bmp.width, bmp.height, fillInput.mask, `Generative fill: ${generationPrompt.slice(0, 24)}`, sourceMeta);
-      }
-      bmp.close();
-      editor.flash(
-        fillInput
-          ? 'Generative fill added'
-          : oversized
-            ? 'Image generated full-size; use Move or Image > Reveal All to show hidden edges'
-            : 'Image generated',
-      );
-      aiTasks.complete(task.id, fillInput ? 'Generative fill added' : 'Image generated');
-    } catch (e) {
-      const message = (e as Error)?.message ?? String(e);
-      error = fillDebugDir ? `${message}\n\nFill input files were saved at:\n${fillDebugDir}` : message;
-      aiTasks.fail(task.id, error);
-      editor.flash('Generation failed');
-    } finally {
-      busy = false;
-      progress = '';
-      clearProgressListener();
-      runningTaskId = null;
-    }
+    };
+    aiTasks.setRetry(task.id, executeTask);
+    window.setTimeout(() => void executeTask(), 0);
   }
 </script>
 
@@ -442,10 +449,13 @@ Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image g
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>
+      {#if task?.status === 'error' && task.retry}
+        <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
+      {/if}
       {#if !task}
-      <button class="dlg-primary" onclick={run} disabled={busy || !desktop}>
-        {busy ? 'Generating…' : 'Generate'}
-      </button>
+        <button class="dlg-primary" onclick={run} disabled={busy || !desktop}>
+          {busy ? 'Generating…' : 'Generate'}
+        </button>
       {/if}
     </div>
   </div>

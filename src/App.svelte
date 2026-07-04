@@ -59,6 +59,7 @@
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { isDesktop, quitApplication } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, type PanelGroupId, type PanelId } from './lib/state/panels';
+  import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
   import { project } from './lib/state/project.svelte';
   import { settings } from './lib/state/settings.svelte';
@@ -512,6 +513,10 @@
       settings.value.general.autosaveIntervalMs,
     );
     return () => window.clearInterval(autosave);
+  });
+
+  $effect(() => {
+    aiTasks.setProjectPath(project.path);
   });
 
   onMount(() => {

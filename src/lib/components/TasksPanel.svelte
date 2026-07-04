@@ -3,12 +3,12 @@
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks, type AiTask } from '../state/aiTasks.svelte';
-  import { Checkmark, Copy, Dismiss, TaskList } from '../icons';
+  import { ArrowSync, Broom, Checkmark, Dismiss, TaskList } from '../icons';
 
   let { collapsed = $bindable(false) }: { collapsed?: boolean } = $props();
 
   const runningCount = $derived(aiTasks.tasks.filter((task) => task.status === 'running').length);
-  const hasFinished = $derived(aiTasks.tasks.some((task) => task.status !== 'running'));
+  const completedCount = $derived(aiTasks.tasks.filter((task) => task.status === 'completed').length);
 
   function statusLabel(task: AiTask): string {
     if (task.status === 'running') return 'Running';
@@ -23,15 +23,15 @@
 
 <Panel title={runningCount > 0 ? `Tasks (${runningCount})` : 'Tasks'} bind:collapsed>
   {#snippet actions()}
-    {#if hasFinished}
+    {#if completedCount > 0}
       <button
-        class="clear-finished"
+        class="clear-completed"
         type="button"
-        aria-label="Clear finished tasks"
-        use:tooltip={{ text: 'Clear finished tasks', placement: 'left' }}
-        onclick={() => aiTasks.clearFinished()}
+        aria-label="Clear completed tasks"
+        use:tooltip={{ text: 'Clear completed tasks', placement: 'left' }}
+        onclick={() => aiTasks.clearCompleted()}
       >
-        <Icon svg={Dismiss} size={13} />
+        <Icon svg={Broom} size={14} />
       </button>
     {/if}
   {/snippet}
@@ -45,32 +45,54 @@
     {:else}
       <div class="task-list">
         {#each aiTasks.tasks as task (task.id)}
-          <button
+          <div
             class="task-row"
             class:running={task.status === 'running'}
             class:completed={task.status === 'completed'}
             class:error={task.status === 'error'}
-            type="button"
-            aria-label={`Open ${task.title}: ${statusLabel(task)}`}
-            onclick={() => openTask(task)}
           >
-            <span class="status" aria-hidden="true">
-              {#if task.status === 'running'}
-                <span class="spinner"></span>
-              {:else if task.status === 'completed'}
-                <Icon svg={Checkmark} size={13} />
-              {:else}
+            <button
+              class="task-open"
+              type="button"
+              aria-label={`Open ${task.title}: ${statusLabel(task)}`}
+              onclick={() => openTask(task)}
+            >
+              <span class="status" aria-hidden="true">
+                {#if task.status === 'running'}
+                  <span class="spinner"></span>
+                {:else if task.status === 'completed'}
+                  <Icon svg={Checkmark} size={13} />
+                {:else}
+                  <Icon svg={Dismiss} size={13} />
+                {/if}
+              </span>
+              <span class="task-main">
+                <span class="task-title">{task.title}</span>
+                <span class="task-progress">{task.progress || task.subtitle}</span>
+              </span>
+            </button>
+            {#if task.status === 'completed'}
+              <button
+                class="task-action"
+                type="button"
+                aria-label={`Clear ${task.title}`}
+                use:tooltip={{ text: 'Clear task', placement: 'left' }}
+                onclick={() => aiTasks.clearCompletedTask(task.id)}
+              >
                 <Icon svg={Dismiss} size={13} />
-              {/if}
-            </span>
-            <span class="task-main">
-              <span class="task-title">{task.title}</span>
-              <span class="task-progress">{task.progress || task.subtitle}</span>
-            </span>
-            {#if task.status === 'error'}
-              <Icon svg={Copy} size={13} />
+              </button>
+            {:else if task.status === 'error' && task.retry}
+              <button
+                class="task-action"
+                type="button"
+                aria-label={`Retry ${task.title}`}
+                use:tooltip={{ text: 'Retry task', placement: 'left' }}
+                onclick={() => aiTasks.retry(task.id)}
+              >
+                <Icon svg={ArrowSync} size={13} />
+              </button>
             {/if}
-          </button>
+          </div>
         {/each}
       </div>
     {/if}
@@ -78,17 +100,17 @@
 </Panel>
 
 <style>
-  .clear-finished {
+  .clear-completed {
     display: grid;
     place-items: center;
-    width: 22px;
-    height: 20px;
+    width: 24px;
+    height: 22px;
     padding: 0;
     color: var(--text-dim);
-    background: transparent;
-    border-color: transparent;
+    background: var(--bg-input);
+    border-color: var(--border-soft);
   }
-  .clear-finished:hover {
+  .clear-completed:hover {
     color: var(--text-bright);
     background: var(--bg-input);
     border-color: var(--border-soft);
@@ -113,26 +135,61 @@
   }
   .task-row {
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    gap: 7px;
+    gap: 4px;
     min-height: 42px;
-    padding: 6px 7px;
+    padding: 0 6px 0 0;
     background: var(--bg-input);
     border: 1px solid var(--border-soft);
     border-radius: 4px;
-    text-align: left;
+    overflow: hidden;
   }
-  .task-row:hover,
-  .task-row:focus-visible {
+  .task-row:hover {
     background: color-mix(in srgb, var(--bg-input) 80%, var(--text-bright) 12%);
     border-color: color-mix(in srgb, var(--border-soft) 70%, var(--accent) 30%);
+  }
+  .task-row:focus-within {
+    border-color: color-mix(in srgb, var(--border-soft) 55%, var(--accent) 45%);
   }
   .task-row.completed {
     border-color: color-mix(in srgb, #42b883 42%, var(--border-soft));
   }
   .task-row.error {
     border-color: color-mix(in srgb, var(--danger) 58%, var(--border-soft));
+  }
+  .task-open {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    min-height: 42px;
+    padding: 6px 7px;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    text-align: left;
+  }
+  .task-open:hover,
+  .task-open:focus-visible {
+    background: transparent;
+  }
+  .task-action {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    color: var(--text-dim);
+    background: transparent;
+    border-color: transparent;
+  }
+  .task-action:hover,
+  .task-action:focus-visible {
+    color: var(--text-bright);
+    background: var(--bg-elevated);
+    border-color: var(--border-soft);
   }
   .status {
     display: grid;

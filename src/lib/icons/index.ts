@@ -46,6 +46,7 @@ export { default as Image } from '@fluentui/svg-icons/icons/image_24_regular.svg
 export { default as ImageAdd } from '@fluentui/svg-icons/icons/image_add_24_regular.svg?raw';
 export { default as ImageEdit } from '@fluentui/svg-icons/icons/image_edit_24_regular.svg?raw';
 export { default as Board } from '@fluentui/svg-icons/icons/board_24_regular.svg?raw';
+export { default as Broom } from '@fluentui/svg-icons/icons/broom_24_regular.svg?raw';
 export { default as DeveloperBoard } from '@fluentui/svg-icons/icons/developer_board_24_regular.svg?raw';
 export { default as FolderAdd } from '@fluentui/svg-icons/icons/folder_add_24_regular.svg?raw';
 export { default as Copy } from '@fluentui/svg-icons/icons/copy_24_regular.svg?raw';

@@ -183,87 +183,98 @@ Use these annotations as direct user instructions for the regions they point to.
     runningTaskId = task.id;
     editor.dismissAiRetouch();
     onClose();
-    let debugDir: string | null = null;
-    progress = 'Preparing AI retouch inputs...';
-    editor.flash('Preparing AI retouch...');
-    clearProgressListener();
-    const runId = createRunId();
-    try {
-      stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
+    const executeTask = async () => {
+      let debugDir: string | null = null;
+      const retryMaskLayer = editor.documents
+        .flatMap((session) => session.doc.layers)
+        .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask');
+      if (retryMaskLayer) retryMaskLayer.userLocked = true;
+      progress = 'Preparing AI retouch inputs...';
+      aiTasks.setProgress(task.id, progress);
+      editor.flash('Preparing AI retouch...');
+      clearProgressListener();
+      const runId = createRunId();
+      void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
         if (event.payload.runId === runId && event.payload.message.trim()) {
           progress = event.payload.message.trim();
           aiTasks.setProgress(task.id, progress);
         }
-      });
-    } catch {
-      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
-      aiTasks.setProgress(task.id, progress);
-    }
+      })
+        .then((unlisten) => {
+          stopProgress = unlisten;
+        })
+        .catch(() => {
+          progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
+          aiTasks.setProgress(task.id, progress);
+        });
 
-    try {
-      const bytes = await editor.prepareAiRetouchInput(active);
-      if (!bytes) throw new Error('Unable to prepare AI retouch input.');
-      debugDir = await saveDebugInputs(bytes, prompt.trim(), active, taskProjectPath);
-      if (debugDir) {
-        progress = `Saved retouch inputs: ${debugDir}`;
-        aiTasks.setProgress(task.id, progress);
+      try {
+        const bytes = await editor.prepareAiRetouchInput(active);
+        if (!bytes) throw new Error('Unable to prepare AI retouch input.');
+        debugDir = await saveDebugInputs(bytes, prompt.trim(), active, taskProjectPath);
+        if (debugDir) {
+          progress = `Saved retouch inputs: ${debugDir}`;
+          aiTasks.setProgress(task.id, progress);
+        }
+        const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
+        const generated =
+          runOptions.provider === 'antigravity'
+            ? await generateAntigravityRetouchImage(
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                bytes.sourcePng,
+                bytes.editTargetPng,
+                bytes.maskPng,
+                bytes.annotatedSourcePng,
+                bytes.referencePng,
+                retouchPrompt,
+              )
+            : await generateCodexRetouchImage(
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                bytes.sourcePng,
+                bytes.editTargetPng,
+                bytes.maskPng,
+                bytes.annotatedSourcePng,
+                bytes.referencePng,
+                retouchPrompt,
+              );
+        const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
+        if (generated.asset || savedAssetCount > 0) await project.refresh(taskProjectPath);
+        const blob = await (await fetch(generated.dataUrl)).blob();
+        const bmp = await createImageBitmap(blob);
+        const maskBmp = generated.maskDataUrl
+          ? await createImageBitmap(await (await fetch(generated.maskDataUrl)).blob())
+          : null;
+        focusTaskDocument(targetDocumentId);
+        editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
+          assetId: generated.asset?.id ?? null,
+          path: generated.asset?.relativePath ?? null,
+        }, maskBmp, maskBmp?.width ?? 0, maskBmp?.height ?? 0);
+        maskBmp?.close();
+        bmp.close();
+        editor.flash(
+          savedAssetCount > 0
+            ? `AI retouch added; ${savedAssetCount} generated asset${savedAssetCount === 1 ? '' : 's'} saved`
+            : 'AI retouch added',
+        );
+        aiTasks.complete(task.id, 'AI retouch added');
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e);
+        error = debugDir ? `${message}\n\nRetouch input files were saved at:\n${debugDir}` : message;
+        aiTasks.fail(task.id, error);
+        editor.flash('AI retouch failed');
+      } finally {
+        const currentMaskLayer = editor.documents
+          .flatMap((session) => session.doc.layers)
+          .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask');
+        if (currentMaskLayer && previousMaskLock !== null) currentMaskLayer.userLocked = previousMaskLock;
+        busy = false;
+        progress = '';
+        clearProgressListener();
+        runningTaskId = null;
       }
-      const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
-      const generated =
-        runOptions.provider === 'antigravity'
-          ? await generateAntigravityRetouchImage(
-              antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
-              bytes.sourcePng,
-              bytes.editTargetPng,
-              bytes.maskPng,
-              bytes.annotatedSourcePng,
-              bytes.referencePng,
-              retouchPrompt,
-            )
-          : await generateCodexRetouchImage(
-              codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
-              bytes.sourcePng,
-              bytes.editTargetPng,
-              bytes.maskPng,
-              bytes.annotatedSourcePng,
-              bytes.referencePng,
-              retouchPrompt,
-            );
-      const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
-      if (generated.asset || savedAssetCount > 0) await project.refresh(taskProjectPath);
-      const blob = await (await fetch(generated.dataUrl)).blob();
-      const bmp = await createImageBitmap(blob);
-      const maskBmp = generated.maskDataUrl
-        ? await createImageBitmap(await (await fetch(generated.maskDataUrl)).blob())
-        : null;
-      focusTaskDocument(targetDocumentId);
-      editor.insertAiRetouchResult(active, bmp, bmp.width, bmp.height, {
-        assetId: generated.asset?.id ?? null,
-        path: generated.asset?.relativePath ?? null,
-      }, maskBmp, maskBmp?.width ?? 0, maskBmp?.height ?? 0);
-      maskBmp?.close();
-      bmp.close();
-      editor.flash(
-        savedAssetCount > 0
-          ? `AI retouch added; ${savedAssetCount} generated asset${savedAssetCount === 1 ? '' : 's'} saved`
-          : 'AI retouch added',
-      );
-      aiTasks.complete(task.id, 'AI retouch added');
-    } catch (e) {
-      const message = (e as Error)?.message ?? String(e);
-      error = debugDir ? `${message}\n\nRetouch input files were saved at:\n${debugDir}` : message;
-      aiTasks.fail(task.id, error);
-      editor.flash('AI retouch failed');
-    } finally {
-      const currentMaskLayer = editor.documents
-        .flatMap((session) => session.doc.layers)
-        .find((layer) => layer.id === active.maskLayerId && layer.kind === 'ai-retouch-mask');
-      if (currentMaskLayer && previousMaskLock !== null) currentMaskLayer.userLocked = previousMaskLock;
-      busy = false;
-      progress = '';
-      clearProgressListener();
-      runningTaskId = null;
-    }
+    };
+    aiTasks.setRetry(task.id, executeTask);
+    window.setTimeout(() => void executeTask(), 0);
   }
 </script>
 
@@ -367,6 +378,9 @@ Use these annotations as direct user instructions for the regions they point to.
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={close}>{task ? 'Close' : 'Cancel'}</button>
+      {#if task?.status === 'error' && task.retry}
+        <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
+      {/if}
       {#if !task}
         <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !request}>
           {busy ? 'Running...' : 'Run'}
