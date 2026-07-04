@@ -6393,15 +6393,6 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         None::<&str>,
     )?;
-    let help_check_updates = MenuItem::with_id(
-        app,
-        "app:check-updates",
-        "Check for Updates...",
-        true,
-        None::<&str>,
-    )?;
-    let help_about =
-        MenuItem::with_id(app, "app:help-about", "About PaintNode", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "app:quit", "Quit PaintNode", true, Some("CmdOrCtrl+Q"))?;
 
     let app_menu = Submenu::with_items(
@@ -6508,22 +6499,9 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         ],
     )?;
     let view = Submenu::with_items(app, "View", true, &[&zoom_in, &zoom_out, &fit, &actual])?;
-    let help = Submenu::with_items(
-        app,
-        "Help",
-        true,
-        &[
-            &help_check_updates,
-            &PredefinedMenuItem::separator(app)?,
-            &help_about,
-        ],
-    )?;
-
     Menu::with_items(
         app,
-        &[
-            &app_menu, &file, &edit, &image, &layer, &select, &filter, &ai, &view, &help,
-        ],
+        &[&app_menu, &file, &edit, &image, &layer, &select, &filter, &ai, &view],
     )
 }
 
