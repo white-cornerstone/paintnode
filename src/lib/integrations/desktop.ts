@@ -652,6 +652,11 @@ export async function quitApplication(): Promise<void> {
   return invoke<void>('quit_app');
 }
 
+export async function takePendingOpenPaths(): Promise<string[]> {
+  if (!isDesktop()) return [];
+  return invoke<string[]>('take_pending_open_paths');
+}
+
 export async function readNativeDroppedFile(path: string): Promise<NativeDroppedFile> {
   if (!isDesktop()) throw new Error('Native file drops are only available in the desktop app.');
   const result = await invoke<Omit<NativeDroppedFile, 'bytes'> & { bytes: number[] }>('read_dropped_file', { path });

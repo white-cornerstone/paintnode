@@ -58,7 +58,7 @@
     saveWorkflowCommand,
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
-  import { isDesktop, quitApplication } from './lib/integrations/desktop';
+  import { isDesktop, quitApplication, takePendingOpenPaths } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, type PanelGroupId, type PanelId } from './lib/state/panels';
   import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
@@ -517,6 +517,17 @@
     await openDocumentPaths(paths);
   }
 
+  async function handleNativeOpenFiles(payload: unknown): Promise<void> {
+    let paths: string[] = [];
+    try {
+      paths = await takePendingOpenPaths();
+    } catch {
+      paths = [];
+    }
+    if (!paths.length) paths = nativeDropPaths(payload);
+    if (paths.length) await openDocumentPaths(paths);
+  }
+
   $effect(() => {
     if (!settings.value.general.autosaveEnabled) return;
     const autosave = window.setInterval(
@@ -536,11 +547,16 @@
     if (settings.value.general.reopenLastProject) void project.restore();
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
+    let unlistenNativeOpenFiles: UnlistenFn | null = null;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
       window.setTimeout(() => void appUpdater.checkForUpdates(), 2500);
       void listen<string>('app-menu', (event) => runAppMenuAction(event.payload)).then((unlisten) => {
         unlistenMenu = unlisten;
+      });
+      void listen<unknown>('native-open-files', (event) => void handleNativeOpenFiles(event.payload)).then((unlisten) => {
+        unlistenNativeOpenFiles = unlisten;
+        void handleNativeOpenFiles([]);
       });
       if (appWindow) {
         void appWindow.onCloseRequested(async (event) => {
@@ -577,6 +593,7 @@
     return () => {
       unlistenMenu?.();
       unlistenClose?.();
+      unlistenNativeOpenFiles?.();
       unlistenNativeDrops.forEach((unlisten) => unlisten());
       window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('contextmenu', preventWebviewContextMenu);
