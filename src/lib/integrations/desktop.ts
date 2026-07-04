@@ -221,12 +221,16 @@ export async function generateImage(config: GeneratorConfig, prompt: string): Pr
 }
 
 function codexInvokeConfig(config: CodexGeneratorConfig) {
+  // Tasks persisted before "minimal" was retired may still carry it; Codex CLI
+  // rejects the value, so clamp to the closest supported level.
+  const reasoningEffort =
+    (config.reasoningEffort as string) === 'minimal' ? 'low' : (config.reasoningEffort ?? null);
   return {
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
-    reasoningEffort: config.reasoningEffort ?? null,
+    reasoningEffort,
     serviceTier: config.serviceTier ?? 'default',
     autonomyLevel: config.autonomyLevel ?? 'low',
   };

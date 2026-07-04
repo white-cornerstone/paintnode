@@ -29,7 +29,7 @@ export const ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS = ANTIGRAVITY_MODEL_OPTIONS;
 
 export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
 export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type ServiceTier = 'default' | 'fast';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
@@ -94,7 +94,7 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
 const MODEL_IDS = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id));
 const AUTOSAVE_INTERVALS = new Set<number>(AUTOSAVE_INTERVAL_OPTIONS.map((option) => option.value));
-const REASONING_EFFORTS = new Set<string>(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
 
 export function defaultSettings(): PaintNodeSettings {
@@ -166,6 +166,8 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const savedProvider = String(ai.provider);
   const provider: AiProvider =
     savedProvider === 'custom' ? 'custom' : savedProvider === 'antigravity' || savedProvider === 'gemini' ? 'antigravity' : 'codex';
+  // Codex CLI retired the "minimal" reasoning effort; map old saves to the closest level.
+  const savedReasoningEffort = ai.reasoningEffort === 'minimal' ? 'low' : ai.reasoningEffort;
   const savedAntigravityBin = ai.antigravityBin ?? ai.geminiBin;
   const savedAntigravityModel = ai.antigravityModel ?? ai.geminiModel;
   const savedAntigravityApprovalMode = ai.antigravityApprovalMode ?? ai.geminiApprovalMode;
@@ -186,8 +188,8 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
       provider,
       codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
       model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
-      reasoningEffort: REASONING_EFFORTS.has(String(ai.reasoningEffort))
-        ? (ai.reasoningEffort as ReasoningEffort)
+      reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
+        ? (savedReasoningEffort as ReasoningEffort)
         : defaults.ai.reasoningEffort,
       serviceTier: ai.serviceTier === 'fast' ? 'fast' : 'default',
       autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))

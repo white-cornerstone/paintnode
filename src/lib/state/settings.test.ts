@@ -22,6 +22,14 @@ describe('settings normalization', () => {
     expect(normalizeSettings({ ai: { model: 'gpt-5.3-codex-spark' } }).ai.model).toBe('gpt-5.5');
   });
 
+  it('migrates the retired minimal reasoning effort to low', () => {
+    expect(normalizeSettings({ ai: { reasoningEffort: 'minimal' } }).ai.reasoningEffort).toBe('low');
+  });
+
+  it('falls back to the default reasoning effort for unknown saved values', () => {
+    expect(normalizeSettings({ ai: { reasoningEffort: 'turbo' } }).ai.reasoningEffort).toBe('medium');
+  });
+
   it('normalizes valid saved settings and clamps canvas dimensions', () => {
     const normalized = normalizeSettings({
       general: { autosaveEnabled: false, autosaveIntervalMs: 120_000 },
