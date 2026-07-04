@@ -1,7 +1,8 @@
 use base64::Engine;
 use std::{
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, HashMap},
     fs,
+    hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -26,6 +27,7 @@ const PAINTNODE_WORK_DIR: &str = "paintnode";
 const CODEX_RUNS_DIR: &str = "codex-runs";
 const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 const AI_WORKING_CANVAS_UNIT: u32 = 16;
+const PROJECT_THUMBNAIL_MAX_EDGE: u32 = 160;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PixelRect {
@@ -370,6 +372,8 @@ fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
     .map_err(|e| format!("Failed to create Antigravity runs folder: {e}"))?;
     fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("trash"))
         .map_err(|e| format!("Failed to create project trash folder: {e}"))?;
+    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("thumbnails"))
+        .map_err(|e| format!("Failed to create project thumbnail cache folder: {e}"))?;
     Ok(())
 }
 
@@ -515,6 +519,135 @@ fn data_url_for_file(path: &Path, mime: Option<&str>) -> Option<String> {
     Some(format!("data:{mime};base64,{b64}"))
 }
 
+fn png_data_url_from_bytes(bytes: &[u8]) -> Option<String> {
+    if !is_png(bytes) {
+        return None;
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:image/png;base64,{b64}"))
+}
+
+fn project_thumbnail_cache_dir(project_path: &Path) -> PathBuf {
+    project_path.join(PAINTNODE_WORK_DIR).join("thumbnails")
+}
+
+fn project_thumbnail_cache_path(
+    project_path: &Path,
+    source_path: &Path,
+    max_edge: u32,
+) -> Option<PathBuf> {
+    let mut hasher = DefaultHasher::new();
+    source_path.to_string_lossy().hash(&mut hasher);
+    path_size(source_path).hash(&mut hasher);
+    modified_millis(source_path).hash(&mut hasher);
+    max_edge.hash(&mut hasher);
+    Some(
+        project_thumbnail_cache_dir(project_path)
+            .join(format!("thumb-{:016x}.png", hasher.finish())),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn write_os_thumbnail(source_path: &Path, output_path: &Path, max_edge: u32) -> bool {
+    let Ok(temp) = TempJobDir::new("paintnode-quicklook-thumb") else {
+        return false;
+    };
+    let Ok(status) = Command::new("/usr/bin/qlmanage")
+        .arg("-t")
+        .arg("-s")
+        .arg(max_edge.to_string())
+        .arg("-o")
+        .arg(temp.path())
+        .arg(source_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    else {
+        return false;
+    };
+    if !status.success() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(temp.path()) else {
+        return false;
+    };
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file()
+            || !path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if newest
+            .as_ref()
+            .map(|(current, _)| modified > *current)
+            .unwrap_or(true)
+        {
+            newest = Some((modified, path));
+        }
+    }
+    let Some((_, thumbnail_path)) = newest else {
+        return false;
+    };
+    fs::copy(&thumbnail_path, output_path).is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_os_thumbnail(_source_path: &Path, _output_path: &Path, _max_edge: u32) -> bool {
+    false
+}
+
+fn write_resized_thumbnail(source_path: &Path, output_path: &Path, max_edge: u32) -> bool {
+    let Ok(bytes) = fs::read(source_path) else {
+        return false;
+    };
+    let Ok(image) = image::load_from_memory(&bytes) else {
+        return false;
+    };
+    let thumbnail = image.thumbnail(max_edge, max_edge).to_rgba8();
+    let Ok(bytes) = encode_rgba_png(thumbnail, "project thumbnail") else {
+        return false;
+    };
+    fs::write(output_path, bytes).is_ok()
+}
+
+fn thumbnail_data_url_for_file(
+    project_path: &Path,
+    path: &Path,
+    mime: Option<&str>,
+) -> Option<String> {
+    let mime = mime
+        .map(str::to_string)
+        .or_else(|| mime_for_path(path))
+        .filter(|m| m.starts_with("image/"))?;
+    if mime == "image/openraster" || is_openraster_path(path) {
+        return ora_thumbnail_data_url(path);
+    }
+    let cache_path = project_thumbnail_cache_path(project_path, path, PROJECT_THUMBNAIL_MAX_EDGE)?;
+    if let Ok(bytes) = fs::read(&cache_path) {
+        if let Some(data_url) = png_data_url_from_bytes(&bytes) {
+            return Some(data_url);
+        }
+    }
+    let _ = fs::create_dir_all(project_thumbnail_cache_dir(project_path));
+    if !write_os_thumbnail(path, &cache_path, PROJECT_THUMBNAIL_MAX_EDGE)
+        && !write_resized_thumbnail(path, &cache_path, PROJECT_THUMBNAIL_MAX_EDGE)
+    {
+        return None;
+    }
+    fs::read(cache_path)
+        .ok()
+        .and_then(|bytes| png_data_url_from_bytes(&bytes))
+}
+
 fn is_openraster_path(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
@@ -547,11 +680,15 @@ fn ora_thumbnail_data_url(path: &Path) -> Option<String> {
     None
 }
 
-fn preview_data_url_for_project_file(path: &Path, mime: Option<&str>) -> Option<String> {
+fn preview_data_url_for_project_file(
+    project_path: &Path,
+    path: &Path,
+    mime: Option<&str>,
+) -> Option<String> {
     if is_openraster_path(path) || mime == Some("image/openraster") {
         return ora_thumbnail_data_url(path);
     }
-    data_url_for_file(path, mime)
+    thumbnail_data_url_for_file(project_path, path, mime)
 }
 
 fn modified_millis(path: &Path) -> u128 {
@@ -580,7 +717,7 @@ fn asset_view(project_path: &Path, asset: ProjectAsset) -> ProjectAssetView {
     let path = project_path.join(&asset.relative_path);
     let exists = path.exists();
     let preview_data_url = exists
-        .then(|| data_url_for_file(&path, asset.mime.as_deref()))
+        .then(|| thumbnail_data_url_for_file(project_path, &path, asset.mime.as_deref()))
         .flatten();
     ProjectAssetView {
         asset,
@@ -639,7 +776,11 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
                 created_at: created_millis(&path),
                 modified_at: modified_millis(&path),
                 size: path_size(&path),
-                preview_data_url: preview_data_url_for_project_file(&path, mime.as_deref()),
+                preview_data_url: preview_data_url_for_project_file(
+                    project_path,
+                    &path,
+                    mime.as_deref(),
+                ),
                 mime,
                 exists: true,
             });
@@ -6095,13 +6236,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         Some("CmdOrCtrl+E"),
     )?;
-    let export_psd = MenuItem::with_id(
-        app,
-        "app:export-psd",
-        "Export PSD...",
-        true,
-        None::<&str>,
-    )?;
+    let export_psd = MenuItem::with_id(app, "app:export-psd", "Export PSD...", true, None::<&str>)?;
 
     let undo = MenuItem::with_id(app, "app:undo", "Undo", true, Some("CmdOrCtrl+Z"))?;
     let redo = MenuItem::with_id(app, "app:redo", "Redo", true, Some("CmdOrCtrl+Shift+Z"))?;
@@ -6452,6 +6587,41 @@ mod tests {
             image::Rgba(pixels[(y * width + x) as usize])
         });
         encode_rgba_png(image, "test image").expect("test png")
+    }
+
+    fn png_dimensions_from_data_url(data_url: &str) -> (u32, u32) {
+        let (_, b64) = data_url.split_once(',').expect("data url comma");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("thumbnail base64");
+        png_dimensions_from_bytes(&bytes).expect("thumbnail png dimensions")
+    }
+
+    #[test]
+    fn project_file_preview_uses_cached_thumbnail() {
+        let project = TempJobDir::new("paintnode-project-thumbnail-test").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let image = image::RgbaImage::from_fn(400, 200, |x, y| {
+            image::Rgba([x as u8, y as u8, (x / 2) as u8, 255])
+        });
+        let bytes = encode_rgba_png(image, "large preview source").expect("source png");
+        let path = project
+            .path()
+            .join("assets")
+            .join("generated")
+            .join("large.png");
+        fs::write(&path, bytes).expect("write source");
+
+        let preview = preview_data_url_for_project_file(project.path(), &path, Some("image/png"))
+            .expect("preview thumbnail");
+        assert!(preview.starts_with("data:image/png;base64,"));
+        let (width, height) = png_dimensions_from_data_url(&preview);
+        assert_eq!(width.max(height), PROJECT_THUMBNAIL_MAX_EDGE);
+
+        let cache_path =
+            project_thumbnail_cache_path(project.path(), &path, PROJECT_THUMBNAIL_MAX_EDGE)
+                .expect("cache path");
+        assert!(cache_path.exists(), "thumbnail should be cached");
     }
 
     #[test]
