@@ -44,6 +44,7 @@
     TextParagraphIcon,
     TaskList,
   } from './lib/icons';
+  import { AI_SETUP_STORAGE_KEY, shouldOfferAiSetup } from './lib/state/aiSetup';
   import { installKeyboard } from './lib/state/keyboard';
   import {
     autosaveOpenDocuments,
@@ -58,7 +59,7 @@
     saveWorkflowCommand,
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
-  import { isDesktop, quitApplication } from './lib/integrations/desktop';
+  import { isDesktop, quitApplication, takePendingOpenPaths } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, type PanelGroupId, type PanelId } from './lib/state/panels';
   import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
@@ -88,6 +89,7 @@
   const loadAiGenerateDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
   const loadAiRetouchDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
+  const loadAiSetupWizard: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiSetupWizard.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
   const loadUpdateDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/UpdateDialog.svelte');
@@ -517,6 +519,17 @@
     await openDocumentPaths(paths);
   }
 
+  async function handleNativeOpenFiles(payload: unknown): Promise<void> {
+    let paths: string[] = [];
+    try {
+      paths = await takePendingOpenPaths();
+    } catch {
+      paths = [];
+    }
+    if (!paths.length) paths = nativeDropPaths(payload);
+    if (paths.length) await openDocumentPaths(paths);
+  }
+
   $effect(() => {
     if (!settings.value.general.autosaveEnabled) return;
     const autosave = window.setInterval(
@@ -534,13 +547,22 @@
     const disposeKeyboard = installKeyboard();
     ui.contextualTaskBarVisible = settings.value.general.showContextualTaskBarOnStartup;
     if (settings.value.general.reopenLastProject) void project.restore();
+    // First-time desktop users get the AI setup wizard once; it marks itself seen.
+    if (shouldOfferAiSetup(settings.value, localStorage.getItem(AI_SETUP_STORAGE_KEY), desktop)) {
+      ui.open('aiSetup');
+    }
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
+    let unlistenNativeOpenFiles: UnlistenFn | null = null;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
       window.setTimeout(() => void appUpdater.checkForUpdates(), 2500);
       void listen<string>('app-menu', (event) => runAppMenuAction(event.payload)).then((unlisten) => {
         unlistenMenu = unlisten;
+      });
+      void listen<unknown>('native-open-files', (event) => void handleNativeOpenFiles(event.payload)).then((unlisten) => {
+        unlistenNativeOpenFiles = unlisten;
+        void handleNativeOpenFiles([]);
       });
       if (appWindow) {
         void appWindow.onCloseRequested(async (event) => {
@@ -577,6 +599,7 @@
     return () => {
       unlistenMenu?.();
       unlistenClose?.();
+      unlistenNativeOpenFiles?.();
       unlistenNativeDrops.forEach((unlisten) => unlisten());
       window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('contextmenu', preventWebviewContextMenu);
@@ -835,6 +858,8 @@
   {@render lazyAiDialog(loadAiRetouchDialog)}
 {:else if ui.dialog === 'aiDecouple'}
   {@render lazyAiDialog(loadAiDecoupleDialog)}
+{:else if ui.dialog === 'aiSetup'}
+  {@render lazyDialog(loadAiSetupWizard)}
 {:else if ui.dialog === 'stockImages'}
   {@render lazyDialog(loadStockImagesDialog)}
 {:else if ui.dialog === 'settings'}

@@ -26,7 +26,6 @@
   }: { options: AiRunOptions; disabled?: boolean; antigravityModelScope?: AntigravityModelScope } = $props();
 
   const reasoningEfforts: { value: ReasoningEffort; label: string; short: string }[] = [
-    { value: 'minimal', label: 'Minimal', short: 'Min' },
     { value: 'low', label: 'Light', short: 'Light' },
     { value: 'medium', label: 'Medium', short: 'Med' },
     { value: 'high', label: 'High', short: 'High' },

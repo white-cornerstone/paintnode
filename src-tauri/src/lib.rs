@@ -14,7 +14,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
@@ -28,6 +28,10 @@ const CODEX_RUNS_DIR: &str = "codex-runs";
 const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 const AI_WORKING_CANVAS_UNIT: u32 = 16;
 const PROJECT_THUMBNAIL_MAX_EDGE: u32 = 160;
+const NATIVE_OPEN_FILES_EVENT: &str = "native-open-files";
+
+#[derive(Clone, Default)]
+struct PendingOpenPaths(Arc<Mutex<Vec<String>>>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PixelRect {
@@ -904,6 +908,27 @@ fn safe_document_file_name(name: &str) -> String {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(name);
     format!("{}.ora", safe_stem(stem))
+}
+
+fn queue_native_open_paths(app: &AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    app.state::<PendingOpenPaths>()
+        .0
+        .lock()
+        .map(|mut pending| pending.extend(paths.clone()))
+        .ok();
+    let _ = app.emit(NATIVE_OPEN_FILES_EVENT, paths);
+}
+
+#[tauri::command]
+fn take_pending_open_paths(state: tauri::State<'_, PendingOpenPaths>) -> Vec<String> {
+    state
+        .0
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
 }
 
 fn saved_document_display_name(path: &Path, fallback_name: &str, is_workflow: bool) -> String {
@@ -6509,6 +6534,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(PendingOpenPaths::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -6558,14 +6584,26 @@ pub fn run() {
             project_reveal_file,
             project_read_file,
             read_dropped_file,
+            take_pending_open_paths,
             quit_app,
             project_delete_asset,
             project_write_document,
             project_write_document_path,
             project_save_document_as
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            if let RunEvent::Opened { urls } = event {
+                let paths = urls
+                    .into_iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                queue_native_open_paths(app, paths);
+            }
+        });
 }
 
 #[cfg(test)]
