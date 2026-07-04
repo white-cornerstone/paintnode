@@ -81,7 +81,7 @@
               >
                 <Icon svg={Dismiss} size={13} />
               </button>
-            {:else if task.status === 'error' && task.retry}
+            {:else if aiTasks.canRetry(task)}
               <button
                 class="task-action"
                 type="button"

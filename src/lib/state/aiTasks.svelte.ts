@@ -1,4 +1,4 @@
-import { isRecord } from './settings';
+import { isRecord, type AiRunOptions } from './settings';
 import { ui } from './ui.svelte';
 
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
@@ -11,6 +11,14 @@ export interface GenerateTaskDetail {
   providerLabel: string;
   prompt: string;
   fillMode: boolean;
+  /**
+   * Run configuration captured at creation, persisted so Retry re-runs the
+   * task as recorded — including after an app restart. Absent on tasks saved
+   * by older versions; the executor falls back to current settings.
+   */
+  runOptions?: AiRunOptions;
+  /** Newline-separated custom generator args (custom provider only). */
+  customArgs?: string;
 }
 
 export interface RetouchTaskDetail {
@@ -48,6 +56,11 @@ export interface AiTask {
   error: string;
   startedAt: number;
   completedAt: number | null;
+  /**
+   * Document the task acts on; null means the active document. Document ids
+   * do not survive a restart, so restored tasks always carry null.
+   */
+  documentId: string | null;
   detail: AiTaskDetail;
   retry: (() => Promise<void> | void) | null;
 }
@@ -58,8 +71,17 @@ export interface AiTaskDraft {
   title: string;
   subtitle: string;
   progress: string;
+  documentId?: string | null;
   detail: AiTaskDetail;
 }
+
+/**
+ * Runs (and re-runs) a task of one kind purely from the task record. Kinds
+ * with a registered executor keep Retry across app restarts; kinds whose
+ * inputs are live canvases use per-task setRetry closures instead and lose
+ * Retry on reload.
+ */
+export type AiTaskExecutor = (task: AiTask) => Promise<void> | void;
 
 function createTaskId(kind: AiTaskKind): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -95,6 +117,8 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
     error: status === 'running' ? 'This task was still running when PaintNode closed.' : error,
     startedAt: typeof value.startedAt === 'number' ? value.startedAt : Date.now(),
     completedAt: typeof value.completedAt === 'number' ? value.completedAt : Date.now(),
+    // Document ids are session-scoped; a restored task acts on the active document.
+    documentId: null,
     detail: detail as unknown as AiTaskDetail,
   };
 }
@@ -113,6 +137,7 @@ class AiTaskStore {
   private allTasks = $state<AiTask[]>([]);
   private activeProjectPath = $state<string | null>(null);
   private loadedProjectPaths = new Set<string>();
+  private executors = new Map<AiTaskKind, AiTaskExecutor>();
 
   get tasks(): AiTask[] {
     // Tasks started with no project open (projectPath null) stay visible after
@@ -120,6 +145,10 @@ class AiTaskStore {
     return this.allTasks.filter(
       (task) => task.projectPath === this.activeProjectPath || task.projectPath === null,
     );
+  }
+
+  registerExecutor(kind: AiTaskKind, executor: AiTaskExecutor): void {
+    this.executors.set(kind, executor);
   }
 
   create(draft: AiTaskDraft): AiTask {
@@ -135,12 +164,23 @@ class AiTaskStore {
       error: '',
       startedAt: Date.now(),
       completedAt: null,
+      documentId: draft.documentId ?? null,
       detail: draft.detail,
       retry: null,
     };
     this.allTasks.unshift(task);
     this.persistProject(projectPath);
     return task;
+  }
+
+  /** Run a freshly created task through its kind's registered executor. */
+  launch(id: string): void {
+    const task = this.find(id);
+    const executor = task ? this.executors.get(task.kind) : undefined;
+    if (!task || !executor) return;
+    void Promise.resolve(executor(task)).catch((e) => {
+      this.fail(id, (e as Error)?.message ?? String(e));
+    });
   }
 
   find(id: string | null | undefined): AiTask | null {
@@ -176,6 +216,9 @@ class AiTaskStore {
     task.status = 'completed';
     task.progress = progress;
     task.completedAt = Date.now();
+    // Release the closure: Retry is only offered on error, and retry closures
+    // can pin document-sized canvases for the rest of the session.
+    task.retry = null;
     this.persistProject(task.projectPath);
   }
 
@@ -189,16 +232,23 @@ class AiTaskStore {
     this.persistProject(task.projectPath);
   }
 
+  /** Whether Retry is available: an in-session closure or a kind executor. */
+  canRetry(task: AiTask): boolean {
+    return task.status === 'error' && (task.retry !== null || this.executors.has(task.kind));
+  }
+
   retry(id: string): void {
     const task = this.find(id);
-    if (!task || task.status !== 'error' || !task.retry) return;
+    if (!task || !this.canRetry(task)) return;
+    const retry = task.retry;
+    const executor = this.executors.get(task.kind);
     task.status = 'running';
     task.error = '';
     task.progress = 'Retrying...';
     task.startedAt = Date.now();
     task.completedAt = null;
     this.persistProject(task.projectPath);
-    void Promise.resolve(task.retry()).catch((e) => {
+    void Promise.resolve(retry ? retry() : executor?.(task)).catch((e) => {
       this.fail(id, (e as Error)?.message ?? String(e));
     });
   }

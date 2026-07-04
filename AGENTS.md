@@ -26,6 +26,7 @@ DOM/canvas- and component-level coverage needs a browser environment and is not 
 - `src/lib/engine/` — framework-agnostic rendering engine (canvas / pixel work). Plain TS, **no Svelte**.
 - `src/lib/state/` — reactive stores (Svelte 5 runes), the editor hub, keyboard, commands.
 - `src/lib/components/` — Svelte UI components.
+- `src/lib/ai/` — background AI task executors and shared task/dialog support.
 - `src/lib/ora/` — OpenRaster (.ora) load / save.
 - `src/lib/icons/` — Fluent icon registry (see below).
 

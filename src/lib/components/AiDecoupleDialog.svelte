@@ -9,7 +9,7 @@
     createRunId,
     focusTaskDocument,
     providerLabel,
-  } from './aiTaskDialog';
+  } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
   import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -386,7 +386,7 @@
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>
-      {#if task?.status === 'error' && task.retry}
+      {#if task && aiTasks.canRetry(task)}
         <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
       {/if}
       {#if !task}
