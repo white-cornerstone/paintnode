@@ -15,7 +15,7 @@
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { ui } from '../state/ui.svelte';
-  import { CheckmarkCircle, ChevronLeft, Code, ErrorCircle, FolderAdd, Rocket, Sparkle } from '../icons';
+  import { Checkmark, CheckmarkCircle, ChevronLeft, Code, ErrorCircle, FolderAdd, Rocket, Sparkle } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -173,9 +173,9 @@
     <ol class="steps" aria-label="Setup progress">
       {#each steps as item (item.number)}
         <li class:active={step === item.number} class:done={step > item.number} aria-current={step === item.number ? 'step' : undefined}>
-          <span class="step-dot">
+          <span class="step-dot" aria-hidden="true">
             {#if step > item.number}
-              <Icon svg={CheckmarkCircle} size={16} />
+              <Icon svg={Checkmark} size={11} />
             {:else}
               {item.number}
             {/if}
@@ -476,49 +476,62 @@
     flex-direction: column;
     gap: 14px;
   }
+  /* Progress stepper: dots joined by connector lines — deliberately not
+     button-shaped, so it reads as feedback rather than navigation. */
   .steps {
     display: flex;
-    gap: 6px;
+    align-items: center;
     margin: 0;
-    padding: 0;
+    padding: 2px 2px 6px;
     list-style: none;
   }
   .steps li {
     display: flex;
-    flex: 1;
     align-items: center;
-    justify-content: center;
     gap: 6px;
-    padding: 6px 8px;
-    border: 1px solid var(--border-soft);
-    border-radius: 4px;
-    background: var(--bg-input);
     color: var(--text-dim);
     font-size: 11px;
-    font-weight: 600;
   }
-  .steps li.active {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, var(--bg-input));
-    color: var(--text-bright);
+  .steps li:not(:first-child) {
+    flex: 1;
   }
-  .steps li.done {
-    color: #9fdf9f;
+  .steps li:not(:first-child)::before {
+    content: '';
+    flex: 1;
+    height: 1px;
+    margin: 0 10px;
+    background: var(--border-soft);
+  }
+  .steps li.active:not(:first-child)::before,
+  .steps li.done:not(:first-child)::before {
+    background: color-mix(in srgb, var(--accent) 65%, var(--border-soft));
   }
   .step-dot {
     display: grid;
     place-items: center;
     width: 18px;
     height: 18px;
-    border: 1px solid currentColor;
+    border: 1px solid var(--border-soft);
     border-radius: 999px;
+    background: var(--bg-input);
+    color: var(--text-dim);
     font-size: 10px;
     line-height: 1;
   }
+  .steps li.active .step-dot {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+    font-weight: 700;
+  }
+  .steps li.active .step-label {
+    color: var(--text-bright);
+    font-weight: 600;
+  }
   .steps li.done .step-dot {
-    border: none;
-    width: auto;
-    height: auto;
+    border-color: color-mix(in srgb, var(--accent) 70%, var(--border-soft));
+    background: color-mix(in srgb, var(--accent) 24%, var(--bg-input));
+    color: var(--accent);
   }
   .hero {
     display: grid;
