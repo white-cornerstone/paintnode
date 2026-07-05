@@ -27,15 +27,6 @@ export function defaultFillPrompt(): string {
   return 'Naturally extend the existing image into the masked transparent area, matching the original scene, perspective, lighting, color, grain, and camera style.';
 }
 
-function promptWithCanvasSize(userPrompt: string): string {
-  const base = userPrompt.trim();
-  const doc = editor.doc;
-  if (!doc) return base;
-  return `${base}
-
-Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image generator uses fixed aspect-ratio buckets, PaintNode may use a supported working canvas with this target area centered and crop that area after generation. Keep the meaningful composition inside the final PaintNode target area.`;
-}
-
 function targetDimensions(): TargetDimensions | null {
   const doc = editor.doc;
   if (!doc) return null;
@@ -110,7 +101,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     focusTaskDocument(task.documentId);
     const fillInput = fillMode ? await editor.prepareGenerativeFillInput() : null;
     if (fillMode && !fillInput) throw new Error('The current selection has no editable pixels.');
-    const generationPrompt = fillInput ? userPrompt : promptWithCanvasSize(userPrompt);
+    const generationPrompt = userPrompt;
     const generationTarget = fillInput ? null : targetDimensions();
     const keepJobDir = settings.value.workspace.keepAiRunInputs;
     const fillJobProjectPath = fillInput && keepJobDir ? taskProjectPath : null;

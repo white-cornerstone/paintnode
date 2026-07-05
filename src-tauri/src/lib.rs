@@ -6,7 +6,7 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -45,98 +45,55 @@ struct PixelRect {
     height: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
 struct SupportedAspectRatio {
-    label: &'static str,
+    label: String,
     width: u32,
     height: u32,
     min_width: u32,
     min_height: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ImageModelCapabilities {
+    fallback_aspect_ratios: Vec<SupportedAspectRatio>,
+    providers: ImageProviderCapabilities,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct ImageProviderCapabilities {
+    codex: CodexImageCapability,
+    antigravity: AntigravityImageCapability,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct CodexImageCapability {
+    dimension_multiple: u32,
+    max_long_side: u32,
+    max_short_side: u32,
+    max_aspect_ratio: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct AntigravityImageCapability {
+    aspect_ratios: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct AiWorkingCanvas {
     original_dimensions: (u32, u32),
     working_dimensions: (u32, u32),
     content_rect: PixelRect,
-    aspect_label: &'static str,
+    aspect_label: String,
 }
 
-const AI_SUPPORTED_ASPECT_RATIOS: &[SupportedAspectRatio] = &[
-    SupportedAspectRatio {
-        label: "1:1",
-        width: 1,
-        height: 1,
-        min_width: 1,
-        min_height: 1,
-    },
-    SupportedAspectRatio {
-        label: "2:3",
-        width: 2,
-        height: 3,
-        min_width: 2,
-        min_height: 3,
-    },
-    SupportedAspectRatio {
-        label: "3:2",
-        width: 3,
-        height: 2,
-        min_width: 3,
-        min_height: 2,
-    },
-    SupportedAspectRatio {
-        label: "3:4",
-        width: 3,
-        height: 4,
-        min_width: 3,
-        min_height: 4,
-    },
-    SupportedAspectRatio {
-        label: "4:3",
-        width: 4,
-        height: 3,
-        // Codex/Antigravity image generation commonly returns this 4:3 bucket.
-        // Send smaller 4:3 PaintNode canvases centered inside it so the model
-        // works at provider-native geometry and PaintNode crops back afterward.
-        min_width: 1448,
-        min_height: 1086,
-    },
-    SupportedAspectRatio {
-        label: "4:5",
-        width: 4,
-        height: 5,
-        min_width: 4,
-        min_height: 5,
-    },
-    SupportedAspectRatio {
-        label: "5:4",
-        width: 5,
-        height: 4,
-        min_width: 5,
-        min_height: 4,
-    },
-    SupportedAspectRatio {
-        label: "9:16",
-        width: 9,
-        height: 16,
-        min_width: 9,
-        min_height: 16,
-    },
-    SupportedAspectRatio {
-        label: "16:9",
-        width: 16,
-        height: 9,
-        min_width: 16,
-        min_height: 9,
-    },
-    SupportedAspectRatio {
-        label: "21:9",
-        width: 21,
-        height: 9,
-        min_width: 21,
-        min_height: 9,
-    },
-];
+static AI_IMAGE_MODEL_CAPABILITIES: OnceLock<ImageModelCapabilities> = OnceLock::new();
+const AI_IMAGE_MODEL_CAPABILITIES_JSON: &str =
+    include_str!("../../src/lib/ai/imageModelCapabilities.json");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -1287,6 +1244,13 @@ impl AiWorkingCanvas {
     }
 }
 
+fn ai_image_model_capabilities() -> &'static ImageModelCapabilities {
+    AI_IMAGE_MODEL_CAPABILITIES.get_or_init(|| {
+        serde_json::from_str(AI_IMAGE_MODEL_CAPABILITIES_JSON)
+            .expect("PaintNode AI image model capabilities JSON must be valid")
+    })
+}
+
 fn round_up_to_unit(value: u32, unit: u32) -> u32 {
     value.div_ceil(unit).max(1) * unit
 }
@@ -1295,7 +1259,7 @@ fn ai_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
     let (original_width, original_height) = dimensions;
     let mut best: Option<(AiWorkingCanvas, u64, u64)> = None;
 
-    for ratio in AI_SUPPORTED_ASPECT_RATIOS {
+    for ratio in &ai_image_model_capabilities().fallback_aspect_ratios {
         let minimum_units = original_width
             .div_ceil(ratio.width)
             .max(original_height.div_ceil(ratio.height))
@@ -1326,7 +1290,7 @@ fn ai_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
             original_dimensions: dimensions,
             working_dimensions: (working_width, working_height),
             content_rect,
-            aspect_label: ratio.label,
+            aspect_label: ratio.label.clone(),
         };
         let is_better = best
             .as_ref()
@@ -1349,7 +1313,7 @@ fn ai_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
                 width: original_width,
                 height: original_height,
             },
-            aspect_label: "custom",
+            aspect_label: "custom".into(),
         })
 }
 
@@ -1360,9 +1324,13 @@ fn ai_exact_supported_aspect_ratio(
     if width == 0 || height == 0 {
         return None;
     }
-    AI_SUPPORTED_ASPECT_RATIOS.iter().find(|ratio| {
-        u128::from(width) * u128::from(ratio.height) == u128::from(height) * u128::from(ratio.width)
-    })
+    ai_image_model_capabilities()
+        .fallback_aspect_ratios
+        .iter()
+        .find(|ratio| {
+            u128::from(width) * u128::from(ratio.height)
+                == u128::from(height) * u128::from(ratio.width)
+        })
 }
 
 fn ai_working_canvas_for_exact_supported_ratio(dimensions: (u32, u32)) -> Option<AiWorkingCanvas> {
@@ -1376,11 +1344,45 @@ fn ai_working_canvas_for_exact_supported_ratio(dimensions: (u32, u32)) -> Option
             width,
             height,
         },
-        aspect_label: ratio.label,
+        aspect_label: ratio.label.clone(),
     })
 }
 
-fn ai_codex_retouch_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
+fn ai_exact_working_canvas(dimensions: (u32, u32), aspect_label: &str) -> AiWorkingCanvas {
+    let (width, height) = dimensions;
+    AiWorkingCanvas {
+        original_dimensions: dimensions,
+        working_dimensions: dimensions,
+        content_rect: PixelRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        aspect_label: aspect_label.into(),
+    }
+}
+
+fn ai_codex_gpt_image_2_supports_dimensions(dimensions: (u32, u32)) -> bool {
+    let (width, height) = dimensions;
+    let long_side = width.max(height);
+    let short_side = width.min(height);
+    let codex = &ai_image_model_capabilities().providers.codex;
+    width > 0
+        && height > 0
+        && codex.dimension_multiple > 0
+        && long_side <= codex.max_long_side
+        && short_side <= codex.max_short_side
+        && width % codex.dimension_multiple == 0
+        && height % codex.dimension_multiple == 0
+        && u128::from(width) <= u128::from(height) * u128::from(codex.max_aspect_ratio)
+        && u128::from(height) <= u128::from(width) * u128::from(codex.max_aspect_ratio)
+}
+
+fn ai_codex_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
+    if ai_codex_gpt_image_2_supports_dimensions(dimensions) {
+        return ai_exact_working_canvas(dimensions, "codex");
+    }
     ai_working_canvas_for_exact_supported_ratio(dimensions)
         .unwrap_or_else(|| ai_working_canvas_for_dimensions(dimensions))
 }
@@ -1661,54 +1663,6 @@ fn ai_retouch_editable_mask_png(
     }
 
     encode_rgba_png(out, "AI retouch editable mask")
-}
-
-fn ai_retouch_restore_protected_pixels_png(
-    source_png: &[u8],
-    candidate_png: &[u8],
-    mask_png: &[u8],
-) -> Result<Vec<u8>, String> {
-    let source = decode_png_rgba(source_png, "AI retouch source")?;
-    let candidate = decode_png_rgba(candidate_png, "AI retouch candidate")?;
-    let mask = decode_png_rgba(mask_png, "AI retouch mask")?;
-    let dimensions = source.dimensions();
-    if candidate.dimensions() != dimensions {
-        return Err(format!(
-            "AI retouch candidate must match source dimensions. Source is {}x{}, candidate is {}x{}.",
-            dimensions.0,
-            dimensions.1,
-            candidate.width(),
-            candidate.height()
-        ));
-    }
-    if mask.dimensions() != dimensions {
-        return Err(format!(
-            "AI retouch mask must match source dimensions. Source is {}x{}, mask is {}x{}.",
-            dimensions.0,
-            dimensions.1,
-            mask.width(),
-            mask.height()
-        ));
-    }
-
-    let mut out = image::RgbaImage::new(dimensions.0, dimensions.1);
-    for y in 0..dimensions.1 {
-        for x in 0..dimensions.0 {
-            let coverage = u32::from(mask_pixel_coverage(mask.get_pixel(x, y)));
-            let source_pixel = source.get_pixel(x, y).0;
-            let candidate_pixel = candidate.get_pixel(x, y).0;
-            let mut blended = [0_u8; 4];
-            for channel in 0..4 {
-                blended[channel] = ((u32::from(candidate_pixel[channel]) * coverage
-                    + u32::from(source_pixel[channel]) * (255 - coverage)
-                    + 127)
-                    / 255) as u8;
-            }
-            out.put_pixel(x, y, image::Rgba(blended));
-        }
-    }
-
-    encode_rgba_png(out, "AI retouch protected-pixel candidate")
 }
 
 fn file_has_png_signature(path: &Path) -> bool {
@@ -2815,7 +2769,7 @@ fn run_codex_with_progress_until_cached_png(
     app: AppHandle,
     run_id: String,
     cache_since: SystemTime,
-    working: AiWorkingCanvas,
+    working: &AiWorkingCanvas,
 ) -> Result<CodexImageRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -2862,8 +2816,7 @@ fn run_codex_with_progress_until_cached_png(
         }
 
         let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-        if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, &working)
-            .is_some()
+        if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, working).is_some()
         {
             image_cached_before_exit = true;
             emit_codex_progress(
@@ -2879,7 +2832,7 @@ fn run_codex_with_progress_until_cached_png(
 
         if start.elapsed() >= timeout {
             let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-            if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, &working)
+            if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, working)
                 .is_some()
             {
                 image_cached_before_exit = true;
@@ -3187,14 +3140,11 @@ fn antigravity_generate_prompt(
     user_prompt: &str,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
-    working: Option<&AiWorkingCanvas>,
+    _working: Option<&AiWorkingCanvas>,
     reference_names: &[String],
 ) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
-    let working_instruction = working
-        .map(ai_working_canvas_instruction)
-        .unwrap_or_else(|| "No explicit PaintNode target canvas was provided.".into());
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -3215,8 +3165,6 @@ User image prompt:
 {user_prompt}
 
 {reference_note}
-
-{working_instruction}
 
 {autonomy_contract}
 
@@ -3350,7 +3298,7 @@ Required output:
 - Treat `mask.png` as the maximum allowed edit area, not as an instruction to repaint every white pixel. Change only the content explicitly requested by the user prompt and preserve unrequested masked content.
 - Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
 - Any edit whose visible change extends outside the mask is a failed retouch, even if PaintNode later restores protected pixels. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
-- If the prompt changes clothing or accessories, preserve the person's face, hair, skin, hands, pose, body proportions, expression, gaze, nearby bag, seat, window, and background unless the user explicitly asks to alter those details.
+- If the prompt changes clothing or accessories, preserve the person's identity, face, hair, skin, hands, pose, body proportions, expression, gaze, and all unrequested surrounding content unless the user explicitly asks to alter those details.
 - Blend naturally through any gray feather buffer. PaintNode will apply the mask afterward, but your candidate should still preserve protected and unrequested areas.
 - Keep every black-mask/protected area visually identical to `source.png`: no enhancement, denoise, sharpening, relight, recolor, cleanup, straightening, or reframing outside the mask.
 - Use surrounding texture, lighting, perspective, grain, focus, and edges to blend the retouched area naturally.
@@ -3472,14 +3420,11 @@ Final response should be one short sentence confirming `{result_path}` was creat
 fn codex_prompt(
     user_prompt: &str,
     autonomy: AiAutonomyLevel,
-    working: Option<&AiWorkingCanvas>,
+    _working: Option<&AiWorkingCanvas>,
     reference_names: &[String],
 ) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
     let task_intro = "Use $imagegen to generate one raster PNG for PaintNode.";
-    let working_instruction = working
-        .map(ai_working_canvas_instruction)
-        .unwrap_or_else(|| "No explicit PaintNode target canvas was provided.".into());
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n"
     } else {
@@ -3493,8 +3438,6 @@ User image prompt:
 {user_prompt}
 
 {reference_note}
-
-{working_instruction}
 
 {autonomy_contract}
 
@@ -3883,17 +3826,9 @@ Critical registration rule:
 Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
 The output must stay registered to the input image.
 
-The following anchors must remain in the same pixel positions:
-- document/canvas edges
-- window frame
-- train seat and seat rail
-- vertical poles
-- background buildings
-- subject head position
-- subject eye position
-- shoulder line
-- body centerline
-- nearby bag
+Before using image generation, inspect `source.png`, `edit_target.png`, and `mask.png` and identify the actual stable registration anchors from the visible pixels.
+When invoking image generation, include only those image-specific anchors you observed from the attached inputs.
+Do not use or invent a generic anchor checklist.
 
 If the requested edit cannot be completed without moving, resizing, or reframing the subject or camera, simplify the edit instead.
 
@@ -3910,7 +3845,7 @@ Person preservation:
 You may redraw clothing inside the editable area.
 Do not move or rescale the person.
 Preserve the original pose, head location, gaze, expression, body proportions, silhouette alignment, lighting direction, focus, grain, and camera style.
-Unless explicitly requested, do not change the face, hair, eyes, skin, hands, bag, seat, window, train interior, or background.
+Unless explicitly requested, do not change the face, hair, eyes, skin, hands, or any unrequested surrounding content.
 
 Locked context:
 Black-mask areas are locked. They must look copied from the original image.
@@ -4000,7 +3935,7 @@ Requirements:
 - Treat `mask.png` as the maximum allowed edit area, not as an instruction to repaint every white pixel. Change only the content explicitly requested by the user prompt and preserve unrequested masked content.
 - Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
 - Any edit whose visible change extends outside the mask is a failed retouch, even if PaintNode later restores protected pixels. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
-- If the prompt changes clothing or accessories, preserve the person's face, hair, skin, hands, pose, body proportions, expression, gaze, nearby bag, seat, window, and background unless the user explicitly asks to alter those details.
+- If the prompt changes clothing or accessories, preserve the person's identity, face, hair, skin, hands, pose, body proportions, expression, gaze, and all unrequested surrounding content unless the user explicitly asks to alter those details.
 - If `annotated_source.png` is attached, use its arrows, labels, and callout positions as guidance for what each nearby mask region should become.
 - Change only the masked retouch area, with any edge blending kept subtle and registered.
 - For text, logos, painted marks, signs, glare, or surface blemishes, remove only the foreground mark and reconstruct the continuous underlying surface. Do not cover it with a flat rectangle, paint swatch, or unrelated color block.
@@ -4361,7 +4296,7 @@ async fn generate_codex_image(
         let codex_bin = configured_or_default_codex_bin(bin)?;
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
-        let working = target_dimensions.map(ai_working_canvas_for_dimensions);
+        let working = target_dimensions.map(ai_codex_working_canvas_for_dimensions);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
         } else {
@@ -4874,7 +4809,7 @@ async fn generate_codex_retouch_image(
             ));
         }
     }
-    let working = ai_codex_retouch_working_canvas_for_dimensions(source_dimensions);
+    let working = ai_codex_working_canvas_for_dimensions(source_dimensions);
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_bin = configured_or_default_codex_bin(bin)?;
@@ -4979,7 +4914,7 @@ async fn generate_codex_retouch_image(
             app.clone(),
             run_id.clone(),
             codex_started_at,
-            working,
+            &working,
         )
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
@@ -5011,7 +4946,7 @@ async fn generate_codex_retouch_image(
                 app.clone(),
                 run_id.clone(),
                 codex_started_at,
-                working,
+                &working,
             )
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
@@ -5064,10 +4999,6 @@ async fn generate_codex_retouch_image(
             );
         }
 
-        emit_codex_progress(&app, &run_id, "Restoring protected AI retouch pixels");
-        let protected_generated_bytes =
-            ai_retouch_restore_protected_pixels_png(&source_png, &generated_bytes, &mask_png)?;
-
         emit_codex_progress(&app, &run_id, "Preparing editable AI retouch mask");
         let mask_data_url = Some(png_data_url(&ai_retouch_editable_mask_png(
             &source_png,
@@ -5075,15 +5006,21 @@ async fn generate_codex_retouch_image(
             AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
             AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
         )?)?);
-        let data_url = png_data_url(&protected_generated_bytes)?;
+        let data_url = png_data_url(&generated_bytes)?;
         let mut assets = Vec::new();
         let asset = if let Some(project_dir) = project_dir {
             let source_file_name = safe_png_source_file_name(&recovered_source_path);
-            emit_codex_progress(&app, &run_id, "Saving processed AI retouch result to the project");
+            emit_codex_progress(&app, &run_id, "Saving raw AI retouch result to the project");
+            let raw_result_bytes = fs::read(&staged_result_path).map_err(|e| {
+                format!(
+                    "Failed to read raw AI retouch result at {}: {e}",
+                    staged_result_path.display()
+                )
+            })?;
             let name = ai_retouch_asset_name(prompt.trim(), source_file_name.as_deref());
             let primary_asset = store_generated_png_asset(
                 &project_dir,
-                &protected_generated_bytes,
+                &raw_result_bytes,
                 name,
                 Some(prompt.trim().into()),
                 source_file_name,
@@ -6074,9 +6011,6 @@ async fn generate_antigravity_retouch_image(
                 ),
             );
         }
-        emit_codex_progress(&app, &run_id, "Restoring protected AI retouch pixels");
-        let protected_generated_bytes =
-            ai_retouch_restore_protected_pixels_png(&source_png, &generated_bytes, &mask_png)?;
         emit_codex_progress(&app, &run_id, "Preparing editable AI retouch mask");
         let mask_data_url = Some(png_data_url(&ai_retouch_editable_mask_png(
             &source_png,
@@ -6084,17 +6018,19 @@ async fn generate_antigravity_retouch_image(
             AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
             AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
         )?)?);
-        let data_url = png_data_url(&protected_generated_bytes)?;
+        let data_url = png_data_url(&generated_bytes)?;
         let mut assets = Vec::new();
         let asset = if let Some(project_dir) = project_dir {
-            emit_codex_progress(
-                &app,
-                &run_id,
-                "Saving processed Antigravity AI retouch result",
-            );
+            emit_codex_progress(&app, &run_id, "Saving raw Antigravity AI retouch result");
+            let raw_result_bytes = fs::read(&result_path).map_err(|e| {
+                format!(
+                    "Failed to read raw Antigravity AI retouch result at {}: {e}",
+                    result_path.display()
+                )
+            })?;
             let primary_asset = store_generated_png_asset(
                 &project_dir,
-                &protected_generated_bytes,
+                &raw_result_bytes,
                 ai_retouch_asset_name(prompt.trim(), Some("result.png")),
                 Some(prompt.trim().into()),
                 Some("result.png".into()),
@@ -7296,33 +7232,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_retouch_restore_protected_pixels_preserves_black_mask_area() {
-        let source = test_rgba_png(2, 1, &[[10, 20, 30, 255], [40, 50, 60, 255]]);
-        let candidate = test_rgba_png(2, 1, &[[200, 10, 10, 255], [9, 9, 9, 255]]);
-        let mask = test_rgba_png(2, 1, &[[255, 255, 255, 255], [0, 0, 0, 255]]);
-
-        let result = ai_retouch_restore_protected_pixels_png(&source, &candidate, &mask)
-            .expect("protected-pixel candidate");
-        let image = decode_png_rgba(&result, "protected result").expect("decoded result");
-
-        assert_eq!(image.get_pixel(0, 0).0, [200, 10, 10, 255]);
-        assert_eq!(image.get_pixel(1, 0).0, [40, 50, 60, 255]);
-    }
-
-    #[test]
-    fn ai_retouch_restore_protected_pixels_blends_soft_mask_area() {
-        let source = test_rgba_png(1, 1, &[[10, 20, 30, 255]]);
-        let candidate = test_rgba_png(1, 1, &[[110, 120, 130, 255]]);
-        let mask = test_rgba_png(1, 1, &[[255, 255, 255, 128]]);
-
-        let result = ai_retouch_restore_protected_pixels_png(&source, &candidate, &mask)
-            .expect("protected-pixel candidate");
-        let image = decode_png_rgba(&result, "protected result").expect("decoded result");
-
-        assert_eq!(image.get_pixel(0, 0).0, [60, 70, 80, 255]);
-    }
-
-    #[test]
     fn ora_thumbnail_data_url_reads_embedded_thumbnail() {
         let job = TempJobDir::new("paintnode-ora-thumb-test").expect("temp dir");
         let path = job.path().join("document.ora");
@@ -7511,6 +7420,36 @@ mod tests {
     }
 
     #[test]
+    fn generate_image_prompts_do_not_expose_canvas_geometry() {
+        let working = ai_working_canvas_for_dimensions((1280, 800));
+        let codex = codex_prompt("make an image", AiAutonomyLevel::Low, Some(&working), &[]);
+        assert!(codex.contains("Use $imagegen to generate one raster PNG for PaintNode"));
+        assert!(codex.contains("User image prompt:\nmake an image"));
+        assert!(!codex.contains("1280x800"));
+        assert!(!codex.contains("1296x864"));
+        assert!(!codex.contains("Working PNG"));
+        assert!(!codex.contains("Document rectangle"));
+        assert!(!codex.contains("chroma"));
+        assert!(!codex.contains("#00ff00"));
+
+        let antigravity = antigravity_generate_prompt(
+            "make an image",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            Some(&working),
+            &[],
+        );
+        assert!(antigravity.contains("Generate one raster PNG for PaintNode"));
+        assert!(antigravity.contains("User image prompt:\nmake an image"));
+        assert!(!antigravity.contains("1280x800"));
+        assert!(!antigravity.contains("1296x864"));
+        assert!(!antigravity.contains("Working PNG"));
+        assert!(!antigravity.contains("Document rectangle"));
+        assert!(!antigravity.contains("chroma"));
+        assert!(!antigravity.contains("#00ff00"));
+    }
+
+    #[test]
     fn antigravity_command_applies_model_and_skip_permission_options() {
         let job = TempJobDir::new("paintnode-antigravity-options-test").expect("temp dir");
         let options = antigravity_command_options(
@@ -7692,7 +7631,10 @@ mod tests {
             "every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint"
         ));
         assert!(retouch.contains("visible change extends outside the mask is a failed retouch"));
-        assert!(retouch.contains("preserve the person's face, hair, skin, hands"));
+        assert!(retouch.contains("preserve the person's identity, face, hair, skin, hands"));
+        assert!(retouch.contains("all unrequested surrounding content"));
+        assert!(!retouch.contains("nearby bag"));
+        assert!(!retouch.contains("seat, window"));
         assert!(!retouch.contains("Codex's generated-images cache"));
         assert!(!retouch.contains("Use $imagegen"));
         assert!(!retouch.contains(
@@ -7741,8 +7683,11 @@ mod tests {
         );
         assert!(prompt.contains("Autonomy level: Unmanaged"));
         assert!(prompt.contains("Use $imagegen"));
-        assert!(prompt.contains("PaintNode image geometry"));
         assert!(prompt.contains("normal Codex image-generation flow"));
+        assert!(!prompt.contains("PaintNode image geometry"));
+        assert!(!prompt.contains("Working PNG"));
+        assert!(!prompt.contains("Document rectangle"));
+        assert!(!prompt.contains("chroma"));
         assert!(!prompt.contains("Do not create, edit, or delete files in the working directory"));
         assert!(!prompt.contains("Do not write or run Python"));
 
@@ -8030,7 +7975,12 @@ mod tests {
         ));
         assert!(args[image_idx + 7]
             .contains("visible change extends outside the mask is a failed retouch"));
-        assert!(args[image_idx + 7].contains("preserve the person's face, hair, skin, hands"));
+        assert!(
+            args[image_idx + 7].contains("preserve the person's identity, face, hair, skin, hands")
+        );
+        assert!(args[image_idx + 7].contains("all unrequested surrounding content"));
+        assert!(!args[image_idx + 7].contains("nearby bag"));
+        assert!(!args[image_idx + 7].contains("seat, window"));
         assert!(args[image_idx + 7].contains("Those are deterministic PaintNode responsibilities"));
         assert!(args[image_idx + 7].contains("generated image in Codex's generated-images cache"));
         assert!(!args[image_idx + 7].contains("Save the final exact-size PNG as `result.png`"));
@@ -8038,9 +7988,9 @@ mod tests {
 
     #[test]
     fn ai_retouch_exact_ratio_prompt_avoids_padding_geometry() {
-        let working = ai_codex_retouch_working_canvas_for_dimensions((1280, 960));
-        assert_eq!(working.aspect_label, "4:3");
-        assert_eq!(working.working_dimensions, (1280, 960));
+        let working = ai_codex_working_canvas_for_dimensions((1280, 800));
+        assert_eq!(working.aspect_label, "codex");
+        assert_eq!(working.working_dimensions, (1280, 800));
         assert!(!working.has_padding());
 
         let prompt = ai_retouch_prompt(
@@ -8057,7 +8007,16 @@ mod tests {
             "This is a fixed-canvas image editing task, not a new image generation task"
         ));
         assert!(prompt.contains("Critical registration rule"));
-        assert!(prompt.contains("The following anchors must remain in the same pixel positions"));
+        assert!(prompt
+            .contains("identify the actual stable registration anchors from the visible pixels"));
+        assert!(prompt.contains(
+            "include only those image-specific anchors you observed from the attached inputs"
+        ));
+        assert!(!prompt.contains("The following anchors must remain in the same pixel positions"));
+        assert!(!prompt.contains("window frame"));
+        assert!(!prompt.contains("train seat"));
+        assert!(!prompt.contains("subject eye position"));
+        assert!(!prompt.contains("nearby bag"));
         assert!(prompt
             .contains("Return one full-canvas PNG candidate with the same dimensions and framing"));
         assert!(prompt.contains("Do not translate, shift, crop, zoom, rotate"));
@@ -8066,7 +8025,7 @@ mod tests {
         assert!(!prompt.contains("Document rectangle: x="));
         assert!(!prompt.contains("chroma"));
         assert!(!prompt.contains("#00ff00"));
-        assert!(!prompt.contains("1280x960"));
+        assert!(!prompt.contains("1280x800"));
         assert!(!prompt.contains("No annotated source guide"));
         assert!(!prompt.contains("No reference image is attached"));
     }
@@ -8186,9 +8145,9 @@ mod tests {
 
     #[test]
     fn codex_retouch_working_canvas_uses_unpadded_exact_supported_ratio() {
-        let working = ai_codex_retouch_working_canvas_for_dimensions((1280, 960));
+        let working = ai_codex_working_canvas_for_dimensions((1280, 960));
 
-        assert_eq!(working.aspect_label, "4:3");
+        assert_eq!(working.aspect_label, "codex");
         assert_eq!(working.working_dimensions, (1280, 960));
         assert_eq!(
             working.content_rect,
@@ -8201,9 +8160,22 @@ mod tests {
         );
         assert!(!working.has_padding());
 
-        let unsupported = ai_codex_retouch_working_canvas_for_dimensions((1280, 800));
+        let default_canvas = ai_codex_working_canvas_for_dimensions((1280, 800));
+        assert_eq!(default_canvas.aspect_label, "codex");
+        assert_eq!(default_canvas.working_dimensions, (1280, 800));
+        assert_eq!(
+            default_canvas.content_rect,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            }
+        );
+        assert!(!default_canvas.has_padding());
+
+        let unsupported = ai_codex_working_canvas_for_dimensions((1281, 800));
         assert_eq!(unsupported.aspect_label, "3:2");
-        assert_eq!(unsupported.working_dimensions, (1296, 864));
         assert!(unsupported.has_padding());
     }
 

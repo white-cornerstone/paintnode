@@ -9,6 +9,7 @@
   import { isDesktop } from '../integrations/desktop';
   import { tooltip } from '../actions/tooltip';
   import { Board, FolderAdd, ImageAdd } from '../icons';
+  import { isAntigravityImageRatio, isCodexImageSize } from '../ai/imageModelCapabilities';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -34,7 +35,6 @@
   let tab = $state<Tab>('image');
   let presetFilter = $state<PresetFilter>('all');
 
-  const agyRatios = new Set(['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9']);
   const presetFilters: { id: PresetFilter; label: string; tooltip: string }[] = [
     { id: 'all', label: 'All', tooltip: 'Show every document preset, including custom ratios and model-friendly sizes.' },
     {
@@ -54,32 +54,16 @@
     },
   ];
 
-  function gcd(a: number, b: number): number {
-    let x = Math.abs(Math.round(a));
-    let y = Math.abs(Math.round(b));
-    while (y) [x, y] = [y, x % y];
-    return x || 1;
+  function isAgyFriendly(width: number, height: number): boolean {
+    return isAntigravityImageRatio(width, height);
+  }
+
+  function isCodexFriendly(width: number, height: number): boolean {
+    return isCodexImageSize(width, height);
   }
 
   function normalizedDimension(value: number): number {
     return Number.isFinite(value) ? Math.max(1, Math.round(value)) : 1;
-  }
-
-  function ratioLabel(width: number, height: number): string {
-    const safeWidth = normalizedDimension(width);
-    const safeHeight = normalizedDimension(height);
-    const divisor = gcd(safeWidth, safeHeight);
-    return `${Math.round(safeWidth / divisor)}:${Math.round(safeHeight / divisor)}`;
-  }
-
-  function isAgyFriendly(width: number, height: number): boolean {
-    return agyRatios.has(ratioLabel(width, height));
-  }
-
-  function isCodexFriendly(width: number, height: number): boolean {
-    const longSide = Math.max(width, height);
-    const shortSide = Math.min(width, height);
-    return width % 16 === 0 && height % 16 === 0 && longSide / shortSide <= 3;
   }
 
   function presetMeta(width: number, height: number): string {
