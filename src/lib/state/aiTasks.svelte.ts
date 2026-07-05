@@ -4,7 +4,7 @@ import type { WorkflowSourceImage } from '../integrations/desktop';
 
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
 
-export type AiTaskKind = 'generate' | 'retouch' | 'decouple';
+export type AiTaskKind = 'generate' | 'retouch' | 'upscale' | 'decouple';
 export type AiTaskStatus = 'running' | 'completed' | 'error';
 
 export interface GenerateTaskDetail {
@@ -41,6 +41,15 @@ export interface RetouchTaskDetail {
   references?: WorkflowSourceImage[];
 }
 
+export interface UpscaleTaskDetail {
+  kind: 'upscale';
+  providerLabel: string;
+  scalePercent: number;
+  sourceName: string;
+  /** Preview of the flattened source. Stripped before persistence. */
+  sourcePreview: string;
+}
+
 export interface DecoupleTaskDetail {
   kind: 'decouple';
   providerLabel: string;
@@ -52,7 +61,13 @@ export interface DecoupleTaskDetail {
   notes: string;
 }
 
-export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | DecoupleTaskDetail;
+export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail;
+
+/** Live sub-task progress for placement-split runs (in-memory, like `progress`). */
+export interface AiTaskPartProgress {
+  completed: number;
+  total: number;
+}
 
 export interface AiTask {
   id: string;
@@ -70,7 +85,13 @@ export interface AiTask {
    * do not survive a restart, so restored tasks always carry null.
    */
   documentId: string | null;
+  /**
+   * CLI run id, stable across retries so a retry reuses the same job folder
+   * and resumes from completed parts; also targets Stop for running tasks.
+   */
+  runId: string | null;
   detail: AiTaskDetail;
+  partProgress: AiTaskPartProgress | null;
   retry: (() => Promise<void> | void) | null;
 }
 
@@ -81,6 +102,7 @@ export interface AiTaskDraft {
   subtitle: string;
   progress: string;
   documentId?: string | null;
+  runId?: string | null;
   detail: AiTaskDetail;
 }
 
@@ -97,7 +119,7 @@ function createTaskId(kind: AiTaskKind): string {
   return `${kind}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-type StoredAiTask = Omit<AiTask, 'retry'>;
+type StoredAiTask = Omit<AiTask, 'retry' | 'partProgress'>;
 
 function storageKey(projectPath: string): string {
   return `${TASKS_STORAGE_PREFIX}${encodeURIComponent(projectPath)}`;
@@ -107,7 +129,7 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
   if (!isRecord(value)) return null;
   const kind = value.kind;
   const status = value.status;
-  if (kind !== 'generate' && kind !== 'retouch' && kind !== 'decouple') return null;
+  if (kind !== 'generate' && kind !== 'retouch' && kind !== 'upscale' && kind !== 'decouple') return null;
   if (status !== 'running' && status !== 'completed' && status !== 'error') return null;
   const detail = value.detail;
   if (!isRecord(detail) || detail.kind !== kind) return null;
@@ -128,11 +150,15 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
     completedAt: typeof value.completedAt === 'number' ? value.completedAt : Date.now(),
     // Document ids are session-scoped; a restored task acts on the active document.
     documentId: null,
+    runId: typeof value.runId === 'string' ? value.runId : null,
     detail: detail as unknown as AiTaskDetail,
   };
 }
 
 function storedDetailFrom(detail: AiTaskDetail): AiTaskDetail {
+  if (detail.kind === 'upscale') {
+    return { ...detail, sourcePreview: '' };
+  }
   if (detail.kind === 'generate') {
     const { references, referencePreviews, ...stored } = detail;
     return {
@@ -184,7 +210,9 @@ class AiTaskStore {
       startedAt: Date.now(),
       completedAt: null,
       documentId: draft.documentId ?? null,
+      runId: draft.runId ?? null,
       detail: draft.detail,
+      partProgress: null,
       retry: null,
     };
     this.allTasks.unshift(task);
@@ -216,10 +244,30 @@ class AiTaskStore {
     task.progress = progress;
   }
 
+  /**
+   * Track which placement part a split run is on. In-memory only: part
+   * progress streams with the run and is meaningless after a restart.
+   */
+  setPartProgress(id: string, partIndex: number, partCount: number): void {
+    const task = this.find(id);
+    if (!task || partCount < 1) return;
+    task.partProgress = {
+      completed: Math.min(partCount, Math.max(0, Math.round(partIndex) - 1)),
+      total: Math.round(partCount),
+    };
+  }
+
   setDecoupleNotes(id: string, notes: string): void {
     const task = this.find(id);
     if (!task || task.detail.kind !== 'decouple') return;
     task.detail.notes = notes;
+    this.persistProject(task.projectPath);
+  }
+
+  setRunId(id: string, runId: string | null): void {
+    const task = this.find(id);
+    if (!task) return;
+    task.runId = runId;
     this.persistProject(task.projectPath);
   }
 
@@ -234,6 +282,7 @@ class AiTaskStore {
     if (!task) return;
     task.status = 'completed';
     task.progress = progress;
+    if (task.partProgress) task.partProgress = { ...task.partProgress, completed: task.partProgress.total };
     task.completedAt = Date.now();
     // Release the closure: Retry is only offered on error, and retry closures
     // can pin document-sized canvases for the rest of the session.
@@ -311,7 +360,7 @@ class AiTaskStore {
         .map((item) => storedTaskFrom(item, projectPath))
         .filter((task): task is StoredAiTask => !!task)
         .filter((task) => !existingIds.has(task.id))
-        .map((task) => ({ ...task, retry: null }));
+        .map((task) => ({ ...task, partProgress: null, retry: null }));
       this.allTasks = [...this.allTasks, ...loaded].sort((a, b) => b.startedAt - a.startedAt);
       this.persistProject(projectPath);
     } catch {
@@ -323,7 +372,7 @@ class AiTaskStore {
     if (!projectPath || typeof localStorage === 'undefined') return;
     const serializable: StoredAiTask[] = this.allTasks
       .filter((task) => task.projectPath === projectPath)
-      .map(({ retry, ...task }) => ({
+      .map(({ retry, partProgress, ...task }) => ({
         ...task,
         detail: storedDetailFrom(task.detail),
       }));

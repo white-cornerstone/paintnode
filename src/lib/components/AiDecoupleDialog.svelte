@@ -183,8 +183,10 @@
     busy = true;
     const targetDocumentId = editor.activeDocumentId;
     const taskProjectPath = project.path;
+    const runId = createRunId('decouple');
     const task = aiTasks.create({
       kind: 'decouple',
+      runId,
       title: 'Extract Assets',
       subtitle: `${sourceLayer.name} · ${providerLabel(runOptions.provider)}`,
       progress: 'Preparing source layer...',
@@ -204,7 +206,6 @@
     const executeTask = async () => {
       aiTasks.setProgress(task.id, 'Preparing source layer...');
       editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
-      const runId = createRunId('decouple');
       progressListener.start(
         runId,
         (message) => aiTasks.setProgress(task.id, message),

@@ -72,11 +72,20 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
           ? 'Generating with Antigravity...'
           : 'Generating image...',
   );
-  const runId = runOptions.provider === 'codex' || runOptions.provider === 'antigravity' ? createRunId('generate') : '';
+  const runId =
+    runOptions.provider === 'codex' || runOptions.provider === 'antigravity'
+      ? task.runId ?? createRunId('generate')
+      : '';
+  if (runId && task.runId !== runId) aiTasks.setRunId(task.id, runId);
   if (runId) {
     progressListener.start(
       runId,
-      (message) => aiTasks.setProgress(task.id, message),
+      (message, payload) => {
+        aiTasks.setProgress(task.id, message);
+        if (payload.partIndex && payload.partCount) {
+          aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
+        }
+      },
       () =>
         aiTasks.setProgress(
           task.id,

@@ -118,8 +118,10 @@ Use these annotations as direct user instructions for the regions they point to.
     busy = true;
     const targetDocumentId = editor.activeDocumentId;
     const taskProjectPath = project.path;
+    const runId = createRunId('retouch');
     const task = aiTasks.create({
       kind: 'retouch',
+      runId,
       title: 'AI Retouch',
       subtitle: `${active.toolName} · ${providerLabel(runOptions.provider)}`,
       progress: 'Preparing AI retouch inputs...',
@@ -152,11 +154,15 @@ Use these annotations as direct user instructions for the regions they point to.
       if (maskLayer) maskLayer.userLocked = true;
       aiTasks.setProgress(task.id, 'Preparing AI retouch inputs...');
       editor.flash('Preparing AI retouch...');
-      const runId = createRunId('retouch');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
       progressListener.start(
         runId,
-        (message) => aiTasks.setProgress(task.id, message),
+        (message, payload) => {
+          aiTasks.setProgress(task.id, message);
+          if (payload.partIndex && payload.partCount) {
+            aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
+          }
+        },
         () =>
           aiTasks.setProgress(
             task.id,
@@ -371,8 +377,10 @@ Use these annotations as direct user instructions for the regions they point to.
     </label>
 
     <p class="hint">
-      PaintNode sends the full canvas, the current photo edit target, the selected AI mask, and any
-      sampled reference to the selected local AI provider. The generated pixels are inserted as a new layer and the mask remains reusable.
+      PaintNode crops the canvas around the selected AI mask to a size the provider supports (splitting
+      into sequential parts when the document is too wide or tall), sends it with the photo edit target
+      and any sampled reference, then pastes the result back in place. The generated pixels are inserted
+      as a new layer and the mask remains reusable.
     </p>
 
     {#if currentBusy}
