@@ -117,6 +117,27 @@ impl CoverageGrid {
         }
     }
 
+    fn empty(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            coverage: vec![0_u8; width as usize * height as usize],
+        }
+    }
+
+    /// Mark every pixel of `rect` that is editable in `editable` as covered.
+    fn mark_rect_where_editable(&mut self, rect: PixelRect, editable: &CoverageGrid) {
+        let rect = self.clamped(rect);
+        for y in rect.y..rect.y + rect.height {
+            let row = y as usize * self.width as usize;
+            for x in rect.x..rect.x + rect.width {
+                if editable.coverage[row + x as usize] > 0 {
+                    self.coverage[row + x as usize] = 255;
+                }
+            }
+        }
+    }
+
     fn is_covered(&self, x: u32, y: u32) -> bool {
         x < self.width
             && y < self.height
@@ -630,15 +651,79 @@ pub(crate) struct AiEditPartInputs {
     pub(crate) annotated_source_png: Option<Vec<u8>>,
 }
 
+/// Width of the cross-fade band between a part and previously generated
+/// content: matches the per-axis tiling overlap so it always sits inside the
+/// region both parts actually rendered.
+fn part_feather_width(crop: PixelRect) -> u16 {
+    let side = crop.width.min(crop.height).max(1);
+    (side / 8)
+        .clamp(MIN_PART_OVERLAP, MAX_PART_OVERLAP)
+        .min(side) as u16
+}
+
+/// Two-pass city-block distance to the nearest `true` seed pixel.
+fn city_block_distances(seeds: &[bool], width: usize, height: usize) -> Vec<u32> {
+    const FAR: u32 = u32::MAX / 2;
+    let mut distances = vec![FAR; seeds.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if seeds[index] {
+                distances[index] = 0;
+                continue;
+            }
+            let mut best = FAR;
+            if x > 0 {
+                best = best.min(distances[index - 1] + 1);
+            }
+            if y > 0 {
+                best = best.min(distances[index - width] + 1);
+            }
+            distances[index] = best;
+        }
+    }
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let index = y * width + x;
+            let mut best = distances[index];
+            if x + 1 < width {
+                best = best.min(distances[index + 1] + 1);
+            }
+            if y + 1 < height {
+                best = best.min(distances[index + width] + 1);
+            }
+            distances[index] = best;
+        }
+    }
+    distances
+}
+
+fn mix_rgba(old: image::Rgba<u8>, new: image::Rgba<u8>, weight: u8) -> image::Rgba<u8> {
+    let w = u16::from(weight);
+    let mut out = [0_u8; 4];
+    for channel in 0..4 {
+        let old_value = u16::from(old.0[channel]);
+        let new_value = u16::from(new.0[channel]);
+        out[channel] = ((old_value * (255 - w) + new_value * w + 127) / 255) as u8;
+    }
+    image::Rgba(out)
+}
+
 /// Owns the evolving document state while parts run sequentially, and pastes
-/// normalized part results back into a full-document candidate.
+/// normalized part results back into a full-document candidate. Where a part
+/// touches pixels an earlier part already generated, its result cross-fades
+/// over them across a feathered band instead of cutting hard at the part
+/// boundary — the hard cut is what made split runs look like stitched images.
 pub(crate) struct AiEditComposer {
     source: image::RgbaImage,
     edit_target: image::RgbaImage,
     /// `None` means every pixel is editable (detail-restoration passes).
     mask: Option<image::RgbaImage>,
     annotated_source: Option<image::RgbaImage>,
-    remaining: CoverageGrid,
+    /// Immutable edit permission from the mask (255 = fully editable).
+    editable: CoverageGrid,
+    /// Pixels some earlier part has already generated.
+    painted: CoverageGrid,
 }
 
 impl AiEditComposer {
@@ -665,13 +750,15 @@ impl AiEditComposer {
                 "{label} source, edit target, mask, and annotated source must have identical dimensions."
             ));
         }
-        let remaining = CoverageGrid::from_mask(&mask);
+        let editable = CoverageGrid::from_mask(&mask);
+        let (width, height) = source.dimensions();
         Ok(Self {
             source,
             edit_target,
             mask: Some(mask),
             annotated_source,
-            remaining,
+            editable,
+            painted: CoverageGrid::empty(width, height),
         })
     }
 
@@ -682,11 +769,62 @@ impl AiEditComposer {
         let (width, height) = source.dimensions();
         Ok(Self {
             edit_target: source.clone(),
-            remaining: CoverageGrid::full(width, height),
+            editable: CoverageGrid::full(width, height),
+            painted: CoverageGrid::empty(width, height),
             source,
             mask: None,
             annotated_source: None,
         })
+    }
+
+    /// Per-pixel paste weights for a part (crop-local, 0..=255): fresh
+    /// editable pixels take the part's result fully; pixels an earlier part
+    /// painted take it with a weight that ramps down over the feather band so
+    /// neighboring parts cross-fade; protected pixels never take it.
+    fn part_blend_weights(&self, crop: PixelRect) -> Vec<u8> {
+        let width = crop.width as usize;
+        let height = crop.height as usize;
+        let mut fresh = vec![false; width * height];
+        let mut any_fresh = false;
+        for y in 0..crop.height {
+            for x in 0..crop.width {
+                let index = y as usize * width + x as usize;
+                let document_x = crop.x + x;
+                let document_y = crop.y + y;
+                if self.editable.is_covered(document_x, document_y)
+                    && !self.painted.is_covered(document_x, document_y)
+                {
+                    fresh[index] = true;
+                    any_fresh = true;
+                }
+            }
+        }
+        let feather = part_feather_width(crop);
+        let distances = if any_fresh {
+            city_block_distances(&fresh, width, height)
+        } else {
+            vec![u32::MAX / 2; width * height]
+        };
+        let mut weights = vec![0_u8; width * height];
+        for y in 0..crop.height {
+            for x in 0..crop.width {
+                let index = y as usize * width + x as usize;
+                let document_x = crop.x + x;
+                let document_y = crop.y + y;
+                if !self.editable.is_covered(document_x, document_y) {
+                    continue;
+                }
+                weights[index] = if fresh[index] {
+                    255
+                } else if self.painted.is_covered(document_x, document_y) {
+                    let distance = distances[index].min(u32::from(feather));
+                    (255 - distance * 255 / u32::from(feather)) as u8
+                } else {
+                    0
+                };
+            }
+        }
+        weights
     }
 
     fn crop_png(image: &image::RgbaImage, crop: PixelRect, label: &str) -> Result<Vec<u8>, String> {
@@ -701,20 +839,25 @@ impl AiEditComposer {
         label: &str,
     ) -> Result<AiEditPartInputs, String> {
         let crop = part.crop;
+        let weights = self.part_blend_weights(crop);
         let mut part_mask = image::RgbaImage::new(crop.width, crop.height);
         for y in 0..crop.height {
             for x in 0..crop.width {
                 let document_x = crop.x + x;
                 let document_y = crop.y + y;
-                // Pixels a previous part already generated become protected
-                // context for this part instead of staying editable.
-                let pixel = if self.remaining.is_covered(document_x, document_y) {
+                let weight = weights[y as usize * crop.width as usize + x as usize];
+                // Fresh pixels stay editable; the feather band over earlier
+                // parts' output becomes a gray blend buffer (PaintNode
+                // cross-fades there); everything else is protected context.
+                let pixel = if weight == 0 {
+                    image::Rgba([0, 0, 0, 0])
+                } else if self.painted.is_covered(document_x, document_y) {
+                    image::Rgba([128, 128, 128, 255])
+                } else {
                     self.mask
                         .as_ref()
                         .map(|mask| *mask.get_pixel(document_x, document_y))
                         .unwrap_or(image::Rgba([255, 255, 255, 255]))
-                } else {
-                    image::Rgba([0, 0, 0, 0])
                 };
                 part_mask.put_pixel(x, y, pixel);
             }
@@ -779,19 +922,30 @@ impl AiEditComposer {
                 result.height()
             ));
         }
+        let weights = self.part_blend_weights(part.crop);
         for y in 0..part.crop.height {
             for x in 0..part.crop.width {
-                let document_x = part.crop.x + x;
-                let document_y = part.crop.y + y;
-                if !self.remaining.is_covered(document_x, document_y) {
+                let weight = weights[y as usize * part.crop.width as usize + x as usize];
+                if weight == 0 {
                     continue;
                 }
-                let pixel = *result.get_pixel(x, y);
+                let document_x = part.crop.x + x;
+                let document_y = part.crop.y + y;
+                let pixel = if weight == 255 {
+                    *result.get_pixel(x, y)
+                } else {
+                    mix_rgba(
+                        *self.source.get_pixel(document_x, document_y),
+                        *result.get_pixel(x, y),
+                        weight,
+                    )
+                };
                 self.source.put_pixel(document_x, document_y, pixel);
                 self.edit_target.put_pixel(document_x, document_y, pixel);
             }
         }
-        self.remaining.clear_rect(part.crop);
+        self.painted
+            .mark_rect_where_editable(part.crop, &self.editable);
         Ok(())
     }
 
@@ -1273,8 +1427,10 @@ mod tests {
         assert_eq!(second_source.get_pixel(0, 0).0, [200, 0, 0, 255]);
         let second_mask =
             decode_png_rgba(&second_inputs.mask_png, "second mask").expect("decode mask");
-        // Pixels part one owned are protected now; pixels beyond it stay editable.
+        // Deep inside part one's output the mask is protected; near part two's
+        // fresh region it becomes a gray hand-off band; fresh stays editable.
         assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(second_mask.get_pixel(15, 0).0, [128, 128, 128, 255]);
         assert_eq!(second_mask.get_pixel(31, 0).0, [255, 255, 255, 255]);
 
         let green = solid_png(32, 32, [0, 200, 0, 255]);
@@ -1283,8 +1439,20 @@ mod tests {
             .expect("apply second");
         let composed = composer.composed_png("AI retouch").expect("composed");
         let composed = decode_png_rgba(&composed, "composed").expect("decode");
-        assert_eq!(composed.get_pixel(20, 10).0, [200, 0, 0, 255]);
+        // Far side of the feather band keeps part one's pixels, fresh pixels
+        // are pure part two, and the band in between cross-fades — no more
+        // hard ownership cut at the part boundary.
+        assert_eq!(composed.get_pixel(16, 10).0, [200, 0, 0, 255]);
         assert_eq!(composed.get_pixel(40, 10).0, [0, 200, 0, 255]);
+        let blended = composed.get_pixel(24, 10).0;
+        assert!(
+            blended[0] > 0 && blended[0] < 200 && blended[1] > 0 && blended[1] < 200,
+            "band pixel should mix both parts, got {blended:?}"
+        );
+        // The blend ramps monotonically toward part two across the band.
+        let closer_to_first = composed.get_pixel(18, 10).0;
+        let closer_to_second = composed.get_pixel(30, 10).0;
+        assert!(closer_to_first[0] > blended[0] && blended[0] > closer_to_second[0]);
     }
 
     #[test]
@@ -1496,6 +1664,7 @@ mod tests {
         let second_inputs = composer.part_inputs(&second, "AI upscale").expect("inputs");
         let second_mask = decode_png_rgba(&second_inputs.mask_png, "mask").expect("decode");
         assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(second_mask.get_pixel(15, 0).0, [128, 128, 128, 255]);
         assert_eq!(second_mask.get_pixel(31, 0).0, [255, 255, 255, 255]);
         let second_source =
             decode_png_rgba(&second_inputs.source_png, "source").expect("decode source");

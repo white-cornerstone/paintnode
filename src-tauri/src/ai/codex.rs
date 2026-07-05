@@ -1678,13 +1678,14 @@ This is a fixed-canvas image refinement task, not a new image generation task.
 Attached images:
 1. `source.png` is the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
 2. `edit_target.png` is the same image to re-render in place.
-3. `mask.png` marks the editable area. White pixels are editable; black or transparent pixels were already restored and must remain unchanged.
+3. `mask.png` marks the editable area. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.
 
 {geometry_note}
 
 Restoration goal:
 Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
 Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
+Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so all parts join without visible seams.
 Do not add, remove, move, restyle, or reinterpret any content.
 Do not change global brightness, contrast, or color balance.
 If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
