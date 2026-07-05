@@ -63,6 +63,12 @@ export interface DecoupleTaskDetail {
 
 export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail;
 
+/** Live sub-task progress for placement-split runs (in-memory, like `progress`). */
+export interface AiTaskPartProgress {
+  completed: number;
+  total: number;
+}
+
 export interface AiTask {
   id: string;
   projectPath: string | null;
@@ -80,6 +86,7 @@ export interface AiTask {
    */
   documentId: string | null;
   detail: AiTaskDetail;
+  partProgress: AiTaskPartProgress | null;
   retry: (() => Promise<void> | void) | null;
 }
 
@@ -106,7 +113,7 @@ function createTaskId(kind: AiTaskKind): string {
   return `${kind}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-type StoredAiTask = Omit<AiTask, 'retry'>;
+type StoredAiTask = Omit<AiTask, 'retry' | 'partProgress'>;
 
 function storageKey(projectPath: string): string {
   return `${TASKS_STORAGE_PREFIX}${encodeURIComponent(projectPath)}`;
@@ -197,6 +204,7 @@ class AiTaskStore {
       completedAt: null,
       documentId: draft.documentId ?? null,
       detail: draft.detail,
+      partProgress: null,
       retry: null,
     };
     this.allTasks.unshift(task);
@@ -228,6 +236,19 @@ class AiTaskStore {
     task.progress = progress;
   }
 
+  /**
+   * Track which placement part a split run is on. In-memory only: part
+   * progress streams with the run and is meaningless after a restart.
+   */
+  setPartProgress(id: string, partIndex: number, partCount: number): void {
+    const task = this.find(id);
+    if (!task || partCount < 1) return;
+    task.partProgress = {
+      completed: Math.min(partCount, Math.max(0, Math.round(partIndex) - 1)),
+      total: Math.round(partCount),
+    };
+  }
+
   setDecoupleNotes(id: string, notes: string): void {
     const task = this.find(id);
     if (!task || task.detail.kind !== 'decouple') return;
@@ -246,6 +267,7 @@ class AiTaskStore {
     if (!task) return;
     task.status = 'completed';
     task.progress = progress;
+    if (task.partProgress) task.partProgress = { ...task.partProgress, completed: task.partProgress.total };
     task.completedAt = Date.now();
     // Release the closure: Retry is only offered on error, and retry closures
     // can pin document-sized canvases for the rest of the session.
@@ -323,7 +345,7 @@ class AiTaskStore {
         .map((item) => storedTaskFrom(item, projectPath))
         .filter((task): task is StoredAiTask => !!task)
         .filter((task) => !existingIds.has(task.id))
-        .map((task) => ({ ...task, retry: null }));
+        .map((task) => ({ ...task, partProgress: null, retry: null }));
       this.allTasks = [...this.allTasks, ...loaded].sort((a, b) => b.startedAt - a.startedAt);
       this.persistProject(projectPath);
     } catch {
@@ -335,7 +357,7 @@ class AiTaskStore {
     if (!projectPath || typeof localStorage === 'undefined') return;
     const serializable: StoredAiTask[] = this.allTasks
       .filter((task) => task.projectPath === projectPath)
-      .map(({ retry, ...task }) => ({
+      .map(({ retry, partProgress, ...task }) => ({
         ...task,
         detail: storedDetailFrom(task.detail),
       }));

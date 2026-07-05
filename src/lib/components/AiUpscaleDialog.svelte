@@ -119,7 +119,12 @@
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
       progressListener.start(
         runId,
-        (message) => aiTasks.setProgress(task.id, message),
+        (message, payload) => {
+          aiTasks.setProgress(task.id, message);
+          if (payload.partIndex && payload.partCount) {
+            aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
+          }
+        },
         () =>
           aiTasks.setProgress(
             task.id,

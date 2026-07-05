@@ -29,9 +29,9 @@ use crate::ai::placement::{
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, clean_option, cleanup_project_agent_job,
-    command_failure, command_failure_with_required_output, emit_codex_progress,
-    emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
-    project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
+    command_failure, command_failure_with_required_output, emit_codex_part_progress,
+    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract,
+    now_id, project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
     safe_job_child_path, sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
     validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_reference_pngs,
     AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
@@ -864,9 +864,11 @@ fn antigravity_restore_image_details(
         let prompt_text =
             antigravity_restore_prompt(&job_dir, autonomy, &geometry_note, has_overview);
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
-        emit_codex_progress(
+        emit_codex_part_progress(
             app,
             run_id,
+            part_index,
+            placement.parts.len(),
             ai_part_progress_message(
                 &placement,
                 part_index,
@@ -1169,9 +1171,11 @@ pub(crate) async fn generate_antigravity_fill_image(
             );
             write_ai_job_prompt(&part_path, &prompt_text, "Antigravity generative fill")?;
 
-            emit_codex_progress(
+            emit_codex_part_progress(
                 &app,
                 &run_id,
+                part_index,
+                placement.parts.len(),
                 ai_part_progress_message(
                     &placement,
                     part_index,
@@ -1399,9 +1403,11 @@ pub(crate) async fn generate_antigravity_retouch_image(
             );
             write_ai_job_prompt(&part_path, &prompt_text, "Antigravity AI retouch")?;
 
-            emit_codex_progress(
+            emit_codex_part_progress(
                 &app,
                 &run_id,
+                part_index,
+                placement.parts.len(),
                 ai_part_progress_message(
                     &placement,
                     part_index,

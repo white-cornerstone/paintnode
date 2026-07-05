@@ -4,7 +4,13 @@ import type { AiProvider } from '../state/settings';
 
 /** Shared support for the background AI tasks and their dialogs (Generate, Retouch, Extract Assets). */
 
-export type CodexProgressPayload = { runId: string; message: string };
+export type CodexProgressPayload = {
+  runId: string;
+  message: string;
+  /** 1-based position of the placement part this message belongs to. */
+  partIndex?: number;
+  partCount?: number;
+};
 
 export function providerLabel(provider: AiProvider): string {
   if (provider === 'antigravity') return 'Local Antigravity CLI';
@@ -49,12 +55,16 @@ export class AiProgressListener {
   private unlisten: UnlistenFn | null = null;
   private generation = 0;
 
-  start(runId: string, onMessage: (message: string) => void, onUnavailable: () => void): void {
+  start(
+    runId: string,
+    onMessage: (message: string, payload: CodexProgressPayload) => void,
+    onUnavailable: () => void,
+  ): void {
     this.clear();
     const generation = this.generation;
     void listen<CodexProgressPayload>('codex-generation-progress', (event) => {
       if (event.payload.runId === runId && event.payload.message.trim()) {
-        onMessage(event.payload.message.trim());
+        onMessage(event.payload.message.trim(), event.payload);
       }
     })
       .then((stop) => {

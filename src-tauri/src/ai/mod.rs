@@ -182,6 +182,11 @@ pub(crate) fn reference_prompt_note(reference_names: &[String], prefix: &str) ->
 struct CodexProgressPayload {
     run_id: String,
     message: String,
+    /// 1-based position of the placement part this message belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_count: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -738,6 +743,28 @@ pub(crate) fn emit_codex_progress(app: &AppHandle, run_id: &str, message: impl I
         CodexProgressPayload {
             run_id: run_id.to_string(),
             message: message.into(),
+            part_index: None,
+            part_count: None,
+        },
+    );
+}
+
+/// Progress for one placement part; carries the part position so the task
+/// list can render a sub-task progress indicator.
+pub(crate) fn emit_codex_part_progress(
+    app: &AppHandle,
+    run_id: &str,
+    part_index: usize,
+    part_count: usize,
+    message: impl Into<String>,
+) {
+    let _ = app.emit(
+        CODEX_PROGRESS_EVENT,
+        CodexProgressPayload {
+            run_id: run_id.to_string(),
+            message: message.into(),
+            part_index: Some(part_index + 1),
+            part_count: Some(part_count),
         },
     );
 }

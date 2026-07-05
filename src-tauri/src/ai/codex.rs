@@ -30,8 +30,8 @@ use crate::ai::placement::{
 use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, clean_option,
     cleanup_project_agent_job, cleanup_project_job_enabled, codex_agent_message_text,
-    command_failure, copy_png_candidate, emit_codex_progress, emit_kept_job_dir,
-    image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
+    command_failure, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
+    emit_kept_job_dir, image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, reference_prompt_note, safe_job_child_path, safe_png_source_file_name,
     should_keep_job_dir, spawn_output_reader, unique_child_path, validate_reference_pngs,
     write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
@@ -1750,9 +1750,11 @@ fn codex_restore_image_details(
         let geometry_note = ai_part_geometry_note(&placement, part_index);
         let prompt_text = codex_restore_prompt(autonomy, &geometry_note);
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
-        emit_codex_progress(
+        emit_codex_part_progress(
             app,
             run_id,
+            part_index,
+            placement.parts.len(),
             ai_part_progress_message(&placement, part_index, "Restoring image detail with Codex"),
         );
         let part_run = run_codex_retouch_part(
@@ -1892,9 +1894,11 @@ pub(crate) async fn generate_codex_fill_image(
                 generative_fill_prompt(prompt.trim(), autonomy, &geometry_note, &reference_names);
             write_ai_job_prompt(&part_path, &prompt_text, "Codex generative fill")?;
 
-            emit_codex_progress(
+            emit_codex_part_progress(
                 &app,
                 &run_id,
+                part_index,
+                placement.parts.len(),
                 ai_part_progress_message(
                     &placement,
                     part_index,
@@ -2149,9 +2153,11 @@ pub(crate) async fn generate_codex_retouch_image(
             );
             write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
 
-            emit_codex_progress(
+            emit_codex_part_progress(
                 &app,
                 &run_id,
+                part_index,
+                placement.parts.len(),
                 ai_part_progress_message(&placement, part_index, "Starting local Codex AI retouch"),
             );
             let part_run = run_codex_retouch_part(

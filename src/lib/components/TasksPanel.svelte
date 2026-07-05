@@ -16,6 +16,15 @@
     return 'Failed';
   }
 
+  function partsLabel(task: AiTask): string {
+    const parts = task.partProgress;
+    if (!parts) return '';
+    if (task.status === 'running' && parts.completed < parts.total) {
+      return `, part ${parts.completed + 1} of ${parts.total}`;
+    }
+    return `, ${parts.completed} of ${parts.total} parts completed`;
+  }
+
   function openTask(task: AiTask): void {
     aiTasks.open(task.id);
   }
@@ -54,7 +63,7 @@
             <button
               class="task-open"
               type="button"
-              aria-label={`Open ${task.title}: ${statusLabel(task)}`}
+              aria-label={`Open ${task.title}: ${statusLabel(task)}${partsLabel(task)}`}
               onclick={() => openTask(task)}
             >
               <span class="status" aria-hidden="true">
@@ -67,7 +76,24 @@
                 {/if}
               </span>
               <span class="task-main">
-                <span class="task-title">{task.title}</span>
+                <span class="task-title-row">
+                  <span class="task-title">{task.title}</span>
+                  {#if task.partProgress && task.partProgress.total > 1}
+                    <span
+                      class="parts"
+                      style:grid-template-columns={`repeat(${Math.min(4, task.partProgress.total)}, 5px)`}
+                      aria-hidden="true"
+                    >
+                      {#each { length: task.partProgress.total } as _, index (index)}
+                        <span
+                          class="part-block"
+                          class:done={index < task.partProgress.completed}
+                          class:active={task.status === 'running' && index === task.partProgress.completed}
+                        ></span>
+                      {/each}
+                    </span>
+                  {/if}
+                </span>
                 <span class="task-progress">{task.progress || task.subtitle}</span>
               </span>
             </button>
@@ -219,6 +245,37 @@
     display: grid;
     gap: 2px;
     min-width: 0;
+  }
+  .task-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
+  }
+  .parts {
+    display: grid;
+    gap: 2px;
+    grid-auto-rows: 5px;
+    flex: none;
+  }
+  .part-block {
+    width: 5px;
+    height: 5px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--text-dim) 32%, transparent);
+  }
+  .part-block.done {
+    background: #58c488;
+  }
+  .part-block.active {
+    background: var(--accent);
+    animation: part-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes part-pulse {
+    50% {
+      opacity: 0.35;
+    }
   }
   .task-title,
   .task-progress {
