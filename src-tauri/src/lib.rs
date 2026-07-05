@@ -3205,7 +3205,7 @@ fn antigravity_fill_prompt(
 Input files:
 - `{job_dir}/source.png`: source PNG with the document centered inside it. Pixels outside the document rectangle are the PaintNode chroma-key matte `{chroma_key}`.
 - `{job_dir}/edit_target.png`: same-size image to edit in place.
-- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected document context. Transparent pixels are outside the document rectangle and are not editable.
+- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black or transparent pixels are protected context and are not editable.
 
 {reference_note}
 
@@ -3219,7 +3219,7 @@ User fill prompt:
 Required output:
 - Save exactly one PNG file as `{result_path}`.
 - Prefer the same pixel dimensions as `source.png`, `edit_target.png`, and `mask.png`.
-- Change only the white-mask area and keep black-mask context visually preserved.
+- Change only the white-mask area and keep black/transparent-mask context visually preserved.
 - Match surrounding texture, lighting, perspective, color, focus, and grain.
 - Do not crop, zoom, reframe, or shift the centered content rectangle.
 {workspace_rule}
@@ -3278,7 +3278,7 @@ fn antigravity_retouch_prompt(
 Input files:
 - `{job_dir}/source.png`: source PNG with the document centered inside it. Pixels outside the document rectangle are the PaintNode chroma-key matte `{chroma_key}`.
 - `{job_dir}/edit_target.png`: same-size photo/canvas image to edit in place.
-- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected document context. Transparent pixels are outside the document rectangle and are not editable.
+- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black or transparent pixels are protected context and are not editable.
 {contract_note}
 {annotation_note}
 {reference_note}
@@ -3300,7 +3300,7 @@ Required output:
 - Any edit whose visible change extends outside the mask is a failed retouch, even if PaintNode later restores protected pixels. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
 - If the prompt changes clothing or accessories, preserve the person's identity, face, hair, skin, hands, pose, body proportions, expression, gaze, and all unrequested surrounding content unless the user explicitly asks to alter those details.
 - Blend naturally through any gray feather buffer. PaintNode will apply the mask afterward, but your candidate should still preserve protected and unrequested areas.
-- Keep every black-mask/protected area visually identical to `source.png`: no enhancement, denoise, sharpening, relight, recolor, cleanup, straightening, or reframing outside the mask.
+- Keep every black/transparent-mask protected area visually identical to `source.png`: no enhancement, denoise, sharpening, relight, recolor, cleanup, straightening, or reframing outside the mask.
 - Use surrounding texture, lighting, perspective, grain, focus, and edges to blend the retouched area naturally.
 - Do not include UI chrome, checkerboard transparency, selection outlines, masks, annotations, labels, or guide marks in `result.png`.
 {workspace_rule}
@@ -3683,7 +3683,7 @@ fn generative_fill_prompt(
 Attached images:
 1. `source.png` is the source PNG with the document centered inside it. Pixels outside the document rectangle are the PaintNode chroma-key matte `{chroma_key}`.
 2. `edit_target.png` is the same-size image to edit in place. It has the protected photo content plus a neutral gray placeholder where PaintNode needs generated pixels.
-3. `mask.png` is the same-size edit mask. White pixels are the full editable/generated area. Gray pixels are a narrow seam-blending transition zone. Black pixels are protected document context. Transparent pixels are outside the document rectangle and are not editable.
+3. `mask.png` is the same-size edit mask. White pixels are the full editable/generated area. Gray pixels are a narrow seam-blending transition zone. Black or transparent pixels are protected context and are not editable.
 
 {reference_note}
 
@@ -3700,10 +3700,10 @@ Requirements:
 - Prefer one full working-canvas PNG with the exact same pixel dimensions as `edit_target.png` and `source.png`.
 - Save the final PNG as `result.png` in the current working directory. This file is required.
 - Treat `result.png` as an in-place edit of `edit_target.png`, not as a newly composed photograph.
-- Preserve every black-mask/protected pixel from `source.png` visually unchanged. Treat protected content as context only.
+- Preserve every black/transparent-mask protected pixel from `source.png` visually unchanged. Treat protected content as context only.
 - Fill the white-mask area, matching the surrounding scene, perspective, lighting, focus, color, grain, and camera style.
 - Use the gray-mask transition zone only to keep edges registered and seamless with the original photo; do not make visible subject or composition changes there.
-- Blend naturally across the mask boundary, but do not repaint protected subjects, vehicles, people, buildings, signs, road markings, or other black-mask content.
+- Blend naturally across the mask boundary, but do not repaint protected subjects, vehicles, people, buildings, signs, road markings, or other black/transparent-mask content.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 - Do not leave the neutral gray placeholder visible in the white-mask area.
 - If extending a real photo, avoid inventing crisp readable text in newly generated distant signs or advertisements; partial or indistinct text is preferable.
@@ -3817,7 +3817,7 @@ Attached images:
    - White pixels are editable.
    - Gray pixels are a feathered blend buffer.
    - Black pixels are locked context.
-   - Transparent pixels are outside the document and must remain unchanged.{attached_image_notes}
+   - Transparent pixels are locked context and must remain unchanged.{attached_image_notes}
 
 PaintNode image geometry:
 - The output must have the same full-canvas framing, same document rectangle, same camera geometry, and same pixel coordinate system as `edit_target.png`.
@@ -3848,7 +3848,7 @@ Preserve the original pose, head location, gaze, expression, body proportions, s
 Unless explicitly requested, do not change the face, hair, eyes, skin, hands, or any unrequested surrounding content.
 
 Locked context:
-Black-mask areas are locked. They must look copied from the original image.
+Black or transparent mask areas are locked. They must look copied from the original image.
 Do not clean up, enhance, denoise, sharpen, recolor, relight, beautify, or reinterpret locked context.
 
 Output requirements:
@@ -3912,7 +3912,7 @@ fn ai_retouch_prompt(
 Attached images:
 1. `source.png` is the source PNG with the document centered inside it. Pixels outside the document rectangle are the PaintNode chroma-key matte `{chroma_key}`.
 2. `edit_target.png` is the same-size image to edit in place. It preserves the original photo everywhere, including under the white mask. Masked pixels are editable even though their original content is still visible.
-3. `mask.png` is the same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black pixels are protected document context. Transparent pixels are outside the document rectangle and are not editable.
+3. `mask.png` is the same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black or transparent pixels are protected context and are not editable.
 {annotation_note}
 {reference_note}
 {extra_reference_note}
@@ -3929,8 +3929,8 @@ Requirements:
 - If `source.png` / `edit_target.png` have `{chroma_key}` chroma-key padding around that centered rectangle, leave those matte pixels exactly `{chroma_key}`.
 - Prefer one full working-canvas PNG candidate with the exact same pixel dimensions as `source.png` and `edit_target.png`.
 {managed_method_requirements}
-- PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, gray-mask pixels will be blended with `source.png`, and black-mask/protected pixels will be discarded and preserved from `source.png` by the app.
-- Even so, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
+- PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, gray-mask pixels will be blended with `source.png`, and black/transparent-mask protected pixels will be discarded and preserved from `source.png` by the app.
+- Even so, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black or transparent. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
 - Treat the generated candidate as an in-place retouch of `edit_target.png`, not as a new composition.
 - Treat `mask.png` as the maximum allowed edit area, not as an instruction to repaint every white pixel. Change only the content explicitly requested by the user prompt and preserve unrequested masked content.
 - Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
@@ -7620,9 +7620,8 @@ mod tests {
         assert!(retouch.contains("flat PaintNode chroma-key matte: #00ff00"));
         assert!(retouch.contains("not a green-screen/key-removal request"));
         assert!(retouch.contains("Keep every matte pixel exactly #00ff00"));
-        assert!(retouch.contains(
-            "Transparent pixels are outside the document rectangle and are not editable"
-        ));
+        assert!(retouch
+            .contains("Black or transparent pixels are protected context and are not editable"));
         assert!(!retouch.contains("PaintNode will crop"));
         assert!(!retouch.contains("image-generation tool accepts the aspect ratio"));
         assert!(retouch.contains("Do not write or run Python"));
@@ -7890,9 +7889,8 @@ mod tests {
         assert!(args[image_idx + 6].contains("left=8px, top=32px, right=8px, bottom=32px"));
         assert!(args[image_idx + 6].contains("not a green-screen/key-removal request"));
         assert!(args[image_idx + 6].contains("leave those matte pixels exactly `#00ff00`"));
-        assert!(args[image_idx + 6].contains(
-            "Transparent pixels are outside the document rectangle and are not editable"
-        ));
+        assert!(args[image_idx + 6]
+            .contains("Black or transparent pixels are protected context and are not editable"));
         assert!(!args[image_idx + 6].contains("PaintNode will crop"));
         assert!(args[image_idx + 6].contains("Save the final PNG as `result.png`"));
         assert!(args[image_idx + 6].contains("White pixels are the full editable/generated area"));
@@ -7956,9 +7954,8 @@ mod tests {
         assert!(args[image_idx + 7].contains("left=8px, top=32px, right=8px, bottom=32px"));
         assert!(args[image_idx + 7].contains("not a green-screen/key-removal request"));
         assert!(args[image_idx + 7].contains("leave those matte pixels exactly `#00ff00`"));
-        assert!(args[image_idx + 7].contains(
-            "Transparent pixels are outside the document rectangle and are not editable"
-        ));
+        assert!(args[image_idx + 7]
+            .contains("Black or transparent pixels are protected context and are not editable"));
         assert!(!args[image_idx + 7].contains("PaintNode will crop"));
         assert!(!args[image_idx + 7].contains("Do not fill those margins with train"));
         assert!(args[image_idx + 7].contains("`annotated_source.png` is the clean source image"));
@@ -7966,8 +7963,9 @@ mod tests {
         assert!(args[image_idx + 7].contains("red arrows, yellow callout boxes, annotation text"));
         assert!(args[image_idx + 7].contains("User retouch prompt:\nremove glare"));
         assert!(args[image_idx + 7].contains("PaintNode will apply `mask.png` after you finish"));
-        assert!(args[image_idx + 7]
-            .contains("visually identical to `source.png` everywhere `mask.png` is black"));
+        assert!(args[image_idx + 7].contains(
+            "visually identical to `source.png` everywhere `mask.png` is black or transparent"
+        ));
         assert!(args[image_idx + 7].contains("Do not clean up, enhance, crop out, remove"));
         assert!(args[image_idx + 7].contains("maximum allowed edit area"));
         assert!(args[image_idx + 7].contains(
