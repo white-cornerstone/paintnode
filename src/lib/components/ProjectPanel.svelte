@@ -283,9 +283,9 @@
     if (!asset) return;
     try {
       await project.deleteAsset(asset);
-      editor.flash(`Moved ${asset.name} to project trash`);
+      editor.flash(`Moved ${asset.name} to system trash`);
     } catch (e) {
-      editor.flash('Delete asset failed: ' + ((e as Error)?.message ?? String(e)));
+      editor.flash('Move to trash failed: ' + ((e as Error)?.message ?? String(e)));
     }
   }
 
@@ -349,8 +349,8 @@
     </button>
     {#if allowDelete && assetFor(file)}
       <button
-        aria-label={`Move ${file.name} to trash`}
-        use:tooltip={{ text: 'Move to trash', placement: 'left' }}
+        aria-label={`Move ${file.name} to system trash`}
+        use:tooltip={{ text: 'Move to system trash', placement: 'left' }}
         onclick={() => void remove(file)}
       >
         <Icon svg={Delete} size={14} />
@@ -577,7 +577,7 @@
     <button role="menuitem" onclick={showDetails}>View details</button>
     <button role="menuitem" onclick={() => void revealFromMenu(fileMenu!.file)}>Reveal file</button>
     {#if fileMenu.allowDelete && assetFor(fileMenu.file)}
-      <button role="menuitem" onclick={() => void removeFromMenu(fileMenu!.file)}>Move to trash</button>
+      <button role="menuitem" onclick={() => void removeFromMenu(fileMenu!.file)}>Move to system trash</button>
     {/if}
   </div>
 {/if}

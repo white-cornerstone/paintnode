@@ -34,6 +34,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2.7.1"
 arboard = "3.6"
 sysinfo = "0.30"
+trash = "=5.2.3"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-process = "2.3.1"
