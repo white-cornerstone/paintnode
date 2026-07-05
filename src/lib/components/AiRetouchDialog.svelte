@@ -371,8 +371,10 @@ Use these annotations as direct user instructions for the regions they point to.
     </label>
 
     <p class="hint">
-      PaintNode sends the full canvas, the current photo edit target, the selected AI mask, and any
-      sampled reference to the selected local AI provider. The generated pixels are inserted as a new layer and the mask remains reusable.
+      PaintNode crops the canvas around the selected AI mask to a size the provider supports (splitting
+      into sequential parts when the document is too wide or tall), sends it with the photo edit target
+      and any sampled reference, then pastes the result back in place. The generated pixels are inserted
+      as a new layer and the mask remains reusable.
     </p>
 
     {#if currentBusy}

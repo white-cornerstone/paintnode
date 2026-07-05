@@ -21,18 +21,18 @@ const AI_WORKING_CANVAS_UNIT: u32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PixelRect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct SupportedAspectRatio {
-    label: String,
-    width: u32,
-    height: u32,
+pub(crate) struct SupportedAspectRatio {
+    pub(crate) label: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     min_width: u32,
     min_height: u32,
 }
@@ -52,11 +52,11 @@ struct ImageProviderCapabilities {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct CodexImageCapability {
-    dimension_multiple: u32,
+pub(crate) struct CodexImageCapability {
+    pub(crate) dimension_multiple: u32,
     max_long_side: u32,
     max_short_side: u32,
-    max_aspect_ratio: u32,
+    pub(crate) max_aspect_ratio: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -78,14 +78,6 @@ static AI_IMAGE_MODEL_CAPABILITIES: OnceLock<ImageModelCapabilities> = OnceLock:
 const AI_IMAGE_MODEL_CAPABILITIES_JSON: &str =
     include_str!("../../../src/lib/ai/imageModelCapabilities.json");
 
-pub(crate) fn ai_chroma_key_pixel() -> image::Rgba<u8> {
-    image::Rgba(AI_CHROMA_KEY_RGBA)
-}
-
-pub(crate) fn ai_mask_padding_pixel() -> image::Rgba<u8> {
-    image::Rgba([0, 0, 0, 0])
-}
-
 impl AiWorkingCanvas {
     pub(crate) fn has_padding(&self) -> bool {
         self.original_dimensions != self.working_dimensions
@@ -99,6 +91,14 @@ fn ai_image_model_capabilities() -> &'static ImageModelCapabilities {
         serde_json::from_str(AI_IMAGE_MODEL_CAPABILITIES_JSON)
             .expect("PaintNode AI image model capabilities JSON must be valid")
     })
+}
+
+pub(crate) fn ai_fallback_aspect_ratios() -> &'static [SupportedAspectRatio] {
+    &ai_image_model_capabilities().fallback_aspect_ratios
+}
+
+pub(crate) fn ai_codex_image_capability() -> &'static CodexImageCapability {
+    &ai_image_model_capabilities().providers.codex
 }
 
 fn round_up_to_unit(value: u32, unit: u32) -> u32 {
@@ -198,7 +198,10 @@ fn ai_working_canvas_for_exact_supported_ratio(dimensions: (u32, u32)) -> Option
     })
 }
 
-fn ai_exact_working_canvas(dimensions: (u32, u32), aspect_label: &str) -> AiWorkingCanvas {
+pub(crate) fn ai_exact_working_canvas(
+    dimensions: (u32, u32),
+    aspect_label: &str,
+) -> AiWorkingCanvas {
     let (width, height) = dimensions;
     AiWorkingCanvas {
         original_dimensions: dimensions,
@@ -246,43 +249,6 @@ pub(crate) fn validate_optional_target_dimensions(
         (None, None) => Ok(None),
         _ => Err("AI target dimensions must include both width and height.".into()),
     }
-}
-
-pub(crate) fn pad_png_to_ai_working_canvas(
-    bytes: &[u8],
-    working: &AiWorkingCanvas,
-    label: &str,
-    background: image::Rgba<u8>,
-) -> Result<Vec<u8>, String> {
-    let image = decode_png_rgba(bytes, label)?;
-    if image.dimensions() != working.original_dimensions {
-        return Err(format!(
-            "{label} must be {}x{} before PaintNode prepares the AI working canvas, but it is {}x{}.",
-            working.original_dimensions.0,
-            working.original_dimensions.1,
-            image.width(),
-            image.height()
-        ));
-    }
-    if !working.has_padding() {
-        return Ok(bytes.to_vec());
-    }
-
-    let mut out = image::RgbaImage::from_pixel(
-        working.working_dimensions.0,
-        working.working_dimensions.1,
-        background,
-    );
-    for y in 0..working.content_rect.height {
-        for x in 0..working.content_rect.width {
-            out.put_pixel(
-                working.content_rect.x + x,
-                working.content_rect.y + y,
-                *image.get_pixel(x, y),
-            );
-        }
-    }
-    encode_rgba_png(out, label)
 }
 
 fn scaled_content_rect(result_dimensions: (u32, u32), working: &AiWorkingCanvas) -> PixelRect {
@@ -406,7 +372,7 @@ pub(crate) fn ai_working_canvas_accepts_result_dimensions(
     diff * 1000 <= lhs.max(rhs) * 2
 }
 
-fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
+pub(crate) fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
     let [r, g, b, a] = mask_pixel.0;
     let luminance = (u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19 + 128) / 256;
     ((luminance * u32::from(a) + 127) / 255) as u8
@@ -513,59 +479,6 @@ pub(crate) fn ai_retouch_editable_mask_png(
     }
 
     encode_rgba_png(out, "AI retouch editable mask")
-}
-
-pub(crate) fn ai_working_canvas_instruction(working: &AiWorkingCanvas) -> String {
-    let rect = working.content_rect;
-    let padding_note = if working.has_padding() {
-        let left_padding = rect.x;
-        let top_padding = rect.y;
-        let right_padding = working
-            .working_dimensions
-            .0
-            .saturating_sub(rect.x + rect.width);
-        let bottom_padding = working
-            .working_dimensions
-            .1
-            .saturating_sub(rect.y + rect.height);
-        format!(
-            r#"Chroma-key padding:
-- Keep the final PNG exactly {working_width}x{working_height}.
-- The document rectangle is x={x}, y={y}, width={content_width}, height={content_height}.
-- Keep the padding dimensions unchanged: left={left_padding}px, top={top_padding}px, right={right_padding}px, bottom={bottom_padding}px.
-- Pixels outside the document rectangle are a flat PaintNode chroma-key matte: {chroma_key}.
-- This matte is not a green-screen/key-removal request. Do not remove it or make it transparent.
-- Keep every matte pixel exactly {chroma_key}; do not crop, resize, alpha-out, recolor, blur, shade, texture, extend, or paint scene content into the matte.
-- Only generate or edit pixels inside the document rectangle."#,
-            working_width = working.working_dimensions.0,
-            working_height = working.working_dimensions.1,
-            x = rect.x,
-            y = rect.y,
-            content_width = rect.width,
-            content_height = rect.height,
-            left_padding = left_padding,
-            top_padding = top_padding,
-            right_padding = right_padding,
-            bottom_padding = bottom_padding,
-            chroma_key = AI_CHROMA_KEY_HEX
-        )
-    } else {
-        "The document rectangle fills the working PNG.".into()
-    };
-    format!(
-        r#"PaintNode image geometry:
-- Working PNG: {working_width}x{working_height}.
-- Document rectangle: x={x}, y={y}, width={content_width}, height={content_height}.
-{padding_note}
-- Keep the document rectangle in the same position and size."#,
-        working_width = working.working_dimensions.0,
-        working_height = working.working_dimensions.1,
-        x = rect.x,
-        y = rect.y,
-        content_width = rect.width,
-        content_height = rect.height,
-        padding_note = padding_note
-    )
 }
 
 #[cfg(test)]
@@ -697,43 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn pad_png_to_ai_working_canvas_centers_original_pixels() {
-        let working = ai_working_canvas_for_dimensions((32, 20));
-        let source =
-            image::RgbaImage::from_fn(32, 20, |x, y| image::Rgba([x as u8, y as u8, 200, 255]));
-        let source_bytes = encode_rgba_png(source, "source").expect("encode source");
-
-        let padded =
-            pad_png_to_ai_working_canvas(&source_bytes, &working, "source", ai_chroma_key_pixel())
-                .expect("pad source");
-        let padded_image = decode_png_rgba(&padded, "padded source").expect("decode padded");
-
-        assert_eq!(padded_image.dimensions(), working.working_dimensions);
-        assert_eq!(padded_image.get_pixel(0, 0).0, AI_CHROMA_KEY_RGBA);
-        assert_eq!(
-            padded_image
-                .get_pixel(working.content_rect.x + 7, working.content_rect.y + 3)
-                .0,
-            [7, 3, 200, 255]
-        );
-
-        let padded_mask =
-            pad_png_to_ai_working_canvas(&source_bytes, &working, "mask", ai_mask_padding_pixel())
-                .expect("pad mask");
-        let padded_mask_image =
-            decode_png_rgba(&padded_mask, "padded mask").expect("decode padded mask");
-
-        assert_eq!(padded_mask_image.dimensions(), working.working_dimensions);
-        assert_eq!(padded_mask_image.get_pixel(0, 0).0, [0, 0, 0, 0]);
-        assert_eq!(
-            padded_mask_image
-                .get_pixel(working.content_rect.x + 7, working.content_rect.y + 3)
-                .0,
-            [7, 3, 200, 255]
-        );
-    }
-
-    #[test]
     fn crop_png_bytes_to_ai_content_extracts_centered_document_rect() {
         let working = ai_working_canvas_for_dimensions((32, 20));
         let output = image::RgbaImage::from_fn(
@@ -752,7 +628,7 @@ mod tests {
                         255,
                     ])
                 } else {
-                    ai_chroma_key_pixel()
+                    image::Rgba(AI_CHROMA_KEY_RGBA)
                 }
             },
         );
