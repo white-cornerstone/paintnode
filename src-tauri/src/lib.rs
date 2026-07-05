@@ -425,8 +425,6 @@ fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
             .join(ANTIGRAVITY_RUNS_DIR),
     )
     .map_err(|e| format!("Failed to create Antigravity runs folder: {e}"))?;
-    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("trash"))
-        .map_err(|e| format!("Failed to create project trash folder: {e}"))?;
     fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("thumbnails"))
         .map_err(|e| format!("Failed to create project thumbnail cache folder: {e}"))?;
     Ok(())
@@ -6587,27 +6585,13 @@ async fn project_delete_asset(
         else {
             return project_state(&project_dir);
         };
-        let asset = manifest.assets.remove(index);
+        let asset = manifest.assets[index].clone();
         let source = project_dir.join(&asset.relative_path);
         if source.exists() {
-            let trash = project_dir
-                .join(PAINTNODE_WORK_DIR)
-                .join("trash")
-                .join(format!(
-                    "{}-{}",
-                    now_id(),
-                    source
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("asset")
-                ));
-            if let Some(parent) = trash.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create trash folder: {e}"))?;
-            }
-            fs::rename(&source, &trash)
-                .map_err(|e| format!("Failed to move asset to project trash: {e}"))?;
+            trash::delete(&source)
+                .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
         }
+        manifest.assets.remove(index);
         save_manifest(&project_dir, &manifest)?;
         project_state(&project_dir)
     })
@@ -8325,6 +8309,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["tram-2.ora"]);
+    }
+
+    #[test]
+    fn ensure_project_dirs_does_not_create_project_trash() {
+        let project = TempJobDir::new("paintnode-no-project-trash-test").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+
+        assert!(!project.path().join(PAINTNODE_WORK_DIR).join("trash").exists());
+        assert!(project
+            .path()
+            .join(PAINTNODE_WORK_DIR)
+            .join("thumbnails")
+            .exists());
     }
 
     #[test]
