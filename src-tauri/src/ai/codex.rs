@@ -24,14 +24,16 @@ use crate::ai::canvas::{
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, cleanup_project_agent_job,
-    cleanup_project_job_enabled, command_failure, copy_png_candidate, emit_codex_progress,
-    emit_kept_job_dir, image_agent_autonomy_contract, json_string_at, now_id, optional_project_dir,
-    output_tail, project_agent_run_dir, reference_prompt_note, safe_job_child_path,
-    safe_png_source_file_name, should_keep_job_dir, spawn_output_reader, unique_child_path,
-    validate_reference_pngs, write_ai_job_prompt, write_reference_pngs, AiAutonomyLevel,
+    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, clean_option,
+    cleanup_project_agent_job, cleanup_project_job_enabled, codex_agent_message_text,
+    command_failure, copy_png_candidate, emit_codex_progress, emit_kept_job_dir,
+    image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
+    project_agent_run_dir, reference_prompt_note, safe_job_child_path, safe_png_source_file_name,
+    should_keep_job_dir, spawn_output_reader, unique_child_path, validate_reference_pngs,
+    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
     CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, GENERATION_TIMEOUT, POLL_INTERVAL,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, CODEX_RUNS_DIR, GENERATION_TIMEOUT,
+    POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -42,15 +44,6 @@ use crate::project::{
     write_asset_file_with_file_name, ProjectAsset,
 };
 
-pub(crate) const CODEX_RUNS_DIR: &str = "codex-runs";
-
-#[derive(Debug)]
-pub(crate) struct CodexRunResult {
-    pub(crate) output: Output,
-    pub(crate) thread_id: Option<String>,
-    pub(crate) satisfied_required_output: bool,
-}
-
 #[derive(Debug, Default)]
 struct CodexCommandOptions {
     model: Option<String>,
@@ -60,7 +53,7 @@ struct CodexCommandOptions {
 
 #[derive(Debug)]
 struct CodexImageRunResult {
-    run: CodexRunResult,
+    run: AgentRunResult,
     image_cached_before_exit: bool,
 }
 
@@ -331,31 +324,6 @@ fn copy_codex_cached_png_to_job(
     )
 }
 
-pub(crate) fn codex_agent_message_text(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
-    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let item_type = json_string_at(&value, &["item", "type"]).unwrap_or("");
-    if !event_type.contains("item.completed") || !item_type.contains("agent_message") {
-        return None;
-    }
-    let text = json_string_at(&value, &["item", "text"])?.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
-pub(crate) fn codex_thread_id_from_line(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
-    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    if !event_type.contains("thread.started") {
-        return None;
-    }
-    let thread_id = json_string_at(&value, &["thread_id"])?.trim();
-    if thread_id.is_empty() {
-        None
-    } else {
-        Some(thread_id.to_string())
-    }
-}
-
 fn final_codex_agent_message_from_text(stdout: &str, stderr: &str) -> Option<String> {
     let mut messages = Vec::new();
     for line in stdout.lines().chain(stderr.lines()) {
@@ -390,7 +358,7 @@ fn run_codex_with_progress(
     timeout: Duration,
     app: AppHandle,
     run_id: String,
-) -> Result<CodexRunResult, String> {
+) -> Result<AgentRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -457,7 +425,7 @@ fn run_codex_with_progress(
         .unwrap_or_else(|_| Vec::new());
     let thread_id = thread_id.lock().ok().and_then(|id| id.clone());
 
-    Ok(CodexRunResult {
+    Ok(AgentRunResult {
         output: Output {
             status,
             stdout,
@@ -574,7 +542,7 @@ fn run_codex_with_progress_until_cached_png(
     let thread_id = thread_id.lock().ok().and_then(|id| id.clone());
 
     Ok(CodexImageRunResult {
-        run: CodexRunResult {
+        run: AgentRunResult {
             output: Output {
                 status,
                 stdout,
@@ -611,21 +579,15 @@ fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String
     )
 }
 
-pub(crate) fn clean_codex_option(value: Option<String>) -> Option<String> {
-    value
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 fn codex_command_options(
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
 ) -> CodexCommandOptions {
     CodexCommandOptions {
-        model: clean_codex_option(model),
-        reasoning_effort: clean_codex_option(reasoning_effort),
-        service_tier: clean_codex_option(service_tier),
+        model: clean_option(model),
+        reasoning_effort: clean_option(reasoning_effort),
+        service_tier: clean_option(service_tier),
     }
 }
 
@@ -1528,20 +1490,15 @@ pub(crate) async fn generate_codex_image(
             } else {
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?
             };
-            let asset = ProjectAsset {
+            let asset = ProjectAsset::generated_png(
                 id,
-                kind: "generated".into(),
-                name: source_file_name
+                relative_path,
+                source_file_name
                     .map(str::to_string)
                     .unwrap_or_else(|| prompt.trim().chars().take(48).collect::<String>()),
-                relative_path,
-                created_at: now_id(),
-                prompt: Some(prompt.trim().into()),
-                source_file_name: source_file_name.map(str::to_string),
-                width: None,
-                height: None,
-                mime: Some("image/png".into()),
-            };
+                Some(prompt.trim().into()),
+                source_file_name.map(str::to_string),
+            );
             Some(add_asset(&project_dir, asset)?)
         } else {
             None
@@ -1778,20 +1735,15 @@ pub(crate) async fn generate_codex_fill_image(
             } else {
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?
             };
-            let asset = ProjectAsset {
+            let asset = ProjectAsset::generated_png(
                 id,
-                kind: "generated".into(),
-                name: source_file_name
+                relative_path,
+                source_file_name
                     .map(str::to_string)
                     .unwrap_or_else(|| prompt.trim().chars().take(48).collect::<String>()),
-                relative_path,
-                created_at: now_id(),
-                prompt: Some(prompt.trim().into()),
-                source_file_name: source_file_name.map(str::to_string),
-                width: None,
-                height: None,
-                mime: Some("image/png".into()),
-            };
+                Some(prompt.trim().into()),
+                source_file_name.map(str::to_string),
+            );
             Some(add_asset(&project_dir, asset)?)
             } else {
                 None
@@ -2295,23 +2247,18 @@ pub(crate) async fn decouple_codex_image(
                         write_asset_file(project_dir, "generated", &name, "png", &bytes)?;
                     Some(add_asset(
                         project_dir,
-                        ProjectAsset {
+                        ProjectAsset::generated_png(
                             id,
-                            kind: "generated".into(),
-                            name: name.clone(),
                             relative_path,
-                            created_at: now_id(),
-                            prompt: Some(format!(
+                            name.clone(),
+                            Some(format!(
                                 "Extracted workflow asset from source: {user_prompt}"
                             )),
-                            source_file_name: Path::new(&layer.file)
+                            Path::new(&layer.file)
                                 .file_name()
                                 .and_then(|s| s.to_str())
                                 .map(str::to_string),
-                            width: None,
-                            height: None,
-                            mime: Some("image/png".into()),
-                        },
+                        ),
                     )?)
                 }
                 _ => None,
@@ -2501,24 +2448,19 @@ pub(crate) async fn compose_codex_workflow(
                 .map_err(|e| format!("Failed to read composed image for project storage: {e}"))?;
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
-            let asset = ProjectAsset {
+            let asset = ProjectAsset::generated_png(
                 id,
-                kind: "generated".into(),
-                name: format!(
+                relative_path,
+                format!(
                     "Workflow: {}",
                     prompt.trim().chars().take(48).collect::<String>()
                 ),
-                relative_path,
-                created_at: now_id(),
-                prompt: Some(prompt.trim().into()),
-                source_file_name: recovered_source_path
+                Some(prompt.trim().into()),
+                recovered_source_path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(str::to_string),
-                width: None,
-                height: None,
-                mime: Some("image/png".into()),
-            };
+            );
             Some(add_asset(&project_dir, asset)?)
         } else {
             None
@@ -2545,16 +2487,6 @@ pub(crate) async fn compose_codex_workflow(
 mod tests {
     use super::*;
     use crate::test_util::ONE_PIXEL_PNG;
-
-    #[test]
-    fn codex_thread_id_from_line_extracts_thread_started_event() {
-        let thread_id = codex_thread_id_from_line(
-            r#"{"type":"thread.started","thread_id":"019ef9e6-cc0a-79b3-9464-c2d16354e957"}"#,
-        )
-        .expect("thread id");
-        assert_eq!(thread_id, "019ef9e6-cc0a-79b3-9464-c2d16354e957");
-        assert!(codex_thread_id_from_line(r#"{"type":"turn.started"}"#).is_none());
-    }
 
     #[test]
     fn final_codex_agent_message_extracts_last_meaningful_message() {

@@ -23,23 +23,21 @@ use crate::ai::canvas::{
     AiWorkingCanvas, AI_CHROMA_KEY_HEX, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
-use crate::ai::codex::{clean_codex_option, CodexRunResult};
 use crate::ai::{
-    ai_autonomy_level, ai_retouch_asset_name, cleanup_project_agent_job, command_failure,
-    command_failure_with_required_output, emit_codex_progress, emit_job_file_progress,
-    emit_kept_job_dir, image_agent_autonomy_contract, now_id, project_or_temp_job_path,
-    reference_prompt_note, required_png_output_is_ready, safe_job_child_path,
-    sanitize_progress_line, should_keep_job_dir, spawn_output_reader, validate_reference_pngs,
-    watched_job_files, write_ai_job_prompt, write_reference_pngs, AiAutonomyLevel,
-    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageResult, WorkflowSourceImage, GENERATION_TIMEOUT, POLL_INTERVAL,
+    ai_autonomy_level, ai_retouch_asset_name, clean_option, cleanup_project_agent_job,
+    command_failure, command_failure_with_required_output, emit_codex_progress,
+    emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
+    project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
+    safe_job_child_path, sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
+    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_reference_pngs,
+    AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
+    DecoupledLayerResult, GeneratedImageResult, WorkflowSourceImage, GENERATION_TIMEOUT,
+    POLL_INTERVAL,
 };
 use crate::png::{is_png, png_data_url, png_dimensions_from_bytes, read_png_data_url};
 use crate::project::{
     add_asset, safe_stem, store_generated_png_asset, write_asset_file, ProjectAsset,
 };
-
-pub(crate) const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 
 #[derive(Debug, Default)]
 struct AntigravityCommandOptions {
@@ -174,7 +172,7 @@ fn run_antigravity_with_progress(
     workspace_path: &Path,
     job_path: &Path,
     required_output: Option<&str>,
-) -> Result<CodexRunResult, String> {
+) -> Result<AgentRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -307,7 +305,7 @@ fn run_antigravity_with_progress(
         .unwrap_or_else(|_| Vec::new());
     let thread_id = thread_id.lock().ok().and_then(|id| id.clone());
 
-    Ok(CodexRunResult {
+    Ok(AgentRunResult {
         output: Output {
             status,
             stdout,
@@ -344,8 +342,8 @@ fn antigravity_command_options(
     model: Option<String>,
     approval_mode: Option<String>,
 ) -> AntigravityCommandOptions {
-    let model = clean_codex_option(model).filter(|value| value != "auto");
-    let approval_mode = clean_codex_option(approval_mode);
+    let model = clean_option(model).filter(|value| value != "auto");
+    let approval_mode = clean_option(approval_mode);
     AntigravityCommandOptions {
         model,
         approval_mode,
@@ -737,7 +735,7 @@ fn run_antigravity(
     app: AppHandle,
     run_id: String,
     required_output: Option<&str>,
-) -> Result<CodexRunResult, String> {
+) -> Result<AgentRunResult, String> {
     let mut command = build_antigravity_command(
         antigravity_bin,
         workspace_path,
@@ -873,18 +871,13 @@ pub(crate) async fn generate_antigravity_image(
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
             Some(add_asset(
                 &project_dir,
-                ProjectAsset {
+                ProjectAsset::generated_png(
                     id,
-                    kind: "generated".into(),
-                    name: prompt.trim().chars().take(48).collect::<String>(),
                     relative_path,
-                    created_at: now_id(),
-                    prompt: Some(prompt.trim().into()),
-                    source_file_name: Some("result.png".into()),
-                    width: None,
-                    height: None,
-                    mime: Some("image/png".into()),
-                },
+                    prompt.trim().chars().take(48).collect::<String>(),
+                    Some(prompt.trim().into()),
+                    Some("result.png".into()),
+                ),
             )?)
         } else {
             None
@@ -1048,18 +1041,13 @@ pub(crate) async fn generate_antigravity_fill_image(
                     write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
                 Some(add_asset(
                     &project_dir,
-                    ProjectAsset {
+                    ProjectAsset::generated_png(
                         id,
-                        kind: "generated".into(),
-                        name: prompt.trim().chars().take(48).collect::<String>(),
                         relative_path,
-                        created_at: now_id(),
-                        prompt: Some(prompt.trim().into()),
-                        source_file_name: Some("result.png".into()),
-                        width: None,
-                        height: None,
-                        mime: Some("image/png".into()),
-                    },
+                        prompt.trim().chars().take(48).collect::<String>(),
+                        Some(prompt.trim().into()),
+                        Some("result.png".into()),
+                    ),
                 )?)
             } else {
                 None
@@ -1423,23 +1411,18 @@ pub(crate) async fn decouple_antigravity_image(
                         write_asset_file(project_dir, "generated", &name, "png", &bytes)?;
                     Some(add_asset(
                         project_dir,
-                        ProjectAsset {
+                        ProjectAsset::generated_png(
                             id,
-                            kind: "generated".into(),
-                            name: name.clone(),
                             relative_path,
-                            created_at: now_id(),
-                            prompt: Some(format!(
+                            name.clone(),
+                            Some(format!(
                                 "Extracted workflow asset from source: {user_prompt}"
                             )),
-                            source_file_name: Path::new(&layer.file)
+                            Path::new(&layer.file)
                                 .file_name()
                                 .and_then(|s| s.to_str())
                                 .map(str::to_string),
-                            width: None,
-                            height: None,
-                            mime: Some("image/png".into()),
-                        },
+                        ),
                     )?)
                 }
                 _ => None,
@@ -1571,21 +1554,16 @@ pub(crate) async fn compose_antigravity_workflow(
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
             Some(add_asset(
                 &project_dir,
-                ProjectAsset {
+                ProjectAsset::generated_png(
                     id,
-                    kind: "generated".into(),
-                    name: format!(
+                    relative_path,
+                    format!(
                         "Workflow: {}",
                         prompt.trim().chars().take(48).collect::<String>()
                     ),
-                    relative_path,
-                    created_at: now_id(),
-                    prompt: Some(prompt.trim().into()),
-                    source_file_name: Some("result.png".into()),
-                    width: None,
-                    height: None,
-                    mime: Some("image/png".into()),
-                },
+                    Some(prompt.trim().into()),
+                    Some("result.png".into()),
+                ),
             )?)
         } else {
             None
@@ -1609,6 +1587,7 @@ pub(crate) async fn compose_antigravity_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::ANTIGRAVITY_RUNS_DIR;
     use crate::ai::{TempJobDir, PAINTNODE_WORK_DIR};
 
     #[test]

@@ -17,9 +17,7 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Manager;
 
-use crate::ai::antigravity::ANTIGRAVITY_RUNS_DIR;
-use crate::ai::codex::CODEX_RUNS_DIR;
-use crate::ai::{now_id, TempJobDir, PAINTNODE_WORK_DIR};
+use crate::ai::{ensure_agent_run_dirs, now_id, TempJobDir, PAINTNODE_WORK_DIR};
 use crate::png::{encode_rgba_png, is_png, png_data_url_from_bytes};
 
 const PROJECT_MANIFEST: &str = "paintnode.project.json";
@@ -41,16 +39,39 @@ struct ProjectManifest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectAsset {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) name: String,
-    pub(crate) relative_path: String,
-    pub(crate) created_at: u128,
-    pub(crate) prompt: Option<String>,
-    pub(crate) source_file_name: Option<String>,
-    pub(crate) width: Option<u32>,
-    pub(crate) height: Option<u32>,
-    pub(crate) mime: Option<String>,
+    id: String,
+    kind: String,
+    name: String,
+    relative_path: String,
+    created_at: u128,
+    prompt: Option<String>,
+    source_file_name: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    mime: Option<String>,
+}
+
+impl ProjectAsset {
+    pub(crate) fn generated_png(
+        id: String,
+        relative_path: String,
+        name: String,
+        prompt: Option<String>,
+        source_file_name: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            kind: "generated".into(),
+            name,
+            relative_path,
+            created_at: now_id(),
+            prompt,
+            source_file_name,
+            width: None,
+            height: None,
+            mime: Some("image/png".into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,14 +136,7 @@ pub(crate) fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to create generated assets folder: {e}"))?;
     fs::create_dir_all(project_path.join("assets").join("imported"))
         .map_err(|e| format!("Failed to create imported assets folder: {e}"))?;
-    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join(CODEX_RUNS_DIR))
-        .map_err(|e| format!("Failed to create Codex runs folder: {e}"))?;
-    fs::create_dir_all(
-        project_path
-            .join(PAINTNODE_WORK_DIR)
-            .join(ANTIGRAVITY_RUNS_DIR),
-    )
-    .map_err(|e| format!("Failed to create Antigravity runs folder: {e}"))?;
+    ensure_agent_run_dirs(project_path)?;
     fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("trash"))
         .map_err(|e| format!("Failed to create project trash folder: {e}"))?;
     fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join("thumbnails"))
@@ -752,18 +766,7 @@ pub(crate) fn store_generated_png_asset(
     let (id, relative_path) = write_asset_file(project_dir, "generated", &name, "png", bytes)?;
     add_asset(
         project_dir,
-        ProjectAsset {
-            id,
-            kind: "generated".into(),
-            name,
-            relative_path,
-            created_at: now_id(),
-            prompt,
-            source_file_name,
-            width: None,
-            height: None,
-            mime: Some("image/png".into()),
-        },
+        ProjectAsset::generated_png(id, relative_path, name, prompt, source_file_name),
     )
 }
 

@@ -26,8 +26,6 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Emitter;
 
-use crate::ai::antigravity::ANTIGRAVITY_RUNS_DIR;
-use crate::ai::codex::{clean_codex_option, codex_agent_message_text, codex_thread_id_from_line};
 use crate::png::{
     file_has_png_signature, is_png, png_dimensions_from_bytes, read_png_data_url, PNG_SIGNATURE,
 };
@@ -42,6 +40,8 @@ pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 
 pub(crate) const PAINTNODE_WORK_DIR: &str = "paintnode";
+pub(crate) const CODEX_RUNS_DIR: &str = "codex-runs";
+pub(crate) const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +232,18 @@ pub(crate) fn now_id() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+pub(crate) fn ensure_agent_run_dirs(project_path: &Path) -> Result<(), String> {
+    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join(CODEX_RUNS_DIR))
+        .map_err(|e| format!("Failed to create Codex runs folder: {e}"))?;
+    fs::create_dir_all(
+        project_path
+            .join(PAINTNODE_WORK_DIR)
+            .join(ANTIGRAVITY_RUNS_DIR),
+    )
+    .map_err(|e| format!("Failed to create Antigravity runs folder: {e}"))?;
+    Ok(())
 }
 
 pub(crate) fn project_agent_run_dir(
@@ -497,6 +509,31 @@ pub(crate) fn json_string_at<'a>(value: &'a serde_json::Value, path: &[&str]) ->
     current.as_str()
 }
 
+pub(crate) fn codex_agent_message_text(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let item_type = json_string_at(&value, &["item", "type"]).unwrap_or("");
+    if !event_type.contains("item.completed") || !item_type.contains("agent_message") {
+        return None;
+    }
+    let text = json_string_at(&value, &["item", "text"])?.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+pub(crate) fn codex_thread_id_from_line(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if !event_type.contains("thread.started") {
+        return None;
+    }
+    let thread_id = json_string_at(&value, &["thread_id"])?.trim();
+    if thread_id.is_empty() {
+        None
+    } else {
+        Some(thread_id.to_string())
+    }
+}
+
 fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -704,6 +741,13 @@ pub(crate) fn emit_codex_progress(app: &AppHandle, run_id: &str, message: impl I
     );
 }
 
+#[derive(Debug)]
+pub(crate) struct AgentRunResult {
+    pub(crate) output: Output,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) satisfied_required_output: bool,
+}
+
 pub(crate) fn spawn_output_reader<R: Read + Send + 'static>(
     stream: R,
     sink: Arc<Mutex<Vec<u8>>>,
@@ -776,8 +820,14 @@ pub(crate) fn command_failure(prefix: &str, output: &Output) -> String {
     format!("{prefix} exited with {}:\n{detail}", output.status)
 }
 
+pub(crate) fn clean_option(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub(crate) fn ai_autonomy_level(value: Option<String>) -> AiAutonomyLevel {
-    match clean_codex_option(value).as_deref() {
+    match clean_option(value).as_deref() {
         Some("guided") => AiAutonomyLevel::Guided,
         Some("open") => AiAutonomyLevel::Open,
         Some("unmanaged") => AiAutonomyLevel::Unmanaged,
@@ -892,7 +942,7 @@ mod tests {
     use super::*;
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::canvas::ai_working_canvas_for_dimensions;
-    use crate::ai::codex::{codex_prompt, CODEX_RUNS_DIR};
+    use crate::ai::codex::codex_prompt;
 
     #[test]
     fn temp_job_dir_removes_directory_on_drop() {
@@ -977,6 +1027,16 @@ mod tests {
         assert!(!antigravity.contains("Document rectangle"));
         assert!(!antigravity.contains("chroma"));
         assert!(!antigravity.contains("#00ff00"));
+    }
+
+    #[test]
+    fn codex_thread_id_from_line_extracts_thread_started_event() {
+        let thread_id = codex_thread_id_from_line(
+            r#"{"type":"thread.started","thread_id":"019ef9e6-cc0a-79b3-9464-c2d16354e957"}"#,
+        )
+        .expect("thread id");
+        assert_eq!(thread_id, "019ef9e6-cc0a-79b3-9464-c2d16354e957");
+        assert!(codex_thread_id_from_line(r#"{"type":"turn.started"}"#).is_none());
     }
 
     #[test]
