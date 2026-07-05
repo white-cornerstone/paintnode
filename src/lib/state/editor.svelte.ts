@@ -1217,13 +1217,18 @@ export class EditorStore implements ToolHost {
 
     const session = this.makeSession(doc, sourceKey, hasSavedBaseline);
     this.documents = [...this.documents, session];
-    // Opening or creating a document starts on the Move tool (see setTool).
-    this.setTool('move');
+    // Start on the Move tool, but only after switchDocument has made the new
+    // session active (and discarded any in-progress transform on the old one) —
+    // setTool would otherwise commit that transform into the wrong document.
     if (focus) {
       ui.showDocument();
       this.switchDocument(session.id);
+      this.setTool('move');
     }
-    else if (!this.activeDocumentId) this.switchDocument(session.id);
+    else if (!this.activeDocumentId) {
+      this.switchDocument(session.id);
+      this.setTool('move');
+    }
     return session;
   }
 

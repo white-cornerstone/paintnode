@@ -630,13 +630,26 @@
         void handleNativeOpenFiles([]);
       });
       if (appWindow) {
-        void appWindow.isFullscreen().then((value) => {
-          isFullscreen = value;
-        });
-        // Native fullscreen enter/exit resizes the window; re-read the flag on resize.
-        void appWindow.onResized(async () => {
-          isFullscreen = await appWindow.isFullscreen();
-        }).then((unlisten) => {
+        // Native fullscreen enter/exit resizes the window, so re-read the flag on
+        // resize. Coalesce reads so at most one isFullscreen() IPC call is in flight
+        // (resize fires many times per drag) while the trailing loop still captures
+        // the final state after a burst.
+        let fsReadInFlight = false;
+        let fsReadQueued = false;
+        const refreshFullscreen = async () => {
+          if (fsReadInFlight) {
+            fsReadQueued = true;
+            return;
+          }
+          fsReadInFlight = true;
+          do {
+            fsReadQueued = false;
+            isFullscreen = await appWindow.isFullscreen();
+          } while (fsReadQueued);
+          fsReadInFlight = false;
+        };
+        void refreshFullscreen();
+        void appWindow.onResized(() => void refreshFullscreen()).then((unlisten) => {
           unlistenResize = unlisten;
         });
         void appWindow.onCloseRequested(async (event) => {
@@ -1077,7 +1090,8 @@
     min-height: 0;
   }
   .project-side {
-    width: 292px;
+    --project-side-w: 292px;
+    width: var(--project-side-w);
     flex: none;
     display: flex;
     flex-direction: column;
@@ -1381,7 +1395,7 @@
     max-height: min(520px, 100%);
   }
   .project-peek {
-    width: 292px;
+    width: var(--project-side-w);
   }
   .peek-content {
     min-height: 0;

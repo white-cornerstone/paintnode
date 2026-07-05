@@ -49,6 +49,8 @@
     height: 76px;
     display: block;
     flex: 0 0 auto;
+    border-radius: 22.5%;
+    overflow: hidden;
   }
   .identity h2 {
     margin: 4px 0 0;

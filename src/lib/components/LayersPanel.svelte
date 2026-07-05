@@ -78,7 +78,8 @@
     editor.selectAnnotation(null);
     // Leaving the synthetic annotation row: selecting a real layer must also
     // drop the auto-selected annotation tool, otherwise the layer stays unusable.
-    if (editor.activeToolId === 'annotation') editor.setTool('move');
+    // Skip while a transform is live so setTool doesn't commit it as a side effect.
+    if (editor.activeToolId === 'annotation' && !editor.freeTransform) editor.setTool('move');
     editor.bump();
   }
   function selectAnnotationLayer() {

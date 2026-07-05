@@ -79,21 +79,32 @@
   }
 
   // Free Transform: width/height are stored as scale factors and angle as radians,
-  // so typed values are converted back before updating the live session.
-  function setFreeTransformWidth(px: number): void {
+  // so typed values are converted back before updating the live session. Each
+  // handler reconciles the field back to the canonical value afterwards, so a
+  // cleared/zero/negative entry (which is ignored) snaps back instead of sticking.
+  function setFreeTransformWidth(input: HTMLInputElement): void {
     const t = editor.freeTransform;
-    if (!t || !Number.isFinite(px) || px <= 0) return;
-    editor.updateFreeTransform({ scaleX: px / t.sourceWidth });
+    if (!t) return;
+    const px = input.valueAsNumber;
+    if (Number.isFinite(px) && px > 0) editor.updateFreeTransform({ scaleX: px / t.sourceWidth });
+    const now = editor.freeTransform;
+    if (now) input.value = String(Math.round(now.sourceWidth * now.scaleX));
   }
-  function setFreeTransformHeight(px: number): void {
+  function setFreeTransformHeight(input: HTMLInputElement): void {
     const t = editor.freeTransform;
-    if (!t || !Number.isFinite(px) || px <= 0) return;
-    editor.updateFreeTransform({ scaleY: px / t.sourceHeight });
+    if (!t) return;
+    const px = input.valueAsNumber;
+    if (Number.isFinite(px) && px > 0) editor.updateFreeTransform({ scaleY: px / t.sourceHeight });
+    const now = editor.freeTransform;
+    if (now) input.value = String(Math.round(now.sourceHeight * now.scaleY));
   }
-  function setFreeTransformAngle(deg: number): void {
+  function setFreeTransformAngle(input: HTMLInputElement): void {
     const t = editor.freeTransform;
-    if (!t || !Number.isFinite(deg)) return;
-    editor.updateFreeTransform({ rotation: (deg * Math.PI) / 180 });
+    if (!t) return;
+    const deg = input.valueAsNumber;
+    if (Number.isFinite(deg)) editor.updateFreeTransform({ rotation: (deg * Math.PI) / 180 });
+    const now = editor.freeTransform;
+    if (now) input.value = String(Math.round((now.rotation * 180) / Math.PI));
   }
 </script>
 
@@ -195,7 +206,7 @@
           step="1"
           class="num"
           value={Math.round(editor.freeTransform.sourceWidth * editor.freeTransform.scaleX)}
-          onchange={(event) => setFreeTransformWidth(event.currentTarget.valueAsNumber)}
+          onchange={(event) => setFreeTransformWidth(event.currentTarget)}
         />
         <span class="unit">px</span>
       </label>
@@ -207,7 +218,7 @@
           step="1"
           class="num"
           value={Math.round(editor.freeTransform.sourceHeight * editor.freeTransform.scaleY)}
-          onchange={(event) => setFreeTransformHeight(event.currentTarget.valueAsNumber)}
+          onchange={(event) => setFreeTransformHeight(event.currentTarget)}
         />
         <span class="unit">px</span>
       </label>
@@ -218,7 +229,7 @@
           step="1"
           class="num"
           value={Math.round((editor.freeTransform.rotation * 180) / Math.PI)}
-          onchange={(event) => setFreeTransformAngle(event.currentTarget.valueAsNumber)}
+          onchange={(event) => setFreeTransformAngle(event.currentTarget)}
         />
         <span class="unit">°</span>
       </label>
