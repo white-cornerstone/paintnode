@@ -17,9 +17,10 @@ use serde::Serialize;
 
 use crate::ai::canvas::{
     ai_antigravity_image_capability, ai_codex_image_capability, ai_exact_working_canvas,
-    ai_fallback_aspect_ratios, mask_pixel_coverage, AiWorkingCanvas, PixelRect,
+    ai_fallback_aspect_ratios, ai_working_canvas_accepts_result_dimensions, mask_pixel_coverage,
+    AiWorkingCanvas, PixelRect,
 };
-use crate::png::{decode_png_rgba, encode_rgba_png};
+use crate::png::{decode_png_rgba, encode_rgba_png, is_png, png_dimensions_from_bytes};
 
 /// Enlargements beyond this factor lose enough detail to justify an AI
 /// restoration pass after a generate cover-crop.
@@ -1087,12 +1088,7 @@ struct PlacementManifestJson {
     parts: Vec<PlacementPartJson>,
 }
 
-/// Record the crop/paste-back coordinates as `placement.json` in the job folder.
-pub(crate) fn write_ai_placement_manifest(
-    job_path: &Path,
-    placement: &AiEditPlacement,
-    label: &str,
-) -> Result<(), String> {
+fn placement_manifest_json(placement: &AiEditPlacement, label: &str) -> Result<String, String> {
     let manifest = PlacementManifestJson {
         version: 1,
         provider: placement.provider.label().into(),
@@ -1113,10 +1109,85 @@ pub(crate) fn write_ai_placement_manifest(
             })
             .collect(),
     };
-    let json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("Failed to serialize {label} placement manifest: {e}"))?;
-    fs::write(job_path.join("placement.json"), json)
-        .map_err(|e| format!("Failed to write {label} placement manifest: {e}"))
+    serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize {label} placement manifest: {e}"))
+}
+
+/// Prepare a job folder for this placement and record it as `placement.json`.
+///
+/// When the folder already holds a previous attempt with the exact same
+/// placement, its part outputs are kept so the run can resume from the part
+/// that failed; any other leftover layout is wiped first. Returns whether a
+/// matching previous attempt was found.
+pub(crate) fn prepare_ai_job_dir_for_placement(
+    job_path: &Path,
+    placement: &AiEditPlacement,
+    label: &str,
+) -> Result<bool, String> {
+    let manifest_json = placement_manifest_json(placement, label)?;
+    let manifest_path = job_path.join("placement.json");
+    let resumable = fs::read_to_string(&manifest_path)
+        .map(|previous| previous == manifest_json)
+        .unwrap_or(false);
+    if !resumable && manifest_path.exists() {
+        fs::remove_dir_all(job_path)
+            .map_err(|e| format!("Failed to clear the previous {label} job folder: {e}"))?;
+        fs::create_dir_all(job_path)
+            .map_err(|e| format!("Failed to recreate the {label} job folder: {e}"))?;
+    }
+    fs::write(&manifest_path, &manifest_json)
+        .map_err(|e| format!("Failed to write {label} placement manifest: {e}"))?;
+    Ok(resumable)
+}
+
+/// A previous attempt's usable output for this part, normalized to the crop
+/// size: the canonical `part_result.png`, a raw `result.png` the CLI wrote
+/// before the failure, or the newest staged PNG under `generated/`.
+pub(crate) fn reuse_part_result(part_path: &Path, part: &AiEditPart) -> Option<Vec<u8>> {
+    let mut candidates = vec![
+        part_path.join("part_result.png"),
+        part_path.join("result.png"),
+    ];
+    if let Ok(entries) = fs::read_dir(part_path.join("generated")) {
+        let mut staged: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+            })
+            .collect();
+        staged.sort_by_key(|path| {
+            std::cmp::Reverse(
+                fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok(),
+            )
+        });
+        candidates.extend(staged);
+    }
+    let target = (part.crop.width, part.crop.height);
+    for candidate in candidates {
+        let Ok(bytes) = fs::read(&candidate) else {
+            continue;
+        };
+        if !is_png(&bytes) {
+            continue;
+        }
+        let Some(dimensions) = png_dimensions_from_bytes(&bytes) else {
+            continue;
+        };
+        if dimensions == target {
+            return Some(bytes);
+        }
+        if ai_working_canvas_accepts_result_dimensions(&part.working, dimensions) {
+            if let Ok(resized) = resize_png_to_dimensions(&bytes, target, "reused part result") {
+                return Some(resized);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1692,7 +1763,7 @@ mod tests {
         let placement =
             plan_ai_edit_placement(AiEditProvider::Codex, (6000, 480), &mask, "AI retouch")
                 .expect("placement");
-        write_ai_placement_manifest(job.path(), &placement, "AI retouch").expect("manifest");
+        prepare_ai_job_dir_for_placement(job.path(), &placement, "AI retouch").expect("manifest");
 
         let manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(job.path().join("placement.json")).expect("read manifest"),
@@ -1717,11 +1788,99 @@ mod tests {
             "AI retouch",
         )
         .expect("single placement");
-        write_ai_placement_manifest(job.path(), &single, "AI retouch").expect("manifest");
+        prepare_ai_job_dir_for_placement(job.path(), &single, "AI retouch").expect("manifest");
         let manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(job.path().join("placement.json")).expect("read manifest"),
         )
         .expect("parse manifest");
         assert_eq!(manifest["parts"][0]["dir"], ".");
+    }
+
+    #[test]
+    fn job_dir_resumes_on_matching_placement_and_wipes_on_mismatch() {
+        let job = crate::ai::TempJobDir::new("paintnode-placement-resume-test").expect("job dir");
+        let mask = mask_png_with_rects(6000, 480, &[(0, 0, 6000, 480)]);
+        let placement =
+            plan_ai_edit_placement(AiEditProvider::Codex, (6000, 480), &mask, "AI retouch")
+                .expect("placement");
+
+        // Fresh folder: nothing to resume.
+        assert!(
+            !prepare_ai_job_dir_for_placement(job.path(), &placement, "AI retouch").expect("fresh")
+        );
+        let part_dir = job.path().join("part-1");
+        fs::create_dir_all(&part_dir).expect("part dir");
+        let part_output = solid_png(1440, 480, [1, 2, 3, 255]);
+        fs::write(part_dir.join("part_result.png"), &part_output).expect("part result");
+
+        // Same placement again: previous part outputs survive.
+        assert!(
+            prepare_ai_job_dir_for_placement(job.path(), &placement, "AI retouch").expect("resume")
+        );
+        assert!(part_dir.join("part_result.png").exists());
+
+        // A different placement wipes the stale attempt.
+        let other_mask = mask_png_with_rects(6000, 480, &[(0, 0, 100, 480)]);
+        let other = plan_ai_edit_placement(
+            AiEditProvider::Codex,
+            (6000, 480),
+            &other_mask,
+            "AI retouch",
+        )
+        .expect("other placement");
+        assert!(
+            !prepare_ai_job_dir_for_placement(job.path(), &other, "AI retouch").expect("mismatch")
+        );
+        assert!(!part_dir.join("part_result.png").exists());
+    }
+
+    #[test]
+    fn reuse_part_result_accepts_valid_previous_outputs() {
+        let job = crate::ai::TempJobDir::new("paintnode-part-reuse-test").expect("job dir");
+        let part = ai_edit_part(
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 32,
+            },
+            "codex",
+        );
+
+        // Nothing on disk yet.
+        assert!(reuse_part_result(job.path(), &part).is_none());
+
+        // Invalid PNG bytes are rejected.
+        fs::write(job.path().join("result.png"), b"not a png").expect("write");
+        assert!(reuse_part_result(job.path(), &part).is_none());
+
+        // A raw result at a same-ratio resolution is normalized to crop size.
+        fs::write(
+            job.path().join("result.png"),
+            solid_png(128, 64, [9, 9, 9, 255]),
+        )
+        .expect("write");
+        let reused = reuse_part_result(job.path(), &part).expect("reuse resized");
+        let reused = decode_png_rgba(&reused, "reused").expect("decode");
+        assert_eq!(reused.dimensions(), (64, 32));
+
+        // The canonical normalized output wins over the raw result.
+        fs::write(
+            job.path().join("part_result.png"),
+            solid_png(64, 32, [4, 5, 6, 255]),
+        )
+        .expect("write");
+        let reused = reuse_part_result(job.path(), &part).expect("reuse exact");
+        let reused = decode_png_rgba(&reused, "reused").expect("decode");
+        assert_eq!(reused.get_pixel(0, 0).0, [4, 5, 6, 255]);
+
+        // Wrong-ratio leftovers are not reusable.
+        fs::remove_file(job.path().join("part_result.png")).expect("remove");
+        fs::write(
+            job.path().join("result.png"),
+            solid_png(64, 64, [9, 9, 9, 255]),
+        )
+        .expect("write");
+        assert!(reuse_part_result(job.path(), &part).is_none());
     }
 }

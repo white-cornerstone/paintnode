@@ -97,8 +97,10 @@
     const taskProjectPath = project.path;
     const docName = activeDoc.name || 'Untitled';
     const source = compositeToCanvas(activeDoc);
+    const runId = createRunId('upscale');
     const task = aiTasks.create({
       kind: 'upscale',
+      runId,
       title: 'AI Upscale',
       subtitle: `${scale}% · ${providerLabel(runOptions.provider)}`,
       progress: 'Preparing AI upscale input...',
@@ -115,7 +117,6 @@
     const executeTask = async () => {
       aiTasks.setProgress(task.id, 'Preparing AI upscale input...');
       editor.flash('Preparing AI upscale...');
-      const runId = createRunId('upscale');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
       progressListener.start(
         runId,

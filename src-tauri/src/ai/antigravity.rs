@@ -24,18 +24,19 @@ use crate::ai::canvas::{
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_upscale_target_dimensions,
     cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
-    resize_png_to_dimensions, write_ai_placement_manifest, AiEditComposer, AiEditProvider,
-    AI_RESTORE_UPSCALE_THRESHOLD,
+    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result, AiEditComposer,
+    AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_retouch_asset_name, clean_option, cleanup_project_agent_job,
-    command_failure, command_failure_with_required_output, emit_codex_part_progress,
-    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract,
-    now_id, project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
+    ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, clean_option,
+    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
+    command_failure_with_required_output, emit_codex_part_progress, emit_codex_progress,
+    emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
+    project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
     safe_job_child_path, sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
     validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_reference_pngs,
     AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
-    DecoupledLayerResult, GeneratedImageResult, WorkflowSourceImage, GENERATION_TIMEOUT,
+    DecoupledLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
     POLL_INTERVAL,
 };
 use crate::png::{is_png, png_data_url, png_dimensions_from_bytes, read_png_data_url};
@@ -170,7 +171,6 @@ fn emit_antigravity_transcript_progress(
 
 fn run_antigravity_with_progress(
     command: &mut Command,
-    timeout: Duration,
     app: AppHandle,
     run_id: String,
     workspace_path: &Path,
@@ -211,7 +211,6 @@ fn run_antigravity_with_progress(
         ));
     }
 
-    let start = Instant::now();
     let mut last_file_poll = Instant::now();
     let mut file_snapshot = watched_job_files(job_path);
     let mut transcript_path = None::<PathBuf>;
@@ -286,10 +285,11 @@ fn run_antigravity_with_progress(
             }
         }
 
-        if start.elapsed() >= timeout {
+        if ai_run_cancelled(&run_id) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("Generation timed out. The local command may still be busy, or it may be waiting for input.".into());
+            clear_ai_run_cancelled(&run_id);
+            return Err(AI_RUN_STOPPED_MESSAGE.into());
         }
 
         thread::sleep(POLL_INTERVAL);
@@ -742,7 +742,6 @@ fn run_antigravity(
     prompt: &str,
     options: &AntigravityCommandOptions,
     new_project: bool,
-    timeout: Duration,
     app: AppHandle,
     run_id: String,
     required_output: Option<&str>,
@@ -758,7 +757,6 @@ fn run_antigravity(
     );
     run_antigravity_with_progress(
         &mut command,
-        timeout,
         app,
         run_id,
         workspace_path,
@@ -837,7 +835,7 @@ fn antigravity_restore_image_details(
     let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
     fs::create_dir_all(restore_root)
         .map_err(|e| format!("Failed to create {label} restoration folder: {e}"))?;
-    write_ai_placement_manifest(restore_root, &placement, label)?;
+    let resumable = prepare_ai_job_dir_for_placement(restore_root, &placement, label)?;
     for (part_index, part) in placement.parts.iter().enumerate() {
         let part_path = match placement.part_dir_name(part_index) {
             Some(dir) => restore_root.join(dir),
@@ -845,6 +843,25 @@ fn antigravity_restore_image_details(
         };
         fs::create_dir_all(&part_path)
             .map_err(|e| format!("Failed to create {label} restoration part folder: {e}"))?;
+        if resumable {
+            if let Some(bytes) = reuse_part_result(&part_path, part) {
+                emit_codex_part_progress(
+                    app,
+                    run_id,
+                    part_index,
+                    placement.parts.len(),
+                    ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        "Reusing this part's previous result",
+                    ),
+                );
+                composer.apply_part_result(part, &bytes, label)?;
+                continue;
+            }
+            let _ = fs::remove_file(part_path.join("part_result.png"));
+            let _ = fs::remove_file(part_path.join("result.png"));
+        }
         let job_dir = antigravity_job_dir_label(workspace_path, &part_path);
         let inputs = composer.part_inputs(part, label)?;
         fs::write(part_path.join("source.png"), &inputs.source_png)
@@ -883,7 +900,6 @@ fn antigravity_restore_image_details(
             &prompt_text,
             options,
             allow_new_project && part_index == 0,
-            GENERATION_TIMEOUT,
             app.clone(),
             run_id.to_string(),
             Some("result.png"),
@@ -905,6 +921,8 @@ fn antigravity_restore_image_details(
         let (bytes, _result_dimensions, _normalized) =
             read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+        fs::write(part_path.join("part_result.png"), &bytes)
+            .map_err(|e| format!("Failed to record {label} part result: {e}"))?;
         composer.apply_part_result(part, &bytes, label)?;
     }
     composer.composed_png(label)
@@ -940,9 +958,10 @@ pub(crate) async fn generate_antigravity_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity", keep_job_dir)?;
+            project_or_temp_job_path(&app, &project_path, "antigravity", &run_id, keep_job_dir)?;
         let workspace_path = project_dir
             .as_ref()
             .map(PathBuf::as_path)
@@ -958,34 +977,44 @@ pub(crate) async fn generate_antigravity_image(
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity image generation")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
-        emit_codex_progress(&app, &run_id, "Starting local Antigravity");
-        let run = run_antigravity(
-            &antigravity_bin,
-            &workspace_path,
-            &job_path,
-            &prompt_text,
-            &options,
-            new_antigravity_project,
-            GENERATION_TIMEOUT,
-            app.clone(),
-            run_id.clone(),
-            Some("result.png"),
-        )?;
-        if !run.output.status.success() && !run.satisfied_required_output {
-            return Err(command_failure_with_required_output(
-                "Antigravity",
-                &run.output,
-                &job_path,
-                "result.png",
-            ));
-        }
-
         let result_path = job_path.join("result.png");
-        emit_codex_progress(&app, &run_id, "Reading Antigravity result");
-        let raw_bytes =
-            fs::read(&result_path).map_err(|e| format!("Failed to read Antigravity image: {e}"))?;
-        png_dimensions_from_bytes(&raw_bytes)
-            .ok_or_else(|| "Antigravity image PNG dimensions are invalid.".to_string())?;
+        // A failed previous attempt may have gotten past generation; reuse its
+        // image instead of paying for another one.
+        let salvaged_bytes = fs::read(&result_path)
+            .ok()
+            .filter(|bytes| is_png(bytes) && png_dimensions_from_bytes(bytes).is_some());
+        let raw_bytes = if let Some(bytes) = salvaged_bytes {
+            emit_codex_progress(&app, &run_id, "Reusing the previously generated image");
+            bytes
+        } else {
+            let _ = fs::remove_file(&result_path);
+            emit_codex_progress(&app, &run_id, "Starting local Antigravity");
+            let run = run_antigravity(
+                &antigravity_bin,
+                &workspace_path,
+                &job_path,
+                &prompt_text,
+                &options,
+                new_antigravity_project,
+                app.clone(),
+                run_id.clone(),
+                Some("result.png"),
+            )?;
+            if !run.output.status.success() && !run.satisfied_required_output {
+                return Err(command_failure_with_required_output(
+                    "Antigravity",
+                    &run.output,
+                    &job_path,
+                    "result.png",
+                ));
+            }
+            emit_codex_progress(&app, &run_id, "Reading Antigravity result");
+            let bytes = fs::read(&result_path)
+                .map_err(|e| format!("Failed to read Antigravity image: {e}"))?;
+            png_dimensions_from_bytes(&bytes)
+                .ok_or_else(|| "Antigravity image PNG dimensions are invalid.".to_string())?;
+            bytes
+        };
         let bytes = if let Some(target) = target_dimensions {
             let (mut bytes, source_dimensions, upscale_factor) =
                 cover_crop_png_to_dimensions(&raw_bytes, target, "Antigravity generated image")?;
@@ -998,12 +1027,6 @@ pub(crate) async fn generate_antigravity_image(
                         source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
                 );
-                fs::write(&result_path, &bytes).map_err(|e| {
-                    format!(
-                        "Failed to write normalized generated image at {}: {e}",
-                        result_path.display()
-                    )
-                })?;
             }
             if upscale_factor > AI_RESTORE_UPSCALE_THRESHOLD {
                 emit_codex_progress(
@@ -1108,9 +1131,16 @@ pub(crate) async fn generate_antigravity_fill_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity-fill", keep_job_dir)?;
+            project_or_temp_job_path(
+                &app,
+                &project_path,
+                "antigravity-fill",
+                &run_id,
+                keep_job_dir,
+            )?;
         let store_asset = store_asset.unwrap_or(true);
         let workspace_path = project_dir
             .as_ref()
@@ -1133,7 +1163,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             None,
             "Generative fill",
         )?;
-        write_ai_placement_manifest(&job_path, &placement, "Generative fill")?;
+        let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "Generative fill")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
         for (part_index, part) in placement.parts.iter().enumerate() {
@@ -1143,6 +1173,25 @@ pub(crate) async fn generate_antigravity_fill_image(
             };
             fs::create_dir_all(&part_path)
                 .map_err(|e| format!("Failed to create generative fill part folder: {e}"))?;
+            if resumable {
+                if let Some(bytes) = reuse_part_result(&part_path, part) {
+                    emit_codex_part_progress(
+                        &app,
+                        &run_id,
+                        part_index,
+                        placement.parts.len(),
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            "Reusing this part's previous result",
+                        ),
+                    );
+                    composer.apply_part_result(part, &bytes, "Generative fill")?;
+                    continue;
+                }
+                let _ = fs::remove_file(part_path.join("part_result.png"));
+                let _ = fs::remove_file(part_path.join("result.png"));
+            }
             let job_dir = antigravity_job_dir_label(&workspace_path, &part_path);
             let inputs = composer.part_inputs(part, "Generative fill")?;
             fs::write(part_path.join("source.png"), &inputs.source_png)
@@ -1190,7 +1239,6 @@ pub(crate) async fn generate_antigravity_fill_image(
                 &prompt_text,
                 &options,
                 new_antigravity_project && part_index == 0,
-                GENERATION_TIMEOUT,
                 app.clone(),
                 run_id.clone(),
                 Some("result.png"),
@@ -1233,6 +1281,8 @@ pub(crate) async fn generate_antigravity_fill_image(
                     ),
                 );
             }
+            fs::write(part_path.join("part_result.png"), &bytes)
+                .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
             composer.apply_part_result(part, &bytes, "Generative fill")?;
         }
 
@@ -1319,9 +1369,16 @@ pub(crate) async fn generate_antigravity_retouch_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity-retouch", keep_job_dir)?;
+            project_or_temp_job_path(
+                &app,
+                &project_path,
+                "antigravity-retouch",
+                &run_id,
+                keep_job_dir,
+            )?;
         let workspace_path = project_dir
             .as_ref()
             .map(PathBuf::as_path)
@@ -1343,7 +1400,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
             annotated_source_png.as_deref(),
             "AI retouch",
         )?;
-        write_ai_placement_manifest(&job_path, &placement, "AI retouch")?;
+        let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "AI retouch")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
         for (part_index, part) in placement.parts.iter().enumerate() {
@@ -1353,6 +1410,25 @@ pub(crate) async fn generate_antigravity_retouch_image(
             };
             fs::create_dir_all(&part_path)
                 .map_err(|e| format!("Failed to create AI retouch part folder: {e}"))?;
+            if resumable {
+                if let Some(bytes) = reuse_part_result(&part_path, part) {
+                    emit_codex_part_progress(
+                        &app,
+                        &run_id,
+                        part_index,
+                        placement.parts.len(),
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            "Reusing this part's previous result",
+                        ),
+                    );
+                    composer.apply_part_result(part, &bytes, "AI retouch")?;
+                    continue;
+                }
+                let _ = fs::remove_file(part_path.join("part_result.png"));
+                let _ = fs::remove_file(part_path.join("result.png"));
+            }
             let job_dir = antigravity_job_dir_label(&workspace_path, &part_path);
             let inputs = composer.part_inputs(part, "AI retouch")?;
             fs::write(part_path.join("source.png"), &inputs.source_png)
@@ -1422,7 +1498,6 @@ pub(crate) async fn generate_antigravity_retouch_image(
                 &prompt_text,
                 &options,
                 new_antigravity_project && part_index == 0,
-                GENERATION_TIMEOUT,
                 app.clone(),
                 run_id.clone(),
                 Some("result.png"),
@@ -1474,6 +1549,8 @@ pub(crate) async fn generate_antigravity_retouch_image(
                     ),
                 );
             }
+            fs::write(part_path.join("part_result.png"), &generated_bytes)
+                .map_err(|e| format!("Failed to record AI retouch part result: {e}"))?;
             composer.apply_part_result(part, &generated_bytes, "AI retouch")?;
         }
 
@@ -1549,9 +1626,16 @@ pub(crate) async fn upscale_antigravity_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity-upscale", keep_job_dir)?;
+            project_or_temp_job_path(
+                &app,
+                &project_path,
+                "antigravity-upscale",
+                &run_id,
+                keep_job_dir,
+            )?;
         let workspace_path = project_dir
             .as_ref()
             .map(PathBuf::as_path)
@@ -1650,9 +1734,16 @@ pub(crate) async fn decouple_antigravity_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity-decouple", keep_job_dir)?;
+            project_or_temp_job_path(
+                &app,
+                &project_path,
+                "antigravity-decouple",
+                &now_id().to_string(),
+                keep_job_dir,
+            )?;
         let workspace_path = project_dir
             .as_ref()
             .map(PathBuf::as_path)
@@ -1681,7 +1772,6 @@ pub(crate) async fn decouple_antigravity_image(
             &prompt_text,
             &options,
             new_antigravity_project,
-            GENERATION_TIMEOUT,
             app.clone(),
             run_id.clone(),
             Some("manifest.json"),
@@ -1823,9 +1913,16 @@ pub(crate) async fn compose_antigravity_workflow(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity-workflow", keep_job_dir)?;
+            project_or_temp_job_path(
+                &app,
+                &project_path,
+                "antigravity-workflow",
+                &now_id().to_string(),
+                keep_job_dir,
+            )?;
         let workspace_path = project_dir
             .as_ref()
             .map(PathBuf::as_path)
@@ -1872,7 +1969,6 @@ pub(crate) async fn compose_antigravity_workflow(
             &prompt_text,
             &options,
             new_antigravity_project,
-            GENERATION_TIMEOUT,
             app.clone(),
             run_id.clone(),
             Some("result.png"),

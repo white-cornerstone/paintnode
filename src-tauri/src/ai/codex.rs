@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 
 use tauri::AppHandle;
@@ -24,20 +23,20 @@ use crate::ai::canvas::{
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_upscale_target_dimensions,
     cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
-    resize_png_to_dimensions, write_ai_placement_manifest, AiEditComposer, AiEditProvider,
-    AI_RESTORE_UPSCALE_THRESHOLD,
+    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result, AiEditComposer,
+    AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, clean_option,
-    cleanup_project_agent_job, cleanup_project_job_enabled, codex_agent_message_text,
-    command_failure, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
-    emit_kept_job_dir, image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
-    project_agent_run_dir, reference_prompt_note, safe_job_child_path, safe_png_source_file_name,
-    should_keep_job_dir, spawn_output_reader, unique_child_path, validate_reference_pngs,
-    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, CODEX_RUNS_DIR, GENERATION_TIMEOUT,
-    POLL_INTERVAL,
+    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled, clean_option,
+    cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
+    codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
+    emit_codex_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
+    optional_project_dir, output_tail, project_agent_run_dir, project_agent_run_dir_for_run,
+    reference_prompt_note, safe_job_child_path, safe_png_source_file_name, should_keep_job_dir,
+    spawn_output_reader, unique_child_path, validate_reference_pngs, write_ai_job_prompt,
+    write_reference_pngs, AgentRunResult, AiAutonomyLevel, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageResult, TempJobDir,
+    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -328,6 +327,24 @@ fn copy_codex_cached_png_to_job(
     )
 }
 
+/// Newest valid staged PNG from a previous attempt of this job, if any.
+fn newest_previous_generated_png(job_path: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(job_path.join("generated")).ok()?;
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| file_has_png_signature(path) && png_dimensions(path).is_ok())
+        .collect();
+    candidates.sort_by_key(|path| {
+        std::cmp::Reverse(
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok(),
+        )
+    });
+    candidates.into_iter().next()
+}
+
 fn final_codex_agent_message_from_text(stdout: &str, stderr: &str) -> Option<String> {
     let mut messages = Vec::new();
     for line in stdout.lines().chain(stderr.lines()) {
@@ -359,7 +376,6 @@ fn final_codex_agent_message(output: &Output) -> Option<String> {
 
 fn run_codex_with_progress(
     command: &mut Command,
-    timeout: Duration,
     app: AppHandle,
     run_id: String,
 ) -> Result<AgentRunResult, String> {
@@ -397,7 +413,6 @@ fn run_codex_with_progress(
         ));
     }
 
-    let start = Instant::now();
     let status = loop {
         if let Some(status) = child
             .try_wait()
@@ -406,10 +421,11 @@ fn run_codex_with_progress(
             break status;
         }
 
-        if start.elapsed() >= timeout {
+        if ai_run_cancelled(&run_id) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("Generation timed out. Codex may still be busy, or the local command may be waiting for input.".into());
+            clear_ai_run_cancelled(&run_id);
+            return Err(AI_RUN_STOPPED_MESSAGE.into());
         }
 
         thread::sleep(POLL_INTERVAL);
@@ -442,7 +458,6 @@ fn run_codex_with_progress(
 
 fn run_codex_with_progress_until_cached_png(
     command: &mut Command,
-    timeout: Duration,
     app: AppHandle,
     run_id: String,
     cache_since: SystemTime,
@@ -482,7 +497,6 @@ fn run_codex_with_progress_until_cached_png(
         ));
     }
 
-    let start = Instant::now();
     let mut image_cached_before_exit = false;
     let status = loop {
         if let Some(status) = child
@@ -507,25 +521,11 @@ fn run_codex_with_progress_until_cached_png(
                 .map_err(|e| format!("Failed to stop Codex after image generation: {e}"))?;
         }
 
-        if start.elapsed() >= timeout {
-            let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-            if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, working)
-                .is_some()
-            {
-                image_cached_before_exit = true;
-                emit_codex_progress(
-                    &app,
-                    &run_id,
-                    "Codex timed out after image generation; normalizing PaintNode retouch result",
-                );
-                let _ = child.kill();
-                break child
-                    .wait()
-                    .map_err(|e| format!("Failed to stop Codex after image generation: {e}"))?;
-            }
+        if ai_run_cancelled(&run_id) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("Generation timed out. Codex may still be busy, or the local command may be waiting for input.".into());
+            clear_ai_run_cancelled(&run_id);
+            return Err(AI_RUN_STOPPED_MESSAGE.into());
         }
 
         thread::sleep(POLL_INTERVAL);
@@ -1258,13 +1258,14 @@ pub(crate) async fn generate_codex_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
         let cleanup_project_job = cleanup_project_job_enabled(&job_project_dir, keep_job_dir);
         let temp_job;
         let job_path = if let Some(job_project_dir) = &job_project_dir {
-            project_agent_run_dir(job_project_dir, CODEX_RUNS_DIR, "run")?
+            project_agent_run_dir_for_run(job_project_dir, CODEX_RUNS_DIR, "run", &run_id)?
         } else {
             temp_job = TempJobDir::new("paintnode-codex")?;
             temp_job.path().to_path_buf()
@@ -1277,33 +1278,17 @@ pub(crate) async fn generate_codex_image(
             "Codex image generation",
         )?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
-        emit_codex_progress(&app, &run_id, "Starting local Codex");
-        let codex_started_at = SystemTime::now();
-        let mut command = build_codex_command(
-            &codex_bin,
-            &job_path,
-            prompt.trim(),
-            &reference_paths,
-            &reference_names,
-            &codex_options,
-            autonomy,
-            true,
-        );
-        let mut run = run_codex_with_progress(
-            &mut command,
-            GENERATION_TIMEOUT,
-            app.clone(),
-            run_id.clone(),
-        )
-        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
-
-        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
-            emit_codex_progress(
-                &app,
-                &run_id,
-                "Codex progress stream unavailable; retrying generation",
-            );
-            let mut fallback = build_codex_command(
+        // A failed previous attempt may have gotten past generation; reuse its
+        // image instead of paying for another one.
+        let (recovered_source_path, staged_result_path) = if let Some(previous) =
+            newest_previous_generated_png(&job_path)
+        {
+            emit_codex_progress(&app, &run_id, "Reusing the previously generated image");
+            (previous.clone(), previous)
+        } else {
+            emit_codex_progress(&app, &run_id, "Starting local Codex");
+            let codex_started_at = SystemTime::now();
+            let mut command = build_codex_command(
                 &codex_bin,
                 &job_path,
                 prompt.trim(),
@@ -1311,45 +1296,62 @@ pub(crate) async fn generate_codex_image(
                 &reference_names,
                 &codex_options,
                 autonomy,
-                false,
+                true,
             );
-            run = run_codex_with_progress(
-                &mut fallback,
-                GENERATION_TIMEOUT,
-                app.clone(),
-                run_id.clone(),
-            )
-            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
-        }
+            let mut run = run_codex_with_progress(&mut command, app.clone(), run_id.clone())
+                .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
-        if !run.output.status.success() {
-            if let Some(message) = final_codex_agent_message(&run.output) {
-                return Err(format!("Codex did not generate an image.\n\n{message}"));
+            if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    "Codex progress stream unavailable; retrying generation",
+                );
+                let mut fallback = build_codex_command(
+                    &codex_bin,
+                    &job_path,
+                    prompt.trim(),
+                    &reference_paths,
+                    &reference_names,
+                    &codex_options,
+                    autonomy,
+                    false,
+                );
+                run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone())
+                    .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
             }
-            return Err(command_failure("Codex", &run.output));
-        }
 
-        let Some((recovered_source_path, staged_result_path)) =
-            copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
-        else {
-            if let Some(message) = final_codex_agent_message(&run.output) {
+            if !run.output.status.success() {
+                if let Some(message) = final_codex_agent_message(&run.output) {
+                    return Err(format!("Codex did not generate an image.\n\n{message}"));
+                }
+                return Err(command_failure("Codex", &run.output));
+            }
+
+            let Some(copied) =
+                copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
+            else {
+                if let Some(message) = final_codex_agent_message(&run.output) {
+                    return Err(format!(
+                        "Codex did not expose a generated image in its generated-images cache.\n\n{message}"
+                    ));
+                }
+
+                let stdout = output_tail(&run.output.stdout);
+                let stderr = output_tail(&run.output.stderr);
+                let detail = if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    "Codex completed without exposing a generated PNG that PaintNode could copy."
+                        .into()
+                };
                 return Err(format!(
-                    "Codex did not expose a generated image in its generated-images cache.\n\n{message}"
+                    "PaintNode could not find a new PNG in Codex's generated-images cache.\n\n{detail}"
                 ));
-            }
-
-            let stdout = output_tail(&run.output.stdout);
-            let stderr = output_tail(&run.output.stderr);
-            let detail = if !stderr.is_empty() {
-                stderr
-            } else if !stdout.is_empty() {
-                stdout
-            } else {
-                "Codex completed without exposing a generated PNG that PaintNode could copy.".into()
             };
-            return Err(format!(
-                "PaintNode could not find a new PNG in Codex's generated-images cache.\n\n{detail}"
-            ));
+            copied
         };
 
         emit_codex_progress(&app, &run_id, "Reading copied PNG");
@@ -1369,12 +1371,6 @@ pub(crate) async fn generate_codex_image(
                         source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
                 );
-                fs::write(&staged_result_path, &bytes).map_err(|e| {
-                    format!(
-                        "Failed to write normalized generated image at {}: {e}",
-                        staged_result_path.display()
-                    )
-                })?;
             }
             if upscale_factor > AI_RESTORE_UPSCALE_THRESHOLD {
                 emit_codex_progress(
@@ -1476,13 +1472,8 @@ fn run_codex_fill_part(
         options,
         true,
     );
-    let mut run = run_codex_with_progress(
-        &mut command,
-        GENERATION_TIMEOUT,
-        app.clone(),
-        run_id.to_string(),
-    )
-    .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+    let mut run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
+        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
     if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
         emit_codex_progress(
@@ -1499,13 +1490,8 @@ fn run_codex_fill_part(
             options,
             false,
         );
-        run = run_codex_with_progress(
-            &mut fallback,
-            GENERATION_TIMEOUT,
-            app.clone(),
-            run_id.to_string(),
-        )
-        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+        run = run_codex_with_progress(&mut fallback, app.clone(), run_id.to_string())
+            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
     }
 
     if !run.output.status.success() {
@@ -1577,7 +1563,6 @@ fn run_codex_retouch_part(
     );
     let mut image_run = run_codex_with_progress_until_cached_png(
         &mut command,
-        GENERATION_TIMEOUT,
         app.clone(),
         run_id.to_string(),
         codex_started_at,
@@ -1607,7 +1592,6 @@ fn run_codex_retouch_part(
         );
         image_run = run_codex_with_progress_until_cached_png(
             &mut fallback,
-            GENERATION_TIMEOUT,
             app.clone(),
             run_id.to_string(),
             codex_started_at,
@@ -1725,7 +1709,7 @@ fn codex_restore_image_details(
     let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
     fs::create_dir_all(restore_root)
         .map_err(|e| format!("Failed to create {label} restoration folder: {e}"))?;
-    write_ai_placement_manifest(restore_root, &placement, label)?;
+    let resumable = prepare_ai_job_dir_for_placement(restore_root, &placement, label)?;
     for (part_index, part) in placement.parts.iter().enumerate() {
         let part_path = match placement.part_dir_name(part_index) {
             Some(dir) => restore_root.join(dir),
@@ -1733,6 +1717,25 @@ fn codex_restore_image_details(
         };
         fs::create_dir_all(&part_path)
             .map_err(|e| format!("Failed to create {label} restoration part folder: {e}"))?;
+        if resumable {
+            if let Some(bytes) = reuse_part_result(&part_path, part) {
+                emit_codex_part_progress(
+                    app,
+                    run_id,
+                    part_index,
+                    placement.parts.len(),
+                    ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        "Reusing this part's previous result",
+                    ),
+                );
+                composer.apply_part_result(part, &bytes, label)?;
+                continue;
+            }
+            let _ = fs::remove_file(part_path.join("part_result.png"));
+            let _ = fs::remove_file(part_path.join("result.png"));
+        }
         let inputs = composer.part_inputs(part, label)?;
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
@@ -1772,6 +1775,8 @@ fn codex_restore_image_details(
             &part.working,
         )
         .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+        fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
+            .map_err(|e| format!("Failed to record {label} part result: {e}"))?;
         composer.apply_part_result(part, &part_run.normalized_png, label)?;
     }
     composer.composed_png(label)
@@ -1836,6 +1841,7 @@ pub(crate) async fn generate_codex_fill_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
@@ -1843,7 +1849,7 @@ pub(crate) async fn generate_codex_fill_image(
         let store_asset = store_asset.unwrap_or(true);
         let temp_job;
         let job_path = if let Some(job_project_dir) = &job_project_dir {
-            project_agent_run_dir(job_project_dir, CODEX_RUNS_DIR, "fill")?
+            project_agent_run_dir_for_run(job_project_dir, CODEX_RUNS_DIR, "fill", &run_id)?
         } else {
             temp_job = TempJobDir::new("paintnode-fill")?;
             temp_job.path().to_path_buf()
@@ -1862,7 +1868,7 @@ pub(crate) async fn generate_codex_fill_image(
             None,
             "Generative fill",
         )?;
-        write_ai_placement_manifest(&job_path, &placement, "Generative fill")?;
+        let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "Generative fill")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
         let mut recovered_source_path: Option<PathBuf> = None;
@@ -1873,6 +1879,25 @@ pub(crate) async fn generate_codex_fill_image(
             };
             fs::create_dir_all(&part_path)
                 .map_err(|e| format!("Failed to create generative fill part folder: {e}"))?;
+            if resumable {
+                if let Some(bytes) = reuse_part_result(&part_path, part) {
+                    emit_codex_part_progress(
+                        &app,
+                        &run_id,
+                        part_index,
+                        placement.parts.len(),
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            "Reusing this part's previous result",
+                        ),
+                    );
+                    composer.apply_part_result(part, &bytes, "Generative fill")?;
+                    continue;
+                }
+                let _ = fs::remove_file(part_path.join("part_result.png"));
+                let _ = fs::remove_file(part_path.join("result.png"));
+            }
             let inputs = composer.part_inputs(part, "Generative fill")?;
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
@@ -1935,6 +1960,8 @@ pub(crate) async fn generate_codex_fill_image(
                     ),
                 );
             }
+            fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
+                .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
             composer.apply_part_result(part, &part_run.normalized_png, "Generative fill")?;
             recovered_source_path = Some(part_run.recovered_source_path);
         }
@@ -2075,13 +2102,14 @@ pub(crate) async fn generate_codex_retouch_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
         let cleanup_project_job = cleanup_project_job_enabled(&job_project_dir, keep_job_dir);
         let temp_job;
         let job_path = if let Some(job_project_dir) = &job_project_dir {
-            project_agent_run_dir(job_project_dir, CODEX_RUNS_DIR, "retouch")?
+            project_agent_run_dir_for_run(job_project_dir, CODEX_RUNS_DIR, "retouch", &run_id)?
         } else {
             temp_job = TempJobDir::new("paintnode-retouch")?;
             temp_job.path().to_path_buf()
@@ -2100,7 +2128,7 @@ pub(crate) async fn generate_codex_retouch_image(
             annotated_source_png.as_deref(),
             "AI retouch",
         )?;
-        write_ai_placement_manifest(&job_path, &placement, "AI retouch")?;
+        let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "AI retouch")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
         let mut recovered_source_path: Option<PathBuf> = None;
@@ -2111,6 +2139,25 @@ pub(crate) async fn generate_codex_retouch_image(
             };
             fs::create_dir_all(&part_path)
                 .map_err(|e| format!("Failed to create AI retouch part folder: {e}"))?;
+            if resumable {
+                if let Some(bytes) = reuse_part_result(&part_path, part) {
+                    emit_codex_part_progress(
+                        &app,
+                        &run_id,
+                        part_index,
+                        placement.parts.len(),
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            "Reusing this part's previous result",
+                        ),
+                    );
+                    composer.apply_part_result(part, &bytes, "AI retouch")?;
+                    continue;
+                }
+                let _ = fs::remove_file(part_path.join("part_result.png"));
+                let _ = fs::remove_file(part_path.join("result.png"));
+            }
             let inputs = composer.part_inputs(part, "AI retouch")?;
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write AI retouch source image: {e}"))?;
@@ -2192,6 +2239,8 @@ pub(crate) async fn generate_codex_retouch_image(
                     ),
                 );
             }
+            fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
+                .map_err(|e| format!("Failed to record AI retouch part result: {e}"))?;
             composer.apply_part_result(part, &part_run.normalized_png, "AI retouch")?;
             recovered_source_path = Some(part_run.recovered_source_path);
         }
@@ -2277,13 +2326,14 @@ pub(crate) async fn upscale_codex_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
         let cleanup_project_job = cleanup_project_job_enabled(&job_project_dir, keep_job_dir);
         let temp_job;
         let job_path = if let Some(job_project_dir) = &job_project_dir {
-            project_agent_run_dir(job_project_dir, CODEX_RUNS_DIR, "upscale")?
+            project_agent_run_dir_for_run(job_project_dir, CODEX_RUNS_DIR, "upscale", &run_id)?
         } else {
             temp_job = TempJobDir::new("paintnode-upscale")?;
             temp_job.path().to_path_buf()
@@ -2383,6 +2433,7 @@ pub(crate) async fn decouple_codex_image(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let store_assets = store_assets.unwrap_or(true);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
@@ -2414,13 +2465,8 @@ pub(crate) async fn decouple_codex_image(
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
         let mut command =
             build_decouple_codex_command(&codex_bin, &job_path, user_prompt, &codex_options, true);
-        let mut run = run_codex_with_progress(
-            &mut command,
-            GENERATION_TIMEOUT,
-            app.clone(),
-            run_id.clone(),
-        )
-        .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+        let mut run = run_codex_with_progress(&mut command, app.clone(), run_id.clone())
+            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
         if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
             emit_codex_progress(
@@ -2435,13 +2481,8 @@ pub(crate) async fn decouple_codex_image(
                 &codex_options,
                 false,
             );
-            run = run_codex_with_progress(
-                &mut fallback,
-                GENERATION_TIMEOUT,
-                app.clone(),
-                run_id.clone(),
-            )
-            .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
+            run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone())
+                .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
 
         if !run.output.status.success() {
@@ -2587,6 +2628,7 @@ pub(crate) async fn compose_codex_workflow(
         } else {
             run_id
         };
+        clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
@@ -2641,12 +2683,7 @@ pub(crate) async fn compose_codex_workflow(
             autonomy,
             true,
         );
-        let mut run = run_codex_with_progress(
-            &mut command,
-            GENERATION_TIMEOUT,
-            app.clone(),
-            run_id.clone(),
-        )
+        let mut run = run_codex_with_progress(&mut command, app.clone(), run_id.clone())
         .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
 
         if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
@@ -2665,12 +2702,7 @@ pub(crate) async fn compose_codex_workflow(
                 autonomy,
                 false,
             );
-            run = run_codex_with_progress(
-                &mut fallback,
-                GENERATION_TIMEOUT,
-                app.clone(),
-                run_id.clone(),
-            )
+            run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone())
             .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
 

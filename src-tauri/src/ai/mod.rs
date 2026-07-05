@@ -6,6 +6,7 @@ pub(crate) mod codex;
 pub(crate) mod placement;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -17,6 +18,7 @@ use std::process::Output;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -35,6 +37,44 @@ use crate::project::{
 };
 
 pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
+
+pub(crate) const AI_RUN_STOPPED_MESSAGE: &str = "The task was stopped.";
+
+static CANCELLED_AI_RUNS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn cancelled_ai_runs() -> &'static Mutex<HashSet<String>> {
+    CANCELLED_AI_RUNS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Flag a running AI job for cancellation; its CLI process is killed at the
+/// runner's next poll and the task fails with [`AI_RUN_STOPPED_MESSAGE`].
+#[tauri::command]
+pub(crate) async fn cancel_ai_run(run_id: String) -> Result<(), String> {
+    let run_id = run_id.trim().to_string();
+    if run_id.is_empty() {
+        return Err("Missing run id.".into());
+    }
+    cancelled_ai_runs()
+        .lock()
+        .map_err(|_| "Cancellation registry is unavailable.".to_string())?
+        .insert(run_id);
+    Ok(())
+}
+
+/// Commands clear any stale flag when they start so a retry with the same run
+/// id is not stopped by the previous attempt's cancellation.
+pub(crate) fn clear_ai_run_cancelled(run_id: &str) {
+    if let Ok(mut runs) = cancelled_ai_runs().lock() {
+        runs.remove(run_id);
+    }
+}
+
+pub(crate) fn ai_run_cancelled(run_id: &str) -> bool {
+    cancelled_ai_runs()
+        .lock()
+        .map(|runs| runs.contains(run_id))
+        .unwrap_or(false)
+}
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -262,6 +302,23 @@ pub(crate) fn project_agent_run_dir(
         .join(PAINTNODE_WORK_DIR)
         .join(vendor_dir)
         .join(format!("{prefix}-{}", now_id()));
+    fs::create_dir_all(&run_dir).map_err(|e| format!("Failed to create AI job folder: {e}"))?;
+    Ok(run_dir)
+}
+
+/// Deterministic job folder for a run id: a retry of the same task lands in
+/// the same folder, so it can resume from the previous attempt's part results.
+pub(crate) fn project_agent_run_dir_for_run(
+    project_dir: &Path,
+    vendor_dir: &str,
+    prefix: &str,
+    run_id: &str,
+) -> Result<PathBuf, String> {
+    ensure_project_dirs(project_dir)?;
+    let run_dir = project_dir
+        .join(PAINTNODE_WORK_DIR)
+        .join(vendor_dir)
+        .join(format!("{prefix}-{}", safe_stem(run_id)));
     fs::create_dir_all(&run_dir).map_err(|e| format!("Failed to create AI job folder: {e}"))?;
     Ok(run_dir)
 }
@@ -710,7 +767,7 @@ fn generated_job_outputs(job_path: &Path, required_output: &str) -> Vec<String> 
                 && lower.ends_with(".png")
                 && !matches!(
                     lower.as_str(),
-                    "source.png" | "edit_target.png" | "mask.png"
+                    "source.png" | "edit_target.png" | "mask.png" | "part_result.png"
                 )
         })
         .collect::<Vec<_>>();
@@ -936,6 +993,7 @@ pub(crate) fn project_or_temp_job_path(
     app: &AppHandle,
     project_path: &Option<String>,
     prefix: &str,
+    run_id: &str,
     keep_job_dir: bool,
 ) -> Result<
     (
@@ -950,7 +1008,8 @@ pub(crate) fn project_or_temp_job_path(
     let project_dir = optional_project_dir(project_path);
     let job_project_dir = ai_job_project_dir(app, &project_dir, keep_job_dir)?;
     if let Some(job_project_dir) = &job_project_dir {
-        let run_dir = project_agent_run_dir(job_project_dir, ANTIGRAVITY_RUNS_DIR, prefix)?;
+        let run_dir =
+            project_agent_run_dir_for_run(job_project_dir, ANTIGRAVITY_RUNS_DIR, prefix, run_id)?;
         Ok((
             project_dir,
             Some(job_project_dir.clone()),

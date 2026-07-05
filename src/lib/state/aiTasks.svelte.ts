@@ -85,6 +85,11 @@ export interface AiTask {
    * do not survive a restart, so restored tasks always carry null.
    */
   documentId: string | null;
+  /**
+   * CLI run id, stable across retries so a retry reuses the same job folder
+   * and resumes from completed parts; also targets Stop for running tasks.
+   */
+  runId: string | null;
   detail: AiTaskDetail;
   partProgress: AiTaskPartProgress | null;
   retry: (() => Promise<void> | void) | null;
@@ -97,6 +102,7 @@ export interface AiTaskDraft {
   subtitle: string;
   progress: string;
   documentId?: string | null;
+  runId?: string | null;
   detail: AiTaskDetail;
 }
 
@@ -144,6 +150,7 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
     completedAt: typeof value.completedAt === 'number' ? value.completedAt : Date.now(),
     // Document ids are session-scoped; a restored task acts on the active document.
     documentId: null,
+    runId: typeof value.runId === 'string' ? value.runId : null,
     detail: detail as unknown as AiTaskDetail,
   };
 }
@@ -203,6 +210,7 @@ class AiTaskStore {
       startedAt: Date.now(),
       completedAt: null,
       documentId: draft.documentId ?? null,
+      runId: draft.runId ?? null,
       detail: draft.detail,
       partProgress: null,
       retry: null,
@@ -253,6 +261,13 @@ class AiTaskStore {
     const task = this.find(id);
     if (!task || task.detail.kind !== 'decouple') return;
     task.detail.notes = notes;
+    this.persistProject(task.projectPath);
+  }
+
+  setRunId(id: string, runId: string | null): void {
+    const task = this.find(id);
+    if (!task) return;
+    task.runId = runId;
     this.persistProject(task.projectPath);
   }
 

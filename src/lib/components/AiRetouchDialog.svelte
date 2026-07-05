@@ -118,8 +118,10 @@ Use these annotations as direct user instructions for the regions they point to.
     busy = true;
     const targetDocumentId = editor.activeDocumentId;
     const taskProjectPath = project.path;
+    const runId = createRunId('retouch');
     const task = aiTasks.create({
       kind: 'retouch',
+      runId,
       title: 'AI Retouch',
       subtitle: `${active.toolName} · ${providerLabel(runOptions.provider)}`,
       progress: 'Preparing AI retouch inputs...',
@@ -152,7 +154,6 @@ Use these annotations as direct user instructions for the regions they point to.
       if (maskLayer) maskLayer.userLocked = true;
       aiTasks.setProgress(task.id, 'Preparing AI retouch inputs...');
       editor.flash('Preparing AI retouch...');
-      const runId = createRunId('retouch');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
       progressListener.start(
         runId,

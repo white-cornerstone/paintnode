@@ -21,6 +21,7 @@
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
   import TasksPanel from './lib/components/TasksPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
+  import LongRunningTaskToast from './lib/components/LongRunningTaskToast.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip, truncatedTooltip } from './lib/actions/tooltip';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -912,6 +913,7 @@
   {#if !ui.workspaceFocusMode}
     <StatusBar />
   {/if}
+  <LongRunningTaskToast />
 </div>
 
 {#if ui.dialog === 'new'}

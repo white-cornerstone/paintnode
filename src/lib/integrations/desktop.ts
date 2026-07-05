@@ -403,6 +403,12 @@ export async function generateCodexRetouchImage(
   });
 }
 
+/** Ask a running AI job to stop; its CLI is killed and the task fails as stopped. */
+export async function cancelAiRun(runId: string): Promise<void> {
+  if (!isDesktop() || !runId.trim()) return;
+  await invoke('cancel_ai_run', { runId: runId.trim() });
+}
+
 export async function upscaleCodexImage(
   config: CodexGeneratorConfig,
   sourcePng: Uint8Array,
