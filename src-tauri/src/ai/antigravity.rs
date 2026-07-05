@@ -17,8 +17,9 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_retouch_editable_mask_png, read_png_bytes_cropped_to_ai_working_canvas,
-    validate_optional_target_dimensions, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    ai_protected_region_drift, ai_retouch_editable_mask_png, antigravity_output_target,
+    read_png_bytes_cropped_to_ai_working_canvas, validate_optional_target_dimensions,
+    AiWorkingCanvas, AI_PROTECTED_DRIFT_LIMIT, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
 use crate::ai::placement::{
@@ -458,9 +459,11 @@ fn antigravity_fill_prompt(
     geometry_note: &str,
     has_overview: bool,
     reference_names: &[String],
+    working: &AiWorkingCanvas,
 ) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let tool_call_note = antigravity_image_tool_call_note(job_dir, working);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
@@ -490,6 +493,8 @@ User fill prompt:
 
 {autonomy_contract}
 
+{tool_call_note}
+
 Required output:
 - Save exactly one PNG file as `{result_path}`.
 - Prefer the same pixel dimensions as `source.png`, `edit_target.png`, and `mask.png`.
@@ -512,6 +517,7 @@ fn antigravity_retouch_prompt(
     autonomy: AiAutonomyLevel,
     geometry_note: &str,
     has_overview: bool,
+    working: &AiWorkingCanvas,
 ) -> String {
     let annotation_note = if has_annotated_source {
         format!("- `{job_dir}/annotated_source.png`: optional guide image with PaintNode callouts. Use it only to locate the requested edit.")
@@ -531,6 +537,7 @@ fn antigravity_retouch_prompt(
     let extra_reference_note = reference_prompt_note(reference_names, &reference_prefix);
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let tool_call_note = antigravity_image_tool_call_note(job_dir, working);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
     let contract_note = if autonomy == AiAutonomyLevel::Unmanaged {
         format!(
@@ -565,6 +572,8 @@ User retouch prompt:
 
 {autonomy_contract}
 
+{tool_call_note}
+
 Required output:
 - Save exactly one PNG file as `{result_path}`.
 - Prefer the same pixel dimensions as `source.png` and `edit_target.png`.
@@ -583,6 +592,42 @@ Required output:
 Final response should be one short sentence confirming `{result_path}` was created."#
     )
 }
+
+/// How the agent should drive its image-generation tool for masked in-place
+/// edits: one base image plus a short instruction. Attaching the mask or
+/// extra frames pushes the image model from "edit this image" into "generate
+/// a new image from references", which loses the original framing entirely.
+/// The attached crop matches the model's real output grid for the working
+/// canvas's aspect label, so the note also pins the exact tool parameters.
+fn antigravity_image_tool_call_note(job_dir: &str, working: &AiWorkingCanvas) -> String {
+    let aspect_label = &working.aspect_label;
+    let target = antigravity_output_target(aspect_label, working.original_dimensions);
+    let target_note = match target {
+        Some((tier, (width, height))) => format!(
+            "\n- Set the image tool's aspect ratio parameter to `{aspect_label}` and its image size / resolution parameter to `{tier}`. That tier outputs {width}x{height} pixels — exactly the attached frame's ratio — so a faithful in-place edit maps 1:1 onto the frame with no cropping or reframing."
+        ),
+        None => String::new(),
+    };
+    format!(
+        r#"Image-generation tool call:
+- Give the image-generation tool `{job_dir}/edit_target.png` as its only base image and apply the edit to that image directly. Attach other files only when they are reference images explicitly listed above and the edit needs them.
+- Never attach `{job_dir}/mask.png` or `{job_dir}/paintnode_contract.txt` to the image tool. Read `{job_dir}/mask.png` yourself to locate the editable area, then describe that area in plain words in the tool instruction (for example "the jacket the person is wearing").{target_note}
+- Keep the tool instruction short: state the requested change, then require that everything else stays exactly the same — same framing, same composition, same camera, same crop.
+- Do not mention file names, pixel dimensions, aspect ratios, masks, or these rules inside the tool instruction text; the ratio and size belong in the tool's parameters only."#
+    )
+}
+
+/// Appended to the prompt when a candidate fails the protected-region drift
+/// gate: the model regenerated the scene instead of editing in place.
+const AI_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejected:
+- The previous candidate repainted pixels outside the editable mask, which means the scene was regenerated instead of edited in place. PaintNode discarded it.
+- This is a strict in-place edit of `edit_target.png`: apply the requested change only inside the white mask area and reproduce every pixel outside the mask exactly as it appears in `edit_target.png`.
+- Call the image-generation tool with `edit_target.png` as the only base image and a short instruction; do not attach the mask or any other file.
+- If the requested change cannot be honored inside the mask, make the closest faithful change the image tool allows rather than re-imagining the scene."#;
+
+/// How many candidates to accept-or-reject per part before failing the run:
+/// the first attempt plus one retry with the stricter in-place note.
+const AI_PROTECTED_DRIFT_MAX_ATTEMPTS: u32 = 2;
 
 fn antigravity_retouch_contract_text(
     job_dir: &str,
@@ -1211,15 +1256,15 @@ pub(crate) async fn generate_antigravity_fill_image(
             let (_reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "Generative fill")?;
             let geometry_note = ai_part_geometry_note(&placement, part_index);
-            let prompt_text = antigravity_fill_prompt(
+            let base_prompt_text = antigravity_fill_prompt(
                 prompt.trim(),
                 &job_dir,
                 autonomy,
                 &geometry_note,
                 has_overview,
                 &reference_names,
+                &part.working,
             );
-            write_ai_job_prompt(&part_path, &prompt_text, "Antigravity generative fill")?;
 
             emit_codex_part_progress(
                 &app,
@@ -1232,58 +1277,104 @@ pub(crate) async fn generate_antigravity_fill_image(
                     "Starting local Antigravity generative fill",
                 ),
             );
-            let run = run_antigravity(
-                &antigravity_bin,
-                &workspace_path,
-                &part_path,
-                &prompt_text,
-                &options,
-                new_antigravity_project && part_index == 0,
-                app.clone(),
-                run_id.clone(),
-                Some("result.png"),
-            )
-            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if !run.output.status.success() && !run.satisfied_required_output {
+            let result_path = part_path.join("result.png");
+            let mut generated_bytes = Vec::new();
+            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                let prompt_text = if attempt == 0 {
+                    base_prompt_text.clone()
+                } else {
+                    format!("{base_prompt_text}\n\n{AI_IN_PLACE_RETRY_NOTE}")
+                };
+                write_ai_job_prompt(&part_path, &prompt_text, "Antigravity generative fill")?;
+                let run = run_antigravity(
+                    &antigravity_bin,
+                    &workspace_path,
+                    &part_path,
+                    &prompt_text,
+                    &options,
+                    new_antigravity_project && part_index == 0 && attempt == 0,
+                    app.clone(),
+                    run_id.clone(),
+                    Some("result.png"),
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                if !run.output.status.success() && !run.satisfied_required_output {
+                    return Err(ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &command_failure_with_required_output(
+                            "Antigravity generative fill",
+                            &run.output,
+                            &part_path,
+                            "result.png",
+                        ),
+                    ));
+                }
+                let (bytes, result_dimensions, normalized_result) =
+                    read_png_bytes_cropped_to_ai_working_canvas(
+                        &result_path,
+                        &part.working,
+                        "Antigravity generative fill",
+                    )
+                    .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                if normalized_result {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Normalized Antigravity fill from {}x{} to {}x{}",
+                                result_dimensions.0,
+                                result_dimensions.1,
+                                part.crop.width,
+                                part.crop.height
+                            ),
+                        ),
+                    );
+                }
+                // A candidate that repainted protected pixels was regenerated
+                // from scratch rather than edited in place; pasting it back
+                // would leave visible seams at the mask boundary.
+                let drift = ai_protected_region_drift(
+                    &inputs.source_png,
+                    &inputs.mask_png,
+                    &bytes,
+                    "Antigravity generative fill",
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+                .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT);
+                let Some(drift) = drift else {
+                    generated_bytes = bytes;
+                    break;
+                };
+                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Rejected generative fill candidate: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}); retrying with stricter in-place instructions"
+                            ),
+                        ),
+                    );
+                    let _ = fs::remove_file(&result_path);
+                    continue;
+                }
                 return Err(ai_part_progress_message(
                     &placement,
                     part_index,
-                    &command_failure_with_required_output(
-                        "Antigravity generative fill",
-                        &run.output,
-                        &part_path,
-                        "result.png",
+                    &format!(
+                        "The AI image model regenerated the scene instead of editing it in place: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}). Try a smaller edit area or a simpler prompt."
                     ),
                 ));
             }
-            let result_path = part_path.join("result.png");
-            let (bytes, result_dimensions, normalized_result) =
-                read_png_bytes_cropped_to_ai_working_canvas(
-                    &result_path,
-                    &part.working,
-                    "Antigravity generative fill",
-                )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if normalized_result {
-                emit_codex_progress(
-                    &app,
-                    &run_id,
-                    ai_part_progress_message(
-                        &placement,
-                        part_index,
-                        &format!(
-                            "Normalized Antigravity fill from {}x{} to {}x{}",
-                            result_dimensions.0,
-                            result_dimensions.1,
-                            part.crop.width,
-                            part.crop.height
-                        ),
-                    ),
-                );
-            }
-            fs::write(part_path.join("part_result.png"), &bytes)
+            fs::write(part_path.join("part_result.png"), &generated_bytes)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
-            composer.apply_part_result(part, &bytes, "Generative fill")?;
+            composer.apply_part_result(part, &generated_bytes, "Generative fill")?;
         }
 
         let bytes = composer.composed_png("Generative fill")?;
@@ -1468,7 +1559,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
             .map_err(|e| format!("Failed to write AI retouch PaintNode contract: {e}"))?;
             let (_reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
-            let prompt_text = antigravity_retouch_prompt(
+            let base_prompt_text = antigravity_retouch_prompt(
                 prompt.trim(),
                 has_annotated_source,
                 has_reference,
@@ -1477,8 +1568,8 @@ pub(crate) async fn generate_antigravity_retouch_image(
                 autonomy,
                 &geometry_note,
                 has_overview,
+                &part.working,
             );
-            write_ai_job_prompt(&part_path, &prompt_text, "Antigravity AI retouch")?;
 
             emit_codex_part_progress(
                 &app,
@@ -1491,63 +1582,109 @@ pub(crate) async fn generate_antigravity_retouch_image(
                     "Starting local Antigravity AI retouch",
                 ),
             );
-            let run = run_antigravity(
-                &antigravity_bin,
-                &workspace_path,
-                &part_path,
-                &prompt_text,
-                &options,
-                new_antigravity_project && part_index == 0,
-                app.clone(),
-                run_id.clone(),
-                Some("result.png"),
-            )
-            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if !run.output.status.success() && !run.satisfied_required_output {
-                return Err(ai_part_progress_message(
-                    &placement,
-                    part_index,
-                    &command_failure_with_required_output(
-                        "Antigravity AI retouch",
-                        &run.output,
-                        &part_path,
-                        "result.png",
-                    ),
-                ));
-            }
             let result_path = part_path.join("result.png");
-            emit_codex_progress(
-                &app,
-                &run_id,
-                ai_part_progress_message(
-                    &placement,
-                    part_index,
-                    "Reading Antigravity AI retouch result",
-                ),
-            );
-            let (generated_bytes, result_dimensions, normalized_result) =
-                read_png_bytes_cropped_to_ai_working_canvas(
-                    &result_path,
-                    &part.working,
-                    "AI retouch candidate",
+            let mut generated_bytes = Vec::new();
+            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                let prompt_text = if attempt == 0 {
+                    base_prompt_text.clone()
+                } else {
+                    format!("{base_prompt_text}\n\n{AI_IN_PLACE_RETRY_NOTE}")
+                };
+                write_ai_job_prompt(&part_path, &prompt_text, "Antigravity AI retouch")?;
+                let run = run_antigravity(
+                    &antigravity_bin,
+                    &workspace_path,
+                    &part_path,
+                    &prompt_text,
+                    &options,
+                    new_antigravity_project && part_index == 0 && attempt == 0,
+                    app.clone(),
+                    run_id.clone(),
+                    Some("result.png"),
                 )
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if normalized_result {
+                if !run.output.status.success() && !run.satisfied_required_output {
+                    return Err(ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &command_failure_with_required_output(
+                            "Antigravity AI retouch",
+                            &run.output,
+                            &part_path,
+                            "result.png",
+                        ),
+                    ));
+                }
                 emit_codex_progress(
                     &app,
                     &run_id,
                     ai_part_progress_message(
                         &placement,
                         part_index,
-                        &format!(
-                            "Normalized Antigravity AI retouch from {}x{} to {}x{}",
-                            result_dimensions.0,
-                            result_dimensions.1,
-                            part.crop.width,
-                            part.crop.height
-                        ),
+                        "Reading Antigravity AI retouch result",
                     ),
                 );
+                let (bytes, result_dimensions, normalized_result) =
+                    read_png_bytes_cropped_to_ai_working_canvas(
+                        &result_path,
+                        &part.working,
+                        "AI retouch candidate",
+                    )
+                    .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                if normalized_result {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Normalized Antigravity AI retouch from {}x{} to {}x{}",
+                                result_dimensions.0,
+                                result_dimensions.1,
+                                part.crop.width,
+                                part.crop.height
+                            ),
+                        ),
+                    );
+                }
+                // A candidate that repainted protected pixels was regenerated
+                // from scratch rather than edited in place; pasting it back
+                // would leave visible seams at the mask boundary.
+                let drift = ai_protected_region_drift(
+                    &inputs.source_png,
+                    &inputs.mask_png,
+                    &bytes,
+                    "AI retouch candidate",
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+                .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT);
+                let Some(drift) = drift else {
+                    generated_bytes = bytes;
+                    break;
+                };
+                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Rejected AI retouch candidate: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}); retrying with stricter in-place instructions"
+                            ),
+                        ),
+                    );
+                    let _ = fs::remove_file(&result_path);
+                    continue;
+                }
+                return Err(ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    &format!(
+                        "The AI image model regenerated the scene instead of editing it in place: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}). Try a smaller edit area or a simpler prompt."
+                    ),
+                ));
             }
             fs::write(part_path.join("part_result.png"), &generated_bytes)
                 .map_err(|e| format!("Failed to record AI retouch part result: {e}"))?;
@@ -2024,6 +2161,7 @@ pub(crate) async fn compose_antigravity_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::canvas::ai_exact_working_canvas;
     use crate::ai::ANTIGRAVITY_RUNS_DIR;
     use crate::ai::{TempJobDir, PAINTNODE_WORK_DIR};
 
@@ -2160,6 +2298,7 @@ mod tests {
             AiAutonomyLevel::Low,
             geometry_note,
             true,
+            &ai_exact_working_canvas((1386, 588), "21:9"),
         );
         assert!(retouch.contains("result.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/part-1/source.png"));
@@ -2192,6 +2331,20 @@ mod tests {
         assert!(!retouch.contains(
             "Do not create, edit, copy, verify, or delete files in the working directory"
         ));
+        // The agent must drive its image tool with one base image and a short
+        // instruction — attaching the mask makes the model regenerate the scene.
+        assert!(retouch.contains("Image-generation tool call:"));
+        assert!(retouch.contains(
+            "`paintnode/antigravity-runs/job-1/part-1/edit_target.png` as its only base image"
+        ));
+        assert!(retouch
+            .contains("Never attach `paintnode/antigravity-runs/job-1/part-1/mask.png`"));
+        assert!(retouch.contains("same framing, same composition, same camera, same crop"));
+        // The tool parameters must target the model's real output grid: the
+        // smallest tier covering the 1386x588 crop at "21:9" is 1K (1584x672).
+        assert!(retouch.contains("aspect ratio parameter to `21:9`"));
+        assert!(retouch.contains("image size / resolution parameter to `1K`"));
+        assert!(retouch.contains("outputs 1584x672 pixels"));
 
         let single_retouch = antigravity_retouch_prompt(
             "remove glare",
@@ -2202,6 +2355,7 @@ mod tests {
             AiAutonomyLevel::Low,
             "PaintNode image geometry:\n- The attached images are the full 1280x800 PaintNode document.",
             false,
+            &ai_exact_working_canvas((1247, 696), "16:9"),
         );
         assert!(!single_retouch.contains("overview.png"));
         assert!(single_retouch.contains("the full 1280x800 PaintNode document"));
@@ -2241,5 +2395,20 @@ mod tests {
         assert!(workflow.contains("paintnode/antigravity-runs/job-2/inputs/"));
         assert!(!workflow.contains("Codex's generated-images cache"));
         assert!(!workflow.contains("Do not create, edit, or delete files in the working directory"));
+
+        let fill = antigravity_fill_prompt(
+            "add a boat",
+            "paintnode/antigravity-runs/job-3",
+            AiAutonomyLevel::Low,
+            "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document.",
+            false,
+            &[],
+            &ai_exact_working_canvas((600, 600), "1:1"),
+        );
+        assert!(fill.contains("Image-generation tool call:"));
+        assert!(fill.contains(
+            "`paintnode/antigravity-runs/job-3/edit_target.png` as its only base image"
+        ));
+        assert!(fill.contains("Never attach `paintnode/antigravity-runs/job-3/mask.png`"));
     }
 }
