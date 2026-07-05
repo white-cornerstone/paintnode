@@ -76,6 +76,9 @@
   function select(l: Layer) {
     editor.doc?.setActive(l.id);
     editor.selectAnnotation(null);
+    // Leaving the synthetic annotation row: selecting a real layer must also
+    // drop the auto-selected annotation tool, otherwise the layer stays unusable.
+    if (editor.activeToolId === 'annotation') editor.setTool('move');
     editor.bump();
   }
   function selectAnnotationLayer() {

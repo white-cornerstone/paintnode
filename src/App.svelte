@@ -101,6 +101,8 @@
 
   const desktop = isDesktop();
   const appWindow = desktop ? getCurrentWindow() : null;
+  // Hide the custom titlebar while the OS window is in native fullscreen.
+  let isFullscreen = $state(false);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
 
@@ -192,6 +194,14 @@
 
   function showProjectSide(): void {
     panels.setProjectCollapsed(false);
+  }
+
+  // Which project-side panel is peeked open as a flyout while the column stays collapsed.
+  let peekedProjectPanel = $state<'project' | 'tasks' | null>(null);
+
+  function peekProjectPanel(id: 'project' | 'tasks'): void {
+    panels.setProjectCollapsed(true);
+    peekedProjectPanel = peekedProjectPanel === id ? null : id;
   }
 
   // Header collapse state of the two stacked project-side panels; the divider
@@ -607,6 +617,7 @@
     }
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
+    let unlistenResize: UnlistenFn | null = null;
     let unlistenNativeOpenFiles: UnlistenFn | null = null;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
@@ -619,6 +630,15 @@
         void handleNativeOpenFiles([]);
       });
       if (appWindow) {
+        void appWindow.isFullscreen().then((value) => {
+          isFullscreen = value;
+        });
+        // Native fullscreen enter/exit resizes the window; re-read the flag on resize.
+        void appWindow.onResized(async () => {
+          isFullscreen = await appWindow.isFullscreen();
+        }).then((unlisten) => {
+          unlistenResize = unlisten;
+        });
         void appWindow.onCloseRequested(async (event) => {
           if (quitApproved) return;
           event.preventDefault();
@@ -653,6 +673,7 @@
     return () => {
       unlistenMenu?.();
       unlistenClose?.();
+      unlistenResize?.();
       unlistenNativeOpenFiles?.();
       unlistenNativeDrops.forEach((unlisten) => unlisten());
       window.removeEventListener('beforeunload', onBeforeUnload);
@@ -664,6 +685,10 @@
 
   $effect(() => {
     if (!panels.value.rightCollapsed) peekedPanel = null;
+  });
+
+  $effect(() => {
+    if (!panels.value.projectCollapsed) peekedProjectPanel = null;
   });
 </script>
 
@@ -746,7 +771,7 @@
 {/snippet}
 
 <div class="app" class:workspace-focus={ui.workspaceFocusMode}>
-  {#if desktop}
+  {#if desktop && !isFullscreen}
     <div class="desktop-titlebar" data-tauri-drag-region use:titlebarDrag>
       <div class="desktop-title">PaintNode</div>
       {#if appUpdater.available}
@@ -762,7 +787,7 @@
         </button>
       {/if}
     </div>
-  {:else if !ui.workspaceFocusMode}
+  {:else if !desktop && !ui.workspaceFocusMode}
     <MenuBar />
   {/if}
   <div class="middle">
@@ -857,21 +882,34 @@
                 ><Icon svg={ChevronDoubleLeft} size={16} /></button>
                 <button
                   class="rail-icon"
-                  onclick={showProjectSide}
-                  use:tooltip={{ text: 'Tasks', placement: 'left' }}
-                  aria-label="Tasks"
-                >
-                  <Icon svg={TaskList} size={18} />
-                </button>
-                <button
-                  class="rail-icon"
-                  onclick={showProjectSide}
+                  class:active={peekedProjectPanel === 'project'}
+                  onclick={() => peekProjectPanel('project')}
                   use:tooltip={{ text: 'Project', placement: 'left' }}
                   aria-label="Project"
+                  aria-pressed={peekedProjectPanel === 'project'}
                 >
                   <Icon svg={Folder} size={18} />
                 </button>
+                <button
+                  class="rail-icon"
+                  class:active={peekedProjectPanel === 'tasks'}
+                  onclick={() => peekProjectPanel('tasks')}
+                  use:tooltip={{ text: 'Tasks', placement: 'left' }}
+                  aria-label="Tasks"
+                  aria-pressed={peekedProjectPanel === 'tasks'}
+                >
+                  <Icon svg={TaskList} size={18} />
+                </button>
               </div>
+              {#if peekedProjectPanel === 'tasks'}
+                <div class="peek-popover project-peek">
+                  <TasksPanel grow />
+                </div>
+              {:else if peekedProjectPanel === 'project'}
+                <div class="peek-popover project-peek">
+                  <ProjectPanel />
+                </div>
+              {/if}
             {:else}
               <div class="column-bar">
                 <button
@@ -1050,6 +1088,9 @@
   }
   .project-side.collapsed {
     width: 42px;
+    position: relative;
+    overflow: visible;
+    z-index: 20;
   }
   .right {
     width: var(--rightpanel-w);
@@ -1139,6 +1180,10 @@
   }
   .rail-icon:hover {
     background: var(--bg-elevated);
+  }
+  .rail-icon.active {
+    background: color-mix(in srgb, var(--bg-elevated) 72%, var(--accent) 28%);
+    color: var(--text-bright);
   }
   .panel-stack {
     flex: 1;
@@ -1334,6 +1379,9 @@
   }
   .peek-popover.layers {
     max-height: min(520px, 100%);
+  }
+  .project-peek {
+    width: 292px;
   }
   .peek-content {
     min-height: 0;

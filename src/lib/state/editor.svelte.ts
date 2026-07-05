@@ -296,7 +296,7 @@ export class EditorStore implements ToolHost {
   background = $state<RGB>({ r: 255, g: 255, b: 255 });
 
   brushSize = $state(24);
-  brushHardness = $state(0.85);
+  brushHardness = $state(1);
   brushOpacity = $state(1);
   aiRetouchBrushFeather = $state(24);
   tolerance = $state(24);
@@ -1217,6 +1217,8 @@ export class EditorStore implements ToolHost {
 
     const session = this.makeSession(doc, sourceKey, hasSavedBaseline);
     this.documents = [...this.documents, session];
+    // Opening or creating a document starts on the Move tool (see setTool).
+    this.setTool('move');
     if (focus) {
       ui.showDocument();
       this.switchDocument(session.id);
