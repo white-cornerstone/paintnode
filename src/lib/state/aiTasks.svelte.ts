@@ -4,7 +4,7 @@ import type { WorkflowSourceImage } from '../integrations/desktop';
 
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
 
-export type AiTaskKind = 'generate' | 'retouch' | 'decouple';
+export type AiTaskKind = 'generate' | 'retouch' | 'upscale' | 'decouple';
 export type AiTaskStatus = 'running' | 'completed' | 'error';
 
 export interface GenerateTaskDetail {
@@ -41,6 +41,15 @@ export interface RetouchTaskDetail {
   references?: WorkflowSourceImage[];
 }
 
+export interface UpscaleTaskDetail {
+  kind: 'upscale';
+  providerLabel: string;
+  scalePercent: number;
+  sourceName: string;
+  /** Preview of the flattened source. Stripped before persistence. */
+  sourcePreview: string;
+}
+
 export interface DecoupleTaskDetail {
   kind: 'decouple';
   providerLabel: string;
@@ -52,7 +61,7 @@ export interface DecoupleTaskDetail {
   notes: string;
 }
 
-export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | DecoupleTaskDetail;
+export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail;
 
 export interface AiTask {
   id: string;
@@ -107,7 +116,7 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
   if (!isRecord(value)) return null;
   const kind = value.kind;
   const status = value.status;
-  if (kind !== 'generate' && kind !== 'retouch' && kind !== 'decouple') return null;
+  if (kind !== 'generate' && kind !== 'retouch' && kind !== 'upscale' && kind !== 'decouple') return null;
   if (status !== 'running' && status !== 'completed' && status !== 'error') return null;
   const detail = value.detail;
   if (!isRecord(detail) || detail.kind !== kind) return null;
@@ -133,6 +142,9 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
 }
 
 function storedDetailFrom(detail: AiTaskDetail): AiTaskDetail {
+  if (detail.kind === 'upscale') {
+    return { ...detail, sourcePreview: '' };
+  }
   if (detail.kind === 'generate') {
     const { references, referencePreviews, ...stored } = detail;
     return {

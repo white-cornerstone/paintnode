@@ -16,14 +16,16 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_codex_working_canvas_for_dimensions, ai_retouch_editable_mask_png,
-    ai_working_canvas_accepts_result_dimensions, read_png_bytes_cropped_to_ai_working_canvas,
-    validate_optional_target_dimensions, AiWorkingCanvas, AI_CHROMA_KEY_HEX,
-    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
+    ai_retouch_editable_mask_png, ai_working_canvas_accepts_result_dimensions,
+    read_png_bytes_cropped_to_ai_working_canvas, validate_optional_target_dimensions,
+    AiWorkingCanvas, AI_CHROMA_KEY_HEX, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
 use crate::ai::placement::{
-    ai_part_geometry_note, ai_part_progress_message, plan_ai_edit_placement,
-    write_ai_placement_manifest, AiEditComposer, AiEditProvider,
+    ai_part_geometry_note, ai_part_progress_message, ai_upscale_target_dimensions,
+    cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
+    resize_png_to_dimensions, write_ai_placement_manifest, AiEditComposer, AiEditProvider,
+    AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, clean_option,
@@ -614,7 +616,6 @@ fn apply_codex_command_options(command: &mut Command, options: &CodexCommandOpti
 pub(crate) fn codex_prompt(
     user_prompt: &str,
     autonomy: AiAutonomyLevel,
-    _working: Option<&AiWorkingCanvas>,
     reference_names: &[String],
 ) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
@@ -637,6 +638,7 @@ User image prompt:
 
 Requirements:
 - Create exactly one image from the user prompt.
+- Use the largest image size / highest output resolution your image-generation tool supports.
 {managed_method_requirements}
 - Do not ask follow-up questions; make reasonable visual choices from the prompt.
 - If the prompt needs safety or quality adjustment, make a reasonable compliant rephrasing and continue with image generation.
@@ -653,7 +655,6 @@ fn build_codex_command(
     reference_names: &[String],
     options: &CodexCommandOptions,
     autonomy: AiAutonomyLevel,
-    working: Option<&AiWorkingCanvas>,
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
@@ -674,23 +675,15 @@ fn build_codex_command(
         command.arg("--json");
     }
     if reference_paths.is_empty() {
-        command.arg(codex_prompt(
-            prompt.trim(),
-            autonomy,
-            working,
-            reference_names,
-        ));
+        command.arg(codex_prompt(prompt.trim(), autonomy, reference_names));
     } else {
         command.arg("-i");
         for path in reference_paths {
             command.arg(path);
         }
-        command.arg("--").arg(codex_prompt(
-            prompt.trim(),
-            autonomy,
-            working,
-            reference_names,
-        ));
+        command
+            .arg("--")
+            .arg(codex_prompt(prompt.trim(), autonomy, reference_names));
     }
     command
         .env_remove("OPENAI_API_KEY")
@@ -1260,7 +1253,6 @@ pub(crate) async fn generate_codex_image(
         let codex_bin = configured_or_default_codex_bin(bin)?;
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
-        let working = target_dimensions.map(ai_codex_working_canvas_for_dimensions);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
         } else {
@@ -1281,7 +1273,7 @@ pub(crate) async fn generate_codex_image(
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
         write_ai_job_prompt(
             &job_path,
-            &codex_prompt(prompt.trim(), autonomy, working.as_ref(), &reference_names),
+            &codex_prompt(prompt.trim(), autonomy, &reference_names),
             "Codex image generation",
         )?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
@@ -1295,7 +1287,6 @@ pub(crate) async fn generate_codex_image(
             &reference_names,
             &codex_options,
             autonomy,
-            working.as_ref(),
             true,
         );
         let mut run = run_codex_with_progress(
@@ -1320,7 +1311,6 @@ pub(crate) async fn generate_codex_image(
                 &reference_names,
                 &codex_options,
                 autonomy,
-                working.as_ref(),
                 false,
             );
             run = run_codex_with_progress(
@@ -1363,35 +1353,53 @@ pub(crate) async fn generate_codex_image(
         };
 
         emit_codex_progress(&app, &run_id, "Reading copied PNG");
-        let (bytes, result_dimensions, normalized_result) = if let Some(working) = &working {
-            read_png_bytes_cropped_to_ai_working_canvas(
-                &staged_result_path,
-                working,
-                "Codex generated image",
-            )?
-        } else {
-            let bytes = fs::read(&staged_result_path)
-                .map_err(|e| format!("Failed to read generated image: {e}"))?;
-            let dimensions = png_dimensions_from_bytes(&bytes)
-                .ok_or_else(|| "Codex generated image PNG dimensions are invalid.".to_string())?;
-            (bytes, dimensions, false)
-        };
-        if normalized_result {
-            if let Some(working) = &working {
+        let raw_bytes = fs::read(&staged_result_path)
+            .map_err(|e| format!("Failed to read generated image: {e}"))?;
+        png_dimensions_from_bytes(&raw_bytes)
+            .ok_or_else(|| "Codex generated image PNG dimensions are invalid.".to_string())?;
+        let bytes = if let Some(target) = target_dimensions {
+            let (mut bytes, source_dimensions, upscale_factor) =
+                cover_crop_png_to_dimensions(&raw_bytes, target, "Codex generated image")?;
+            if source_dimensions != target {
                 emit_codex_progress(
                     &app,
                     &run_id,
                     &format!(
-                        "Normalized Codex result from {}x{} {} canvas to {}x{}",
-                        result_dimensions.0,
-                        result_dimensions.1,
-                        working.aspect_label,
-                        working.original_dimensions.0,
-                        working.original_dimensions.1
+                        "Cover-cropped Codex result from {}x{} to {}x{}",
+                        source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
                 );
+                fs::write(&staged_result_path, &bytes).map_err(|e| {
+                    format!(
+                        "Failed to write normalized generated image at {}: {e}",
+                        staged_result_path.display()
+                    )
+                })?;
             }
-        }
+            if upscale_factor > AI_RESTORE_UPSCALE_THRESHOLD {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    &format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
+                );
+                bytes = codex_restore_image_details(
+                    &app,
+                    &run_id,
+                    &codex_bin,
+                    &codex_options,
+                    autonomy,
+                    &job_path.join("restore"),
+                    &bytes,
+                    "Generated image restoration",
+                )?;
+                fs::write(job_path.join("restore").join("result.png"), &bytes).map_err(|e| {
+                    format!("Failed to write restored generated image: {e}")
+                })?;
+            }
+            bytes
+        } else {
+            raw_bytes
+        };
         let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving generated image to the project");
@@ -1653,6 +1661,117 @@ fn run_codex_retouch_part(
         normalized,
         recovered_source_path,
     })
+}
+
+fn codex_restore_prompt(autonomy: AiAutonomyLevel, geometry_note: &str) -> String {
+    let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
+    let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
+        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache."
+    } else {
+        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\nDo not create, edit, copy, verify, or delete files in the working directory.\nYou do not need to copy the generated PNG to `result.png`, crop, resize, or write helper scripts. Those are deterministic PaintNode responsibilities."
+    };
+    format!(
+        r#"Use $imagegen to perform one in-place PaintNode detail restoration.
+
+This is a fixed-canvas image refinement task, not a new image generation task.
+
+Attached images:
+1. `source.png` is the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
+2. `edit_target.png` is the same image to re-render in place.
+3. `mask.png` marks the editable area. White pixels are editable; black or transparent pixels were already restored and must remain unchanged.
+
+{geometry_note}
+
+Restoration goal:
+Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
+Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
+Do not add, remove, move, restyle, or reinterpret any content.
+Do not change global brightness, contrast, or color balance.
+If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
+
+Critical registration rule:
+Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
+The output must stay registered to the input image.
+
+{autonomy_contract}
+
+Output requirements:
+Return one full-canvas PNG candidate with the same framing as `edit_target.png`, at the highest output resolution available to you.
+Do not include PaintNode UI, borders, labels, watermarks, or mask visualization.
+{managed_method_requirements}
+Do not ask follow-up questions.
+
+Final response:
+One short sentence confirming the restored image was generated."#
+    )
+}
+
+/// Run a tiled detail-restoration pass over an enlarged image: every part is
+/// regenerated at model-native density and pasted back at its position.
+fn codex_restore_image_details(
+    app: &AppHandle,
+    run_id: &str,
+    codex_bin: &str,
+    options: &CodexCommandOptions,
+    autonomy: AiAutonomyLevel,
+    restore_root: &Path,
+    enlarged_png: &[u8],
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let dimensions = png_dimensions_from_bytes(enlarged_png)
+        .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
+    let placement = plan_ai_restore_placement(AiEditProvider::Codex, dimensions, label)?;
+    let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
+    fs::create_dir_all(restore_root)
+        .map_err(|e| format!("Failed to create {label} restoration folder: {e}"))?;
+    write_ai_placement_manifest(restore_root, &placement, label)?;
+    for (part_index, part) in placement.parts.iter().enumerate() {
+        let part_path = match placement.part_dir_name(part_index) {
+            Some(dir) => restore_root.join(dir),
+            None => restore_root.to_path_buf(),
+        };
+        fs::create_dir_all(&part_path)
+            .map_err(|e| format!("Failed to create {label} restoration part folder: {e}"))?;
+        let inputs = composer.part_inputs(part, label)?;
+        fs::write(part_path.join("source.png"), &inputs.source_png)
+            .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
+        fs::write(part_path.join("edit_target.png"), &inputs.edit_target_png)
+            .map_err(|e| format!("Failed to write {label} edit target image: {e}"))?;
+        fs::write(part_path.join("mask.png"), &inputs.mask_png)
+            .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
+        let has_overview = placement.is_split();
+        if has_overview {
+            fs::write(
+                part_path.join("overview.png"),
+                composer.overview_png(part, label)?,
+            )
+            .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
+        }
+        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let prompt_text = codex_restore_prompt(autonomy, &geometry_note);
+        write_ai_job_prompt(&part_path, &prompt_text, label)?;
+        emit_codex_progress(
+            app,
+            run_id,
+            ai_part_progress_message(&placement, part_index, "Restoring image detail with Codex"),
+        );
+        let part_run = run_codex_retouch_part(
+            app,
+            run_id,
+            codex_bin,
+            options,
+            &part_path,
+            &prompt_text,
+            false,
+            false,
+            has_overview,
+            &[],
+            &part.working,
+        )
+        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+        composer.apply_part_result(part, &part_run.normalized_png, label)?;
+    }
+    composer.composed_png(label)
 }
 
 /// Run local Codex headlessly for a mask-guided generative fill.
@@ -2117,6 +2236,115 @@ pub(crate) async fn generate_codex_retouch_image(
     .map_err(|e| format!("Task error: {e}"))?
 }
 
+/// Enlarge a flattened document and restore its detail with tiled AI
+/// regeneration (AI -> Upscale). 100% skips the enlarge and only restores.
+#[tauri::command]
+pub(crate) async fn upscale_codex_image(
+    app: AppHandle,
+    bin: Option<String>,
+    project_path: Option<String>,
+    keep_job_dir: Option<bool>,
+    source_png: Vec<u8>,
+    scale_percent: u32,
+    run_id: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    autonomy_level: Option<String>,
+) -> Result<GeneratedImageResult, String> {
+    if !is_png(&source_png) {
+        return Err("AI upscale source is not a PNG image.".into());
+    }
+    let source_dimensions = png_dimensions_from_bytes(&source_png)
+        .ok_or_else(|| "AI upscale source PNG dimensions are invalid.".to_string())?;
+    let target_dimensions = ai_upscale_target_dimensions(source_dimensions, scale_percent)?;
+    // Reject over-large jobs before allocating the enlarged image.
+    plan_ai_restore_placement(AiEditProvider::Codex, target_dimensions, "AI upscale")?;
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let codex_bin = configured_or_default_codex_bin(bin)?;
+        let codex_options = codex_command_options(model, reasoning_effort, service_tier);
+        let autonomy = ai_autonomy_level(autonomy_level);
+        let run_id = if run_id.trim().is_empty() {
+            format!("upscale-{}", now_id())
+        } else {
+            run_id
+        };
+        let project_dir = optional_project_dir(&project_path);
+        let keep_job_dir = should_keep_job_dir(keep_job_dir);
+        let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
+        let cleanup_project_job = cleanup_project_job_enabled(&job_project_dir, keep_job_dir);
+        let temp_job;
+        let job_path = if let Some(job_project_dir) = &job_project_dir {
+            project_agent_run_dir(job_project_dir, CODEX_RUNS_DIR, "upscale")?
+        } else {
+            temp_job = TempJobDir::new("paintnode-upscale")?;
+            temp_job.path().to_path_buf()
+        };
+
+        let enlarged_png = if target_dimensions == source_dimensions {
+            source_png
+        } else {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                &format!(
+                    "Enlarging image from {}x{} to {}x{}",
+                    source_dimensions.0,
+                    source_dimensions.1,
+                    target_dimensions.0,
+                    target_dimensions.1
+                ),
+            );
+            resize_png_to_dimensions(&source_png, target_dimensions, "AI upscale")?
+        };
+        emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
+
+        let bytes = codex_restore_image_details(
+            &app,
+            &run_id,
+            &codex_bin,
+            &codex_options,
+            autonomy,
+            &job_path,
+            &enlarged_png,
+            "AI upscale",
+        )?;
+        fs::write(job_path.join("result.png"), &bytes)
+            .map_err(|e| format!("Failed to write AI upscale result: {e}"))?;
+        let data_url = png_data_url(&bytes)?;
+        let mut assets = Vec::new();
+        let asset = if let Some(project_dir) = project_dir {
+            emit_codex_progress(&app, &run_id, "Saving upscaled image to the project");
+            let primary_asset = store_generated_png_asset(
+                &project_dir,
+                &bytes,
+                format!("AI Upscale {scale_percent}%"),
+                Some(format!("AI upscale to {scale_percent}%")),
+                None,
+            )?;
+            assets.push(primary_asset.clone());
+            Some(primary_asset)
+        } else {
+            None
+        };
+
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
 /// Ask local Codex to turn one source PNG into a manifest plus reusable asset PNGs.
 ///
 /// The app owns the deterministic import step; Codex only needs to satisfy the file contract.
@@ -2545,7 +2773,6 @@ mod tests {
                 &[],
                 &options,
                 AiAutonomyLevel::Low,
-                None,
                 true,
             );
             let args = command
@@ -2577,7 +2804,6 @@ mod tests {
             &reference_names,
             &CodexCommandOptions::default(),
             AiAutonomyLevel::Low,
-            None,
             true,
         );
         let args = command
@@ -2599,13 +2825,7 @@ mod tests {
 
     #[test]
     fn unmanaged_autonomy_prompts_omit_method_guardrails() {
-        let working = ai_codex_working_canvas_for_dimensions((1280, 800));
-        let prompt = codex_prompt(
-            "make an image",
-            AiAutonomyLevel::Unmanaged,
-            Some(&working),
-            &[],
-        );
+        let prompt = codex_prompt("make an image", AiAutonomyLevel::Unmanaged, &[]);
         assert!(prompt.contains("Autonomy level: Unmanaged"));
         assert!(prompt.contains("Use $imagegen"));
         assert!(prompt.contains("normal Codex image-generation flow"));
@@ -2912,6 +3132,21 @@ mod tests {
         assert!(prompt_arg.contains("Those are deterministic PaintNode responsibilities"));
         assert!(prompt_arg.contains("generated image in Codex's generated-images cache"));
         assert!(!prompt_arg.contains("Save the final exact-size PNG as `result.png`"));
+    }
+
+    #[test]
+    fn codex_restore_prompt_targets_detail_without_content_changes() {
+        let prompt = codex_restore_prompt(AiAutonomyLevel::Low, TEST_GEOMETRY_NOTE);
+        assert!(
+            prompt.contains("Use $imagegen to perform one in-place PaintNode detail restoration")
+        );
+        assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
+        assert!(prompt.contains("highest output resolution"));
+        assert!(prompt.contains("the full 1280x800 PaintNode document"));
+        assert!(prompt.contains("generated-images cache"));
+        assert!(prompt.contains("Critical registration rule"));
+        assert!(!prompt.contains("chroma"));
+        assert!(!prompt.contains("User retouch prompt"));
     }
 
     #[test]

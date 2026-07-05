@@ -10,13 +10,14 @@ export type DialogId =
   | 'gaussianBlur'
   | 'aiGenerate'
   | 'aiRetouch'
+  | 'aiUpscale'
   | 'aiDecouple'
   | 'aiSetup'
   | 'stockImages'
   | 'settings'
   | 'update';
 
-export type AiTaskDialogKind = 'generate' | 'retouch' | 'decouple';
+export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
@@ -82,7 +83,9 @@ class UiState {
         ? 'aiGenerate'
         : kind === 'retouch'
           ? 'aiRetouch'
-          : 'aiDecouple';
+          : kind === 'upscale'
+            ? 'aiUpscale'
+            : 'aiDecouple';
   }
   close(): void {
     this.dialog = null;

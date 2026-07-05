@@ -89,6 +89,7 @@
   const loadAiGenerateDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
   const loadAiRetouchDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
+  const loadAiUpscaleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiUpscaleDialog.svelte');
   const loadAiSetupWizard: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiSetupWizard.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
@@ -438,6 +439,9 @@
         break;
       case 'app:ai-decouple':
         ui.open('aiDecouple');
+        break;
+      case 'app:ai-upscale':
+        ui.open('aiUpscale');
         break;
       case 'app:workflow-board':
         workflow.newBoard();
@@ -858,6 +862,8 @@
   {@render lazyAiDialog(loadAiRetouchDialog)}
 {:else if ui.dialog === 'aiDecouple'}
   {@render lazyAiDialog(loadAiDecoupleDialog)}
+{:else if ui.dialog === 'aiUpscale'}
+  {@render lazyAiDialog(loadAiUpscaleDialog)}
 {:else if ui.dialog === 'aiSetup'}
   {@render lazyDialog(loadAiSetupWizard)}
 {:else if ui.dialog === 'stockImages'}

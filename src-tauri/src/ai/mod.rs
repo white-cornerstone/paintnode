@@ -942,7 +942,6 @@ pub(crate) fn project_or_temp_job_path(
 mod tests {
     use super::*;
     use crate::ai::antigravity::antigravity_generate_prompt;
-    use crate::ai::canvas::ai_working_canvas_for_dimensions;
     use crate::ai::codex::codex_prompt;
 
     #[test]
@@ -1002,10 +1001,10 @@ mod tests {
 
     #[test]
     fn generate_image_prompts_do_not_expose_canvas_geometry() {
-        let working = ai_working_canvas_for_dimensions((1280, 800));
-        let codex = codex_prompt("make an image", AiAutonomyLevel::Low, Some(&working), &[]);
+        let codex = codex_prompt("make an image", AiAutonomyLevel::Low, &[]);
         assert!(codex.contains("Use $imagegen to generate one raster PNG for PaintNode"));
         assert!(codex.contains("User image prompt:\nmake an image"));
+        assert!(codex.contains("largest image size / highest output resolution"));
         assert!(!codex.contains("1280x800"));
         assert!(!codex.contains("1296x864"));
         assert!(!codex.contains("Working PNG"));
@@ -1017,11 +1016,11 @@ mod tests {
             "make an image",
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Low,
-            Some(&working),
             &[],
         );
         assert!(antigravity.contains("Generate one raster PNG for PaintNode"));
         assert!(antigravity.contains("User image prompt:\nmake an image"));
+        assert!(antigravity.contains("largest image size / highest output resolution"));
         assert!(!antigravity.contains("1280x800"));
         assert!(!antigravity.contains("1296x864"));
         assert!(!antigravity.contains("Working PNG"));

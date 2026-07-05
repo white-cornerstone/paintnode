@@ -15,10 +15,6 @@ pub(crate) const AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS: u32 = 0;
 // Must match PAINTNODE_CHROMA_KEY_HEX in src/lib/engine/decouple/chroma.ts.
 pub(crate) const AI_CHROMA_KEY_HEX: &str = "#00ff00";
 
-const AI_CHROMA_KEY_RGBA: [u8; 4] = [0, 255, 0, 255];
-
-const AI_WORKING_CANVAS_UNIT: u32 = 16;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PixelRect {
     pub(crate) x: u32,
@@ -33,8 +29,6 @@ pub(crate) struct SupportedAspectRatio {
     pub(crate) label: String,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    min_width: u32,
-    min_height: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -57,19 +51,25 @@ pub(crate) struct CodexImageCapability {
     max_long_side: u32,
     max_short_side: u32,
     pub(crate) max_aspect_ratio: u32,
+    /// Largest tile side for AI detail restoration: tiles at or below this
+    /// size regenerate at the model's native output density.
+    pub(crate) restore_tile_side: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct AntigravityImageCapability {
+pub(crate) struct AntigravityImageCapability {
     aspect_ratios: Vec<String>,
+    pub(crate) restore_tile_side: u32,
 }
 
+/// Submission geometry for one AI image request. PaintNode crops (never pads)
+/// its submissions, so the working canvas equals the submitted image; providers
+/// may still answer with any same-ratio resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AiWorkingCanvas {
     pub(crate) original_dimensions: (u32, u32),
     pub(crate) working_dimensions: (u32, u32),
-    pub(crate) content_rect: PixelRect,
     pub(crate) aspect_label: String,
 }
 
@@ -77,14 +77,6 @@ static AI_IMAGE_MODEL_CAPABILITIES: OnceLock<ImageModelCapabilities> = OnceLock:
 
 const AI_IMAGE_MODEL_CAPABILITIES_JSON: &str =
     include_str!("../../../src/lib/ai/imageModelCapabilities.json");
-
-impl AiWorkingCanvas {
-    pub(crate) fn has_padding(&self) -> bool {
-        self.original_dimensions != self.working_dimensions
-            || self.content_rect.x != 0
-            || self.content_rect.y != 0
-    }
-}
 
 fn ai_image_model_capabilities() -> &'static ImageModelCapabilities {
     AI_IMAGE_MODEL_CAPABILITIES.get_or_init(|| {
@@ -101,143 +93,19 @@ pub(crate) fn ai_codex_image_capability() -> &'static CodexImageCapability {
     &ai_image_model_capabilities().providers.codex
 }
 
-fn round_up_to_unit(value: u32, unit: u32) -> u32 {
-    value.div_ceil(unit).max(1) * unit
-}
-
-pub(crate) fn ai_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
-    let (original_width, original_height) = dimensions;
-    let mut best: Option<(AiWorkingCanvas, u64, u64)> = None;
-
-    for ratio in &ai_image_model_capabilities().fallback_aspect_ratios {
-        let minimum_units = original_width
-            .div_ceil(ratio.width)
-            .max(original_height.div_ceil(ratio.height))
-            .max(1);
-        let units = round_up_to_unit(minimum_units, AI_WORKING_CANVAS_UNIT);
-        let Some(working_width) = ratio.width.checked_mul(units) else {
-            continue;
-        };
-        let Some(working_height) = ratio.height.checked_mul(units) else {
-            continue;
-        };
-        let working_width = working_width.max(ratio.min_width);
-        let working_height = working_height.max(ratio.min_height);
-        if working_width < original_width || working_height < original_height {
-            continue;
-        }
-        let area = u64::from(working_width) * u64::from(working_height);
-        let aspect_error = ((i128::from(working_width) * i128::from(original_height))
-            - (i128::from(working_height) * i128::from(original_width)))
-        .unsigned_abs() as u64;
-        let content_rect = PixelRect {
-            x: (working_width - original_width) / 2,
-            y: (working_height - original_height) / 2,
-            width: original_width,
-            height: original_height,
-        };
-        let canvas = AiWorkingCanvas {
-            original_dimensions: dimensions,
-            working_dimensions: (working_width, working_height),
-            content_rect,
-            aspect_label: ratio.label.clone(),
-        };
-        let is_better = best
-            .as_ref()
-            .map(|(_, best_area, best_aspect_error)| {
-                (aspect_error, area) < (*best_aspect_error, *best_area)
-            })
-            .unwrap_or(true);
-        if is_better {
-            best = Some((canvas, area, aspect_error));
-        }
-    }
-
-    best.map(|(canvas, _, _)| canvas)
-        .unwrap_or(AiWorkingCanvas {
-            original_dimensions: dimensions,
-            working_dimensions: dimensions,
-            content_rect: PixelRect {
-                x: 0,
-                y: 0,
-                width: original_width,
-                height: original_height,
-            },
-            aspect_label: "custom".into(),
-        })
-}
-
-fn ai_exact_supported_aspect_ratio(
-    dimensions: (u32, u32),
-) -> Option<&'static SupportedAspectRatio> {
-    let (width, height) = dimensions;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    ai_image_model_capabilities()
-        .fallback_aspect_ratios
-        .iter()
-        .find(|ratio| {
-            u128::from(width) * u128::from(ratio.height)
-                == u128::from(height) * u128::from(ratio.width)
-        })
-}
-
-fn ai_working_canvas_for_exact_supported_ratio(dimensions: (u32, u32)) -> Option<AiWorkingCanvas> {
-    let (width, height) = dimensions;
-    ai_exact_supported_aspect_ratio(dimensions).map(|ratio| AiWorkingCanvas {
-        original_dimensions: dimensions,
-        working_dimensions: dimensions,
-        content_rect: PixelRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        },
-        aspect_label: ratio.label.clone(),
-    })
+pub(crate) fn ai_antigravity_image_capability() -> &'static AntigravityImageCapability {
+    &ai_image_model_capabilities().providers.antigravity
 }
 
 pub(crate) fn ai_exact_working_canvas(
     dimensions: (u32, u32),
     aspect_label: &str,
 ) -> AiWorkingCanvas {
-    let (width, height) = dimensions;
     AiWorkingCanvas {
         original_dimensions: dimensions,
         working_dimensions: dimensions,
-        content_rect: PixelRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        },
         aspect_label: aspect_label.into(),
     }
-}
-
-fn ai_codex_gpt_image_2_supports_dimensions(dimensions: (u32, u32)) -> bool {
-    let (width, height) = dimensions;
-    let long_side = width.max(height);
-    let short_side = width.min(height);
-    let codex = &ai_image_model_capabilities().providers.codex;
-    width > 0
-        && height > 0
-        && codex.dimension_multiple > 0
-        && long_side <= codex.max_long_side
-        && short_side <= codex.max_short_side
-        && width % codex.dimension_multiple == 0
-        && height % codex.dimension_multiple == 0
-        && u128::from(width) <= u128::from(height) * u128::from(codex.max_aspect_ratio)
-        && u128::from(height) <= u128::from(width) * u128::from(codex.max_aspect_ratio)
-}
-
-pub(crate) fn ai_codex_working_canvas_for_dimensions(dimensions: (u32, u32)) -> AiWorkingCanvas {
-    if ai_codex_gpt_image_2_supports_dimensions(dimensions) {
-        return ai_exact_working_canvas(dimensions, "codex");
-    }
-    ai_working_canvas_for_exact_supported_ratio(dimensions)
-        .unwrap_or_else(|| ai_working_canvas_for_dimensions(dimensions))
 }
 
 pub(crate) fn validate_optional_target_dimensions(
@@ -251,57 +119,8 @@ pub(crate) fn validate_optional_target_dimensions(
     }
 }
 
-fn scaled_content_rect(result_dimensions: (u32, u32), working: &AiWorkingCanvas) -> PixelRect {
-    let scale_x = result_dimensions.0 as f64 / working.working_dimensions.0 as f64;
-    let scale_y = result_dimensions.1 as f64 / working.working_dimensions.1 as f64;
-    let x = (working.content_rect.x as f64 * scale_x).round() as u32;
-    let y = (working.content_rect.y as f64 * scale_y).round() as u32;
-    let mut width = (working.content_rect.width as f64 * scale_x).round() as u32;
-    let mut height = (working.content_rect.height as f64 * scale_y).round() as u32;
-    let x = x.min(result_dimensions.0.saturating_sub(1));
-    let y = y.min(result_dimensions.1.saturating_sub(1));
-    width = width.max(1).min(result_dimensions.0 - x);
-    height = height.max(1).min(result_dimensions.1 - y);
-    PixelRect {
-        x,
-        y,
-        width,
-        height,
-    }
-}
-
-fn pixel_is_ai_chroma_key(pixel: &image::Rgba<u8>) -> bool {
-    let [r, g, b, a] = pixel.0;
-    a >= 245
-        && r.abs_diff(AI_CHROMA_KEY_RGBA[0]) <= 8
-        && g.abs_diff(AI_CHROMA_KEY_RGBA[1]) <= 8
-        && b.abs_diff(AI_CHROMA_KEY_RGBA[2]) <= 8
-}
-
-fn ai_chroma_key_padding_coverage(
-    image: &image::RgbaImage,
-    content_rect: PixelRect,
-) -> Option<f64> {
-    let mut padding_pixels = 0_u64;
-    let mut keyed_pixels = 0_u64;
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            let inside = x >= content_rect.x
-                && x < content_rect.x + content_rect.width
-                && y >= content_rect.y
-                && y < content_rect.y + content_rect.height;
-            if inside {
-                continue;
-            }
-            padding_pixels += 1;
-            if pixel_is_ai_chroma_key(image.get_pixel(x, y)) {
-                keyed_pixels += 1;
-            }
-        }
-    }
-    (padding_pixels > 0).then(|| keyed_pixels as f64 / padding_pixels as f64)
-}
-
+/// Normalize a provider result to the submitted crop size: exact-size results
+/// pass through; same-ratio results at another resolution get resized.
 fn crop_png_bytes_to_ai_content(
     bytes: &[u8],
     working: &AiWorkingCanvas,
@@ -314,32 +133,12 @@ fn crop_png_bytes_to_ai_content(
     }
 
     let image = decode_png_rgba(bytes, label)?;
-    let rect = scaled_content_rect(result_dimensions, working);
-    let normalized = if working.has_padding()
-        && ai_chroma_key_padding_coverage(&image, rect)
-            .map(|coverage| coverage < 0.6)
-            .unwrap_or(false)
-    {
-        image::imageops::resize(
-            &image,
-            working.original_dimensions.0,
-            working.original_dimensions.1,
-            image::imageops::FilterType::Lanczos3,
-        )
-    } else {
-        let cropped =
-            image::imageops::crop_imm(&image, rect.x, rect.y, rect.width, rect.height).to_image();
-        if cropped.dimensions() == working.original_dimensions {
-            cropped
-        } else {
-            image::imageops::resize(
-                &cropped,
-                working.original_dimensions.0,
-                working.original_dimensions.1,
-                image::imageops::FilterType::Lanczos3,
-            )
-        }
-    };
+    let normalized = image::imageops::resize(
+        &image,
+        working.original_dimensions.0,
+        working.original_dimensions.1,
+        image::imageops::FilterType::Lanczos3,
+    );
     let normalized_bytes = encode_rgba_png(normalized, label)?;
     Ok((normalized_bytes, result_dimensions, true))
 }
@@ -525,162 +324,34 @@ mod tests {
     }
 
     #[test]
-    fn ai_working_canvas_chooses_small_supported_canvas_for_unsupported_ratio() {
-        let working = ai_working_canvas_for_dimensions((1280, 800));
+    fn crop_png_bytes_to_ai_content_passes_exact_results_and_resizes_same_ratio() {
+        let working = ai_exact_working_canvas((32, 20), "codex");
 
-        assert_eq!(working.aspect_label, "3:2");
-        assert_eq!(working.working_dimensions, (1296, 864));
-        assert_eq!(
-            working.content_rect,
-            PixelRect {
-                x: 8,
-                y: 32,
-                width: 1280,
-                height: 800,
-            }
-        );
-    }
-
-    #[test]
-    fn ai_working_canvas_uses_provider_bucket_for_small_exact_ratio() {
-        let working = ai_working_canvas_for_dimensions((1024, 768));
-
-        assert_eq!(working.aspect_label, "4:3");
-        assert_eq!(working.working_dimensions, (1448, 1086));
-        assert_eq!(
-            working.content_rect,
-            PixelRect {
-                x: 212,
-                y: 159,
-                width: 1024,
-                height: 768,
-            }
-        );
-        assert!(working.has_padding());
-
-        let working = ai_working_canvas_for_dimensions((1280, 960));
-        assert_eq!(working.aspect_label, "4:3");
-        assert_eq!(working.working_dimensions, (1448, 1086));
-        assert_eq!(
-            working.content_rect,
-            PixelRect {
-                x: 84,
-                y: 63,
-                width: 1280,
-                height: 960,
-            }
-        );
-        assert!(working.has_padding());
-    }
-
-    #[test]
-    fn codex_retouch_working_canvas_uses_unpadded_exact_supported_ratio() {
-        let working = ai_codex_working_canvas_for_dimensions((1280, 960));
-
-        assert_eq!(working.aspect_label, "codex");
-        assert_eq!(working.working_dimensions, (1280, 960));
-        assert_eq!(
-            working.content_rect,
-            PixelRect {
-                x: 0,
-                y: 0,
-                width: 1280,
-                height: 960,
-            }
-        );
-        assert!(!working.has_padding());
-
-        let default_canvas = ai_codex_working_canvas_for_dimensions((1280, 800));
-        assert_eq!(default_canvas.aspect_label, "codex");
-        assert_eq!(default_canvas.working_dimensions, (1280, 800));
-        assert_eq!(
-            default_canvas.content_rect,
-            PixelRect {
-                x: 0,
-                y: 0,
-                width: 1280,
-                height: 800,
-            }
-        );
-        assert!(!default_canvas.has_padding());
-
-        let unsupported = ai_codex_working_canvas_for_dimensions((1281, 800));
-        assert_eq!(unsupported.aspect_label, "3:2");
-        assert!(unsupported.has_padding());
-    }
-
-    #[test]
-    fn crop_png_bytes_to_ai_content_extracts_centered_document_rect() {
-        let working = ai_working_canvas_for_dimensions((32, 20));
-        let output = image::RgbaImage::from_fn(
-            working.working_dimensions.0,
-            working.working_dimensions.1,
-            |x, y| {
-                let inside = x >= working.content_rect.x
-                    && x < working.content_rect.x + working.content_rect.width
-                    && y >= working.content_rect.y
-                    && y < working.content_rect.y + working.content_rect.height;
-                if inside {
-                    image::Rgba([
-                        (x - working.content_rect.x) as u8,
-                        (y - working.content_rect.y) as u8,
-                        77,
-                        255,
-                    ])
-                } else {
-                    image::Rgba(AI_CHROMA_KEY_RGBA)
-                }
-            },
-        );
-        let output_bytes = encode_rgba_png(output, "provider output").expect("encode output");
-
-        let (cropped_bytes, provider_dimensions, cropped) =
-            crop_png_bytes_to_ai_content(&output_bytes, &working, "provider output")
-                .expect("crop output");
-        let cropped_image = decode_png_rgba(&cropped_bytes, "cropped output").expect("decode crop");
-
-        assert_eq!(provider_dimensions, working.working_dimensions);
-        assert!(cropped);
-        assert_eq!(cropped_image.dimensions(), working.original_dimensions);
-        assert_eq!(cropped_image.get_pixel(0, 0).0, [0, 0, 77, 255]);
-        assert_eq!(cropped_image.get_pixel(31, 19).0, [31, 19, 77, 255]);
-    }
-
-    #[test]
-    fn crop_png_bytes_to_ai_content_resizes_full_frame_when_chroma_padding_is_removed() {
-        let working = ai_working_canvas_for_dimensions((32, 20));
-        let output = image::RgbaImage::from_fn(
-            working.working_dimensions.0,
-            working.working_dimensions.1,
-            |x, y| {
-                let inside = x >= working.content_rect.x
-                    && x < working.content_rect.x + working.content_rect.width
-                    && y >= working.content_rect.y
-                    && y < working.content_rect.y + working.content_rect.height;
-                if inside {
-                    image::Rgba([20, 40, 220, 255])
-                } else {
-                    image::Rgba([220, 20, 40, 255])
-                }
-            },
-        );
-        let output_bytes = encode_rgba_png(output, "provider output").expect("encode output");
-
-        let (cropped_bytes, provider_dimensions, cropped) =
-            crop_png_bytes_to_ai_content(&output_bytes, &working, "provider output")
+        let exact =
+            image::RgbaImage::from_fn(32, 20, |x, y| image::Rgba([x as u8, y as u8, 77, 255]));
+        let exact_bytes = encode_rgba_png(exact, "provider output").expect("encode output");
+        let (bytes, provider_dimensions, normalized) =
+            crop_png_bytes_to_ai_content(&exact_bytes, &working, "provider output")
                 .expect("normalize output");
-        let cropped_image =
-            decode_png_rgba(&cropped_bytes, "normalized output").expect("decode normalized");
+        assert_eq!(provider_dimensions, (32, 20));
+        assert!(!normalized);
+        assert_eq!(bytes, exact_bytes);
 
-        assert_eq!(provider_dimensions, working.working_dimensions);
-        assert!(cropped);
-        assert_eq!(cropped_image.dimensions(), working.original_dimensions);
-        assert_eq!(cropped_image.get_pixel(0, 0).0, [220, 20, 40, 255]);
+        let scaled = image::RgbaImage::from_pixel(64, 40, image::Rgba([20, 40, 220, 255]));
+        let scaled_bytes = encode_rgba_png(scaled, "provider output").expect("encode output");
+        let (bytes, provider_dimensions, normalized) =
+            crop_png_bytes_to_ai_content(&scaled_bytes, &working, "provider output")
+                .expect("normalize output");
+        let normalized_image = decode_png_rgba(&bytes, "normalized output").expect("decode");
+        assert_eq!(provider_dimensions, (64, 40));
+        assert!(normalized);
+        assert_eq!(normalized_image.dimensions(), (32, 20));
+        assert_eq!(normalized_image.get_pixel(0, 0).0, [20, 40, 220, 255]);
     }
 
     #[test]
     fn ai_working_canvas_accepts_scaled_same_ratio_outputs() {
-        let working = ai_working_canvas_for_dimensions((1280, 800));
+        let working = ai_exact_working_canvas((1280, 800), "codex");
 
         assert!(ai_working_canvas_accepts_result_dimensions(
             &working,
@@ -688,11 +359,7 @@ mod tests {
         ));
         assert!(ai_working_canvas_accepts_result_dimensions(
             &working,
-            working.working_dimensions
-        ));
-        assert!(ai_working_canvas_accepts_result_dimensions(
-            &working,
-            (1536, 1024)
+            (1536, 960)
         ));
         assert!(!ai_working_canvas_accepts_result_dimensions(
             &working,

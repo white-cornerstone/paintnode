@@ -403,6 +403,27 @@ export async function generateCodexRetouchImage(
   });
 }
 
+export async function upscaleCodexImage(
+  config: CodexGeneratorConfig,
+  sourcePng: Uint8Array,
+  scalePercent: number,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex AI upscale is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `upscale-${Date.now()}`;
+  return invoke<GeneratedImageResult>('upscale_codex_image', {
+    ...codexInvokeConfig({ ...config, runId }),
+    bin,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    scalePercent: Math.round(scalePercent),
+    runId,
+  });
+}
+
 export async function decoupleCodexImage(
   config: CodexGeneratorConfig,
   sourcePng: Uint8Array,
@@ -527,6 +548,27 @@ export async function generateAntigravityRetouchImage(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    runId,
+  });
+}
+
+export async function upscaleAntigravityImage(
+  config: AntigravityGeneratorConfig,
+  sourcePng: Uint8Array,
+  scalePercent: number,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity AI upscale is only available in the desktop app.');
+  }
+  const bin = config.bin?.trim() ? config.bin.trim() : null;
+  const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
+  const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-upscale-${Date.now()}`;
+  return invoke<GeneratedImageResult>('upscale_antigravity_image', {
+    ...antigravityInvokeConfig({ ...config, runId }),
+    bin,
+    projectPath,
+    sourcePng: Array.from(sourcePng),
+    scalePercent: Math.round(scalePercent),
     runId,
   });
 }

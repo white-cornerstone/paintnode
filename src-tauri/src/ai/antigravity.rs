@@ -17,13 +17,15 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_retouch_editable_mask_png, ai_working_canvas_for_dimensions,
-    read_png_bytes_cropped_to_ai_working_canvas, validate_optional_target_dimensions,
-    AiWorkingCanvas, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
+    ai_retouch_editable_mask_png, read_png_bytes_cropped_to_ai_working_canvas,
+    validate_optional_target_dimensions, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
 use crate::ai::placement::{
-    ai_part_geometry_note, ai_part_progress_message, plan_ai_edit_placement,
-    write_ai_placement_manifest, AiEditComposer, AiEditProvider,
+    ai_part_geometry_note, ai_part_progress_message, ai_upscale_target_dimensions,
+    cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
+    resize_png_to_dimensions, write_ai_placement_manifest, AiEditComposer, AiEditProvider,
+    AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, clean_option, cleanup_project_agent_job,
@@ -403,7 +405,6 @@ pub(crate) fn antigravity_generate_prompt(
     user_prompt: &str,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
-    _working: Option<&AiWorkingCanvas>,
     reference_names: &[String],
 ) -> String {
     let result_path = antigravity_result_path(job_dir);
@@ -434,6 +435,7 @@ User image prompt:
 Required output:
 - Save the final image as `{result_path}`.
 - PNG only.
+- Use the largest image size / highest output resolution your image-generation tool supports.
 - Do not ask follow-up questions.
 {workspace_rule}
 
@@ -766,6 +768,145 @@ fn run_antigravity(
     .map_err(|e| format!("Failed to run Antigravity at '{antigravity_bin}': {e}"))
 }
 
+fn antigravity_restore_prompt(
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    geometry_note: &str,
+    has_overview: bool,
+) -> String {
+    let result_path = antigravity_result_path(job_dir);
+    let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let overview_note = antigravity_overview_note(job_dir, has_overview);
+    let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
+        "- Save the final image at the required path so PaintNode can import it.".into()
+    } else {
+        format!("- Work only inside `{job_dir}`.")
+    };
+    format!(
+        r#"Perform one PaintNode detail restoration using the PNG files in `{job_dir}`.
+
+This is a fixed-canvas image refinement task, not a new image generation task.
+
+Input files:
+- `{job_dir}/source.png`: the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
+- `{job_dir}/edit_target.png`: the same image to re-render in place.
+- `{job_dir}/mask.png`: editable-area mask. White pixels are editable; black or transparent pixels were already restored and must remain unchanged.{overview_note}
+
+{geometry_note}
+
+Restoration goal:
+- Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
+- Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
+- Do not add, remove, move, restyle, or reinterpret any content.
+- Do not change global brightness, contrast, or color balance.
+- If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
+- Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
+
+{autonomy_contract}
+
+Required output:
+- Save exactly one PNG file as `{result_path}` at the highest output resolution available to you.
+- Prefer the same aspect ratio as `source.png`.
+- Do not include UI chrome, borders, labels, watermarks, or mask visualization in `result.png`.
+{workspace_rule}
+- Do not ask follow-up questions.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+    )
+}
+
+/// Run a tiled detail-restoration pass over an enlarged image: every part is
+/// regenerated at model-native density and pasted back at its position.
+#[allow(clippy::too_many_arguments)]
+fn antigravity_restore_image_details(
+    app: &AppHandle,
+    run_id: &str,
+    antigravity_bin: &str,
+    options: &AntigravityCommandOptions,
+    autonomy: AiAutonomyLevel,
+    workspace_path: &Path,
+    restore_root: &Path,
+    allow_new_project: bool,
+    enlarged_png: &[u8],
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let dimensions = png_dimensions_from_bytes(enlarged_png)
+        .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
+    let placement = plan_ai_restore_placement(AiEditProvider::Antigravity, dimensions, label)?;
+    let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
+    fs::create_dir_all(restore_root)
+        .map_err(|e| format!("Failed to create {label} restoration folder: {e}"))?;
+    write_ai_placement_manifest(restore_root, &placement, label)?;
+    for (part_index, part) in placement.parts.iter().enumerate() {
+        let part_path = match placement.part_dir_name(part_index) {
+            Some(dir) => restore_root.join(dir),
+            None => restore_root.to_path_buf(),
+        };
+        fs::create_dir_all(&part_path)
+            .map_err(|e| format!("Failed to create {label} restoration part folder: {e}"))?;
+        let job_dir = antigravity_job_dir_label(workspace_path, &part_path);
+        let inputs = composer.part_inputs(part, label)?;
+        fs::write(part_path.join("source.png"), &inputs.source_png)
+            .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
+        fs::write(part_path.join("edit_target.png"), &inputs.edit_target_png)
+            .map_err(|e| format!("Failed to write {label} edit target image: {e}"))?;
+        fs::write(part_path.join("mask.png"), &inputs.mask_png)
+            .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
+        let has_overview = placement.is_split();
+        if has_overview {
+            fs::write(
+                part_path.join("overview.png"),
+                composer.overview_png(part, label)?,
+            )
+            .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
+        }
+        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let prompt_text =
+            antigravity_restore_prompt(&job_dir, autonomy, &geometry_note, has_overview);
+        write_ai_job_prompt(&part_path, &prompt_text, label)?;
+        emit_codex_progress(
+            app,
+            run_id,
+            ai_part_progress_message(
+                &placement,
+                part_index,
+                "Restoring image detail with Antigravity",
+            ),
+        );
+        let run = run_antigravity(
+            antigravity_bin,
+            workspace_path,
+            &part_path,
+            &prompt_text,
+            options,
+            allow_new_project && part_index == 0,
+            GENERATION_TIMEOUT,
+            app.clone(),
+            run_id.to_string(),
+            Some("result.png"),
+        )
+        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+        if !run.output.status.success() && !run.satisfied_required_output {
+            return Err(ai_part_progress_message(
+                &placement,
+                part_index,
+                &command_failure_with_required_output(
+                    "Antigravity detail restoration",
+                    &run.output,
+                    &part_path,
+                    "result.png",
+                ),
+            ));
+        }
+        let result_path = part_path.join("result.png");
+        let (bytes, _result_dimensions, _normalized) =
+            read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+        composer.apply_part_result(part, &bytes, label)?;
+    }
+    composer.composed_png(label)
+}
+
 #[tauri::command]
 pub(crate) async fn generate_antigravity_image(
     app: AppHandle,
@@ -791,7 +932,6 @@ pub(crate) async fn generate_antigravity_image(
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
         let options = antigravity_command_options(model, approval_mode);
         let autonomy = ai_autonomy_level(autonomy_level);
-        let working = target_dimensions.map(ai_working_canvas_for_dimensions);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -810,13 +950,8 @@ pub(crate) async fn generate_antigravity_image(
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
         let (_reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
-        let prompt_text = antigravity_generate_prompt(
-            prompt.trim(),
-            &job_dir,
-            autonomy,
-            working.as_ref(),
-            &reference_names,
-        );
+        let prompt_text =
+            antigravity_generate_prompt(prompt.trim(), &job_dir, autonomy, &reference_names);
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity image generation")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
@@ -844,35 +979,54 @@ pub(crate) async fn generate_antigravity_image(
 
         let result_path = job_path.join("result.png");
         emit_codex_progress(&app, &run_id, "Reading Antigravity result");
-        let (bytes, result_dimensions, normalized_result) = if let Some(working) = &working {
-            read_png_bytes_cropped_to_ai_working_canvas(
-                &result_path,
-                working,
-                "Antigravity generated image",
-            )?
-        } else {
-            let bytes = fs::read(&result_path)
-                .map_err(|e| format!("Failed to read Antigravity image: {e}"))?;
-            let dimensions = png_dimensions_from_bytes(&bytes)
-                .ok_or_else(|| "Antigravity image PNG dimensions are invalid.".to_string())?;
-            (bytes, dimensions, false)
-        };
-        if normalized_result {
-            if let Some(working) = &working {
+        let raw_bytes =
+            fs::read(&result_path).map_err(|e| format!("Failed to read Antigravity image: {e}"))?;
+        png_dimensions_from_bytes(&raw_bytes)
+            .ok_or_else(|| "Antigravity image PNG dimensions are invalid.".to_string())?;
+        let bytes = if let Some(target) = target_dimensions {
+            let (mut bytes, source_dimensions, upscale_factor) =
+                cover_crop_png_to_dimensions(&raw_bytes, target, "Antigravity generated image")?;
+            if source_dimensions != target {
                 emit_codex_progress(
                     &app,
                     &run_id,
                     &format!(
-                        "Normalized Antigravity result from {}x{} {} canvas to {}x{}",
-                        result_dimensions.0,
-                        result_dimensions.1,
-                        working.aspect_label,
-                        working.original_dimensions.0,
-                        working.original_dimensions.1
+                        "Cover-cropped Antigravity result from {}x{} to {}x{}",
+                        source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
                 );
+                fs::write(&result_path, &bytes).map_err(|e| {
+                    format!(
+                        "Failed to write normalized generated image at {}: {e}",
+                        result_path.display()
+                    )
+                })?;
             }
-        }
+            if upscale_factor > AI_RESTORE_UPSCALE_THRESHOLD {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    &format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
+                );
+                bytes = antigravity_restore_image_details(
+                    &app,
+                    &run_id,
+                    &antigravity_bin,
+                    &options,
+                    autonomy,
+                    &workspace_path,
+                    &job_path.join("restore"),
+                    false,
+                    &bytes,
+                    "Generated image restoration",
+                )?;
+                fs::write(job_path.join("restore").join("result.png"), &bytes)
+                    .map_err(|e| format!("Failed to write restored generated image: {e}"))?;
+            }
+            bytes
+        } else {
+            raw_bytes
+        };
         let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving Antigravity image to the project");
@@ -1355,6 +1509,113 @@ pub(crate) async fn generate_antigravity_retouch_image(
     .map_err(|e| format!("Task error: {e}"))?
 }
 
+/// Enlarge a flattened document and restore its detail with tiled AI
+/// regeneration (AI -> Upscale). 100% skips the enlarge and only restores.
+#[tauri::command]
+pub(crate) async fn upscale_antigravity_image(
+    app: AppHandle,
+    bin: Option<String>,
+    project_path: Option<String>,
+    keep_job_dir: Option<bool>,
+    source_png: Vec<u8>,
+    scale_percent: u32,
+    run_id: String,
+    model: Option<String>,
+    approval_mode: Option<String>,
+    autonomy_level: Option<String>,
+) -> Result<GeneratedImageResult, String> {
+    if !is_png(&source_png) {
+        return Err("AI upscale source is not a PNG image.".into());
+    }
+    let source_dimensions = png_dimensions_from_bytes(&source_png)
+        .ok_or_else(|| "AI upscale source PNG dimensions are invalid.".to_string())?;
+    let target_dimensions = ai_upscale_target_dimensions(source_dimensions, scale_percent)?;
+    // Reject over-large jobs before allocating the enlarged image.
+    plan_ai_restore_placement(AiEditProvider::Antigravity, target_dimensions, "AI upscale")?;
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
+        let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+        let options = antigravity_command_options(model, approval_mode);
+        let autonomy = ai_autonomy_level(autonomy_level);
+        let run_id = if run_id.trim().is_empty() {
+            format!("antigravity-upscale-{}", now_id())
+        } else {
+            run_id
+        };
+        let keep_job_dir = should_keep_job_dir(keep_job_dir);
+        let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(&app, &project_path, "antigravity-upscale", keep_job_dir)?;
+        let workspace_path = project_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+            .unwrap_or(job_path.as_path())
+            .to_path_buf();
+        let new_antigravity_project = job_project_dir.is_none();
+
+        let enlarged_png = if target_dimensions == source_dimensions {
+            source_png
+        } else {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                &format!(
+                    "Enlarging image from {}x{} to {}x{}",
+                    source_dimensions.0,
+                    source_dimensions.1,
+                    target_dimensions.0,
+                    target_dimensions.1
+                ),
+            );
+            resize_png_to_dimensions(&source_png, target_dimensions, "AI upscale")?
+        };
+        emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
+
+        let bytes = antigravity_restore_image_details(
+            &app,
+            &run_id,
+            &antigravity_bin,
+            &options,
+            autonomy,
+            &workspace_path,
+            &job_path,
+            new_antigravity_project,
+            &enlarged_png,
+            "AI upscale",
+        )?;
+        fs::write(job_path.join("result.png"), &bytes)
+            .map_err(|e| format!("Failed to write AI upscale result: {e}"))?;
+        let data_url = png_data_url(&bytes)?;
+        let mut assets = Vec::new();
+        let asset = if let Some(project_dir) = project_dir {
+            emit_codex_progress(&app, &run_id, "Saving upscaled image to the project");
+            let primary_asset = store_generated_png_asset(
+                &project_dir,
+                &bytes,
+                format!("AI Upscale {scale_percent}%"),
+                Some(format!("AI upscale to {scale_percent}%")),
+                Some("result.png".into()),
+            )?;
+            assets.push(primary_asset.clone());
+            Some(primary_asset)
+        } else {
+            None
+        };
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Done");
+        Ok(GeneratedImageResult {
+            data_url,
+            asset,
+            assets,
+            mask_data_url: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
 #[tauri::command]
 pub(crate) async fn decouple_antigravity_image(
     app: AppHandle,
@@ -1764,6 +2025,24 @@ mod tests {
             args[add_dir_idx + 1],
             job_path.to_string_lossy().to_string()
         );
+    }
+
+    #[test]
+    fn antigravity_restore_prompt_requires_result_png_without_content_changes() {
+        let prompt = antigravity_restore_prompt(
+            "paintnode/antigravity-runs/up-1/part-2",
+            AiAutonomyLevel::Low,
+            "PaintNode multi-part edit context:\n- You are editing part 2 of 4.",
+            true,
+        );
+        assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/result.png"));
+        assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/source.png"));
+        assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/overview.png"));
+        assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
+        assert!(prompt.contains("highest output resolution"));
+        assert!(prompt.contains("part 2 of 4"));
+        assert!(!prompt.contains("Use $imagegen"));
+        assert!(!prompt.contains("chroma"));
     }
 
     #[test]

@@ -151,6 +151,7 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
         true,
         None::<&str>,
     )?;
+    let ai_upscale = MenuItem::with_id(app, "app:ai-upscale", "Upscale...", true, None::<&str>)?;
     let workflow_board = MenuItem::with_id(
         app,
         "app:workflow-board",
@@ -290,6 +291,7 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
         &[
             &ai_generate,
             &ai_decouple,
+            &ai_upscale,
             &PredefinedMenuItem::separator(app)?,
             &workflow_board,
         ],

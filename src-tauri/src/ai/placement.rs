@@ -16,10 +16,14 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::ai::canvas::{
-    ai_codex_image_capability, ai_exact_working_canvas, ai_fallback_aspect_ratios,
-    mask_pixel_coverage, AiWorkingCanvas, PixelRect,
+    ai_antigravity_image_capability, ai_codex_image_capability, ai_exact_working_canvas,
+    ai_fallback_aspect_ratios, mask_pixel_coverage, AiWorkingCanvas, PixelRect,
 };
 use crate::png::{decode_png_rgba, encode_rgba_png};
+
+/// Enlargements beyond this factor lose enough detail to justify an AI
+/// restoration pass after a generate cover-crop.
+pub(crate) const AI_RESTORE_UPSCALE_THRESHOLD: f64 = 1.25;
 
 /// Every part is one full provider CLI run, so keep automatic splitting bounded.
 const MAX_AI_EDIT_PARTS: usize = 16;
@@ -102,6 +106,14 @@ impl CoverageGrid {
             width,
             height,
             coverage,
+        }
+    }
+
+    fn full(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            coverage: vec![255_u8; width as usize * height as usize],
         }
     }
 
@@ -332,13 +344,13 @@ fn split_tile_candidates(
 
 /// Choose the tile shape that needs the fewest parts (largest area on ties)
 /// and lay tiles over the target region in reading order.
-fn split_part_rects(
-    provider: AiEditProvider,
+fn best_tiling(
+    candidates: Vec<(u32, u32, String)>,
     document: (u32, u32),
     target: PixelRect,
 ) -> Result<(Vec<PixelRect>, String), String> {
     let mut best: Option<(usize, u64, Vec<PixelRect>, String)> = None;
-    for (tile_width, tile_height, label) in split_tile_candidates(provider, document) {
+    for (tile_width, tile_height, label) in candidates {
         let xs = tile_axis_origins(document.0, target.x, target.width, tile_width);
         let ys = tile_axis_origins(document.1, target.y, target.height, tile_height);
         let count = xs.len() * ys.len();
@@ -367,6 +379,179 @@ fn split_part_rects(
     }
     best.map(|(_, _, rects, label)| (rects, label))
         .ok_or_else(|| "No supported AI crop shape fits this document.".into())
+}
+
+fn split_part_rects(
+    provider: AiEditProvider,
+    document: (u32, u32),
+    target: PixelRect,
+) -> Result<(Vec<PixelRect>, String), String> {
+    best_tiling(split_tile_candidates(provider, document), document, target)
+}
+
+/// Restoration tile shapes: capped at the provider's native output size so
+/// every regenerated tile carries model-native detail density.
+fn restore_tile_candidates(
+    provider: AiEditProvider,
+    document: (u32, u32),
+) -> Vec<(u32, u32, String)> {
+    match provider {
+        AiEditProvider::Codex => {
+            let codex = ai_codex_image_capability();
+            let cap = codex.restore_tile_side.max(1);
+            let tile = aspect_clamped(
+                document.0.min(cap),
+                document.1.min(cap),
+                codex.max_aspect_ratio.max(1),
+            );
+            (tile.0 > 0 && tile.1 > 0)
+                .then(|| (tile.0, tile.1, "codex-crop".to_string()))
+                .into_iter()
+                .collect()
+        }
+        AiEditProvider::Antigravity => {
+            let cap = ai_antigravity_image_capability().restore_tile_side.max(1);
+            ai_fallback_aspect_ratios()
+                .iter()
+                .filter_map(|ratio| {
+                    let units = (document.0 / ratio.width)
+                        .min(document.1 / ratio.height)
+                        .min(cap / ratio.width.max(ratio.height));
+                    (units > 0).then(|| {
+                        (
+                            ratio.width * units,
+                            ratio.height * units,
+                            ratio.label.clone(),
+                        )
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+/// Plan an AI detail-restoration pass: tiles capped at the provider's native
+/// output size covering the whole image, run sequentially like any other
+/// placement so earlier restored tiles become context for later ones.
+pub(crate) fn plan_ai_restore_placement(
+    provider: AiEditProvider,
+    document_dimensions: (u32, u32),
+    label: &str,
+) -> Result<AiEditPlacement, String> {
+    let (width, height) = document_dimensions;
+    if width == 0 || height == 0 {
+        return Err(format!("{label} image dimensions are invalid."));
+    }
+    let full = PixelRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let (rects, aspect_label) = best_tiling(
+        restore_tile_candidates(provider, document_dimensions),
+        document_dimensions,
+        full,
+    )?;
+    if rects.len() > MAX_AI_EDIT_PARTS {
+        return Err(format!(
+            "{label} would need {} AI restoration parts for a {width}x{height} image. Use a smaller scale.",
+            rects.len()
+        ));
+    }
+    Ok(AiEditPlacement {
+        provider,
+        document_dimensions,
+        mask_bounds: full,
+        parts: rects
+            .into_iter()
+            .map(|rect| ai_edit_part(rect, &aspect_label))
+            .collect(),
+    })
+}
+
+/// Output dimensions for an AI upscale request (100% = original size).
+pub(crate) fn ai_upscale_target_dimensions(
+    source: (u32, u32),
+    scale_percent: u32,
+) -> Result<(u32, u32), String> {
+    if !(100..=1000).contains(&scale_percent) {
+        return Err("AI upscale scale must be between 100% and 1000%.".into());
+    }
+    let width = (u64::from(source.0) * u64::from(scale_percent) / 100) as u32;
+    let height = (u64::from(source.1) * u64::from(scale_percent) / 100) as u32;
+    if width == 0 || height == 0 {
+        return Err("AI upscale output dimensions are invalid.".into());
+    }
+    Ok((width, height))
+}
+
+/// Lanczos-resize a PNG to the target dimensions (same aspect ratio expected).
+pub(crate) fn resize_png_to_dimensions(
+    bytes: &[u8],
+    target: (u32, u32),
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let image = decode_png_rgba(bytes, label)?;
+    if image.dimensions() == target {
+        return Ok(bytes.to_vec());
+    }
+    let resized = image::imageops::resize(
+        &image,
+        target.0,
+        target.1,
+        image::imageops::FilterType::Lanczos3,
+    );
+    encode_rgba_png(resized, label)
+}
+
+/// Center-crop the PNG to the target aspect ratio and resize it to the target
+/// dimensions (no distortion). Returns the normalized PNG, the source
+/// dimensions, and the enlargement factor that was applied (1.0 = none/shrink).
+pub(crate) fn cover_crop_png_to_dimensions(
+    bytes: &[u8],
+    target: (u32, u32),
+    label: &str,
+) -> Result<(Vec<u8>, (u32, u32), f64), String> {
+    let image = decode_png_rgba(bytes, label)?;
+    let source_dimensions = image.dimensions();
+    if source_dimensions == target {
+        return Ok((bytes.to_vec(), source_dimensions, 1.0));
+    }
+    let (source_width, source_height) = source_dimensions;
+    if source_width == 0 || source_height == 0 || target.0 == 0 || target.1 == 0 {
+        return Err(format!("{label} dimensions are invalid."));
+    }
+    // Widest crop of the source that matches the target ratio.
+    let mut crop_width = source_width;
+    let mut crop_height =
+        ((u64::from(source_width) * u64::from(target.1)) / u64::from(target.0)) as u32;
+    if crop_height > source_height {
+        crop_height = source_height;
+        crop_width =
+            ((u64::from(source_height) * u64::from(target.0)) / u64::from(target.1)).max(1) as u32;
+    }
+    let crop_height = crop_height.max(1);
+    let crop = PixelRect {
+        x: (source_width - crop_width) / 2,
+        y: (source_height - crop_height) / 2,
+        width: crop_width,
+        height: crop_height,
+    };
+    let cropped =
+        image::imageops::crop_imm(&image, crop.x, crop.y, crop.width, crop.height).to_image();
+    let resized = image::imageops::resize(
+        &cropped,
+        target.0,
+        target.1,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let upscale_factor = f64::from(target.0) / f64::from(crop_width);
+    Ok((
+        encode_rgba_png(resized, label)?,
+        source_dimensions,
+        upscale_factor.max(1.0),
+    ))
 }
 
 pub(crate) fn plan_ai_edit_placement(
@@ -450,7 +635,8 @@ pub(crate) struct AiEditPartInputs {
 pub(crate) struct AiEditComposer {
     source: image::RgbaImage,
     edit_target: image::RgbaImage,
-    mask: image::RgbaImage,
+    /// `None` means every pixel is editable (detail-restoration passes).
+    mask: Option<image::RgbaImage>,
     annotated_source: Option<image::RgbaImage>,
     remaining: CoverageGrid,
 }
@@ -483,9 +669,23 @@ impl AiEditComposer {
         Ok(Self {
             source,
             edit_target,
-            mask,
+            mask: Some(mask),
             annotated_source,
             remaining,
+        })
+    }
+
+    /// Composer for detail restoration: the whole image is editable and the
+    /// image itself is both source and edit target.
+    pub(crate) fn new_full_coverage(source_png: &[u8], label: &str) -> Result<Self, String> {
+        let source = decode_png_rgba(source_png, label)?;
+        let (width, height) = source.dimensions();
+        Ok(Self {
+            edit_target: source.clone(),
+            remaining: CoverageGrid::full(width, height),
+            source,
+            mask: None,
+            annotated_source: None,
         })
     }
 
@@ -509,7 +709,10 @@ impl AiEditComposer {
                 // Pixels a previous part already generated become protected
                 // context for this part instead of staying editable.
                 let pixel = if self.remaining.is_covered(document_x, document_y) {
-                    *self.mask.get_pixel(document_x, document_y)
+                    self.mask
+                        .as_ref()
+                        .map(|mask| *mask.get_pixel(document_x, document_y))
+                        .unwrap_or(image::Rgba([255, 255, 255, 255]))
                 } else {
                     image::Rgba([0, 0, 0, 0])
                 };
@@ -809,7 +1012,6 @@ mod tests {
             }
         );
         assert_eq!(part.working.aspect_label, "codex");
-        assert!(!part.working.has_padding());
         assert_eq!(part.working.working_dimensions, (1280, 800));
     }
 
@@ -894,7 +1096,6 @@ mod tests {
         let part = &placement.parts[0];
         assert_eq!((part.crop.width, part.crop.height), (1200, 800));
         assert_eq!(part.working.aspect_label, "3:2");
-        assert!(!part.working.has_padding());
         assert!(rect_contains(part.crop, placement.mask_bounds));
     }
 
@@ -934,7 +1135,10 @@ mod tests {
         for (index, part) in placement.parts.iter().enumerate() {
             assert_eq!((part.crop.width, part.crop.height), (1440, 480));
             assert!(rect_contains(document, part.crop));
-            assert!(!part.working.has_padding());
+            assert_eq!(
+                part.working.working_dimensions,
+                (part.crop.width, part.crop.height)
+            );
             if index > 0 {
                 assert!(
                     part.crop.x < previous_end,
@@ -1176,6 +1380,140 @@ mod tests {
             ai_part_progress_message(&single, 0, "Starting local Codex AI retouch"),
             "Starting local Codex AI retouch"
         );
+    }
+
+    #[test]
+    fn restore_placement_tiles_cover_image_at_native_density() {
+        let placement =
+            plan_ai_restore_placement(AiEditProvider::Codex, (4000, 1500), "AI upscale")
+                .expect("codex restore placement");
+        assert!(placement.parts.len() > 1);
+        let mut covered = CoverageGrid::full(4000, 1500);
+        for part in &placement.parts {
+            assert!(part.crop.width <= 2048 && part.crop.height <= 2048);
+            assert!(part.crop.x + part.crop.width <= 4000);
+            assert!(part.crop.y + part.crop.height <= 1500);
+            covered.clear_rect(part.crop);
+        }
+        assert!(
+            covered.bounds().is_none(),
+            "tiles must cover the whole image"
+        );
+
+        let placement =
+            plan_ai_restore_placement(AiEditProvider::Antigravity, (1600, 600), "AI upscale")
+                .expect("antigravity restore placement");
+        let ratio_labels: Vec<&str> = ai_fallback_aspect_ratios()
+            .iter()
+            .map(|ratio| ratio.label.as_str())
+            .collect();
+        let mut covered = CoverageGrid::full(1600, 600);
+        for part in &placement.parts {
+            assert!(part.crop.width.max(part.crop.height) <= 1344);
+            assert!(ratio_labels.contains(&part.working.aspect_label.as_str()));
+            covered.clear_rect(part.crop);
+        }
+        assert!(covered.bounds().is_none());
+
+        let small = plan_ai_restore_placement(AiEditProvider::Codex, (800, 600), "AI upscale")
+            .expect("small restore placement");
+        assert_eq!(small.parts.len(), 1);
+        assert_eq!(
+            (small.parts[0].crop.width, small.parts[0].crop.height),
+            (800, 600)
+        );
+
+        let error = plan_ai_restore_placement(AiEditProvider::Codex, (20000, 20000), "AI upscale")
+            .expect_err("oversized restore must fail");
+        assert!(error.contains("Use a smaller scale"));
+    }
+
+    #[test]
+    fn cover_crop_preserves_ratio_and_reports_upscale() {
+        // 16:9-ish source into a wider 8:3 target: full width kept, height
+        // cropped, mild enlargement reported.
+        let source = solid_png(1376, 768, [10, 20, 30, 255]);
+        let (normalized, source_dimensions, upscale) =
+            cover_crop_png_to_dimensions(&source, (1600, 600), "generated image")
+                .expect("cover crop");
+        let normalized = decode_png_rgba(&normalized, "normalized").expect("decode");
+        assert_eq!(normalized.dimensions(), (1600, 600));
+        assert_eq!(source_dimensions, (1376, 768));
+        assert!((upscale - 1600.0 / 1376.0).abs() < 0.001);
+
+        // Wider source than target: crop the sides and downscale — no upscale.
+        let source = solid_png(3000, 800, [10, 20, 30, 255]);
+        let (normalized, _, upscale) =
+            cover_crop_png_to_dimensions(&source, (1600, 600), "generated image")
+                .expect("cover crop");
+        let normalized = decode_png_rgba(&normalized, "normalized").expect("decode");
+        assert_eq!(normalized.dimensions(), (1600, 600));
+        assert_eq!(upscale, 1.0);
+
+        // Exact match passes through untouched.
+        let source = solid_png(1600, 600, [10, 20, 30, 255]);
+        let (normalized, _, upscale) =
+            cover_crop_png_to_dimensions(&source, (1600, 600), "generated image")
+                .expect("cover crop");
+        assert_eq!(normalized, source);
+        assert_eq!(upscale, 1.0);
+    }
+
+    #[test]
+    fn full_coverage_composer_marks_everything_editable_until_owned() {
+        let source = solid_png(48, 32, [0, 0, 200, 255]);
+        let first = ai_edit_part(
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            "codex-crop",
+        );
+        let second = ai_edit_part(
+            PixelRect {
+                x: 16,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            "codex-crop",
+        );
+        let mut composer =
+            AiEditComposer::new_full_coverage(&source, "AI upscale").expect("composer");
+
+        let inputs = composer.part_inputs(&first, "AI upscale").expect("inputs");
+        let mask = decode_png_rgba(&inputs.mask_png, "mask").expect("decode mask");
+        assert_eq!(mask.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(31, 31).0, [255, 255, 255, 255]);
+        assert!(inputs.annotated_source_png.is_none());
+
+        let red = solid_png(32, 32, [200, 0, 0, 255]);
+        composer
+            .apply_part_result(&first, &red, "AI upscale")
+            .expect("apply");
+        let second_inputs = composer.part_inputs(&second, "AI upscale").expect("inputs");
+        let second_mask = decode_png_rgba(&second_inputs.mask_png, "mask").expect("decode");
+        assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(second_mask.get_pixel(31, 0).0, [255, 255, 255, 255]);
+        let second_source =
+            decode_png_rgba(&second_inputs.source_png, "source").expect("decode source");
+        assert_eq!(second_source.get_pixel(0, 0).0, [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn upscale_target_dimensions_validate_scale() {
+        assert_eq!(
+            ai_upscale_target_dimensions((1600, 600), 100).unwrap(),
+            (1600, 600)
+        );
+        assert_eq!(
+            ai_upscale_target_dimensions((1600, 600), 250).unwrap(),
+            (4000, 1500)
+        );
+        assert!(ai_upscale_target_dimensions((1600, 600), 99).is_err());
+        assert!(ai_upscale_target_dimensions((1600, 600), 1001).is_err());
     }
 
     #[test]
