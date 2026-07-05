@@ -1,5 +1,6 @@
 import { isRecord, type AiRunOptions } from './settings';
 import { ui } from './ui.svelte';
+import type { WorkflowSourceImage } from '../integrations/desktop';
 
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
 
@@ -19,6 +20,10 @@ export interface GenerateTaskDetail {
   runOptions?: AiRunOptions;
   /** Newline-separated custom generator args (custom provider only). */
   customArgs?: string;
+  /** Reference PNGs captured for the active in-session run. Stripped before persistence. */
+  references?: WorkflowSourceImage[];
+  referenceNames?: string[];
+  referencePreviews?: string[];
 }
 
 export interface RetouchTaskDetail {
@@ -29,7 +34,11 @@ export interface RetouchTaskDetail {
   gestureKind: string;
   sourcePreview: string;
   maskPreview: string;
+  annotatedSourcePreview: string;
   referencePreview: string;
+  referenceNames?: string[];
+  referencePreviews?: string[];
+  references?: WorkflowSourceImage[];
 }
 
 export interface DecoupleTaskDetail {
@@ -124,12 +133,22 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
 }
 
 function storedDetailFrom(detail: AiTaskDetail): AiTaskDetail {
+  if (detail.kind === 'generate') {
+    const { references, referencePreviews, ...stored } = detail;
+    return {
+      ...stored,
+      referencePreviews: referencePreviews?.length ? [] : undefined,
+    };
+  }
   if (detail.kind !== 'retouch') return detail;
+  const { references, referencePreviews, ...stored } = detail;
   return {
-    ...detail,
+    ...stored,
     sourcePreview: '',
     maskPreview: '',
+    annotatedSourcePreview: '',
     referencePreview: '',
+    referencePreviews: referencePreviews?.length ? [] : undefined,
   };
 }
 

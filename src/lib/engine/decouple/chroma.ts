@@ -1,5 +1,9 @@
 import { clamp, type RGB } from '../types';
 
+// Must match AI_CHROMA_KEY_HEX in src-tauri/src/lib.rs.
+export const PAINTNODE_CHROMA_KEY_HEX = '#00ff00';
+export const PAINTNODE_CHROMA_KEY_RGB: RGB = { r: 0, g: 255, b: 0 };
+
 export interface ChromaKeyOptions {
   key: RGB;
   /** Distance from the key color that becomes fully transparent. */

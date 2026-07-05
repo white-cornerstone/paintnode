@@ -10,8 +10,8 @@
     createRunId,
     focusTaskDocument,
     providerLabel,
-    providerRunDir,
   } from '../ai/taskSupport';
+  import { loadAiReferenceImages, type AiReferenceImage } from '../ai/references';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
   import { editor } from '../state/editor.svelte';
@@ -24,9 +24,8 @@
     generateCodexRetouchImage,
     generateAntigravityRetouchImage,
     isDesktop,
-    writeProjectDocumentPath,
   } from '../integrations/desktop';
-  import { Copy } from '../icons';
+  import { Add, Copy, Dismiss } from '../icons';
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
@@ -36,6 +35,7 @@
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);
+  let references = $state<AiReferenceImage[]>([]);
   const progressListener = new AiProgressListener();
   let runningTaskId: string | null = null;
 
@@ -47,11 +47,8 @@
   const request = $derived(editor.pendingAiRetouch);
   const sourcePreview = $derived(taskDetail?.sourcePreview ?? (request ? canvasPreviewDataUrl(request.source) : ''));
   const maskPreview = $derived(taskDetail?.maskPreview ?? (request ? canvasPreviewDataUrl(request.mask) : ''));
+  const annotatedSourcePreview = $derived(taskDetail?.annotatedSourcePreview ?? (request?.annotatedSource ? canvasPreviewDataUrl(request.annotatedSource) : ''));
   const referencePreview = $derived(taskDetail?.referencePreview ?? (request?.reference ? canvasPreviewDataUrl(request.reference) : ''));
-
-  function textBytes(text: string): Uint8Array {
-    return new TextEncoder().encode(text);
-  }
 
   function promptWithAnnotationNotes(requestPrompt: string, annotationNotes: string[] | undefined): string {
     const notes = annotationNotes?.map((note) => note.trim()).filter(Boolean) ?? [];
@@ -80,29 +77,22 @@ Use these annotations as direct user instructions for the regions they point to.
     window.setTimeout(() => (copied = false), 1200);
   }
 
-  async function saveDebugInputs(
-    bytes: NonNullable<Awaited<ReturnType<typeof editor.prepareAiRetouchInput>>>,
-    requestPrompt: string,
-    activeRequest: NonNullable<typeof request>,
-    projectPath: string | null,
-  ): Promise<string | null> {
-    if (!settings.value.workspace.keepAiRunInputs || !projectPath) return null;
-    const dir = `paintnode/${providerRunDir(runOptions.provider)}/retouch-inputs-${Date.now()}`;
-    await writeProjectDocumentPath({ projectPath, path: `${dir}/source.png`, bytes: bytes.sourcePng });
-    await writeProjectDocumentPath({ projectPath, path: `${dir}/edit_target.png`, bytes: bytes.editTargetPng });
-    await writeProjectDocumentPath({ projectPath, path: `${dir}/mask.png`, bytes: bytes.maskPng });
-    if (bytes.annotatedSourcePng) {
-      await writeProjectDocumentPath({ projectPath, path: `${dir}/annotated_source.png`, bytes: bytes.annotatedSourcePng });
+  async function addReferences(): Promise<void> {
+    error = '';
+    copied = false;
+    if (!desktop) {
+      error = 'Reference files are available only in the desktop app.';
+      return;
     }
-    if (bytes.referencePng) {
-      await writeProjectDocumentPath({ projectPath, path: `${dir}/reference.png`, bytes: bytes.referencePng });
+    try {
+      references = [...references, ...(await loadAiReferenceImages(project.path))];
+    } catch (e) {
+      error = 'Add reference failed: ' + ((e as Error)?.message ?? String(e));
     }
-    await writeProjectDocumentPath({
-      projectPath,
-      path: `${dir}/prompt.txt`,
-      bytes: textBytes(`${activeRequest.toolName}\n\n${promptWithAnnotationNotes(requestPrompt, bytes.annotationNotes)}`),
-    });
-    return dir;
+  }
+
+  function removeReference(id: string): void {
+    references = references.filter((reference) => reference.id !== id);
   }
 
   async function run() {
@@ -141,14 +131,17 @@ Use these annotations as direct user instructions for the regions they point to.
         gestureKind: active.gesture.kind,
         sourcePreview,
         maskPreview,
+        annotatedSourcePreview,
         referencePreview,
+        references: references.map((reference) => ({ name: reference.name, bytes: reference.bytes })),
+        referenceNames: references.map((reference) => reference.name),
+        referencePreviews: references.map((reference) => reference.previewDataUrl),
       },
     });
     runningTaskId = task.id;
     editor.dismissAiRetouch();
     onClose();
     const executeTask = async () => {
-      let debugDir: string | null = null;
       const maskLayer =
         editor.documents
           .flatMap((session) => session.doc.layers)
@@ -160,6 +153,7 @@ Use these annotations as direct user instructions for the regions they point to.
       aiTasks.setProgress(task.id, 'Preparing AI retouch inputs...');
       editor.flash('Preparing AI retouch...');
       const runId = createRunId('retouch');
+      const keepJobDir = settings.value.workspace.keepAiRunInputs;
       progressListener.start(
         runId,
         (message) => aiTasks.setProgress(task.id, message),
@@ -173,30 +167,28 @@ Use these annotations as direct user instructions for the regions they point to.
       try {
         const bytes = await editor.prepareAiRetouchInput(active);
         if (!bytes) throw new Error('Unable to prepare AI retouch input.');
-        debugDir = await saveDebugInputs(bytes, prompt.trim(), active, taskProjectPath);
-        if (debugDir) {
-          aiTasks.setProgress(task.id, `Saved retouch inputs: ${debugDir}`);
-        }
         const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
         const generated =
           runOptions.provider === 'antigravity'
             ? await generateAntigravityRetouchImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 bytes.sourcePng,
                 bytes.editTargetPng,
                 bytes.maskPng,
                 bytes.annotatedSourcePng,
                 bytes.referencePng,
                 retouchPrompt,
+                references,
               )
             : await generateCodexRetouchImage(
-                codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 bytes.sourcePng,
                 bytes.editTargetPng,
                 bytes.maskPng,
                 bytes.annotatedSourcePng,
                 bytes.referencePng,
                 retouchPrompt,
+                references,
               );
         const savedAssetCount = generated.assets?.length ?? (generated.asset ? 1 : 0);
         if (generated.asset || savedAssetCount > 0) await project.refresh(taskProjectPath);
@@ -221,7 +213,7 @@ Use these annotations as direct user instructions for the regions they point to.
         aiTasks.complete(task.id, 'AI retouch added');
       } catch (e) {
         const message = (e as Error)?.message ?? String(e);
-        error = debugDir ? `${message}\n\nRetouch input files were saved at:\n${debugDir}` : message;
+        error = message;
         aiTasks.fail(task.id, error);
         editor.flash('AI retouch failed');
       } finally {
@@ -253,27 +245,107 @@ Use these annotations as direct user instructions for the regions they point to.
         <strong>{taskDetail.toolName}</strong>
         <span>{taskDetail.gestureKind} · {taskDetail.providerLabel}</span>
       </div>
+
+      {#if taskDetail.sourcePreview || taskDetail.maskPreview || taskDetail.referenceNames?.length}
+        <div class="preview-section">
+          <div class="preview-title">
+            <span>Images</span>
+          </div>
+          <div class="previews" aria-label="AI retouch input images">
+            {#if taskDetail.sourcePreview}
+              <figure>
+                <img src={taskDetail.sourcePreview} alt="" />
+                <figcaption>Source</figcaption>
+              </figure>
+            {/if}
+            {#if taskDetail.maskPreview}
+              <figure>
+                <img src={taskDetail.maskPreview} alt="" />
+                <figcaption>Mask</figcaption>
+              </figure>
+            {/if}
+            {#if taskDetail.annotatedSourcePreview}
+              <figure>
+                <img src={taskDetail.annotatedSourcePreview} alt="" />
+                <figcaption>Annotated</figcaption>
+              </figure>
+            {/if}
+            {#if taskDetail.referencePreview}
+              <figure>
+                <img src={taskDetail.referencePreview} alt="" />
+                <figcaption>Reference</figcaption>
+              </figure>
+            {/if}
+            {#each taskDetail.referenceNames ?? [] as name, index}
+              <figure>
+                {#if taskDetail.referencePreviews?.[index]}
+                  <img src={taskDetail.referencePreviews[index]} alt="" />
+                {:else}
+                  <div class="missing-preview" aria-hidden="true"></div>
+                {/if}
+                <figcaption>{name}</figcaption>
+              </figure>
+            {/each}
+          </div>
+        </div>
+      {/if}
     {:else if request}
       <div class="summary">
         <strong>{request.toolName}</strong>
         <span>{request.gesture.kind}</span>
       </div>
 
-      <div class="previews">
-        <figure>
-          <img src={sourcePreview} alt="" />
-          <figcaption>Source</figcaption>
-        </figure>
-        <figure>
-          <img src={maskPreview} alt="" />
-          <figcaption>Mask</figcaption>
-        </figure>
-        {#if referencePreview}
+      <div class="preview-section">
+        <div class="preview-title">
+          <span>Images</span>
+          <button
+            type="button"
+            class="icon-btn"
+            aria-label="Add reference"
+            use:tooltip={{ text: 'Add reference', placement: 'left' }}
+            onclick={addReferences}
+            disabled={currentBusy || !desktop}
+          >
+            <Icon svg={Add} size={16} />
+          </button>
+        </div>
+        <div class="previews" aria-label="AI retouch input images">
           <figure>
-            <img src={referencePreview} alt="" />
-            <figcaption>Reference</figcaption>
+            <img src={sourcePreview} alt="" />
+            <figcaption>Source</figcaption>
           </figure>
-        {/if}
+          <figure>
+            <img src={maskPreview} alt="" />
+            <figcaption>Mask</figcaption>
+          </figure>
+          {#if annotatedSourcePreview}
+            <figure>
+              <img src={annotatedSourcePreview} alt="" />
+              <figcaption>Annotated</figcaption>
+            </figure>
+          {/if}
+          {#if referencePreview}
+            <figure>
+              <img src={referencePreview} alt="" />
+              <figcaption>Reference</figcaption>
+            </figure>
+          {/if}
+          {#each references as reference (reference.id)}
+            <figure>
+              <img src={reference.previewDataUrl} alt="" />
+              <button
+                type="button"
+                class="remove-ref"
+                aria-label={`Remove ${reference.name}`}
+                use:tooltip={{ text: 'Remove reference', placement: 'top' }}
+                onclick={() => removeReference(reference.id)}
+              >
+                <Icon svg={Dismiss} size={13} />
+              </button>
+              <figcaption>{reference.name}</figcaption>
+            </figure>
+          {/each}
+        </div>
       </div>
     {/if}
 
@@ -366,16 +438,40 @@ Use these annotations as direct user instructions for the regions they point to.
   .summary span {
     color: var(--text-dim);
   }
-  .previews {
+  .preview-section {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    min-width: 0;
+  }
+  .preview-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 8px;
+    color: var(--text-dim);
+  }
+  .icon-btn,
+  .remove-ref {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+  }
+  .previews {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
   figure {
+    position: relative;
+    flex: 0 0 166px;
     margin: 0;
     min-width: 0;
   }
-  figure img {
+  figure img,
+  .missing-preview {
     width: 100%;
     aspect-ratio: 1.45;
     object-fit: contain;
@@ -386,6 +482,17 @@ Use these annotations as direct user instructions for the regions they point to.
   figcaption {
     margin-top: 4px;
     color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .remove-ref {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    background: rgba(22, 22, 22, 0.78);
   }
   .dlg-field {
     display: grid;

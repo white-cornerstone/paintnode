@@ -11,7 +11,14 @@
     providerLabel,
   } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
-  import { applyAlphaMask, chromaKeyToAlpha, connectedMatteToAlpha, parseHexColor } from '../engine/decouple/chroma';
+  import {
+    PAINTNODE_CHROMA_KEY_HEX,
+    PAINTNODE_CHROMA_KEY_RGB,
+    applyAlphaMask,
+    chromaKeyToAlpha,
+    connectedMatteToAlpha,
+    parseHexColor,
+  } from '../engine/decouple/chroma';
   import { aiTasks } from '../state/aiTasks.svelte';
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
@@ -112,6 +119,13 @@
       throw new Error(`Asset "${layer.name}" returned invalid keyColor "${layer.keyColor}".`);
     }
     if (key) {
+      const isPaintNodeKey =
+        key.r === PAINTNODE_CHROMA_KEY_RGB.r &&
+        key.g === PAINTNODE_CHROMA_KEY_RGB.g &&
+        key.b === PAINTNODE_CHROMA_KEY_RGB.b;
+      if (!isPaintNodeKey) {
+        throw new Error(`Asset "${layer.name}" returned keyColor "${layer.keyColor}". PaintNode only accepts ${PAINTNODE_CHROMA_KEY_HEX}.`);
+      }
       const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
       connectedMatteToAlpha(img.data, {
         key,

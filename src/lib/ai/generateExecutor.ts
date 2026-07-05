@@ -6,7 +6,6 @@ import {
   generateAntigravityFillImage,
   generateAntigravityImage,
   generateImage,
-  writeProjectDocumentPath,
   type ProjectAsset,
   type TargetDimensions,
 } from '../integrations/desktop';
@@ -14,8 +13,8 @@ import { aiTasks, type AiTask } from '../state/aiTasks.svelte';
 import { editor } from '../state/editor.svelte';
 import { project } from '../state/project.svelte';
 import { settings } from '../state/settings.svelte';
-import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings, type AiRunOptions } from '../state/settings';
-import { AiProgressListener, createRunId, focusTaskDocument, providerRunDir } from './taskSupport';
+import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
+import { AiProgressListener, createRunId, focusTaskDocument } from './taskSupport';
 
 /**
  * Executor for `generate` tasks. Everything it needs comes from the task
@@ -28,42 +27,10 @@ export function defaultFillPrompt(): string {
   return 'Naturally extend the existing image into the masked transparent area, matching the original scene, perspective, lighting, color, grain, and camera style.';
 }
 
-function promptWithCanvasSize(userPrompt: string): string {
-  const base = userPrompt.trim();
-  const doc = editor.doc;
-  if (!doc) return base;
-  return `${base}
-
-Final PaintNode canvas target: ${doc.width}x${doc.height} pixels. If the image generator uses fixed aspect-ratio buckets, PaintNode may use a supported working canvas with this target area centered and crop that area after generation. Keep the meaningful composition inside the final PaintNode target area.`;
-}
-
 function targetDimensions(): TargetDimensions | null {
   const doc = editor.doc;
   if (!doc) return null;
   return { width: doc.width, height: doc.height };
-}
-
-function textBytes(text: string): Uint8Array {
-  return new TextEncoder().encode(text);
-}
-
-async function saveFillDebugInputs(
-  fillInput: NonNullable<Awaited<ReturnType<typeof editor.prepareGenerativeFillInput>>>,
-  generationPrompt: string,
-  projectPath: string | null,
-  runOptions: AiRunOptions,
-): Promise<string | null> {
-  if (!settings.value.workspace.keepAiRunInputs || !projectPath) return null;
-  const dir = `paintnode/${providerRunDir(runOptions.provider)}/fill-inputs-${Date.now()}`;
-  await writeProjectDocumentPath({ projectPath, path: `${dir}/source.png`, bytes: fillInput.sourcePng });
-  await writeProjectDocumentPath({ projectPath, path: `${dir}/edit_target.png`, bytes: fillInput.editTargetPng });
-  await writeProjectDocumentPath({ projectPath, path: `${dir}/mask.png`, bytes: fillInput.maskPng });
-  await writeProjectDocumentPath({
-    projectPath,
-    path: `${dir}/prompt.txt`,
-    bytes: textBytes(generationPrompt),
-  });
-  return dir;
 }
 
 async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -85,9 +52,9 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     (settings.value.ai.customGenerateArgsText || settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   const fillMode = detail.fillMode;
   const userPrompt = detail.prompt;
+  const references = detail.references ?? [];
   const taskProjectPath = task.projectPath;
   const progressListener = new AiProgressListener();
-  let fillDebugDir: string | null = null;
   aiTasks.setProgress(
     task.id,
     runOptions.provider === 'codex'
@@ -126,51 +93,58 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     if (runOptions.provider === 'custom' && !runOptions.customBin.trim()) {
       throw new Error('Enter the generator command in AI settings.');
     }
+    if (runOptions.provider === 'custom' && references.length) {
+      throw new Error('Reference images are currently available with Local Codex or Antigravity CLI.');
+    }
     // On retry another document may be active; the fill input must come from
     // the document the task was started in (null means the active document).
     focusTaskDocument(task.documentId);
     const fillInput = fillMode ? await editor.prepareGenerativeFillInput() : null;
     if (fillMode && !fillInput) throw new Error('The current selection has no editable pixels.');
-    const generationPrompt = fillInput ? userPrompt : promptWithCanvasSize(userPrompt);
+    const generationPrompt = userPrompt;
     const generationTarget = fillInput ? null : targetDimensions();
-    fillDebugDir = fillInput ? await saveFillDebugInputs(fillInput, generationPrompt, taskProjectPath, runOptions) : null;
-    if (fillDebugDir) {
-      aiTasks.setProgress(task.id, `Saved fill inputs: ${fillDebugDir}`);
-    }
+    const keepJobDir = settings.value.workspace.keepAiRunInputs;
+    const fillJobProjectPath = fillInput && keepJobDir ? taskProjectPath : null;
     if (fillInput) {
       aiTasks.setProgress(
         task.id,
-        fillDebugDir ? `Starting mask-guided generative fill (${fillDebugDir})...` : 'Starting mask-guided generative fill...',
+        'Starting mask-guided generative fill...',
       );
     }
     const generated =
       runOptions.provider === 'codex'
         ? fillInput
           ? await generateCodexFillImage(
-              codexConfigFromRunOptions(runOptions, null, runId),
+              codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
               fillInput.sourcePng,
               fillInput.editTargetPng,
               fillInput.maskPng,
               generationPrompt,
+              references,
+              false,
             )
           : await generateCodexImage(
-              codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
+              codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
               generationPrompt,
               generationTarget,
+              references,
             )
         : runOptions.provider === 'antigravity'
           ? fillInput
             ? await generateAntigravityFillImage(
-                antigravityConfigFromRunOptions(runOptions, null, runId),
+                antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
                 fillInput.sourcePng,
                 fillInput.editTargetPng,
                 fillInput.maskPng,
                 generationPrompt,
+                references,
+                false,
               )
             : await generateAntigravityImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 generationPrompt,
                 generationTarget,
+                references,
               )
           : null;
     if (generated?.asset) await project.refresh(taskProjectPath);
@@ -228,7 +202,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     aiTasks.complete(task.id, fillInput ? 'Generative fill added' : 'Image generated');
   } catch (e) {
     const message = (e as Error)?.message ?? String(e);
-    aiTasks.fail(task.id, fillDebugDir ? `${message}\n\nFill input files were saved at:\n${fillDebugDir}` : message);
+    aiTasks.fail(task.id, message);
     editor.flash('Generation failed');
   } finally {
     progressListener.clear();

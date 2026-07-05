@@ -1,0 +1,25 @@
+{
+  "fallbackAspectRatios": [
+    { "label": "1:1", "width": 1, "height": 1, "minWidth": 1, "minHeight": 1 },
+    { "label": "2:3", "width": 2, "height": 3, "minWidth": 2, "minHeight": 3 },
+    { "label": "3:2", "width": 3, "height": 2, "minWidth": 3, "minHeight": 2 },
+    { "label": "3:4", "width": 3, "height": 4, "minWidth": 3, "minHeight": 4 },
+    { "label": "4:3", "width": 4, "height": 3, "minWidth": 1448, "minHeight": 1086 },
+    { "label": "4:5", "width": 4, "height": 5, "minWidth": 4, "minHeight": 5 },
+    { "label": "5:4", "width": 5, "height": 4, "minWidth": 5, "minHeight": 4 },
+    { "label": "9:16", "width": 9, "height": 16, "minWidth": 9, "minHeight": 16 },
+    { "label": "16:9", "width": 16, "height": 9, "minWidth": 16, "minHeight": 9 },
+    { "label": "21:9", "width": 21, "height": 9, "minWidth": 21, "minHeight": 9 }
+  ],
+  "providers": {
+    "codex": {
+      "dimensionMultiple": 16,
+      "maxLongSide": 3840,
+      "maxShortSide": 2160,
+      "maxAspectRatio": 3
+    },
+    "antigravity": {
+      "aspectRatios": ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+    }
+  }
+}
