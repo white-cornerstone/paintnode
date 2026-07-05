@@ -296,7 +296,7 @@ export class EditorStore implements ToolHost {
   background = $state<RGB>({ r: 255, g: 255, b: 255 });
 
   brushSize = $state(24);
-  brushHardness = $state(0.85);
+  brushHardness = $state(1);
   brushOpacity = $state(1);
   aiRetouchBrushFeather = $state(24);
   tolerance = $state(24);
@@ -1217,11 +1217,18 @@ export class EditorStore implements ToolHost {
 
     const session = this.makeSession(doc, sourceKey, hasSavedBaseline);
     this.documents = [...this.documents, session];
+    // Start on the Move tool, but only after switchDocument has made the new
+    // session active (and discarded any in-progress transform on the old one) —
+    // setTool would otherwise commit that transform into the wrong document.
     if (focus) {
       ui.showDocument();
       this.switchDocument(session.id);
+      this.setTool('move');
     }
-    else if (!this.activeDocumentId) this.switchDocument(session.id);
+    else if (!this.activeDocumentId) {
+      this.switchDocument(session.id);
+      this.setTool('move');
+    }
     return session;
   }
 

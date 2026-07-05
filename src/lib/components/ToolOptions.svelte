@@ -77,6 +77,35 @@
     const value = Number.isFinite(editor.aiRetouchBrushFeather) ? editor.aiRetouchBrushFeather : 0;
     editor.aiRetouchBrushFeather = Math.max(0, Math.min(500, Math.round(value)));
   }
+
+  // Free Transform: width/height are stored as scale factors and angle as radians,
+  // so typed values are converted back before updating the live session. Each
+  // handler reconciles the field back to the canonical value afterwards, so a
+  // cleared/zero/negative entry (which is ignored) snaps back instead of sticking.
+  function setFreeTransformWidth(input: HTMLInputElement): void {
+    const t = editor.freeTransform;
+    if (!t) return;
+    const px = input.valueAsNumber;
+    if (Number.isFinite(px) && px > 0) editor.updateFreeTransform({ scaleX: px / t.sourceWidth });
+    const now = editor.freeTransform;
+    if (now) input.value = String(Math.round(now.sourceWidth * now.scaleX));
+  }
+  function setFreeTransformHeight(input: HTMLInputElement): void {
+    const t = editor.freeTransform;
+    if (!t) return;
+    const px = input.valueAsNumber;
+    if (Number.isFinite(px) && px > 0) editor.updateFreeTransform({ scaleY: px / t.sourceHeight });
+    const now = editor.freeTransform;
+    if (now) input.value = String(Math.round(now.sourceHeight * now.scaleY));
+  }
+  function setFreeTransformAngle(input: HTMLInputElement): void {
+    const t = editor.freeTransform;
+    if (!t) return;
+    const deg = input.valueAsNumber;
+    if (Number.isFinite(deg)) editor.updateFreeTransform({ rotation: (deg * Math.PI) / 180 });
+    const now = editor.freeTransform;
+    if (now) input.value = String(Math.round((now.rotation * 180) / Math.PI));
+  }
 </script>
 
 {#snippet selectionModeButtons()}
@@ -169,18 +198,41 @@
     {#if editor.freeTransform}
       <span class="tool-name">Free Transform</span>
       <span class="divider"></span>
-      <div class="opt">
+      <label class="opt">
         W
-        <span class="pill">{Math.round(editor.freeTransform.sourceWidth * editor.freeTransform.scaleX)}px</span>
-      </div>
-      <div class="opt">
+        <input
+          type="number"
+          min="1"
+          step="1"
+          class="num"
+          value={Math.round(editor.freeTransform.sourceWidth * editor.freeTransform.scaleX)}
+          onchange={(event) => setFreeTransformWidth(event.currentTarget)}
+        />
+        <span class="unit">px</span>
+      </label>
+      <label class="opt">
         H
-        <span class="pill">{Math.round(editor.freeTransform.sourceHeight * editor.freeTransform.scaleY)}px</span>
-      </div>
-      <div class="opt">
+        <input
+          type="number"
+          min="1"
+          step="1"
+          class="num"
+          value={Math.round(editor.freeTransform.sourceHeight * editor.freeTransform.scaleY)}
+          onchange={(event) => setFreeTransformHeight(event.currentTarget)}
+        />
+        <span class="unit">px</span>
+      </label>
+      <label class="opt">
         Angle
-        <span class="pill">{Math.round((editor.freeTransform.rotation * 180) / Math.PI)}°</span>
-      </div>
+        <input
+          type="number"
+          step="1"
+          class="num"
+          value={Math.round((editor.freeTransform.rotation * 180) / Math.PI)}
+          onchange={(event) => setFreeTransformAngle(event.currentTarget)}
+        />
+        <span class="unit">°</span>
+      </label>
       <button onclick={() => editor.cancelFreeTransform()}>Cancel</button>
       <button class="primary-option" onclick={() => editor.commitFreeTransform()}>Done</button>
       {@render toolInfo('transform', 'Drag handles to scale, drag the round handle to rotate, press Enter to apply.')}
