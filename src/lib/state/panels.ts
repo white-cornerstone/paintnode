@@ -18,14 +18,28 @@ export const PANEL_GROUP_IDS = Object.keys(PANEL_GROUP_PANELS) as PanelGroupId[]
 export interface PanelLayout {
   rightCollapsed: boolean;
   projectCollapsed: boolean;
+  /** Height in px of the Tasks panel when both Project and Tasks are expanded. */
+  tasksPanelHeight: number;
   activePanelByGroup: Record<PanelGroupId, PanelId>;
   collapsedGroups: Record<PanelGroupId, boolean>;
+}
+
+export const TASKS_PANEL_MIN_HEIGHT = 96;
+export const TASKS_PANEL_MAX_HEIGHT = 800;
+export const TASKS_PANEL_DEFAULT_HEIGHT = 240;
+
+/** Clamp a Tasks-panel height, optionally against the space available right now. */
+export function clampTasksPanelHeight(value: number, availableMax = TASKS_PANEL_MAX_HEIGHT): number {
+  if (!Number.isFinite(value)) return TASKS_PANEL_DEFAULT_HEIGHT;
+  const upper = Math.max(TASKS_PANEL_MIN_HEIGHT, Math.min(TASKS_PANEL_MAX_HEIGHT, availableMax));
+  return Math.round(Math.min(upper, Math.max(TASKS_PANEL_MIN_HEIGHT, value)));
 }
 
 export function defaultPanelLayout(): PanelLayout {
   return {
     rightCollapsed: false,
     projectCollapsed: false,
+    tasksPanelHeight: TASKS_PANEL_DEFAULT_HEIGHT,
     activePanelByGroup: {
       presets: 'color',
       edits: 'properties',
@@ -65,6 +79,10 @@ export function normalizePanelLayout(raw: unknown): PanelLayout {
   return {
     rightCollapsed: booleanOrDefault(raw.rightCollapsed, defaults.rightCollapsed),
     projectCollapsed: booleanOrDefault(raw.projectCollapsed, defaults.projectCollapsed),
+    tasksPanelHeight:
+      typeof raw.tasksPanelHeight === 'number'
+        ? clampTasksPanelHeight(raw.tasksPanelHeight)
+        : defaults.tasksPanelHeight,
     activePanelByGroup,
     collapsedGroups,
   };

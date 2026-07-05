@@ -60,7 +60,7 @@
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { isDesktop, quitApplication, takePendingOpenPaths } from './lib/integrations/desktop';
-  import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, type PanelGroupId, type PanelId } from './lib/state/panels';
+  import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, TASKS_PANEL_MIN_HEIGHT, type PanelGroupId, type PanelId } from './lib/state/panels';
   import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
   import { project } from './lib/state/project.svelte';
@@ -191,6 +191,55 @@
 
   function showProjectSide(): void {
     panels.setProjectCollapsed(false);
+  }
+
+  // Header collapse state of the two stacked project-side panels; the divider
+  // between them only exists while both are expanded.
+  let projectPanelCollapsed = $state(false);
+  let tasksPanelCollapsed = $state(false);
+  const projectTasksSplit = $derived(!projectPanelCollapsed && !tasksPanelCollapsed);
+
+  // Keep at least this much of the sidebar for the Project panel when resizing.
+  const PROJECT_PANEL_MIN_HEIGHT = 160;
+
+  function maxTasksPanelHeight(divider: HTMLElement): number {
+    const side = divider.closest('.project-side');
+    if (!(side instanceof HTMLElement)) return Number.POSITIVE_INFINITY;
+    return side.clientHeight - PROJECT_PANEL_MIN_HEIGHT - divider.offsetHeight;
+  }
+
+  function startTasksDividerDrag(event: PointerEvent): void {
+    const divider = event.currentTarget;
+    if (!(divider instanceof HTMLElement)) return;
+    event.preventDefault();
+    divider.setPointerCapture(event.pointerId);
+    const startY = event.clientY;
+    const startHeight = panels.value.tasksPanelHeight;
+    const available = maxTasksPanelHeight(divider);
+    const onMove = (move: PointerEvent) => {
+      panels.setTasksPanelHeight(startHeight + (startY - move.clientY), available, false);
+    };
+    const onEnd = () => {
+      divider.removeEventListener('pointermove', onMove);
+      divider.removeEventListener('pointerup', onEnd);
+      divider.removeEventListener('pointercancel', onEnd);
+      panels.persist();
+    };
+    divider.addEventListener('pointermove', onMove);
+    divider.addEventListener('pointerup', onEnd);
+    divider.addEventListener('pointercancel', onEnd);
+  }
+
+  function tasksDividerKeydown(event: KeyboardEvent): void {
+    const step = event.key === 'ArrowUp' ? 16 : event.key === 'ArrowDown' ? -16 : 0;
+    if (!step) return;
+    const divider = event.currentTarget;
+    if (!(divider instanceof HTMLElement)) return;
+    event.preventDefault();
+    panels.setTasksPanelHeight(
+      panels.value.tasksPanelHeight + step,
+      maxTasksPanelHeight(divider),
+    );
   }
 
   function documentDisplayName(session: DocumentSession): string {
@@ -831,8 +880,29 @@
                   aria-label="Collapse panels"
                 ><Icon svg={ChevronDoubleRight} size={16} /></button>
               </div>
-              <ProjectPanel />
-              <TasksPanel />
+              <ProjectPanel bind:collapsed={projectPanelCollapsed} />
+              {#if projectTasksSplit}
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
+                <div
+                  class="tasks-divider"
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Resize tasks panel"
+                  aria-valuemin={TASKS_PANEL_MIN_HEIGHT}
+                  aria-valuenow={panels.value.tasksPanelHeight}
+                  tabindex="0"
+                  onpointerdown={startTasksDividerDrag}
+                  onkeydown={tasksDividerKeydown}
+                ></div>
+              {/if}
+              <div
+                class="tasks-slot"
+                class:sized={projectTasksSplit}
+                class:fill={projectPanelCollapsed && !tasksPanelCollapsed}
+                style:height={projectTasksSplit ? `${panels.value.tasksPanelHeight}px` : undefined}
+              >
+                <TasksPanel grow bind:collapsed={tasksPanelCollapsed} />
+              </div>
             {/if}
           </aside>
         {/if}
@@ -1004,6 +1074,46 @@
     padding: 0 6px;
     background: var(--bg-panel-2);
     border-bottom: 1px solid var(--border);
+  }
+  .tasks-divider {
+    flex: none;
+    height: 7px;
+    margin: -3px 0;
+    cursor: row-resize;
+    position: relative;
+    z-index: 5;
+    background: transparent;
+  }
+  .tasks-divider::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 3px;
+    height: 1px;
+    background: var(--border);
+  }
+  .tasks-divider:hover::after,
+  .tasks-divider:focus-visible::after {
+    top: 2px;
+    height: 3px;
+    background: color-mix(in srgb, var(--accent) 55%, var(--border));
+  }
+  .tasks-divider:focus-visible {
+    outline: none;
+  }
+  .tasks-slot {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .tasks-slot.sized {
+    /* Never squeeze the Project panel below its working minimum. */
+    max-height: calc(100% - 190px);
+  }
+  .tasks-slot.fill {
+    flex: 1;
   }
   .project-rail {
     display: flex;

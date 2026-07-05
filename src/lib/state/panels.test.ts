@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { defaultPanelLayout, normalizePanelLayout, parsePanelLayoutJson } from './panels';
+import {
+  clampTasksPanelHeight,
+  defaultPanelLayout,
+  normalizePanelLayout,
+  parsePanelLayoutJson,
+  TASKS_PANEL_DEFAULT_HEIGHT,
+  TASKS_PANEL_MAX_HEIGHT,
+  TASKS_PANEL_MIN_HEIGHT,
+} from './panels';
 
 describe('panel layout normalization', () => {
   it('defaults to expanded columns and groups with the first panel of each group active', () => {
@@ -68,5 +76,22 @@ describe('panel layout normalization', () => {
   it('recovers from malformed or absent JSON', () => {
     expect(parsePanelLayoutJson('{not json').activePanelByGroup.presets).toBe('color');
     expect(parsePanelLayoutJson(null)).toEqual(defaultPanelLayout());
+  });
+
+  it('keeps a valid saved tasks panel height and clamps out-of-range values', () => {
+    expect(defaultPanelLayout().tasksPanelHeight).toBe(TASKS_PANEL_DEFAULT_HEIGHT);
+    expect(normalizePanelLayout({ tasksPanelHeight: 320 }).tasksPanelHeight).toBe(320);
+    expect(normalizePanelLayout({ tasksPanelHeight: 4 }).tasksPanelHeight).toBe(TASKS_PANEL_MIN_HEIGHT);
+    expect(normalizePanelLayout({ tasksPanelHeight: 5000 }).tasksPanelHeight).toBe(TASKS_PANEL_MAX_HEIGHT);
+    expect(normalizePanelLayout({ tasksPanelHeight: 'tall' }).tasksPanelHeight).toBe(TASKS_PANEL_DEFAULT_HEIGHT);
+  });
+
+  it('clamps live drag heights against the space available in the sidebar', () => {
+    expect(clampTasksPanelHeight(500, 360)).toBe(360);
+    expect(clampTasksPanelHeight(10, 360)).toBe(TASKS_PANEL_MIN_HEIGHT);
+    expect(clampTasksPanelHeight(200.6, 360)).toBe(201);
+    // A cramped sidebar never pushes the clamp below the minimum height.
+    expect(clampTasksPanelHeight(500, 40)).toBe(TASKS_PANEL_MIN_HEIGHT);
+    expect(clampTasksPanelHeight(Number.NaN)).toBe(TASKS_PANEL_DEFAULT_HEIGHT);
   });
 });

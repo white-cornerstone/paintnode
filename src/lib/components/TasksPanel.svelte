@@ -5,7 +5,7 @@
   import { aiTasks, type AiTask } from '../state/aiTasks.svelte';
   import { ArrowSync, Broom, Checkmark, Dismiss, TaskList } from '../icons';
 
-  let { collapsed = $bindable(false) }: { collapsed?: boolean } = $props();
+  let { collapsed = $bindable(false), grow = false }: { collapsed?: boolean; grow?: boolean } = $props();
 
   const runningCount = $derived(aiTasks.tasks.filter((task) => task.status === 'running').length);
   const completedCount = $derived(aiTasks.tasks.filter((task) => task.status === 'completed').length);
@@ -21,7 +21,7 @@
   }
 </script>
 
-<Panel title={runningCount > 0 ? `Tasks (${runningCount})` : 'Tasks'} bind:collapsed>
+<Panel title={runningCount > 0 ? `Tasks (${runningCount})` : 'Tasks'} {grow} bind:collapsed>
   {#snippet actions()}
     {#if completedCount > 0}
       <button
@@ -118,8 +118,10 @@
   .tasks {
     display: flex;
     flex-direction: column;
+    flex: 1;
     min-height: 0;
     padding: 8px;
+    overflow-y: auto;
   }
   .empty {
     display: flex;

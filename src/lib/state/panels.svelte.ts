@@ -1,4 +1,5 @@
 import {
+  clampTasksPanelHeight,
   defaultPanelLayout,
   PANELS_STORAGE_KEY,
   parsePanelLayoutJson,
@@ -33,6 +34,12 @@ class PanelsStore {
   setGroupCollapsed(groupId: PanelGroupId, collapsed: boolean): void {
     this.value.collapsedGroups[groupId] = collapsed;
     this.persist();
+  }
+
+  /** Live-resize the Tasks panel; skip persistence during drags and persist on release. */
+  setTasksPanelHeight(height: number, availableMax?: number, persist = true): void {
+    this.value.tasksPanelHeight = clampTasksPanelHeight(height, availableMax);
+    if (persist) this.persist();
   }
 
   persist(): void {
