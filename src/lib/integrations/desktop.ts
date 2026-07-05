@@ -81,6 +81,8 @@ export interface CodexGeneratorConfig {
   bin?: string;
   /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
+  /** Keep the actual provider job folder for inspecting the exact inputs sent to the CLI. */
+  keepJobDir?: boolean;
   /** Per-request id used to filter Codex progress events. */
   runId?: string;
   /** Codex model selected in PaintNode settings. */
@@ -98,6 +100,8 @@ export interface AntigravityGeneratorConfig {
   bin?: string;
   /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
+  /** Keep the actual provider job folder for inspecting the exact inputs sent to the CLI. */
+  keepJobDir?: boolean;
   /** Per-request id used to filter progress events. */
   runId?: string;
   /** Antigravity model selected in PaintNode settings. "auto" lets Antigravity CLI choose. */
@@ -228,6 +232,7 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
   return {
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
+    keepJobDir: config.keepJobDir ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
     reasoningEffort,
@@ -240,6 +245,7 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
   return {
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
+    keepJobDir: config.keepJobDir ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
     approvalMode: config.approvalMode ?? 'skipPermissions',
@@ -247,10 +253,16 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
   };
 }
 
-export function codexConfigFromRunOptions(options: AiRunOptions, projectPath?: string | null, runId?: string): CodexGeneratorConfig {
+export function codexConfigFromRunOptions(
+  options: AiRunOptions,
+  projectPath?: string | null,
+  runId?: string,
+  keepJobDir = false,
+): CodexGeneratorConfig {
   return {
     bin: options.codexBin,
     projectPath,
+    keepJobDir,
     runId,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
@@ -259,10 +271,16 @@ export function codexConfigFromRunOptions(options: AiRunOptions, projectPath?: s
   };
 }
 
-export function antigravityConfigFromRunOptions(options: AiRunOptions, projectPath?: string | null, runId?: string): AntigravityGeneratorConfig {
+export function antigravityConfigFromRunOptions(
+  options: AiRunOptions,
+  projectPath?: string | null,
+  runId?: string,
+  keepJobDir = false,
+): AntigravityGeneratorConfig {
   return {
     bin: options.antigravityBin,
     projectPath,
+    keepJobDir,
     runId,
     model: options.antigravityModel,
     approvalMode: options.antigravityApprovalMode,
@@ -296,6 +314,7 @@ export async function generateCodexImage(
   config: CodexGeneratorConfig,
   prompt: string,
   targetDimensions?: TargetDimensions | null,
+  references: WorkflowSourceImage[] = [],
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex image generation is only available in the desktop app.');
@@ -311,6 +330,10 @@ export async function generateCodexImage(
     runId,
     targetWidth: targetDimensions?.width ?? null,
     targetHeight: targetDimensions?.height ?? null,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
   });
 }
 
@@ -320,6 +343,8 @@ export async function generateCodexFillImage(
   editTargetPng: Uint8Array,
   maskPng: Uint8Array,
   prompt: string,
+  references: WorkflowSourceImage[] = [],
+  storeAsset = true,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex generative fill is only available in the desktop app.');
@@ -335,6 +360,11 @@ export async function generateCodexFillImage(
     sourcePng: Array.from(sourcePng),
     editTargetPng: Array.from(editTargetPng),
     maskPng: Array.from(maskPng),
+    storeAsset,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
     runId,
   });
 }
@@ -347,6 +377,7 @@ export async function generateCodexRetouchImage(
   annotatedSourcePng: Uint8Array | null | undefined,
   referencePng: Uint8Array | null | undefined,
   prompt: string,
+  references: WorkflowSourceImage[] = [],
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex AI retouch is only available in the desktop app.');
@@ -364,6 +395,10 @@ export async function generateCodexRetouchImage(
     maskPng: Array.from(maskPng),
     annotatedSourcePng: annotatedSourcePng ? Array.from(annotatedSourcePng) : null,
     referencePng: referencePng ? Array.from(referencePng) : null,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
     runId,
   });
 }
@@ -419,6 +454,7 @@ export async function generateAntigravityImage(
   config: AntigravityGeneratorConfig,
   prompt: string,
   targetDimensions?: TargetDimensions | null,
+  references: WorkflowSourceImage[] = [],
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity image generation is only available in the desktop app.');
@@ -430,6 +466,10 @@ export async function generateAntigravityImage(
     runId,
     targetWidth: targetDimensions?.width ?? null,
     targetHeight: targetDimensions?.height ?? null,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
   });
 }
 
@@ -439,6 +479,8 @@ export async function generateAntigravityFillImage(
   editTargetPng: Uint8Array,
   maskPng: Uint8Array,
   prompt: string,
+  references: WorkflowSourceImage[] = [],
+  storeAsset = true,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity generative fill is only available in the desktop app.');
@@ -450,6 +492,11 @@ export async function generateAntigravityFillImage(
     sourcePng: Array.from(sourcePng),
     editTargetPng: Array.from(editTargetPng),
     maskPng: Array.from(maskPng),
+    storeAsset,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
     runId,
   });
 }
@@ -462,6 +509,7 @@ export async function generateAntigravityRetouchImage(
   annotatedSourcePng: Uint8Array | null | undefined,
   referencePng: Uint8Array | null | undefined,
   prompt: string,
+  references: WorkflowSourceImage[] = [],
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity AI retouch is only available in the desktop app.');
@@ -475,6 +523,10 @@ export async function generateAntigravityRetouchImage(
     maskPng: Array.from(maskPng),
     annotatedSourcePng: annotatedSourcePng ? Array.from(annotatedSourcePng) : null,
     referencePng: referencePng ? Array.from(referencePng) : null,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
     runId,
   });
 }
@@ -636,6 +688,25 @@ export async function saveProjectDocumentAs(args: {
     previousName: args.previousName?.trim() ? args.previousName.trim() : null,
     bytes: Array.from(args.bytes),
   });
+}
+
+/** Pick image/reference files for an AI request, defaulting to the active project folder. */
+export async function pickAiReferenceFiles(projectPath?: string | null): Promise<string[]> {
+  if (!isDesktop()) throw new Error('AI reference files are only available in the desktop app.');
+  const selected = await openDialog({
+    title: 'Add AI Reference',
+    directory: false,
+    multiple: true,
+    defaultPath: projectPath?.trim() ? projectPath.trim() : undefined,
+    filters: [
+      { name: 'AI reference images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'ora', 'psd'] },
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+      { name: 'PaintNode/OpenRaster', extensions: ['ora'] },
+      { name: 'Photoshop Document', extensions: ['psd'] },
+    ],
+  });
+  if (!selected) return [];
+  return Array.isArray(selected) ? selected : [selected];
 }
 
 export async function writeProjectDocumentPath(args: {
