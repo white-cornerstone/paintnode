@@ -5,8 +5,14 @@ export type DialogId =
   | 'new'
   | 'about'
   | 'imageSize'
+  | 'canvasSize'
+  | 'trim'
+  | 'duplicateDocument'
   | 'brightnessContrast'
   | 'hueSaturation'
+  | 'levels'
+  | 'threshold'
+  | 'aiAutoAdjust'
   | 'gaussianBlur'
   | 'aiGenerate'
   | 'aiRetouch'
@@ -17,7 +23,8 @@ export type DialogId =
   | 'settings'
   | 'update';
 
-export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple';
+export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust';
+export type AiAutoAdjustKind = 'tone' | 'contrast' | 'color';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
@@ -39,6 +46,7 @@ class UiState {
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
   aiTaskDialog = $state<{ kind: AiTaskDialogKind; id: string } | null>(null);
+  aiAutoAdjustKind = $state<AiAutoAdjustKind>('tone');
   activeSurface = $state<'document' | 'workflow'>('document');
   workspaceFocusMode = $state(false);
   workspaceFocusHintVisible = $state(false);
@@ -71,6 +79,10 @@ class UiState {
     this.aiGeneratePrefill = prefillPrompt;
     this.open('aiGenerate');
   }
+  openAiAutoAdjust(kind: AiAutoAdjustKind): void {
+    this.aiAutoAdjustKind = kind;
+    this.open('aiAutoAdjust');
+  }
   consumeAiGeneratePrefill(): string | null {
     const value = this.aiGeneratePrefill;
     this.aiGeneratePrefill = null;
@@ -85,7 +97,9 @@ class UiState {
           ? 'aiRetouch'
           : kind === 'upscale'
             ? 'aiUpscale'
-            : 'aiDecouple';
+            : kind === 'autoAdjust'
+              ? 'aiAutoAdjust'
+              : 'aiDecouple';
   }
   close(): void {
     this.dialog = null;

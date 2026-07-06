@@ -19,20 +19,21 @@
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
   import { compositeToCanvas } from '../engine/compositor';
+  import { createCanvas, ctx2d } from '../engine/types';
   import {
-    codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
-    upscaleCodexImage,
-    upscaleAntigravityImage,
+    codexConfigFromRunOptions,
+    generateAntigravityRetouchImage,
+    generateCodexRetouchImage,
     isDesktop,
   } from '../integrations/desktop';
+  import { ui, type AiAutoAdjustKind } from '../state/ui.svelte';
   import { Copy } from '../icons';
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
   const desktop = isDesktop();
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
-  let scalePercent = $state(200);
   let busy = $state(false);
   let error = $state('');
   let copied = $state(false);
@@ -40,24 +41,39 @@
   let runningTaskId: string | null = null;
 
   const task = $derived(aiTasks.find(taskId));
-  const taskDetail = $derived(task?.detail.kind === 'upscale' ? task.detail : null);
+  const taskDetail = $derived(task?.detail.kind === 'autoAdjust' ? task.detail : null);
+  const kind = $derived(taskDetail?.adjustment ?? ui.aiAutoAdjustKind);
+  const doc = $derived(editor.doc);
   const currentError = $derived(task?.error ?? error);
   const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
-  const doc = $derived(editor.doc);
-  const clampedScale = $derived(Math.min(1000, Math.max(100, Math.round(scalePercent || 100))));
-  const outputSize = $derived(
-    doc
-      ? {
-          width: Math.round((doc.width * clampedScale) / 100),
-          height: Math.round((doc.height * clampedScale) / 100),
-        }
-      : null,
-  );
+  let prompt = $state(autoPrompt(ui.aiAutoAdjustKind));
+
+  $effect(() => {
+    if (!taskDetail) prompt = autoPrompt(ui.aiAutoAdjustKind);
+  });
+
+  const title = $derived(`AI Auto ${labelFor(kind)}`);
 
   onDestroy(() => {
     if (!runningTaskId) progressListener.clear();
   });
+
+  function labelFor(value: AiAutoAdjustKind): string {
+    return value === 'tone' ? 'Tone' : value === 'contrast' ? 'Contrast' : 'Color';
+  }
+
+  function autoPrompt(value: AiAutoAdjustKind): string {
+    const common =
+      'Preserve the document content, composition, crop, transparency, subject identity, text, logos, line art, and all object positions. Do not add, remove, move, restyle, denoise, sharpen, upscale, or repaint content. Only make a natural global photographic adjustment.';
+    if (value === 'contrast') {
+      return `Apply an automatic contrast correction to this full PaintNode document. Improve black/white points and local readability while keeping colors and brightness believable. ${common}`;
+    }
+    if (value === 'color') {
+      return `Apply an automatic color correction to this full PaintNode document. Neutralize unwanted color cast, balance highlights/midtones/shadows, and keep skin tones and brand colors natural. ${common}`;
+    }
+    return `Apply an automatic tonal correction to this full PaintNode document. Balance shadows, midtones, and highlights, recover a natural exposure, and avoid clipping important detail. ${common}`;
+  }
 
   async function copyError() {
     if (!currentError) return;
@@ -70,10 +86,18 @@
     const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((value) => {
         if (value) resolve(value);
-        else reject(new Error('Unable to encode the document for AI upscale.'));
+        else reject(new Error('Unable to encode the document for AI auto adjustment.'));
       }, 'image/png');
     });
     return new Uint8Array(await blob.arrayBuffer());
+  }
+
+  function fullMask(width: number, height: number): HTMLCanvasElement {
+    const mask = createCanvas(width, height);
+    const c = ctx2d(mask);
+    c.fillStyle = '#ffffff';
+    c.fillRect(0, 0, width, height);
+    return mask;
   }
 
   async function run() {
@@ -81,42 +105,51 @@
     copied = false;
     const activeDoc = editor.doc;
     if (!activeDoc) {
-      error = 'Open a document to upscale.';
+      error = 'Open a document to adjust.';
       return;
     }
     if (!desktop) {
-      error = 'AI Upscale is available only in the desktop app.';
+      error = 'AI Auto adjustments are available only in the desktop app.';
+      return;
+    }
+    if (!prompt.trim()) {
+      error = 'Enter an adjustment prompt.';
       return;
     }
     if (runOptions.provider === 'custom') {
-      error = 'AI Upscale is currently available with Local Codex or Antigravity CLI.';
+      error = 'AI Auto adjustments are currently available with Local Codex or Antigravity CLI.';
       return;
     }
-    const scale = clampedScale;
+
     busy = true;
+    const adjustment = kind;
     const taskProjectPath = project.path;
     const docName = activeDoc.name || 'Untitled';
     const source = compositeToCanvas(activeDoc);
-    const runId = createRunId('upscale');
+    const mask = fullMask(source.width, source.height);
+    const sourcePreview = canvasPreviewDataUrl(source);
+    const runId = createRunId(`auto-${adjustment}`);
     const task = aiTasks.create({
-      kind: 'upscale',
+      kind: 'autoAdjust',
       runId,
-      title: 'AI Upscale',
-      subtitle: `${scale}% · ${providerLabel(runOptions.provider)}`,
-      progress: 'Preparing AI upscale input...',
+      title: `AI Auto ${labelFor(adjustment)}`,
+      subtitle: providerLabel(runOptions.provider),
+      progress: 'Preparing AI auto adjustment input...',
       detail: {
-        kind: 'upscale',
+        kind: 'autoAdjust',
         providerLabel: providerLabel(runOptions.provider),
-        scalePercent: scale,
+        adjustment,
+        prompt: prompt.trim(),
         sourceName: docName,
-        sourcePreview: canvasPreviewDataUrl(source),
+        sourcePreview,
       },
     });
     runningTaskId = task.id;
     onClose();
+
     const executeTask = async () => {
-      aiTasks.setProgress(task.id, 'Preparing AI upscale input...');
-      editor.flash('Preparing AI upscale...');
+      aiTasks.setProgress(task.id, 'Preparing AI auto adjustment input...');
+      editor.flash('Preparing AI auto adjustment...');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
       progressListener.start(
         runId,
@@ -135,38 +168,47 @@
 
       try {
         const sourcePng = await canvasToPngBytes(source);
+        const maskPng = await canvasToPngBytes(mask);
         const generated =
           runOptions.provider === 'antigravity'
-            ? await upscaleAntigravityImage(
+            ? await generateAntigravityRetouchImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 sourcePng,
-                scale,
+                sourcePng,
+                maskPng,
+                null,
+                null,
+                prompt.trim(),
               )
-            : await upscaleCodexImage(
+            : await generateCodexRetouchImage(
                 codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 sourcePng,
-                scale,
+                sourcePng,
+                maskPng,
+                null,
+                null,
+                prompt.trim(),
               );
         if (generated.asset) await project.refresh(taskProjectPath);
         const blob = await (await fetch(generated.dataUrl)).blob();
         const bmp = await createImageBitmap(blob);
-        const upscaledDoc = new PaintDocument(bmp.width, bmp.height, `${docName} ${scale}%`);
-        const layer = new Layer(bmp.width, bmp.height, 'Layer 1');
+        const adjustedDoc = new PaintDocument(bmp.width, bmp.height, `${docName} AI Auto ${labelFor(adjustment)}`);
+        const layer = new Layer(bmp.width, bmp.height, 'Adjusted image');
         layer.sourceAssetId = generated.asset?.id ?? null;
         layer.sourcePath = generated.asset?.relativePath ?? null;
         layer.ctx.drawImage(bmp, 0, 0);
         layer.touch();
         bmp.close();
-        upscaledDoc.layers = [layer];
-        upscaledDoc.activeLayerId = layer.id;
-        editor.openDocument(upscaledDoc);
-        editor.flash('AI upscale added as a new document');
-        aiTasks.complete(task.id, 'AI upscale completed');
+        adjustedDoc.layers = [layer];
+        adjustedDoc.activeLayerId = layer.id;
+        editor.openDocument(adjustedDoc);
+        editor.flash(`AI Auto ${labelFor(adjustment)} opened as a new document`);
+        aiTasks.complete(task.id, `AI Auto ${labelFor(adjustment)} completed`);
       } catch (e) {
         const message = (e as Error)?.message ?? String(e);
         error = message;
         aiTasks.fail(task.id, message);
-        editor.flash('AI upscale failed');
+        editor.flash(`AI Auto ${labelFor(adjustment)} failed`);
       } finally {
         busy = false;
         progressListener.clear();
@@ -178,16 +220,16 @@
   }
 </script>
 
-<Modal title="AI Upscale" onClose={onClose} width={480}>
-  <div class="dlg-form">
+<Modal title={title} onClose={onClose} width={540}>
+  <div class="dlg-form auto-adjust">
     {#if !desktop}
-      <p class="warn">AI Upscale runs a local AI provider and only works in the desktop app.</p>
+      <p class="warn">AI Auto adjustments run a local AI provider and only work in the desktop app.</p>
     {/if}
 
     {#if taskDetail}
       <div class="summary">
         <strong>{taskDetail.sourceName}</strong>
-        <span>{taskDetail.scalePercent}% · {taskDetail.providerLabel}</span>
+        <span>{labelFor(taskDetail.adjustment)} · {taskDetail.providerLabel}</span>
       </div>
       {#if taskDetail.sourcePreview}
         <figure>
@@ -195,42 +237,17 @@
           <figcaption>Source</figcaption>
         </figure>
       {/if}
+      <label class="dlg-field">
+        <span>Prompt</span>
+        <textarea value={taskDetail.prompt} rows="4" readonly></textarea>
+      </label>
     {:else}
       <label class="dlg-field">
-        <span>Scale</span>
-        <div class="preset-row" aria-label="Scale presets">
-          {#each [100, 200, 400] as preset (preset)}
-            <button
-              type="button"
-              class:active={clampedScale === preset}
-              disabled={currentBusy}
-              onclick={() => (scalePercent = preset)}
-            >
-              {preset / 100}x
-            </button>
-          {/each}
-        </div>
-        <div class="scale-row">
-          <input
-            type="number"
-            min="100"
-            max="1000"
-            step="25"
-            bind:value={scalePercent}
-            disabled={currentBusy}
-          />
-          <span class="unit">%</span>
-          {#if outputSize}
-            <span class="output-size">{outputSize.width} × {outputSize.height} px</span>
-          {/if}
-        </div>
+        <span>Adjustment prompt</span>
+        <textarea bind:value={prompt} rows="5" spellcheck="true"></textarea>
       </label>
-
       <p class="hint">
-        PaintNode enlarges the flattened document, splits it into parts the provider can regenerate
-        at native detail, and asks the AI to restore crisp detail part by part. 100% keeps the size
-        and only re-renders detail. The result opens as a new document. Large scales run one AI job
-        per part and can take several minutes.
+        The result opens as a new single-layer document so you can compare it with the original.
       </p>
     {/if}
 
@@ -249,7 +266,7 @@
     {#if currentError}
       <div class="error-box">
         <div class="error-head">
-          <span>AI upscale failed</span>
+          <span>AI auto adjustment failed</span>
           <button
             class="copy-error"
             type="button"
@@ -269,13 +286,13 @@
         <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
       {/if}
       <span class="dlg-action-spacer"></span>
-      <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>
+      <button type="button" onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>
       {#if task && aiTasks.canRetry(task)}
-        <button class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
+        <button type="button" class="dlg-primary" onclick={() => aiTasks.retry(task.id)}>Retry</button>
       {/if}
       {#if !task}
-        <button class="dlg-primary" onclick={run} disabled={busy || !desktop || !doc}>
-          {busy ? 'Running...' : 'Upscale'}
+        <button type="button" class="dlg-primary" onclick={run} disabled={busy || !desktop || !doc}>
+          {busy ? 'Running...' : 'Adjust'}
         </button>
       {/if}
     </div>
@@ -283,19 +300,28 @@
 </Modal>
 
 <style>
-  .dlg-form {
-    display: grid;
-    gap: 12px;
+  .auto-adjust {
     font-size: 12px;
   }
   .summary {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--text);
   }
-  .summary span {
+  .summary span,
+  .hint {
     color: var(--text-dim);
+  }
+  .hint,
+  .warn {
+    margin: 0;
+    line-height: 1.45;
+  }
+  .warn {
+    color: #ffd28a;
+  }
+  textarea {
+    resize: vertical;
   }
   figure {
     margin: 0;
@@ -310,46 +336,6 @@
   figcaption {
     margin-top: 4px;
     color: var(--text-dim);
-  }
-  .dlg-field {
-    display: grid;
-    gap: 5px;
-    color: var(--text-dim);
-  }
-  .scale-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .preset-row {
-    display: flex;
-    gap: 6px;
-  }
-  .preset-row button {
-    min-width: 42px;
-  }
-  .preset-row button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .scale-row input {
-    width: 90px;
-  }
-  .unit {
-    color: var(--text-dim);
-  }
-  .output-size {
-    margin-left: auto;
-    color: var(--text-dim);
-  }
-  .hint,
-  .warn {
-    margin: 0;
-    color: var(--text-dim);
-    line-height: 1.45;
-  }
-  .warn {
-    color: #ffd28a;
   }
   .progress-line {
     display: flex;
@@ -381,25 +367,23 @@
     padding: 7px 9px;
     color: #ffd1d1;
   }
+  .error-box pre {
+    margin: 0;
+    padding: 9px;
+    white-space: pre-wrap;
+    user-select: text;
+    color: #ffe5e5;
+    border-top: 1px solid rgba(255, 96, 96, 0.25);
+  }
   .copy-error {
-    display: grid;
+    display: inline-grid;
     place-items: center;
     width: 24px;
     height: 24px;
     padding: 0;
   }
-  pre {
-    margin: 0;
-    padding: 0 9px 9px;
-    max-height: 150px;
-    overflow: auto;
-    white-space: pre-wrap;
-    color: #ffe0e0;
-  }
   .dlg-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
+    align-items: center;
   }
   .dlg-action-spacer {
     flex: 1;

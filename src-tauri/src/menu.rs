@@ -25,13 +25,7 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
         true,
         Some("CmdOrCtrl+Shift+S"),
     )?;
-    let export = MenuItem::with_id(
-        app,
-        "app:export-png",
-        "Export PNG...",
-        true,
-        Some("CmdOrCtrl+E"),
-    )?;
+    let export = MenuItem::with_id(app, "app:export-png", "Export PNG...", true, None::<&str>)?;
     let export_psd = MenuItem::with_id(app, "app:export-psd", "Export PSD...", true, None::<&str>)?;
 
     let undo = MenuItem::with_id(app, "app:undo", "Undo", true, Some("CmdOrCtrl+Z"))?;
@@ -62,30 +56,57 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
         Some("CmdOrCtrl+T"),
     )?;
 
-    let image_size = MenuItem::with_id(app, "app:image-size", "Image Size...", true, None::<&str>)?;
-    let reveal_all = MenuItem::with_id(app, "app:reveal-all", "Reveal All", true, None::<&str>)?;
-    let crop = MenuItem::with_id(
+    let image_size = MenuItem::with_id(
         app,
-        "app:crop-to-selection",
-        "Crop to Selection",
+        "app:image-size",
+        "Image Size...",
+        true,
+        Some("CmdOrCtrl+Alt+I"),
+    )?;
+    let canvas_size = MenuItem::with_id(
+        app,
+        "app:canvas-size",
+        "Canvas Size...",
+        true,
+        Some("CmdOrCtrl+Alt+C"),
+    )?;
+    let image_ai_upscale = MenuItem::with_id(
+        app,
+        "app:image-ai-upscale",
+        "AI Upscale...",
+        true,
+        Some("CmdOrCtrl+Alt+Shift+U"),
+    )?;
+    let reveal_all = MenuItem::with_id(app, "app:reveal-all", "Reveal All", true, None::<&str>)?;
+    let crop = MenuItem::with_id(app, "app:crop-to-selection", "Crop", true, None::<&str>)?;
+    let trim = MenuItem::with_id(app, "app:trim", "Trim...", true, None::<&str>)?;
+    let duplicate_document = MenuItem::with_id(
+        app,
+        "app:duplicate-document",
+        "Duplicate...",
         true,
         None::<&str>,
     )?;
-    let rotate_cw = MenuItem::with_id(app, "app:rotate-cw", "Rotate 90° CW", true, None::<&str>)?;
-    let rotate_ccw =
-        MenuItem::with_id(app, "app:rotate-ccw", "Rotate 90° CCW", true, None::<&str>)?;
-    let rotate_180 = MenuItem::with_id(app, "app:rotate-180", "Rotate 180°", true, None::<&str>)?;
+    let rotate_cw = MenuItem::with_id(app, "app:rotate-cw", "90° Clockwise", true, None::<&str>)?;
+    let rotate_ccw = MenuItem::with_id(
+        app,
+        "app:rotate-ccw",
+        "90° Counter Clockwise",
+        true,
+        None::<&str>,
+    )?;
+    let rotate_180 = MenuItem::with_id(app, "app:rotate-180", "180°", true, None::<&str>)?;
     let flip_h = MenuItem::with_id(
         app,
         "app:flip-horizontal",
-        "Flip Horizontal",
+        "Flip Canvas Horizontal",
         true,
         None::<&str>,
     )?;
     let flip_v = MenuItem::with_id(
         app,
         "app:flip-vertical",
-        "Flip Vertical",
+        "Flip Canvas Vertical",
         true,
         None::<&str>,
     )?;
@@ -96,14 +117,43 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
         true,
         None::<&str>,
     )?;
+    let levels = MenuItem::with_id(app, "app:levels", "Levels...", true, Some("CmdOrCtrl+L"))?;
     let hue = MenuItem::with_id(
         app,
         "app:hue-saturation",
         "Hue/Saturation...",
         true,
-        None::<&str>,
+        Some("CmdOrCtrl+U"),
     )?;
-    let desaturate = MenuItem::with_id(app, "app:desaturate", "Desaturate", true, None::<&str>)?;
+    let threshold = MenuItem::with_id(app, "app:threshold", "Threshold...", true, None::<&str>)?;
+    let ai_auto_tone = MenuItem::with_id(
+        app,
+        "app:ai-auto-tone",
+        "Auto Tone",
+        true,
+        Some("CmdOrCtrl+Shift+L"),
+    )?;
+    let ai_auto_contrast = MenuItem::with_id(
+        app,
+        "app:ai-auto-contrast",
+        "Auto Contrast",
+        true,
+        Some("CmdOrCtrl+Alt+Shift+L"),
+    )?;
+    let ai_auto_color = MenuItem::with_id(
+        app,
+        "app:ai-auto-color",
+        "Auto Color",
+        true,
+        Some("CmdOrCtrl+Shift+B"),
+    )?;
+    let desaturate = MenuItem::with_id(
+        app,
+        "app:desaturate",
+        "Desaturate",
+        true,
+        Some("CmdOrCtrl+Shift+U"),
+    )?;
     let invert = MenuItem::with_id(app, "app:invert", "Invert", true, Some("CmdOrCtrl+I"))?;
     let flatten = MenuItem::with_id(app, "app:flatten", "Flatten Image", true, None::<&str>)?;
 
@@ -117,7 +167,13 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
     )?;
     let delete_layer =
         MenuItem::with_id(app, "app:delete-layer", "Delete Layer", true, None::<&str>)?;
-    let merge_down = MenuItem::with_id(app, "app:merge-down", "Merge Down", true, None::<&str>)?;
+    let merge_down = MenuItem::with_id(
+        app,
+        "app:merge-down",
+        "Merge Down",
+        true,
+        Some("CmdOrCtrl+E"),
+    )?;
 
     let select_all = MenuItem::with_id(app, "app:select-all", "All", true, Some("CmdOrCtrl+A"))?;
     let deselect = MenuItem::with_id(app, "app:deselect", "Deselect", true, Some("CmdOrCtrl+D"))?;
@@ -247,27 +303,54 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
             &free_transform,
         ],
     )?;
+    let adjustments = Submenu::with_items(
+        app,
+        "Adjustments",
+        true,
+        &[
+            &brightness,
+            &levels,
+            &hue,
+            &threshold,
+            &PredefinedMenuItem::separator(app)?,
+            &invert,
+            &PredefinedMenuItem::separator(app)?,
+            &desaturate,
+        ],
+    )?;
+    let image_rotation = Submenu::with_items(
+        app,
+        "Image Rotation",
+        true,
+        &[
+            &rotate_180,
+            &rotate_cw,
+            &rotate_ccw,
+            &PredefinedMenuItem::separator(app)?,
+            &flip_h,
+            &flip_v,
+        ],
+    )?;
     let image = Submenu::with_items(
         app,
         "Image",
         true,
         &[
+            &adjustments,
+            &PredefinedMenuItem::separator(app)?,
+            &ai_auto_tone,
+            &ai_auto_contrast,
+            &ai_auto_color,
+            &PredefinedMenuItem::separator(app)?,
             &image_size,
-            &reveal_all,
+            &image_ai_upscale,
+            &canvas_size,
+            &image_rotation,
             &crop,
+            &trim,
+            &reveal_all,
             &PredefinedMenuItem::separator(app)?,
-            &rotate_cw,
-            &rotate_ccw,
-            &rotate_180,
-            &flip_h,
-            &flip_v,
-            &PredefinedMenuItem::separator(app)?,
-            &brightness,
-            &hue,
-            &desaturate,
-            &invert,
-            &PredefinedMenuItem::separator(app)?,
-            &flatten,
+            &duplicate_document,
         ],
     )?;
     let layer = Submenu::with_items(
@@ -280,6 +363,7 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
             &delete_layer,
             &PredefinedMenuItem::separator(app)?,
             &merge_down,
+            &flatten,
         ],
     )?;
     let select = Submenu::with_items(app, "Select", true, &[&select_all, &deselect, &inverse])?;

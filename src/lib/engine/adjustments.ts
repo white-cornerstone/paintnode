@@ -65,6 +65,8 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
+const clamp255 = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
+
 /** hue [-180,180] degrees, saturation/lightness [-100,100]. */
 export function makeHueSaturation(hue: number, saturation: number, lightness: number): PixelOp {
   const hShift = hue / 360;
@@ -78,5 +80,44 @@ export function makeHueSaturation(hue: number, saturation: number, lightness: nu
     d[i] = r;
     d[i + 1] = g;
     d[i + 2] = b;
+  };
+}
+
+export interface LevelsOptions {
+  inputBlack: number;
+  inputWhite: number;
+  gamma: number;
+  outputBlack: number;
+  outputWhite: number;
+}
+
+/** Photoshop-style composite RGB levels. */
+export function makeLevels(options: LevelsOptions): PixelOp {
+  const inputBlack = clamp255(options.inputBlack);
+  const inputWhite = Math.max(inputBlack + 1, clamp255(options.inputWhite));
+  const gamma = Math.max(0.1, Math.min(9.99, options.gamma || 1));
+  const outputBlack = clamp255(options.outputBlack);
+  const outputWhite = clamp255(options.outputWhite);
+  const inputRange = inputWhite - inputBlack;
+  const outputRange = outputWhite - outputBlack;
+  const map = (value: number) => {
+    const normalized = clamp01((value - inputBlack) / inputRange);
+    return outputBlack + Math.pow(normalized, gamma) * outputRange;
+  };
+  return (d, i) => {
+    d[i] = map(d[i]);
+    d[i + 1] = map(d[i + 1]);
+    d[i + 2] = map(d[i + 2]);
+  };
+}
+
+export function makeThreshold(threshold: number): PixelOp {
+  const t = clamp255(threshold);
+  return (d, i) => {
+    const luminance = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const value = luminance >= t ? 255 : 0;
+    d[i] = value;
+    d[i + 1] = value;
+    d[i + 2] = value;
   };
 }

@@ -84,13 +84,19 @@
   const loadNewDocumentDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/NewDocumentDialog.svelte');
   const loadAboutDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AboutDialog.svelte');
   const loadImageSizeDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/ImageSizeDialog.svelte');
+  const loadCanvasSizeDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/CanvasSizeDialog.svelte');
+  const loadTrimDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/TrimDialog.svelte');
+  const loadDuplicateDocumentDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/DuplicateDocumentDialog.svelte');
   const loadBrightnessContrastDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/BrightnessContrastDialog.svelte');
   const loadHueSaturationDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/HueSaturationDialog.svelte');
+  const loadLevelsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/LevelsDialog.svelte');
+  const loadThresholdDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/ThresholdDialog.svelte');
   const loadGaussianBlurDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/GaussianBlurDialog.svelte');
   const loadAiGenerateDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiGenerateDialog.svelte');
   const loadAiRetouchDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiRetouchDialog.svelte');
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadAiUpscaleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiUpscaleDialog.svelte');
+  const loadAiAutoAdjustDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiAutoAdjustDialog.svelte');
   const loadAiSetupWizard: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiSetupWizard.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
@@ -425,6 +431,15 @@
       case 'app:image-size':
         ui.open('imageSize');
         break;
+      case 'app:canvas-size':
+        ui.open('canvasSize');
+        break;
+      case 'app:trim':
+        ui.open('trim');
+        break;
+      case 'app:duplicate-document':
+        ui.open('duplicateDocument');
+        break;
       case 'app:reveal-all':
         editor.revealAll();
         break;
@@ -451,6 +466,21 @@
         break;
       case 'app:hue-saturation':
         ui.open('hueSaturation');
+        break;
+      case 'app:levels':
+        ui.open('levels');
+        break;
+      case 'app:threshold':
+        ui.open('threshold');
+        break;
+      case 'app:ai-auto-tone':
+        ui.openAiAutoAdjust('tone');
+        break;
+      case 'app:ai-auto-contrast':
+        ui.openAiAutoAdjust('contrast');
+        break;
+      case 'app:ai-auto-color':
+        ui.openAiAutoAdjust('color');
         break;
       case 'app:desaturate':
         editor.adjustDesaturate();
@@ -501,6 +531,7 @@
         ui.open('aiDecouple');
         break;
       case 'app:ai-upscale':
+      case 'app:image-ai-upscale':
         ui.open('aiUpscale');
         break;
       case 'app:workflow-board':
@@ -973,10 +1004,20 @@
   {@render lazyDialog(loadAboutDialog)}
 {:else if ui.dialog === 'imageSize'}
   {@render lazyDialog(loadImageSizeDialog)}
+{:else if ui.dialog === 'canvasSize'}
+  {@render lazyDialog(loadCanvasSizeDialog)}
+{:else if ui.dialog === 'trim'}
+  {@render lazyDialog(loadTrimDialog)}
+{:else if ui.dialog === 'duplicateDocument'}
+  {@render lazyDialog(loadDuplicateDocumentDialog)}
 {:else if ui.dialog === 'brightnessContrast'}
   {@render lazyDialog(loadBrightnessContrastDialog)}
 {:else if ui.dialog === 'hueSaturation'}
   {@render lazyDialog(loadHueSaturationDialog)}
+{:else if ui.dialog === 'levels'}
+  {@render lazyDialog(loadLevelsDialog)}
+{:else if ui.dialog === 'threshold'}
+  {@render lazyDialog(loadThresholdDialog)}
 {:else if ui.dialog === 'gaussianBlur'}
   {@render lazyDialog(loadGaussianBlurDialog)}
 {:else if ui.dialog === 'aiGenerate'}
@@ -987,6 +1028,8 @@
   {@render lazyAiDialog(loadAiDecoupleDialog)}
 {:else if ui.dialog === 'aiUpscale'}
   {@render lazyAiDialog(loadAiUpscaleDialog)}
+{:else if ui.dialog === 'aiAutoAdjust'}
+  {@render lazyAiDialog(loadAiAutoAdjustDialog)}
 {:else if ui.dialog === 'aiSetup'}
   {@render lazyDialog(loadAiSetupWizard)}
 {:else if ui.dialog === 'stockImages'}

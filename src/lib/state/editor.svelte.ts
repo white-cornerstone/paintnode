@@ -22,6 +22,9 @@ import {
   desaturatePixel,
   makeBrightnessContrast,
   makeHueSaturation,
+  makeLevels,
+  makeThreshold,
+  type LevelsOptions,
   type PixelOp,
 } from '../engine/adjustments';
 import { gaussianBlur, sharpen } from '../engine/filters';
@@ -109,6 +112,38 @@ export interface DecoupledLayerImport {
   visible?: boolean | null;
   sourceMeta?: LayerSourceMeta;
 }
+
+export type CanvasAnchor =
+  | 'top-left'
+  | 'top'
+  | 'top-right'
+  | 'left'
+  | 'center'
+  | 'right'
+  | 'bottom-left'
+  | 'bottom'
+  | 'bottom-right';
+
+export type CanvasExtensionFill =
+  | { kind: 'transparent' }
+  | { kind: 'foreground' }
+  | { kind: 'background' }
+  | { kind: 'white' }
+  | { kind: 'black' }
+  | { kind: 'gray' }
+  | { kind: 'custom'; color: string };
+
+export type TrimBasis = 'transparent' | 'top-left' | 'bottom-right';
+
+export interface TrimOptions {
+  basis: TrimBasis;
+  top: boolean;
+  bottom: boolean;
+  left: boolean;
+  right: boolean;
+}
+
+export type ImageResampleMethod = 'automatic' | 'bicubic' | 'nearest';
 
 export interface GenerativeFillInput {
   source: HTMLCanvasElement;
@@ -1376,6 +1411,25 @@ export class EditorStore implements ToolHost {
     this.openDocument(doc);
   }
 
+  duplicateDocument(name: string, merged: boolean): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const nextName = name.trim() || `${doc.name} copy`;
+    if (merged) {
+      const copy = new PaintDocument(doc.width, doc.height, nextName);
+      const layer = new Layer(doc.width, doc.height, 'Background');
+      layer.ctx.drawImage(compositeToCanvas(doc), 0, 0);
+      layer.touch();
+      copy.layers = [layer];
+      copy.activeLayerId = layer.id;
+      this.openDocument(copy);
+      return;
+    }
+    const copy = doc.clone();
+    copy.name = nextName;
+    this.openDocument(copy);
+  }
+
   // --- Layer structural ops (undoable) ---
   private structural(label: string, mutate: () => void, refit = false): void {
     const doc = this.doc;
@@ -1721,7 +1775,146 @@ export class EditorStore implements ToolHost {
     this.setSelection(null);
   }
 
-  resizeImage(w: number, h: number): void {
+  resizeCanvas(w: number, h: number, anchor: CanvasAnchor, fill: CanvasExtensionFill): void {
+    const doc = this.doc;
+    if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Canvas Size')) return;
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    if (w === doc.width && h === doc.height) return;
+    const xOffset =
+      anchor.endsWith('right') || anchor === 'right'
+        ? w - doc.width
+        : anchor === 'center' || anchor === 'top' || anchor === 'bottom'
+          ? Math.round((w - doc.width) / 2)
+          : 0;
+    const yOffset =
+      anchor.startsWith('bottom') || anchor === 'bottom'
+        ? h - doc.height
+        : anchor === 'center' || anchor === 'left' || anchor === 'right'
+          ? Math.round((h - doc.height) / 2)
+          : 0;
+    this.structural(
+      'Canvas Size',
+      () => {
+        const layers = doc.layers.map((layer) => {
+          const next = this.cloneLayerExact(layer);
+          next.x = layer.x + xOffset;
+          next.y = layer.y + yOffset;
+          return next;
+        });
+        const css = this.canvasExtensionFillCss(fill);
+        if (css) {
+          const extension = new Layer(w, h, 'Canvas extension');
+          extension.ctx.fillStyle = css;
+          const oldX = xOffset;
+          const oldY = yOffset;
+          const oldRight = oldX + doc.width;
+          const oldBottom = oldY + doc.height;
+          if (oldY > 0) extension.ctx.fillRect(0, 0, w, Math.min(h, oldY));
+          if (oldBottom < h) extension.ctx.fillRect(0, Math.max(0, oldBottom), w, h - Math.max(0, oldBottom));
+          if (oldX > 0) {
+            const y0 = Math.max(0, oldY);
+            const y1 = Math.min(h, oldBottom);
+            if (y1 > y0) extension.ctx.fillRect(0, y0, Math.min(w, oldX), y1 - y0);
+          }
+          if (oldRight < w) {
+            const y0 = Math.max(0, oldY);
+            const y1 = Math.min(h, oldBottom);
+            if (y1 > y0) extension.ctx.fillRect(Math.max(0, oldRight), y0, w - Math.max(0, oldRight), y1 - y0);
+          }
+          extension.touch();
+          layers.unshift(extension);
+        }
+        doc.width = w;
+        doc.height = h;
+        doc.layers = layers;
+      },
+      true,
+    );
+    this.setSelection(null);
+  }
+
+  private canvasExtensionFillCss(fill: CanvasExtensionFill): string | null {
+    switch (fill.kind) {
+      case 'transparent':
+        return null;
+      case 'foreground':
+        return this.foregroundCss;
+      case 'background':
+        return this.backgroundCss;
+      case 'white':
+        return '#ffffff';
+      case 'black':
+        return '#000000';
+      case 'gray':
+        return '#808080';
+      case 'custom':
+        return fill.color || '#ffffff';
+    }
+  }
+
+  trimImage(options: TrimOptions): void {
+    const doc = this.doc;
+    if (!doc) return;
+    if (this.blockIfPsdProtectedDoc('Trim')) return;
+    if (!options.top && !options.bottom && !options.left && !options.right) {
+      this.flash('Choose at least one side to trim');
+      return;
+    }
+    const composite = compositeToCanvas(doc);
+    const image = ctx2d(composite).getImageData(0, 0, doc.width, doc.height);
+    const data = image.data;
+    const pixelAt = (x: number, y: number) => {
+      const i = (y * doc.width + x) * 4;
+      return [data[i], data[i + 1], data[i + 2], data[i + 3]] as const;
+    };
+    const target = options.basis === 'bottom-right' ? pixelAt(doc.width - 1, doc.height - 1) : pixelAt(0, 0);
+    const matches = (x: number, y: number): boolean => {
+      const i = (y * doc.width + x) * 4;
+      if (options.basis === 'transparent') return data[i + 3] === 0;
+      return data[i] === target[0] && data[i + 1] === target[1] && data[i + 2] === target[2] && data[i + 3] === target[3];
+    };
+    const rowMatches = (y: number, x0: number, x1: number) => {
+      for (let x = x0; x <= x1; x++) if (!matches(x, y)) return false;
+      return true;
+    };
+    const colMatches = (x: number, y0: number, y1: number) => {
+      for (let y = y0; y <= y1; y++) if (!matches(x, y)) return false;
+      return true;
+    };
+
+    let x0 = 0;
+    let y0 = 0;
+    let x1 = doc.width - 1;
+    let y1 = doc.height - 1;
+    if (options.top) while (y0 <= y1 && rowMatches(y0, x0, x1)) y0++;
+    if (options.bottom) while (y1 >= y0 && rowMatches(y1, x0, x1)) y1--;
+    if (options.left) while (x0 <= x1 && colMatches(x0, y0, y1)) x0++;
+    if (options.right) while (x1 >= x0 && colMatches(x1, y0, y1)) x1--;
+
+    if (x1 < x0 || y1 < y0) {
+      this.flash('Trim would remove the entire image');
+      return;
+    }
+    const rect = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    if (rect.x === 0 && rect.y === 0 && rect.w === doc.width && rect.h === doc.height) {
+      this.flash('Nothing to trim');
+      return;
+    }
+    this.structural(
+      'Trim',
+      () => this.commitLayers(
+        this.remapLayers(rect.w, rect.h, (c, l) => c.drawImage(l.canvas, l.x - rect.x, l.y - rect.y)),
+        rect.w,
+        rect.h,
+      ),
+      true,
+    );
+    this.setSelection(null);
+  }
+
+  resizeImage(w: number, h: number, resample: ImageResampleMethod = 'automatic'): void {
     const doc = this.doc;
     if (!doc) return;
     if (this.blockIfPsdProtectedDoc('Image Size')) return;
@@ -1751,7 +1944,7 @@ export class EditorStore implements ToolHost {
           nl.kind = l.kind === 'text' ? 'raster' : l.kind;
           nl.aiRetouch = cloneAiRetouchMetadata(l.aiRetouch);
           if (l.psd) nl.psd = { ...l.psd, imported: { ...l.psd.imported, pixelRev: -1 } };
-          nl.ctx.imageSmoothingEnabled = true;
+          nl.ctx.imageSmoothingEnabled = resample !== 'nearest';
           nl.ctx.imageSmoothingQuality = 'high';
           nl.ctx.drawImage(l.canvas, 0, 0, l.width, l.height, 0, 0, nw, nh);
           nl.touch();
@@ -2070,6 +2263,12 @@ export class EditorStore implements ToolHost {
   }
   adjustHueSaturation(hue: number, saturation: number, lightness: number): void {
     this.applyPixelOp('Hue/Saturation', makeHueSaturation(hue, saturation, lightness));
+  }
+  adjustLevels(options: LevelsOptions): void {
+    this.applyPixelOp('Levels', makeLevels(options));
+  }
+  adjustThreshold(threshold: number): void {
+    this.applyPixelOp('Threshold', makeThreshold(threshold));
   }
 
   // --- Filters (active layer, selection-aware, undoable) ---

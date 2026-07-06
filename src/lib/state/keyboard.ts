@@ -1,5 +1,5 @@
 import { editor } from './editor.svelte';
-import { openCommand, saveActiveCopyCommand, saveActiveCommand, exportPngCommand } from './commands';
+import { openCommand, saveActiveCopyCommand, saveActiveCommand } from './commands';
 import { isTypingTarget } from './editing';
 import { ui } from './ui.svelte';
 import { nextAiRetouchTool } from '../engine/aiRetouch';
@@ -56,13 +56,21 @@ export function installKeyboard(): () => void {
           e.preventDefault();
           editor.selectAll();
           return;
+        case 'b':
+          if (e.shiftKey && !e.altKey) {
+            e.preventDefault();
+            ui.openAiAutoAdjust('color');
+            return;
+          }
+          break;
         case 'd':
           e.preventDefault();
           editor.deselect();
           return;
         case 'c':
           e.preventDefault();
-          editor.copy();
+          if (e.altKey && !e.shiftKey) ui.open('canvasSize');
+          else editor.copy();
           return;
         case 'x':
           e.preventDefault();
@@ -74,8 +82,15 @@ export function installKeyboard(): () => void {
           return;
         case 'i':
           e.preventDefault();
-          if (e.shiftKey) editor.invertSelection();
+          if (e.altKey && !e.shiftKey) ui.open('imageSize');
+          else if (e.shiftKey && !e.altKey) editor.invertSelection();
           else editor.adjustInvert();
+          return;
+        case 'l':
+          e.preventDefault();
+          if (e.altKey && e.shiftKey) ui.openAiAutoAdjust('contrast');
+          else if (e.shiftKey && !e.altKey) ui.openAiAutoAdjust('tone');
+          else if (!e.altKey) ui.open('levels');
           return;
         case 's':
           e.preventDefault();
@@ -88,11 +103,17 @@ export function installKeyboard(): () => void {
           return;
         case 'e':
           e.preventDefault();
-          void exportPngCommand();
+          if (editor.activeLayer?.id) editor.mergeDown(editor.activeLayer.id);
           return;
         case 't':
           e.preventDefault();
           editor.beginFreeTransform();
+          return;
+        case 'u':
+          e.preventDefault();
+          if (e.altKey && e.shiftKey) ui.open('aiUpscale');
+          else if (e.shiftKey && !e.altKey) editor.adjustDesaturate();
+          else if (!e.altKey) ui.open('hueSaturation');
           return;
         case '0':
           e.preventDefault();
