@@ -18,8 +18,9 @@ use tauri::AppHandle;
 
 use crate::ai::canvas::{
     ai_protected_region_drift, ai_retouch_editable_mask_png, antigravity_output_target,
-    read_png_bytes_cropped_to_ai_working_canvas, validate_optional_target_dimensions,
-    AiWorkingCanvas, AI_PROTECTED_DRIFT_LIMIT, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
+    validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_LIMIT,
+    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
 use crate::ai::placement::{
@@ -625,10 +626,6 @@ const AI_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejecte
 - This is a strict in-place edit of `edit_target.png`: apply the requested change only inside the white mask area and reproduce every pixel outside the mask exactly as it appears in `edit_target.png`.
 - Call the image-generation tool with `edit_target.png` as the base image and `mask.png` attached as the second image (the edit mask marking the only editable area), with a short instruction.
 - If the requested change cannot be honored inside the mask, make the closest faithful change the image tool allows rather than re-imagining the scene."#;
-
-/// How many candidates to accept-or-reject per part before failing the run:
-/// the first attempt plus one retry with the stricter in-place note.
-const AI_PROTECTED_DRIFT_MAX_ATTEMPTS: u32 = 2;
 
 fn antigravity_retouch_contract_text(
     job_dir: &str,
@@ -1337,7 +1334,7 @@ pub(crate) async fn generate_antigravity_fill_image(
                 // from scratch rather than edited in place; pasting it back
                 // would leave visible seams at the mask boundary.
                 let drift = ai_protected_region_drift(
-                    &inputs.source_png,
+                    &inputs.edit_target_png,
                     &inputs.mask_png,
                     &bytes,
                     "Antigravity generative fill",
@@ -1360,9 +1357,13 @@ pub(crate) async fn generate_antigravity_fill_image(
                             ),
                         ),
                     );
-                    let _ = fs::remove_file(&result_path);
+                    remove_rejected_ai_candidate(&result_path)
+                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
                     continue;
                 }
+                // Drop the rejected candidate so a resumed retry cannot
+                // silently import it via reuse_part_result.
+                let _ = fs::remove_file(&result_path);
                 return Err(ai_part_progress_message(
                     &placement,
                     part_index,
@@ -1651,7 +1652,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
                 // from scratch rather than edited in place; pasting it back
                 // would leave visible seams at the mask boundary.
                 let drift = ai_protected_region_drift(
-                    &inputs.source_png,
+                    &inputs.edit_target_png,
                     &inputs.mask_png,
                     &bytes,
                     "AI retouch candidate",
@@ -1674,9 +1675,13 @@ pub(crate) async fn generate_antigravity_retouch_image(
                             ),
                         ),
                     );
-                    let _ = fs::remove_file(&result_path);
+                    remove_rejected_ai_candidate(&result_path)
+                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
                     continue;
                 }
+                // Drop the rejected candidate so a resumed retry cannot
+                // silently import it via reuse_part_result.
+                let _ = fs::remove_file(&result_path);
                 return Err(ai_part_progress_message(
                     &placement,
                     part_index,

@@ -277,24 +277,29 @@ fn gcd(a: u32, b: u32) -> u32 {
     x
 }
 
-/// Reduce a capability output grid to its exact ratio unit
-/// (e.g. 1584x672 -> 33x14).
-fn ratio_unit(ratio: &SupportedAspectRatio) -> (u32, u32) {
+/// Reduce a capability output grid to its exact ratio unit and the unit
+/// count of the 1K grid (e.g. 1584x672 -> unit 33x14, 1K step 48).
+fn ratio_unit(ratio: &SupportedAspectRatio) -> ((u32, u32), u32) {
     let step = gcd(ratio.width, ratio.height);
-    (ratio.width / step, ratio.height / step)
+    ((ratio.width / step, ratio.height / step), step)
 }
 
 /// Antigravity crops must match the model's REAL output grid ratio (e.g.
 /// "21:9" outputs 1584x672 = 33:14, not 7:3): a crop the model cannot map
 /// onto its output grid forces it to reframe the scene instead of editing
-/// in place.
+/// in place. Crops are also capped at the 4K output grid (4x the 1K step)
+/// so results only ever downscale back onto the document — upscaling a
+/// model result would smear protected pixels; larger documents split into
+/// parts instead.
 fn ratio_crop_candidates(document: (u32, u32)) -> Vec<(u32, u32, String)> {
     ai_antigravity_image_capability()
         .aspect_ratios
         .iter()
         .filter_map(|ratio| {
-            let unit = ratio_unit(ratio);
-            let units = (document.0 / unit.0).min(document.1 / unit.1);
+            let (unit, step) = ratio_unit(ratio);
+            let units = (document.0 / unit.0)
+                .min(document.1 / unit.1)
+                .min(step * 4);
             (units > 0).then(|| (unit.0 * units, unit.1 * units, ratio.label.clone()))
         })
         .collect()
@@ -453,7 +458,7 @@ fn restore_tile_candidates(
                 .aspect_ratios
                 .iter()
                 .filter_map(|ratio| {
-                    let unit = ratio_unit(ratio);
+                    let (unit, _) = ratio_unit(ratio);
                     let units = (document.0 / unit.0)
                         .min(document.1 / unit.1)
                         .min(cap / unit.0.max(unit.1));
@@ -1404,6 +1409,28 @@ mod tests {
         let part = &placement.parts[0];
         assert_eq!(part.working.aspect_label, "4:1");
         assert_eq!((part.crop.width, part.crop.height), (2400, 600));
+        assert!(rect_contains(part.crop, placement.mask_bounds));
+    }
+
+    #[test]
+    fn antigravity_crops_cap_at_the_4k_output_grid() {
+        // A giant document must not produce a crop larger than the model's
+        // 4K output — the result would upscale back onto the document and
+        // smear protected pixels past the drift gate's tolerance.
+        let mask = mask_png_with_rects(7920, 3360, &[(3000, 1500, 200, 200)]);
+        let placement = plan_ai_edit_placement(
+            AiEditProvider::Antigravity,
+            (7920, 3360),
+            &mask,
+            "AI retouch",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
+        assert_eq!(part.working.aspect_label, "21:9");
+        // Exactly the 4K "21:9" grid (4 x 1584x672).
+        assert_eq!((part.crop.width, part.crop.height), (6336, 2688));
         assert!(rect_contains(part.crop, placement.mask_bounds));
     }
 

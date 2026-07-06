@@ -2708,6 +2708,11 @@ export class EditorStore implements ToolHost {
     if (sw !== doc.width || sh !== doc.height) return null;
     if (maskSource && (maskSw !== doc.width || maskSh !== doc.height)) return null;
     const maskLayer = doc.layers.find((layer) => layer.id === request.maskLayerId && layer.kind === 'ai-retouch-mask') ?? null;
+    // The result layer carries raw generated pixels across the whole edited
+    // region — the mask is not baked in. Without the linked mask layer the
+    // raw frame would be fully visible, so refuse rather than silently
+    // insert an unmasked AI frame over the document.
+    if (maskSource && !maskLayer) return null;
 
     const before = this.layerStackSnapshot();
     if (maskLayer && maskSource) {

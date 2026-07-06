@@ -207,8 +207,13 @@ pub(crate) fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
 /// Mean absolute luminance difference on a 0-255 scale.
 pub(crate) const AI_PROTECTED_DRIFT_LIMIT: f64 = 8.0;
 
-/// Below this many fully-protected pixels the drift measurement is too noisy
-/// to gate on (e.g. full-coverage restore masks protect nothing).
+/// How many candidates to accept-or-reject per part before failing the run:
+/// the first attempt plus one retry with the stricter in-place note.
+pub(crate) const AI_PROTECTED_DRIFT_MAX_ATTEMPTS: u32 = 2;
+
+/// Below this many comparable protected pixels the drift measurement is too
+/// noisy to gate on (e.g. full-coverage restore masks protect nothing, or a
+/// transparent-background document leaves almost no opaque protected pixels).
 const AI_DRIFT_MIN_PROTECTED_PIXELS: u64 = 4096;
 
 fn pixel_luminance(pixel: &image::Rgba<u8>) -> u8 {
@@ -216,34 +221,60 @@ fn pixel_luminance(pixel: &image::Rgba<u8>) -> u8 {
     ((u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19 + 128) / 256) as u8
 }
 
-/// Mean absolute luminance drift between `source_png` and `candidate_png`
-/// over fully-protected mask pixels (coverage 0). Detects candidates where
-/// the image model regenerated the whole scene instead of editing in place —
-/// pasting those back produces visibly broken seams at the mask boundary.
-/// Returns `None` when the mask protects too few pixels to judge.
+/// Drop a drift-rejected candidate from the job dir. It must actually be
+/// gone: provider runners treat an existing result.png as a satisfied or
+/// reusable output (killing the retry agent immediately, or resurrecting the
+/// rejected candidate on a resumed run via reuse_part_result).
+pub(crate) fn remove_rejected_ai_candidate(result_path: &Path) -> Result<(), String> {
+    if let Err(error) = fs::remove_file(result_path) {
+        if result_path.exists() {
+            return Err(format!(
+                "Failed to remove the rejected AI candidate at {}: {error}",
+                result_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Mean absolute luminance drift between the image the model was told to
+/// edit (`edit_target_png`) and `candidate_png`, measured over
+/// fully-protected mask pixels (coverage 0) where the edit target is fully
+/// opaque. Transparent edit-target pixels are skipped — generated output is
+/// opaque, so comparing against them would reject every faithful edit on a
+/// transparent-background document. The candidate's luminance is
+/// alpha-weighted, so a candidate that goes transparent over an opaque
+/// baseline still registers as drift. Detects candidates where the image
+/// model regenerated the whole scene instead of editing in place — pasting
+/// those back produces visibly broken seams at the mask boundary. Returns
+/// `None` when too few pixels are comparable to judge.
 pub(crate) fn ai_protected_region_drift(
-    source_png: &[u8],
+    edit_target_png: &[u8],
     mask_png: &[u8],
     candidate_png: &[u8],
     label: &str,
 ) -> Result<Option<f64>, String> {
-    let source = decode_png_rgba(source_png, label)?;
+    let baseline = decode_png_rgba(edit_target_png, label)?;
     let mask = decode_png_rgba(mask_png, label)?;
     let candidate = decode_png_rgba(candidate_png, label)?;
-    if mask.dimensions() != source.dimensions() || candidate.dimensions() != source.dimensions() {
+    if mask.dimensions() != baseline.dimensions() || candidate.dimensions() != baseline.dimensions()
+    {
         return Err(format!(
             "{label} protected-drift inputs must have identical dimensions."
         ));
     }
     let mut sum = 0_u64;
     let mut count = 0_u64;
-    for (source_pixel, (mask_pixel, candidate_pixel)) in
-        source.pixels().zip(mask.pixels().zip(candidate.pixels()))
+    for (baseline_pixel, (mask_pixel, candidate_pixel)) in
+        baseline.pixels().zip(mask.pixels().zip(candidate.pixels()))
     {
-        if mask_pixel_coverage(mask_pixel) > 0 {
+        if mask_pixel_coverage(mask_pixel) > 0 || baseline_pixel.0[3] != 255 {
             continue;
         }
-        sum += u64::from(pixel_luminance(source_pixel).abs_diff(pixel_luminance(candidate_pixel)));
+        // Alpha-weighted luminance: a transparent candidate pixel over an
+        // opaque baseline reads as 0 and counts as drift.
+        let candidate_luma = mask_pixel_coverage(candidate_pixel);
+        sum += u64::from(pixel_luminance(baseline_pixel).abs_diff(candidate_luma));
         count += 1;
     }
     if count < AI_DRIFT_MIN_PROTECTED_PIXELS {
@@ -475,6 +506,35 @@ mod tests {
         let regenerated = drift_image_png([140, 140, 140, 255], [200, 30, 30, 255]);
 
         let drift = ai_protected_region_drift(&source, &mask, &regenerated, "test")
+            .expect("drift")
+            .expect("measured");
+        assert!(
+            drift > AI_PROTECTED_DRIFT_LIMIT,
+            "expected drift above limit, got {drift}"
+        );
+    }
+
+    #[test]
+    fn ai_protected_region_drift_skips_transparent_baseline_pixels() {
+        let mask = drift_mask_png();
+        // Every protected pixel of the edit target is fully transparent (a
+        // transparent-background document); the opaque candidate must not be
+        // rejected for it — too few comparable pixels, so the gate skips.
+        let baseline = drift_image_png([0, 0, 0, 0], [200, 30, 30, 255]);
+        let candidate = drift_image_png([255, 255, 255, 255], [30, 200, 30, 255]);
+
+        let drift = ai_protected_region_drift(&baseline, &mask, &candidate, "test").expect("drift");
+        assert!(drift.is_none());
+    }
+
+    #[test]
+    fn ai_protected_region_drift_counts_candidate_transparency_as_drift() {
+        let mask = drift_mask_png();
+        let baseline = drift_image_png([200, 200, 200, 255], [80, 80, 80, 255]);
+        // The candidate wipes opaque protected pixels to transparency.
+        let candidate = drift_image_png([200, 200, 200, 0], [80, 80, 80, 255]);
+
+        let drift = ai_protected_region_drift(&baseline, &mask, &candidate, "test")
             .expect("drift")
             .expect("measured");
         assert!(
