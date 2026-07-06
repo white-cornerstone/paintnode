@@ -1,6 +1,7 @@
 <script lang="ts">
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { workflow } from '../state/workflow.svelte';
   import {
     openCommand,
     saveActiveCommand,
@@ -26,8 +27,48 @@
   }
 
   const activeId = () => editor.activeLayer?.id;
+  const hasDocument = () => !!editor.doc;
+  const hasOpenTarget = () => hasDocument() || (ui.activeSurface === 'workflow' && workflow.active);
+  const activeLayer = () => editor.activeLayer;
+  const hasActiveLayer = () => !!activeLayer();
+  const hasEditableActiveLayer = () => {
+    const layer = activeLayer();
+    return !!layer && !layer.locked;
+  };
+  const activeLayerIndex = () => {
+    const doc = editor.doc;
+    const id = activeId();
+    return doc && id ? doc.indexOf(id) : -1;
+  };
+  const hasLockedLayer = () => !!editor.doc?.layers.some((layer) => layer.locked);
+  const hasPsdProtectedLayer = () =>
+    !!editor.doc?.layers.some((layer) => layer.locked || layer.psdMask || layer.psd?.clipping);
+  const canTransformDocument = () => hasDocument() && !hasPsdProtectedLayer();
+  const canRevealAll = () => hasDocument() && !hasLockedLayer();
+  const canDeleteActiveLayer = () => {
+    const doc = editor.doc;
+    const id = activeId();
+    if (!doc || !id) return false;
+    const deletionIds = doc.linkedLayerDeletionIds(id);
+    if (!deletionIds.length || doc.layers.length - deletionIds.length <= 0) return false;
+    return deletionIds.every((layerId) => !doc.layers.find((layer) => layer.id === layerId)?.locked);
+  };
+  const canDuplicateActiveLayer = () => hasEditableActiveLayer();
+  const canMergeDown = () => {
+    const doc = editor.doc;
+    const idx = activeLayerIndex();
+    return !!doc && idx > 0 && !doc.layers[idx]?.locked && !doc.layers[idx - 1]?.locked;
+  };
+  const canFlatten = () => !!editor.doc && editor.doc.layers.length > 1 && !hasLockedLayer();
+  const canRasterizeType = () => editor.activeLayer?.kind === 'text' && !editor.activeLayer.locked;
+  const canUseViewport = () => hasDocument() && !!editor.viewport;
   const vp = () => editor.viewport;
   const hasSel = () => !!editor.selection;
+  const itemDisabled = (item: MItem): boolean => {
+    if (item.disabled?.()) return true;
+    if (!item.items) return false;
+    return item.items.filter((child) => !child.sep).every(itemDisabled);
+  };
 
   const menus: Menu[] = [
     {
@@ -35,12 +76,17 @@
       items: [
         { label: 'New…', shortcut: '⌘N', action: () => ui.open('new') },
         { label: 'Open…', shortcut: '⌘O', action: () => void openCommand() },
-        { label: 'Place Image…', action: () => void importImageCommand() },
+        { label: 'Place Image…', action: () => void importImageCommand(), disabled: () => !hasDocument() },
         { sep: true },
-        { label: 'Save', shortcut: '⌘S', action: () => void saveActiveCommand() },
-        { label: 'Save a Copy…', shortcut: '⇧⌘S', action: () => void saveActiveCopyCommand() },
-        { label: 'Export PNG…', action: () => void exportPngCommand() },
-        { label: 'Export PSD…', action: () => void exportPsdCommand() },
+        { label: 'Save', shortcut: '⌘S', action: () => void saveActiveCommand(), disabled: () => !hasOpenTarget() },
+        {
+          label: 'Save a Copy…',
+          shortcut: '⇧⌘S',
+          action: () => void saveActiveCopyCommand(),
+          disabled: () => !hasOpenTarget(),
+        },
+        { label: 'Export PNG…', action: () => void exportPngCommand(), disabled: () => !hasDocument() },
+        { label: 'Export PSD…', action: () => void exportPsdCommand(), disabled: () => !hasDocument() },
       ],
     },
     {
@@ -49,19 +95,27 @@
         { label: 'Undo', shortcut: '⌘Z', action: () => editor.undo(), disabled: () => !editor.canUndo },
         { label: 'Redo', shortcut: '⇧⌘Z', action: () => editor.redo(), disabled: () => !editor.canRedo },
         { sep: true },
-        { label: 'Cut', shortcut: '⌘X', action: () => editor.cut() },
-        { label: 'Copy', shortcut: '⌘C', action: () => editor.copy() },
-        { label: 'Paste', shortcut: '⌘V', action: () => editor.paste(), disabled: () => !editor.clipboard },
+        { label: 'Cut', shortcut: '⌘X', action: () => editor.cut(), disabled: () => !hasEditableActiveLayer() },
+        { label: 'Copy', shortcut: '⌘C', action: () => editor.copy(), disabled: () => !hasActiveLayer() },
+        { label: 'Paste', shortcut: '⌘V', action: () => editor.paste(), disabled: () => !hasDocument() || !editor.clipboard },
         { sep: true },
-        { label: 'Fill with Foreground', action: () => editor.fillActive(editor.foreground) },
-        { label: 'Fill with Background', action: () => editor.fillActive(editor.background) },
-        { label: 'Clear', shortcut: 'Del', action: () => editor.clearActive() },
+        {
+          label: 'Fill with Foreground',
+          action: () => editor.fillActive(editor.foreground),
+          disabled: () => !hasEditableActiveLayer(),
+        },
+        {
+          label: 'Fill with Background',
+          action: () => editor.fillActive(editor.background),
+          disabled: () => !hasEditableActiveLayer(),
+        },
+        { label: 'Clear', shortcut: 'Del', action: () => editor.clearActive(), disabled: () => !hasEditableActiveLayer() },
         { sep: true },
         {
           label: 'Free Transform',
           shortcut: '⌘T',
           action: () => editor.beginFreeTransform(),
-          disabled: () => !editor.activeLayer || !!editor.freeTransform,
+          disabled: () => !hasEditableActiveLayer() || !!editor.freeTransform || !!editor.activeLayer?.psdMask,
         },
       ],
     },
@@ -71,72 +125,125 @@
         {
           label: 'Adjustments',
           items: [
-            { label: 'Brightness/Contrast…', action: () => ui.open('brightnessContrast') },
-            { label: 'Levels…', shortcut: '⌘L', action: () => ui.open('levels') },
-            { label: 'Hue/Saturation…', shortcut: '⌘U', action: () => ui.open('hueSaturation') },
-            { label: 'Threshold…', action: () => ui.open('threshold') },
+            {
+              label: 'Brightness/Contrast…',
+              action: () => ui.open('brightnessContrast'),
+              disabled: () => !hasEditableActiveLayer(),
+            },
+            { label: 'Levels…', shortcut: '⌘L', action: () => ui.open('levels'), disabled: () => !hasEditableActiveLayer() },
+            {
+              label: 'Hue/Saturation…',
+              shortcut: '⌘U',
+              action: () => ui.open('hueSaturation'),
+              disabled: () => !hasEditableActiveLayer(),
+            },
+            { label: 'Threshold…', action: () => ui.open('threshold'), disabled: () => !hasEditableActiveLayer() },
             { sep: true },
-            { label: 'Invert', shortcut: '⌘I', action: () => editor.adjustInvert() },
+            { label: 'Invert', shortcut: '⌘I', action: () => editor.adjustInvert(), disabled: () => !hasEditableActiveLayer() },
             { sep: true },
-            { label: 'Desaturate', shortcut: '⇧⌘U', action: () => editor.adjustDesaturate() },
+            { label: 'Desaturate', shortcut: '⇧⌘U', action: () => editor.adjustDesaturate(), disabled: () => !hasEditableActiveLayer() },
           ],
         },
         { sep: true },
-        { label: 'Auto Tone', shortcut: '⇧⌘L', action: () => ui.openAiAutoAdjust('tone') },
-        { label: 'Auto Contrast', shortcut: '⌥⇧⌘L', action: () => ui.openAiAutoAdjust('contrast') },
-        { label: 'Auto Color', shortcut: '⇧⌘B', action: () => ui.openAiAutoAdjust('color') },
+        { label: 'Auto Tone', shortcut: '⇧⌘L', action: () => ui.openAiAutoAdjust('tone'), disabled: () => !hasDocument() },
+        {
+          label: 'Auto Contrast',
+          shortcut: '⌥⇧⌘L',
+          action: () => ui.openAiAutoAdjust('contrast'),
+          disabled: () => !hasDocument(),
+        },
+        { label: 'Auto Color', shortcut: '⇧⌘B', action: () => ui.openAiAutoAdjust('color'), disabled: () => !hasDocument() },
         { sep: true },
-        { label: 'Image Size…', shortcut: '⌥⌘I', action: () => ui.open('imageSize') },
-        { label: 'AI Upscale…', shortcut: '⌥⇧⌘U', action: () => ui.open('aiUpscale') },
-        { label: 'Canvas Size…', shortcut: '⌥⌘C', action: () => ui.open('canvasSize') },
+        {
+          label: 'Image Size…',
+          shortcut: '⌥⌘I',
+          action: () => ui.open('imageSize'),
+          disabled: () => !canTransformDocument(),
+        },
+        { label: 'AI Upscale…', shortcut: '⌥⇧⌘U', action: () => ui.open('aiUpscale'), disabled: () => !hasDocument() },
+        {
+          label: 'Canvas Size…',
+          shortcut: '⌥⌘C',
+          action: () => ui.open('canvasSize'),
+          disabled: () => !canTransformDocument(),
+        },
         {
           label: 'Image Rotation',
           items: [
-            { label: '180°', action: () => editor.rotate(180) },
-            { label: '90° Clockwise', action: () => editor.rotate(90) },
-            { label: '90° Counter Clockwise', action: () => editor.rotate(270) },
+            { label: '180°', action: () => editor.rotate(180), disabled: () => !canTransformDocument() },
+            { label: '90° Clockwise', action: () => editor.rotate(90), disabled: () => !canTransformDocument() },
+            {
+              label: '90° Counter Clockwise',
+              action: () => editor.rotate(270),
+              disabled: () => !canTransformDocument(),
+            },
             { sep: true },
-            { label: 'Flip Canvas Horizontal', action: () => editor.flip('h') },
-            { label: 'Flip Canvas Vertical', action: () => editor.flip('v') },
+            { label: 'Flip Canvas Horizontal', action: () => editor.flip('h'), disabled: () => !canTransformDocument() },
+            { label: 'Flip Canvas Vertical', action: () => editor.flip('v'), disabled: () => !canTransformDocument() },
           ],
         },
-        { label: 'Crop', action: () => editor.cropToSelection(), disabled: () => !hasSel() },
-        { label: 'Trim…', action: () => ui.open('trim') },
-        { label: 'Reveal All', action: () => editor.revealAll() },
+        { label: 'Crop', action: () => editor.cropToSelection(), disabled: () => !canTransformDocument() || !hasSel() },
+        { label: 'Trim…', action: () => ui.open('trim'), disabled: () => !canTransformDocument() },
+        { label: 'Reveal All', action: () => editor.revealAll(), disabled: () => !canRevealAll() },
         { sep: true },
-        { label: 'Duplicate…', action: () => ui.open('duplicateDocument') },
+        { label: 'Duplicate…', action: () => ui.open('duplicateDocument'), disabled: () => !hasDocument() },
       ],
     },
     {
       label: 'Layer',
       items: [
-        { label: 'New Layer', action: () => editor.addLayer() },
-        { label: 'Duplicate Layer', action: () => { const id = activeId(); if (id) editor.duplicateLayer(id); } },
-        { label: 'Delete Layer', action: () => { const id = activeId(); if (id) editor.deleteLayer(id); } },
+        { label: 'New Layer', action: () => editor.addLayer(), disabled: () => !hasDocument() },
+        {
+          label: 'Duplicate Layer',
+          action: () => {
+            const id = activeId();
+            if (id) editor.duplicateLayer(id);
+          },
+          disabled: () => !canDuplicateActiveLayer(),
+        },
+        {
+          label: 'Delete Layer',
+          action: () => {
+            const id = activeId();
+            if (id) editor.deleteLayer(id);
+          },
+          disabled: () => !canDeleteActiveLayer(),
+        },
         { sep: true },
         {
           label: 'Rasterize Type',
-          action: () => { const id = activeId(); if (id) editor.rasterizeType(id); },
-          disabled: () => editor.activeLayer?.kind !== 'text',
+          action: () => {
+            const id = activeId();
+            if (id) editor.rasterizeType(id);
+          },
+          disabled: () => !canRasterizeType(),
         },
         { sep: true },
-        { label: 'Merge Down', shortcut: '⌘E', action: () => { const id = activeId(); if (id) editor.mergeDown(id); } },
-        { label: 'Flatten Image', action: () => editor.flatten() },
+        {
+          label: 'Merge Down',
+          shortcut: '⌘E',
+          action: () => {
+            const id = activeId();
+            if (id) editor.mergeDown(id);
+          },
+          disabled: () => !canMergeDown(),
+        },
+        { label: 'Flatten Image', action: () => editor.flatten(), disabled: () => !canFlatten() },
       ],
     },
     {
       label: 'Select',
       items: [
-        { label: 'All', shortcut: '⌘A', action: () => editor.selectAll() },
-        { label: 'Deselect', shortcut: '⌘D', action: () => editor.deselect(), disabled: () => !hasSel() },
-        { label: 'Inverse', shortcut: '⇧⌘I', action: () => editor.invertSelection(), disabled: () => !hasSel() },
+        { label: 'All', shortcut: '⌘A', action: () => editor.selectAll(), disabled: () => !hasDocument() },
+        { label: 'Deselect', shortcut: '⌘D', action: () => editor.deselect(), disabled: () => !hasDocument() || !hasSel() },
+        { label: 'Inverse', shortcut: '⇧⌘I', action: () => editor.invertSelection(), disabled: () => !hasDocument() || !hasSel() },
       ],
     },
     {
       label: 'Filter',
       items: [
-        { label: 'Gaussian Blur…', action: () => ui.open('gaussianBlur') },
-        { label: 'Sharpen', action: () => editor.filterSharpen(1) },
+        { label: 'Gaussian Blur…', action: () => ui.open('gaussianBlur'), disabled: () => !hasEditableActiveLayer() },
+        { label: 'Sharpen', action: () => editor.filterSharpen(1), disabled: () => !hasEditableActiveLayer() },
       ],
     },
     {
@@ -146,17 +253,17 @@
         {
           label: 'Extract Assets…',
           action: () => ui.open('aiDecouple'),
-          disabled: () => !editor.activeLayer,
+          disabled: () => !hasActiveLayer(),
         },
       ],
     },
     {
       label: 'View',
       items: [
-        { label: 'Zoom In', shortcut: '⌘+', action: () => vp()?.zoomBy(1.25) },
-        { label: 'Zoom Out', shortcut: '⌘-', action: () => vp()?.zoomBy(1 / 1.25) },
-        { label: 'Fit on Screen', shortcut: '⌘0', action: () => vp()?.fitToView() },
-        { label: 'Actual Pixels (100%)', shortcut: '⌘1', action: () => vp()?.setZoom(1) },
+        { label: 'Zoom In', shortcut: '⌘+', action: () => vp()?.zoomBy(1.25), disabled: () => !canUseViewport() },
+        { label: 'Zoom Out', shortcut: '⌘-', action: () => vp()?.zoomBy(1 / 1.25), disabled: () => !canUseViewport() },
+        { label: 'Fit on Screen', shortcut: '⌘0', action: () => vp()?.fitToView(), disabled: () => !canUseViewport() },
+        { label: 'Actual Pixels (100%)', shortcut: '⌘1', action: () => vp()?.setZoom(1), disabled: () => !canUseViewport() },
         { sep: true },
         {
           label: 'Show Contextual Task Bar',
@@ -185,7 +292,7 @@
     }
   }
   function run(item: MItem) {
-    if (item.disabled?.()) return;
+    if (itemDisabled(item)) return;
     if (item.items) return;
     open = null;
     openSub = null;
@@ -221,9 +328,9 @@
                 <button
                   class="item"
                   class:has-sub={!!item.items}
-                  disabled={item.disabled?.()}
+                  disabled={itemDisabled(item)}
                   onclick={() => run(item)}
-                  onpointerenter={() => (openSub = item.items ? j : null)}
+                  onpointerenter={() => (openSub = item.items && !itemDisabled(item) ? j : null)}
                 >
                   <span>{item.label}</span>
                   {#if item.items}<span class="sc">›</span>{:else if item.shortcut}<span class="sc">{item.shortcut}</span>{/if}
@@ -234,7 +341,7 @@
                       {#if child.sep}
                         <div class="sep"></div>
                       {:else}
-                        <button class="item" disabled={child.disabled?.()} onclick={() => run(child)}>
+                        <button class="item" disabled={itemDisabled(child)} onclick={() => run(child)}>
                           <span>{child.label}</span>
                           {#if child.shortcut}<span class="sc">{child.shortcut}</span>{/if}
                         </button>
@@ -327,11 +434,18 @@
     background: var(--accent);
     color: #fff;
   }
+  .item:disabled {
+    opacity: 1;
+    color: #6f7378;
+  }
   .item.has-sub {
     position: relative;
   }
   .sc {
     color: var(--text-dim);
+  }
+  .item:disabled .sc {
+    color: #5a5f65;
   }
   .item:hover:not(:disabled) .sc {
     color: #e8f0ff;

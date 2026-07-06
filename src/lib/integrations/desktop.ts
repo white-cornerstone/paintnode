@@ -39,6 +39,15 @@ export async function writeDesktopClipboardText(text: string): Promise<boolean> 
   }
 }
 
+export async function setNativeMenuEnabledStates(enabled: Record<string, boolean>): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await invoke('set_app_menu_enabled', { enabled });
+  } catch (error) {
+    console.warn('Failed to update native menu state', error);
+  }
+}
+
 export async function readAppMemoryInfo(): Promise<AppMemoryInfo | null> {
   if (!isDesktop()) return null;
   try {
