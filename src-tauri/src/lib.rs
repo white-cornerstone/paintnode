@@ -6,10 +6,18 @@ mod project;
 #[cfg(test)]
 mod test_util;
 
-use tauri::{Emitter, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 
 use app::{queue_native_open_paths, PendingOpenPaths};
 use menu::build_app_menu;
+
+#[cfg(target_os = "macos")]
+fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -78,6 +86,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, RunEvent::Ready) {
+                focus_main_window(app);
+            }
+
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
             if let RunEvent::Opened { urls } = event {
                 let paths = urls
