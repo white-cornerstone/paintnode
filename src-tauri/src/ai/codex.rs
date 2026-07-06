@@ -1677,7 +1677,7 @@ Attached images:
 Restoration goal:
 Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
 Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
-Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so all parts join without visible seams.
+Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so the result joins them without visible seams.
 Do not add, remove, move, restyle, or reinterpret any content.
 Do not change global brightness, contrast, or color balance.
 If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
@@ -2972,7 +2972,7 @@ mod tests {
         assert!(args[image_idx + 3].contains("`references/reference-1-style.png`"));
     }
 
-    const TEST_GEOMETRY_NOTE: &str = "PaintNode image geometry:\n- The attached images are the full 1280x800 PaintNode document.";
+    const TEST_GEOMETRY_NOTE: &str = "PaintNode image geometry:\n- The attached images are the full PaintNode document.";
 
     #[test]
     fn unmanaged_autonomy_prompts_omit_method_guardrails() {
@@ -3138,7 +3138,7 @@ mod tests {
         assert_eq!(args[image_idx + 4], reference_paths[0].to_string_lossy());
         assert_eq!(args[image_idx + 5], "--");
         let prompt_arg = &args[image_idx + 6];
-        assert!(prompt_arg.contains("the full 1280x800 PaintNode document"));
+        assert!(prompt_arg.contains("the full PaintNode document"));
         assert!(!prompt_arg.contains("chroma"));
         assert!(!prompt_arg.contains("#00ff00"));
         assert!(!prompt_arg.contains("centered content rectangle"));
@@ -3256,7 +3256,7 @@ mod tests {
         assert_eq!(args[image_idx + 6], "--");
         let prompt_arg = &args[image_idx + 7];
         assert!(prompt_arg.contains("Use $imagegen to perform one in-place PaintNode retouch"));
-        assert!(prompt_arg.contains("the full 1280x800 PaintNode document"));
+        assert!(prompt_arg.contains("the full PaintNode document"));
         assert!(!prompt_arg.contains("chroma"));
         assert!(!prompt_arg.contains("#00ff00"));
         assert!(!prompt_arg.contains("centered content rectangle"));
@@ -3296,7 +3296,7 @@ mod tests {
         );
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
         assert!(prompt.contains("highest output resolution"));
-        assert!(prompt.contains("the full 1280x800 PaintNode document"));
+        assert!(prompt.contains("the full PaintNode document"));
         assert!(prompt.contains("generated-images cache"));
         assert!(prompt.contains("Critical registration rule"));
         assert!(!prompt.contains("chroma"));
@@ -3311,7 +3311,7 @@ mod tests {
             false,
             &[],
             AiAutonomyLevel::Low,
-            "PaintNode image geometry:\n- The attached images are a crop of a larger 6000x480 PaintNode document.\n- The crop covers document region x=1140, y=0, width=1440, height=480.",
+            "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.",
         );
 
         assert!(prompt.contains("Use $imagegen to perform one in-place PaintNode retouch"));
@@ -3324,8 +3324,9 @@ mod tests {
         assert!(prompt.contains(
             "include only those image-specific anchors you observed from the attached inputs"
         ));
-        assert!(prompt.contains("a crop of a larger 6000x480 PaintNode document"));
-        assert!(prompt.contains("document region x=1140, y=0, width=1440, height=480"));
+        assert!(prompt.contains("a crop of a larger PaintNode document"));
+        assert!(prompt
+            .contains("paste your result back into the correct document region automatically"));
         assert!(!prompt.contains("The following anchors must remain in the same pixel positions"));
         assert!(!prompt.contains("window frame"));
         assert!(!prompt.contains("train seat"));

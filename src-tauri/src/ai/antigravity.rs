@@ -447,7 +447,7 @@ Final response should be one short sentence confirming `{result_path}` was creat
 
 fn antigravity_overview_note(job_dir: &str, has_overview: bool) -> String {
     if has_overview {
-        format!("\n- `{job_dir}/overview.png`: downscaled preview of the whole document with this part's region outlined in red. Use it only as composition and continuity guidance; never copy its pixels or the red outline into the result.")
+        format!("\n- `{job_dir}/overview.png`: downscaled preview of the surrounding document content with the editable region outlined in red. Use it only as composition and continuity guidance; never copy its pixels or the red outline into the result.")
     } else {
         String::new()
     }
@@ -604,8 +604,8 @@ fn antigravity_image_tool_call_note(job_dir: &str, working: &AiWorkingCanvas) ->
     let aspect_label = &working.aspect_label;
     let target = antigravity_output_target(aspect_label, working.original_dimensions);
     let target_note = match target {
-        Some((tier, (width, height))) => format!(
-            "\n- Set the image tool's aspect ratio parameter to `{aspect_label}` and its image size / resolution parameter to `{tier}`. That tier outputs {width}x{height} pixels — exactly the attached frame's ratio — so a faithful in-place edit maps 1:1 onto the frame with no cropping or reframing."
+        Some((tier, _)) => format!(
+            "\n- Set the image tool's aspect ratio parameter to `{aspect_label}` and its image size / resolution parameter to `{tier}`. That tier's output grid matches the attached frame's ratio exactly, so a faithful in-place edit maps 1:1 onto the frame with no cropping or reframing."
         ),
         None => String::new(),
     };
@@ -836,7 +836,7 @@ Input files:
 Restoration goal:
 - Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
 - Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
-- Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so all parts join without visible seams.
+- Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so the result joins them without visible seams.
 - Do not add, remove, move, restyle, or reinterpret any content.
 - Do not change global brightness, contrast, or color balance.
 - If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
@@ -2277,7 +2277,7 @@ mod tests {
         let prompt = antigravity_restore_prompt(
             "paintnode/antigravity-runs/up-1/part-2",
             AiAutonomyLevel::Low,
-            "PaintNode multi-part edit context:\n- You are editing part 2 of 4.",
+            "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.",
             true,
         );
         assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/result.png"));
@@ -2285,14 +2285,14 @@ mod tests {
         assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/overview.png"));
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
         assert!(prompt.contains("highest output resolution"));
-        assert!(prompt.contains("part 2 of 4"));
+        assert!(prompt.contains("a crop of a larger PaintNode document"));
         assert!(!prompt.contains("Use $imagegen"));
         assert!(!prompt.contains("chroma"));
     }
 
     #[test]
     fn antigravity_prompts_require_result_file_without_codex_cache_contract() {
-        let geometry_note = "PaintNode multi-part edit context:\n- The full PaintNode document is 6000x480. No supported AI image shape can cover this edit at once, so PaintNode split it into 5 parts that run one at a time.\n- You are editing part 1 of 5: document region x=0, y=0, width=1120, height=480.";
+        let geometry_note = "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.\n- The attached images already include finished content adjacent to the editable region. Match its content, lighting, perspective, and style so your result joins it seamlessly.";
         let retouch = antigravity_retouch_prompt(
             "remove glare",
             false,
@@ -2310,9 +2310,13 @@ mod tests {
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/part-1/mask.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/part-1/overview.png"));
         assert!(retouch.contains("paintnode/antigravity-runs/job-1/part-1/paintnode_contract.txt"));
-        assert!(retouch.contains("PaintNode multi-part edit context"));
-        assert!(retouch.contains("part 1 of 5"));
-        assert!(retouch.contains("document region x=0, y=0, width=1120, height=480"));
+        assert!(retouch.contains("a crop of a larger PaintNode document"));
+        assert!(retouch.contains("your result joins it seamlessly"));
+        // Prompts must not reveal document dimensions or the split structure
+        // to the agent — it forwards prompt text to the image model.
+        assert!(!retouch.contains("6000x480"));
+        assert!(!retouch.contains("part 1 of"));
+        assert!(!retouch.contains("document region x="));
         assert!(!retouch.contains("chroma"));
         assert!(!retouch.contains("#00ff00"));
         assert!(!retouch.contains("centered content rectangle"));
@@ -2349,10 +2353,12 @@ mod tests {
             .contains("Never attach `paintnode/antigravity-runs/job-1/part-1/paintnode_contract.txt`"));
         assert!(retouch.contains("same framing, same composition, same camera, same crop"));
         // The tool parameters must target the model's real output grid: the
-        // smallest tier covering the 1386x588 crop at "21:9" is 1K (1584x672).
+        // smallest tier covering the 1386x588 crop at "21:9" is 1K. The note
+        // pins the parameters only — never literal output pixels, which the
+        // agent could forward into the image-model instruction.
         assert!(retouch.contains("aspect ratio parameter to `21:9`"));
         assert!(retouch.contains("image size / resolution parameter to `1K`"));
-        assert!(retouch.contains("outputs 1584x672 pixels"));
+        assert!(!retouch.contains("1584x672"));
 
         let single_retouch = antigravity_retouch_prompt(
             "remove glare",
@@ -2361,17 +2367,17 @@ mod tests {
             &[],
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Low,
-            "PaintNode image geometry:\n- The attached images are the full 1280x800 PaintNode document.",
+            "PaintNode image geometry:\n- The attached images are the full PaintNode document.",
             false,
             &ai_exact_working_canvas((1247, 696), "16:9"),
         );
         assert!(!single_retouch.contains("overview.png"));
-        assert!(single_retouch.contains("the full 1280x800 PaintNode document"));
+        assert!(single_retouch.contains("the full PaintNode document"));
 
         let contract = antigravity_retouch_contract_text(
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Low,
-            "PaintNode image geometry:\n- The attached images are the full 1280x800 PaintNode document.",
+            "PaintNode image geometry:\n- The attached images are the full PaintNode document.",
         );
         assert!(contract
             .contains("Paste the result into the document region recorded in `placement.json`"));
@@ -2390,7 +2396,7 @@ mod tests {
         let unmanaged_contract = antigravity_retouch_contract_text(
             "paintnode/antigravity-runs/job-1",
             AiAutonomyLevel::Unmanaged,
-            "PaintNode image geometry:\n- The attached images are the full 1280x800 PaintNode document.",
+            "PaintNode image geometry:\n- The attached images are the full PaintNode document.",
         );
         assert!(unmanaged_contract
             .contains("Paste the result into the document region recorded in `placement.json`"));
