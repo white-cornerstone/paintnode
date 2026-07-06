@@ -27,7 +27,14 @@ export function isCodexImageSize(width: number, height: number): boolean {
 }
 
 export function isAntigravityImageRatio(width: number, height: number): boolean {
-  return imageModelCapabilities.providers.antigravity.aspectRatios.includes(ratioLabel(width, height));
+  const safeWidth = normalizedDimension(width);
+  const safeHeight = normalizedDimension(height);
+  // The capability table records the model's actual output grids (e.g.
+  // "21:9" outputs 1584x672 = 33:14, not 7:3); a document is AI-friendly
+  // only when it matches a real grid ratio exactly.
+  return imageModelCapabilities.providers.antigravity.aspectRatios.some(
+    (ratio) => safeWidth * ratio.height === safeHeight * ratio.width,
+  );
 }
 
 function gcd(a: number, b: number): number {

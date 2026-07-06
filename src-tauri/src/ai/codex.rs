@@ -15,10 +15,11 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_retouch_editable_mask_png, ai_working_canvas_accepts_result_dimensions,
-    read_png_bytes_cropped_to_ai_working_canvas, validate_optional_target_dimensions,
-    AiWorkingCanvas, AI_CHROMA_KEY_HEX, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
-    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
+    ai_protected_region_drift, ai_retouch_editable_mask_png,
+    ai_working_canvas_accepts_result_dimensions, read_png_bytes_cropped_to_ai_working_canvas,
+    remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
+    AI_CHROMA_KEY_HEX, AI_PROTECTED_DRIFT_LIMIT, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
+    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
 };
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_upscale_target_dimensions,
@@ -46,6 +47,13 @@ use crate::project::{
     add_asset, safe_file_name, safe_stem, store_generated_png_asset, write_asset_file,
     write_asset_file_with_file_name, ProjectAsset,
 };
+
+/// Appended to the prompt when a candidate fails the protected-region drift
+/// gate: the model regenerated the scene instead of editing in place.
+const CODEX_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejected:
+- The previous candidate repainted pixels outside the editable mask, which means the scene was regenerated instead of edited in place. PaintNode discarded it.
+- This is a strict in-place edit of `edit_target.png`: apply the requested change only inside the white mask area and reproduce every pixel outside the mask exactly as it appears in `edit_target.png`.
+- If the requested change cannot be honored inside the mask, make the closest faithful change rather than re-imagining the scene."#;
 
 #[derive(Debug, Default)]
 struct CodexCommandOptions {
@@ -858,9 +866,9 @@ fn generative_fill_prompt(
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
     let task_intro = "Use $imagegen to perform one mask-guided generative fill for PaintNode.";
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic paste-back into the document, protected-pixel restoration, mask blending, and import.\n"
+        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic paste-back into the document and import; the mask is attached as a separate user-editable layer mask and is never baked into your candidate, so protected areas must stay visually identical to `source.png` in the candidate itself.\n"
     } else {
-        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic paste-back into the document, protected-pixel restoration, mask blending, and import.\n- Do not create, edit, or delete files in the working directory except `result.png`.\n"
+        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic paste-back into the document and import; the mask is attached as a separate user-editable layer mask and is never baked into your candidate, so protected areas must stay visually identical to `source.png` in the candidate itself.\n- Do not create, edit, or delete files in the working directory except `result.png`.\n"
     };
     let reference_note = reference_prompt_note(reference_names, "");
     format!(
@@ -987,7 +995,7 @@ fn ai_retouch_prompt(
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
         "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache."
     } else {
-        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\nDo not create, edit, copy, verify, or delete files in the working directory.\nYou do not need to copy the generated PNG to `result.png`, composite the mask, restore protected pixels, crop, resize, write helper scripts, or prove exact pixel preservation. Those are deterministic PaintNode responsibilities."
+        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\nDo not create, edit, copy, verify, or delete files in the working directory.\nYou do not need to copy the generated PNG to `result.png`, crop, resize, write helper scripts, or prove exact pixel preservation. Those are deterministic PaintNode responsibilities. The mask is attached as a separate user-editable layer mask and is never baked into your candidate, so protected pixels must stay visually identical in the candidate itself."
     };
     format!(
         r#"Use $imagegen to perform one in-place PaintNode retouch.
@@ -1025,10 +1033,10 @@ Only change pixels necessary to satisfy the user retouch prompt.
 The visible edit must stay inside the white/gray mask footprint.
 Do not use the mask as an instruction to repaint everything inside it. Treat `mask.png` as the maximum allowed edit area.
 Do not change unrequested content inside the mask.
-PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, gray-mask pixels will be blended with `source.png`, and black/transparent-mask protected pixels will be discarded and preserved from `source.png` by the app.
-Even so, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black or transparent. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
+PaintNode imports your candidate as a new layer and attaches `mask.png` as a separate linked layer mask: white-mask pixels show your candidate and black/transparent-mask pixels keep the original visible. The mask is never baked into your candidate's pixels, so the user can still edit the mask afterwards.
+Because of that, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black or transparent. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
 Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
-Any edit whose visible change extends outside the mask is a failed retouch, even if PaintNode later restores protected pixels. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
+Any edit whose visible change extends outside the mask is a failed retouch, even though the app masks the imported layer afterward. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
 
 Person preservation:
 You may redraw clothing inside the editable area.
@@ -1916,9 +1924,8 @@ pub(crate) async fn generate_codex_fill_image(
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "Generative fill")?;
             let geometry_note = ai_part_geometry_note(&placement, part_index);
-            let prompt_text =
+            let base_prompt_text =
                 generative_fill_prompt(prompt.trim(), autonomy, &geometry_note, &reference_names);
-            write_ai_job_prompt(&part_path, &prompt_text, "Codex generative fill")?;
 
             emit_codex_part_progress(
                 &app,
@@ -1931,35 +1938,88 @@ pub(crate) async fn generate_codex_fill_image(
                     "Starting local Codex generative fill",
                 ),
             );
-            let part_run = run_codex_fill_part(
-                &app,
-                &run_id,
-                &codex_bin,
-                &codex_options,
-                &part_path,
-                &prompt_text,
-                has_overview,
-                &reference_paths,
-                &part.working,
-            )
-            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if part_run.normalized {
-                emit_codex_progress(
+            let result_path = part_path.join("result.png");
+            let mut accepted_run = None;
+            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                let prompt_text = if attempt == 0 {
+                    base_prompt_text.clone()
+                } else {
+                    format!("{base_prompt_text}\n\n{CODEX_IN_PLACE_RETRY_NOTE}")
+                };
+                write_ai_job_prompt(&part_path, &prompt_text, "Codex generative fill")?;
+                let part_run = run_codex_fill_part(
                     &app,
                     &run_id,
-                    ai_part_progress_message(
-                        &placement,
-                        part_index,
-                        &format!(
-                            "Normalized Codex fill from {}x{} to {}x{}",
-                            part_run.result_dimensions.0,
-                            part_run.result_dimensions.1,
-                            part.crop.width,
-                            part.crop.height
+                    &codex_bin,
+                    &codex_options,
+                    &part_path,
+                    &prompt_text,
+                    has_overview,
+                    &reference_paths,
+                    &part.working,
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                if part_run.normalized {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Normalized Codex fill from {}x{} to {}x{}",
+                                part_run.result_dimensions.0,
+                                part_run.result_dimensions.1,
+                                part.crop.width,
+                                part.crop.height
+                            ),
                         ),
+                    );
+                }
+                // A candidate that repainted protected pixels was regenerated
+                // from scratch rather than edited in place; pasting it back
+                // would leave visible seams at the mask boundary.
+                let drift = ai_protected_region_drift(
+                    &inputs.edit_target_png,
+                    &inputs.mask_png,
+                    &part_run.normalized_png,
+                    "Codex generative fill",
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+                .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT);
+                let Some(drift) = drift else {
+                    accepted_run = Some(part_run);
+                    break;
+                };
+                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Rejected generative fill candidate: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}); retrying with stricter in-place instructions"
+                            ),
+                        ),
+                    );
+                    remove_rejected_ai_candidate(&result_path)
+                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                    continue;
+                }
+                // Drop the rejected candidate so a resumed retry cannot
+                // silently import it via reuse_part_result.
+                let _ = fs::remove_file(&result_path);
+                return Err(ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    &format!(
+                        "The AI image model regenerated the scene instead of editing it in place: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}). Try a smaller edit area or a simpler prompt."
                     ),
-                );
+                ));
             }
+            let part_run = accepted_run
+                .ok_or_else(|| "Generative fill produced no accepted candidate.".to_string())?;
             fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
             composer.apply_part_result(part, &part_run.normalized_png, "Generative fill")?;
@@ -2191,7 +2251,7 @@ pub(crate) async fn generate_codex_retouch_image(
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
             let geometry_note = ai_part_geometry_note(&placement, part_index);
-            let prompt_text = ai_retouch_prompt(
+            let base_prompt_text = ai_retouch_prompt(
                 prompt.trim(),
                 has_annotated_source,
                 has_reference,
@@ -2199,7 +2259,6 @@ pub(crate) async fn generate_codex_retouch_image(
                 autonomy,
                 &geometry_note,
             );
-            write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
 
             emit_codex_part_progress(
                 &app,
@@ -2208,37 +2267,90 @@ pub(crate) async fn generate_codex_retouch_image(
                 placement.parts.len(),
                 ai_part_progress_message(&placement, part_index, "Starting local Codex AI retouch"),
             );
-            let part_run = run_codex_retouch_part(
-                &app,
-                &run_id,
-                &codex_bin,
-                &codex_options,
-                &part_path,
-                &prompt_text,
-                has_annotated_source,
-                has_reference,
-                has_overview,
-                &reference_paths,
-                &part.working,
-            )
-            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if part_run.normalized {
-                emit_codex_progress(
+            let result_path = part_path.join("result.png");
+            let mut accepted_run = None;
+            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                let prompt_text = if attempt == 0 {
+                    base_prompt_text.clone()
+                } else {
+                    format!("{base_prompt_text}\n\n{CODEX_IN_PLACE_RETRY_NOTE}")
+                };
+                write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
+                let part_run = run_codex_retouch_part(
                     &app,
                     &run_id,
-                    ai_part_progress_message(
-                        &placement,
-                        part_index,
-                        &format!(
-                            "Normalized AI retouch result from {}x{} to {}x{}",
-                            part_run.result_dimensions.0,
-                            part_run.result_dimensions.1,
-                            part.crop.width,
-                            part.crop.height
+                    &codex_bin,
+                    &codex_options,
+                    &part_path,
+                    &prompt_text,
+                    has_annotated_source,
+                    has_reference,
+                    has_overview,
+                    &reference_paths,
+                    &part.working,
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                if part_run.normalized {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Normalized AI retouch result from {}x{} to {}x{}",
+                                part_run.result_dimensions.0,
+                                part_run.result_dimensions.1,
+                                part.crop.width,
+                                part.crop.height
+                            ),
                         ),
+                    );
+                }
+                // A candidate that repainted protected pixels was regenerated
+                // from scratch rather than edited in place; pasting it back
+                // would leave visible seams at the mask boundary.
+                let drift = ai_protected_region_drift(
+                    &inputs.edit_target_png,
+                    &inputs.mask_png,
+                    &part_run.normalized_png,
+                    "AI retouch candidate",
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+                .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT);
+                let Some(drift) = drift else {
+                    accepted_run = Some(part_run);
+                    break;
+                };
+                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            &format!(
+                                "Rejected AI retouch candidate: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}); retrying with stricter in-place instructions"
+                            ),
+                        ),
+                    );
+                    remove_rejected_ai_candidate(&result_path)
+                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                    continue;
+                }
+                // Drop the rejected candidate so a resumed retry cannot
+                // silently import it via reuse_part_result.
+                let _ = fs::remove_file(&result_path);
+                return Err(ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    &format!(
+                        "The AI image model regenerated the scene instead of editing it in place: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}). Try a smaller edit area or a simpler prompt."
                     ),
-                );
+                ));
             }
+            let part_run = accepted_run
+                .ok_or_else(|| "AI retouch produced no accepted candidate.".to_string())?;
             fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
                 .map_err(|e| format!("Failed to record AI retouch part result: {e}"))?;
             composer.apply_part_result(part, &part_run.normalized_png, "AI retouch")?;
@@ -3154,7 +3266,10 @@ mod tests {
         assert!(prompt_arg.contains("arrows, labels, and callout positions as guidance"));
         assert!(prompt_arg.contains("red arrows, yellow callout boxes, annotation text"));
         assert!(prompt_arg.contains("User retouch prompt:\nremove glare"));
-        assert!(prompt_arg.contains("PaintNode will apply `mask.png` after you finish"));
+        // The mask is attached as a separate editable layer mask, never baked
+        // into the candidate's pixels.
+        assert!(prompt_arg.contains("attaches `mask.png` as a separate linked layer mask"));
+        assert!(prompt_arg.contains("never baked into your candidate's pixels"));
         assert!(prompt_arg.contains(
             "visually identical to `source.png` everywhere `mask.png` is black or transparent"
         ));

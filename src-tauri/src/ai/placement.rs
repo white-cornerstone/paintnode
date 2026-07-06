@@ -17,8 +17,8 @@ use serde::Serialize;
 
 use crate::ai::canvas::{
     ai_antigravity_image_capability, ai_codex_image_capability, ai_exact_working_canvas,
-    ai_fallback_aspect_ratios, ai_working_canvas_accepts_result_dimensions, mask_pixel_coverage,
-    AiWorkingCanvas, PixelRect,
+    ai_working_canvas_accepts_result_dimensions, mask_pixel_coverage, AiWorkingCanvas, PixelRect,
+    SupportedAspectRatio,
 };
 use crate::png::{decode_png_rgba, encode_rgba_png, is_png, png_dimensions_from_bytes};
 
@@ -126,15 +126,13 @@ impl CoverageGrid {
         }
     }
 
-    /// Mark every pixel of `rect` that is editable in `editable` as covered.
-    fn mark_rect_where_editable(&mut self, rect: PixelRect, editable: &CoverageGrid) {
+    /// Mark every pixel of `rect` as covered.
+    fn mark_rect(&mut self, rect: PixelRect) {
         let rect = self.clamped(rect);
         for y in rect.y..rect.y + rect.height {
             let row = y as usize * self.width as usize;
             for x in rect.x..rect.x + rect.width {
-                if editable.coverage[row + x as usize] > 0 {
-                    self.coverage[row + x as usize] = 255;
-                }
+                self.coverage[row + x as usize] = 255;
             }
         }
     }
@@ -271,18 +269,38 @@ fn codex_crop_dimensions(
         .then(|| (free.0, free.1, "codex-crop".into()))
 }
 
+fn gcd(a: u32, b: u32) -> u32 {
+    let (mut x, mut y) = (a.max(1), b.max(1));
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    x
+}
+
+/// Reduce a capability output grid to its exact ratio unit and the unit
+/// count of the 1K grid (e.g. 1584x672 -> unit 33x14, 1K step 48).
+fn ratio_unit(ratio: &SupportedAspectRatio) -> ((u32, u32), u32) {
+    let step = gcd(ratio.width, ratio.height);
+    ((ratio.width / step, ratio.height / step), step)
+}
+
+/// Antigravity crops must match the model's REAL output grid ratio (e.g.
+/// "21:9" outputs 1584x672 = 33:14, not 7:3): a crop the model cannot map
+/// onto its output grid forces it to reframe the scene instead of editing
+/// in place. Crops are also capped at the 4K output grid (4x the 1K step)
+/// so results only ever downscale back onto the document — upscaling a
+/// model result would smear protected pixels; larger documents split into
+/// parts instead.
 fn ratio_crop_candidates(document: (u32, u32)) -> Vec<(u32, u32, String)> {
-    ai_fallback_aspect_ratios()
+    ai_antigravity_image_capability()
+        .aspect_ratios
         .iter()
         .filter_map(|ratio| {
-            let units = (document.0 / ratio.width).min(document.1 / ratio.height);
-            (units > 0).then(|| {
-                (
-                    ratio.width * units,
-                    ratio.height * units,
-                    ratio.label.clone(),
-                )
-            })
+            let (unit, step) = ratio_unit(ratio);
+            let units = (document.0 / unit.0)
+                .min(document.1 / unit.1)
+                .min(step * 4);
+            (units > 0).then(|| (unit.0 * units, unit.1 * units, ratio.label.clone()))
         })
         .collect()
 }
@@ -432,20 +450,19 @@ fn restore_tile_candidates(
                 .collect()
         }
         AiEditProvider::Antigravity => {
-            let cap = ai_antigravity_image_capability().restore_tile_side.max(1);
-            ai_fallback_aspect_ratios()
+            let capability = ai_antigravity_image_capability();
+            let cap = capability.restore_tile_side.max(1);
+            // Restore tiles must also land on the model's real output grids,
+            // or every regenerated tile drifts off its frame.
+            capability
+                .aspect_ratios
                 .iter()
                 .filter_map(|ratio| {
-                    let units = (document.0 / ratio.width)
-                        .min(document.1 / ratio.height)
-                        .min(cap / ratio.width.max(ratio.height));
-                    (units > 0).then(|| {
-                        (
-                            ratio.width * units,
-                            ratio.height * units,
-                            ratio.label.clone(),
-                        )
-                    })
+                    let (unit, _) = ratio_unit(ratio);
+                    let units = (document.0 / unit.0)
+                        .min(document.1 / unit.1)
+                        .min(cap / unit.0.max(unit.1));
+                    (units > 0).then(|| (unit.0 * units, unit.1 * units, ratio.label.clone()))
                 })
                 .collect()
         }
@@ -715,6 +732,12 @@ fn mix_rgba(old: image::Rgba<u8>, new: image::Rgba<u8>, weight: u8) -> image::Rg
 /// touches pixels an earlier part already generated, its result cross-fades
 /// over them across a feathered band instead of cutting hard at the part
 /// boundary — the hard cut is what made split runs look like stitched images.
+///
+/// The edit mask is deliberately NOT baked into the candidate: each part's
+/// raw result covers its whole crop rect, and the app applies the mask
+/// non-destructively via the linked mask layer, so the user keeps full power
+/// to edit the mask after import. The mask still shapes the per-part agent
+/// inputs (`part_inputs`).
 pub(crate) struct AiEditComposer {
     source: image::RgbaImage,
     edit_target: image::RgbaImage,
@@ -778,10 +801,11 @@ impl AiEditComposer {
         })
     }
 
-    /// Per-pixel paste weights for a part (crop-local, 0..=255): fresh
-    /// editable pixels take the part's result fully; pixels an earlier part
-    /// painted take it with a weight that ramps down over the feather band so
-    /// neighboring parts cross-fade; protected pixels never take it.
+    /// Per-pixel mask weights for a part's agent inputs (crop-local,
+    /// 0..=255): fresh editable pixels stay fully editable; pixels an
+    /// earlier part painted ramp down over the feather band into a gray
+    /// hand-off buffer; protected pixels stay protected. Used only to build
+    /// the per-part `mask.png` — pasting uses `part_paste_weights`.
     fn part_blend_weights(&self, crop: PixelRect) -> Vec<u8> {
         let width = crop.width as usize;
         let height = crop.height as usize;
@@ -850,15 +874,21 @@ impl AiEditComposer {
                 // Fresh pixels stay editable; the feather band over earlier
                 // parts' output becomes a gray blend buffer (PaintNode
                 // cross-fades there); everything else is protected context.
+                // Everything is written opaque: agents and image models often
+                // flatten alpha away (usually onto white), which would turn a
+                // white-on-transparent mask into an all-white "everything is
+                // editable" mask. Opaque black/gray/white survives that.
                 let pixel = if weight == 0 {
-                    image::Rgba([0, 0, 0, 0])
+                    image::Rgba([0, 0, 0, 255])
                 } else if self.painted.is_covered(document_x, document_y) {
                     image::Rgba([128, 128, 128, 255])
                 } else {
-                    self.mask
+                    let coverage = self
+                        .mask
                         .as_ref()
-                        .map(|mask| *mask.get_pixel(document_x, document_y))
-                        .unwrap_or(image::Rgba([255, 255, 255, 255]))
+                        .map(|mask| mask_pixel_coverage(mask.get_pixel(document_x, document_y)))
+                        .unwrap_or(255);
+                    image::Rgba([coverage, coverage, coverage, 255])
                 };
                 part_mask.put_pixel(x, y, pixel);
             }
@@ -905,8 +935,46 @@ impl AiEditComposer {
         encode_rgba_png(thumb, label)
     }
 
-    /// Paste a normalized part result (already resized to the part's crop size)
-    /// into the document composites, but only where this part's mask allowed edits.
+    /// Per-pixel paste weights for a part's result (crop-local, 0..=255):
+    /// the edit mask is NOT applied here — masking stays non-destructive in
+    /// the app via the linked mask layer. Fresh pixels take the result
+    /// fully; pixels an earlier part painted cross-fade over the feather
+    /// band so neighboring parts stitch without hard seams.
+    fn part_paste_weights(&self, crop: PixelRect) -> Vec<u8> {
+        let width = crop.width as usize;
+        let height = crop.height as usize;
+        let mut fresh = vec![false; width * height];
+        let mut any_fresh = false;
+        for y in 0..crop.height {
+            for x in 0..crop.width {
+                if !self.painted.is_covered(crop.x + x, crop.y + y) {
+                    fresh[y as usize * width + x as usize] = true;
+                    any_fresh = true;
+                }
+            }
+        }
+        let feather = part_feather_width(crop);
+        let distances = if any_fresh {
+            city_block_distances(&fresh, width, height)
+        } else {
+            vec![u32::MAX / 2; width * height]
+        };
+        let mut weights = vec![0_u8; width * height];
+        for (index, weight) in weights.iter_mut().enumerate() {
+            *weight = if fresh[index] {
+                255
+            } else {
+                let distance = distances[index].min(u32::from(feather));
+                (255 - distance * 255 / u32::from(feather)) as u8
+            };
+        }
+        weights
+    }
+
+    /// Paste a normalized part result (already resized to the part's crop
+    /// size) into the document composites across the whole crop rect. The
+    /// edit mask is not applied — the app masks the imported layer
+    /// non-destructively so the user can still edit the mask afterwards.
     pub(crate) fn apply_part_result(
         &mut self,
         part: &AiEditPart,
@@ -923,7 +991,7 @@ impl AiEditComposer {
                 result.height()
             ));
         }
-        let weights = self.part_blend_weights(part.crop);
+        let weights = self.part_paste_weights(part.crop);
         for y in 0..part.crop.height {
             for x in 0..part.crop.width {
                 let weight = weights[y as usize * part.crop.width as usize + x as usize];
@@ -945,13 +1013,12 @@ impl AiEditComposer {
                 self.edit_target.put_pixel(document_x, document_y, pixel);
             }
         }
-        self.painted
-            .mark_rect_where_editable(part.crop, &self.editable);
+        self.painted.mark_rect(part.crop);
         Ok(())
     }
 
-    /// Full-document candidate: original pixels everywhere except the pixels
-    /// the parts were allowed to edit.
+    /// Full-document candidate: the parts' raw results pasted at their crop
+    /// positions over the original pixels. The edit mask is not baked in.
     pub(crate) fn composed_png(&self, label: &str) -> Result<Vec<u8>, String> {
         encode_rgba_png(self.source.clone(), label)
     }
@@ -987,26 +1054,24 @@ pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usi
     let (document_width, document_height) = placement.document_dimensions;
     let crop = part.crop;
     if !placement.is_split() {
+        // Single-crop notes carry no pixel numbers on purpose: the agent may
+        // forward this text into its image-generation call, and stray document
+        // dimensions or crop coordinates (often an unsupported aspect ratio)
+        // mislead the image model. Paste-back coordinates live in
+        // `placement.json`; the agent never needs them.
         let is_full_document = crop.x == 0
             && crop.y == 0
             && (crop.width, crop.height) == placement.document_dimensions;
         if is_full_document {
-            return format!(
-                r#"PaintNode image geometry:
-- The attached images are the full {document_width}x{document_height} PaintNode document.
-- Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it."#
-            );
+            return r#"PaintNode image geometry:
+- The attached images are the full PaintNode document.
+- Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
+                .into();
         }
-        return format!(
-            r#"PaintNode image geometry:
-- The attached images are a crop of a larger {document_width}x{document_height} PaintNode document.
-- The crop covers document region x={x}, y={y}, width={width}, height={height}.
-- PaintNode will paste your result back into that exact document region, so treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it."#,
-            x = crop.x,
-            y = crop.y,
-            width = crop.width,
-            height = crop.height
-        );
+        return r#"PaintNode image geometry:
+- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.
+- Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
+            .into();
     }
     format!(
         r#"PaintNode multi-part edit context:
@@ -1319,8 +1384,75 @@ mod tests {
 
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
-        assert_eq!((part.crop.width, part.crop.height), (1200, 800));
+        // "3:2" crops follow the model's real 1264x848 output grid (79:53),
+        // not the nominal 3:2, so the model can map its output 1:1.
+        assert_eq!((part.crop.width, part.crop.height), (1185, 795));
         assert_eq!(part.working.aspect_label, "3:2");
+        assert!(rect_contains(part.crop, placement.mask_bounds));
+    }
+
+    #[test]
+    fn antigravity_wide_document_uses_extreme_ratio_crop() {
+        // Regression for the 2600x600 retouch runs: with the extreme ratios
+        // available, a full-height 4:1 crop covers the widest document slice
+        // in one part (2048x512 output reduces to exactly 4:1).
+        let mask = mask_png_with_rects(2600, 600, &[(1316, 157, 651, 443)]);
+        let placement = plan_ai_edit_placement(
+            AiEditProvider::Antigravity,
+            (2600, 600),
+            &mask,
+            "AI retouch",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
+        assert_eq!(part.working.aspect_label, "4:1");
+        assert_eq!((part.crop.width, part.crop.height), (2400, 600));
+        assert!(rect_contains(part.crop, placement.mask_bounds));
+    }
+
+    #[test]
+    fn antigravity_crops_cap_at_the_4k_output_grid() {
+        // A giant document must not produce a crop larger than the model's
+        // 4K output — the result would upscale back onto the document and
+        // smear protected pixels past the drift gate's tolerance.
+        let mask = mask_png_with_rects(7920, 3360, &[(3000, 1500, 200, 200)]);
+        let placement = plan_ai_edit_placement(
+            AiEditProvider::Antigravity,
+            (7920, 3360),
+            &mask,
+            "AI retouch",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
+        assert_eq!(part.working.aspect_label, "21:9");
+        // Exactly the 4K "21:9" grid (4 x 1584x672).
+        assert_eq!((part.crop.width, part.crop.height), (6336, 2688));
+        assert!(rect_contains(part.crop, placement.mask_bounds));
+    }
+
+    #[test]
+    fn antigravity_21_9_crop_uses_real_33_14_grid() {
+        // The old nominal 21:9 crop (7:3) mismatched the model's real
+        // 1584x672 = 33:14 output grid, forcing the model to reframe. The
+        // crop must land exactly on the real grid.
+        let mask = mask_png_with_rects(1400, 600, &[(600, 200, 100, 100)]);
+        let placement = plan_ai_edit_placement(
+            AiEditProvider::Antigravity,
+            (1400, 600),
+            &mask,
+            "AI retouch",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
+        assert_eq!(part.working.aspect_label, "21:9");
+        assert_eq!((part.crop.width, part.crop.height), (1386, 588));
+        assert_eq!(part.crop.width * 14, part.crop.height * 33);
         assert!(rect_contains(part.crop, placement.mask_bounds));
     }
 
@@ -1337,8 +1469,8 @@ mod tests {
 
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
-        assert_eq!((part.crop.width, part.crop.height), (1200, 800));
-        assert_eq!(part.crop.x, 80);
+        assert_eq!((part.crop.width, part.crop.height), (1185, 795));
+        assert_eq!(part.crop.x, 95);
         assert!(rect_contains(part.crop, placement.mask_bounds));
     }
 
@@ -1415,7 +1547,8 @@ mod tests {
         .expect("placement");
 
         assert!(placement.parts.len() > 1);
-        let ratio_labels: Vec<&str> = ai_fallback_aspect_ratios()
+        let ratio_labels: Vec<&str> = ai_antigravity_image_capability()
+            .aspect_ratios
             .iter()
             .map(|ratio| ratio.label.as_str())
             .collect();
@@ -1437,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_pastes_part_results_only_inside_the_mask() {
+    fn composer_pastes_whole_part_rect_without_baking_the_mask() {
         let source = solid_png(64, 32, [0, 0, 200, 255]);
         let mask = mask_png_with_rects(64, 32, &[(8, 8, 16, 16)]);
         let placement =
@@ -1445,6 +1578,7 @@ mod tests {
                 .expect("placement");
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
+        assert_eq!((part.crop.width, part.crop.height), (64, 32));
 
         let mut composer =
             AiEditComposer::new(&source, &source, &mask, None, "AI retouch").expect("composer");
@@ -1453,12 +1587,16 @@ mod tests {
             .apply_part_result(part, &result, "AI retouch")
             .expect("apply");
 
+        // The raw result covers the whole crop rect — including pixels
+        // outside the edit mask. The app applies the mask non-destructively
+        // via the linked mask layer, so the user can still edit the mask
+        // after import.
         let composed = composer.composed_png("AI retouch").expect("composed");
         let composed = decode_png_rgba(&composed, "composed").expect("decode");
         assert_eq!(composed.dimensions(), (64, 32));
         assert_eq!(composed.get_pixel(10, 10).0, [200, 0, 0, 255]);
-        assert_eq!(composed.get_pixel(0, 0).0, [0, 0, 200, 255]);
-        assert_eq!(composed.get_pixel(40, 10).0, [0, 0, 200, 255]);
+        assert_eq!(composed.get_pixel(0, 0).0, [200, 0, 0, 255]);
+        assert_eq!(composed.get_pixel(40, 10).0, [200, 0, 0, 255]);
     }
 
     #[test]
@@ -1498,9 +1636,10 @@ mod tests {
         assert_eq!(second_source.get_pixel(0, 0).0, [200, 0, 0, 255]);
         let second_mask =
             decode_png_rgba(&second_inputs.mask_png, "second mask").expect("decode mask");
-        // Deep inside part one's output the mask is protected; near part two's
+        // Deep inside part one's output the mask is protected (opaque black so
+        // alpha-stripping consumers still read it correctly); near part two's
         // fresh region it becomes a gray hand-off band; fresh stays editable.
-        assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 255]);
         assert_eq!(second_mask.get_pixel(15, 0).0, [128, 128, 128, 255]);
         assert_eq!(second_mask.get_pixel(31, 0).0, [255, 255, 255, 255]);
 
@@ -1582,8 +1721,12 @@ mod tests {
             plan_ai_edit_placement(AiEditProvider::Codex, (1280, 800), &full_mask, "AI retouch")
                 .expect("single placement");
         let note = ai_part_geometry_note(&single, 0);
-        assert!(note.contains("the full 1280x800 PaintNode document"));
+        assert!(note.contains("the full PaintNode document"));
         assert!(note.contains("do not crop, zoom, pan, rotate, or reframe"));
+        // Single-crop notes must not leak pixel numbers the agent could
+        // forward to the image model.
+        assert!(!note.contains("1280"));
+        assert!(!note.contains("800"));
         assert!(!note.contains("part 1 of"));
         assert!(!note.contains("chroma"));
 
@@ -1596,9 +1739,10 @@ mod tests {
         )
         .expect("cropped placement");
         let note = ai_part_geometry_note(&cropped, 0);
-        assert!(note.contains("a crop of a larger 1280x800 PaintNode document"));
-        assert!(note.contains("x=80, y=0, width=1200, height=800"));
-        assert!(note.contains("paste your result back into that exact document region"));
+        assert!(note.contains("a crop of a larger PaintNode document"));
+        assert!(note.contains("paste your result back into the correct document region"));
+        assert!(!note.contains("1280"));
+        assert!(!note.contains("x=80"));
 
         let wide_mask = mask_png_with_rects(6000, 480, &[(0, 0, 6000, 480)]);
         let split =
@@ -1642,7 +1786,8 @@ mod tests {
         let placement =
             plan_ai_restore_placement(AiEditProvider::Antigravity, (1600, 600), "AI upscale")
                 .expect("antigravity restore placement");
-        let ratio_labels: Vec<&str> = ai_fallback_aspect_ratios()
+        let ratio_labels: Vec<&str> = ai_antigravity_image_capability()
+            .aspect_ratios
             .iter()
             .map(|ratio| ratio.label.as_str())
             .collect();
@@ -1734,7 +1879,7 @@ mod tests {
             .expect("apply");
         let second_inputs = composer.part_inputs(&second, "AI upscale").expect("inputs");
         let second_mask = decode_png_rgba(&second_inputs.mask_png, "mask").expect("decode");
-        assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 255]);
         assert_eq!(second_mask.get_pixel(15, 0).0, [128, 128, 128, 255]);
         assert_eq!(second_mask.get_pixel(31, 0).0, [255, 255, 255, 255]);
         let second_source =

@@ -34,7 +34,6 @@ pub(crate) struct SupportedAspectRatio {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct ImageModelCapabilities {
-    fallback_aspect_ratios: Vec<SupportedAspectRatio>,
     providers: ImageProviderCapabilities,
 }
 
@@ -59,8 +58,37 @@ pub(crate) struct CodexImageCapability {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AntigravityImageCapability {
-    aspect_ratios: Vec<String>,
+    /// Actual 1K-tier output grids per supported aspect-ratio label. The
+    /// model's real output ratios deviate from the nominal labels (e.g.
+    /// "21:9" outputs 1584x672 = 33:14, not 7:3); crops must match the real
+    /// grid or the model cannot reproduce the frame and reframes instead.
+    pub(crate) aspect_ratios: Vec<SupportedAspectRatio>,
     pub(crate) restore_tile_side: u32,
+}
+
+/// Nano Banana resolution tiers as multiples of the 1K grids above.
+const ANTIGRAVITY_OUTPUT_TIERS: [(&str, u32); 3] = [("1K", 1), ("2K", 2), ("4K", 4)];
+
+/// Image-tool parameters for a submitted crop: the smallest resolution tier
+/// whose output grid covers the crop, so results only ever downscale back
+/// onto the document. Returns `(tier name, output dimensions)`; `None` when
+/// the label is not an Antigravity aspect ratio.
+pub(crate) fn antigravity_output_target(
+    aspect_label: &str,
+    dimensions: (u32, u32),
+) -> Option<(&'static str, (u32, u32))> {
+    let ratio = ai_antigravity_image_capability()
+        .aspect_ratios
+        .iter()
+        .find(|ratio| ratio.label == aspect_label)?;
+    let (tier, scale) = ANTIGRAVITY_OUTPUT_TIERS
+        .iter()
+        .copied()
+        .find(|(_, scale)| {
+            ratio.width * scale >= dimensions.0 && ratio.height * scale >= dimensions.1
+        })
+        .unwrap_or(("4K", 4));
+    Some((tier, (ratio.width * scale, ratio.height * scale)))
 }
 
 /// Submission geometry for one AI image request. PaintNode crops (never pads)
@@ -83,10 +111,6 @@ fn ai_image_model_capabilities() -> &'static ImageModelCapabilities {
         serde_json::from_str(AI_IMAGE_MODEL_CAPABILITIES_JSON)
             .expect("PaintNode AI image model capabilities JSON must be valid")
     })
-}
-
-pub(crate) fn ai_fallback_aspect_ratios() -> &'static [SupportedAspectRatio] {
-    &ai_image_model_capabilities().fallback_aspect_ratios
 }
 
 pub(crate) fn ai_codex_image_capability() -> &'static CodexImageCapability {
@@ -175,6 +199,88 @@ pub(crate) fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
     let [r, g, b, a] = mask_pixel.0;
     let luminance = (u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19 + 128) / 256;
     ((luminance * u32::from(a) + 127) / 255) as u8
+}
+
+/// Fully-protected mask pixels must come back visually identical: a faithful
+/// in-place edit re-encodes them nearly losslessly (drift well under this),
+/// while a model that regenerated the scene from scratch drifts far above it.
+/// Mean absolute luminance difference on a 0-255 scale.
+pub(crate) const AI_PROTECTED_DRIFT_LIMIT: f64 = 8.0;
+
+/// How many candidates to accept-or-reject per part before failing the run:
+/// the first attempt plus one retry with the stricter in-place note.
+pub(crate) const AI_PROTECTED_DRIFT_MAX_ATTEMPTS: u32 = 2;
+
+/// Below this many comparable protected pixels the drift measurement is too
+/// noisy to gate on (e.g. full-coverage restore masks protect nothing, or a
+/// transparent-background document leaves almost no opaque protected pixels).
+const AI_DRIFT_MIN_PROTECTED_PIXELS: u64 = 4096;
+
+fn pixel_luminance(pixel: &image::Rgba<u8>) -> u8 {
+    let [r, g, b, _] = pixel.0;
+    ((u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19 + 128) / 256) as u8
+}
+
+/// Drop a drift-rejected candidate from the job dir. It must actually be
+/// gone: provider runners treat an existing result.png as a satisfied or
+/// reusable output (killing the retry agent immediately, or resurrecting the
+/// rejected candidate on a resumed run via reuse_part_result).
+pub(crate) fn remove_rejected_ai_candidate(result_path: &Path) -> Result<(), String> {
+    if let Err(error) = fs::remove_file(result_path) {
+        if result_path.exists() {
+            return Err(format!(
+                "Failed to remove the rejected AI candidate at {}: {error}",
+                result_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Mean absolute luminance drift between the image the model was told to
+/// edit (`edit_target_png`) and `candidate_png`, measured over
+/// fully-protected mask pixels (coverage 0) where the edit target is fully
+/// opaque. Transparent edit-target pixels are skipped — generated output is
+/// opaque, so comparing against them would reject every faithful edit on a
+/// transparent-background document. The candidate's luminance is
+/// alpha-weighted, so a candidate that goes transparent over an opaque
+/// baseline still registers as drift. Detects candidates where the image
+/// model regenerated the whole scene instead of editing in place — pasting
+/// those back produces visibly broken seams at the mask boundary. Returns
+/// `None` when too few pixels are comparable to judge.
+pub(crate) fn ai_protected_region_drift(
+    edit_target_png: &[u8],
+    mask_png: &[u8],
+    candidate_png: &[u8],
+    label: &str,
+) -> Result<Option<f64>, String> {
+    let baseline = decode_png_rgba(edit_target_png, label)?;
+    let mask = decode_png_rgba(mask_png, label)?;
+    let candidate = decode_png_rgba(candidate_png, label)?;
+    if mask.dimensions() != baseline.dimensions() || candidate.dimensions() != baseline.dimensions()
+    {
+        return Err(format!(
+            "{label} protected-drift inputs must have identical dimensions."
+        ));
+    }
+    let mut sum = 0_u64;
+    let mut count = 0_u64;
+    for (baseline_pixel, (mask_pixel, candidate_pixel)) in
+        baseline.pixels().zip(mask.pixels().zip(candidate.pixels()))
+    {
+        if mask_pixel_coverage(mask_pixel) > 0 || baseline_pixel.0[3] != 255 {
+            continue;
+        }
+        // Alpha-weighted luminance: a transparent candidate pixel over an
+        // opaque baseline reads as 0 and counts as drift.
+        let candidate_luma = mask_pixel_coverage(candidate_pixel);
+        sum += u64::from(pixel_luminance(baseline_pixel).abs_diff(candidate_luma));
+        count += 1;
+    }
+    if count < AI_DRIFT_MIN_PROTECTED_PIXELS {
+        return Ok(None);
+    }
+    Ok(Some(sum as f64 / count as f64))
 }
 
 fn box_blur_coverage(coverage: &[u8], width: u32, height: u32, radius: u32) -> Vec<u8> {
@@ -321,6 +427,145 @@ mod tests {
             .expect_err("size mismatch should fail");
 
         assert!(err.contains("Source is 2x1, mask is 1x1"));
+    }
+
+    /// 96x96 canvas with a 32x32 editable rect: 8192 protected pixels, enough
+    /// to clear the drift gate's minimum-sample floor.
+    fn drift_mask_png() -> Vec<u8> {
+        let mask = image::RgbaImage::from_fn(96, 96, |x, y| {
+            if (32..64).contains(&x) && (32..64).contains(&y) {
+                image::Rgba([255, 255, 255, 255])
+            } else {
+                image::Rgba([0, 0, 0, 255])
+            }
+        });
+        encode_rgba_png(mask, "test mask").expect("mask png")
+    }
+
+    fn drift_image_png(protected: [u8; 4], editable: [u8; 4]) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(96, 96, |x, y| {
+            if (32..64).contains(&x) && (32..64).contains(&y) {
+                image::Rgba(editable)
+            } else {
+                image::Rgba(protected)
+            }
+        });
+        encode_rgba_png(image, "test image").expect("image png")
+    }
+
+    #[test]
+    fn antigravity_output_target_picks_smallest_covering_tier() {
+        // 1386x588 (33:14 grid) fits inside the 1K "21:9" output of 1584x672.
+        assert_eq!(
+            antigravity_output_target("21:9", (1386, 588)),
+            Some(("1K", (1584, 672)))
+        );
+        // A crop wider than the 1K grid needs the 2K tier.
+        assert_eq!(
+            antigravity_output_target("21:9", (2000, 849)),
+            Some(("2K", (3168, 1344)))
+        );
+        // The extreme 4:1 grid (1K = 2048x512) needs 2K for a full-height
+        // 2400x600 crop of a 2600x600 document.
+        assert_eq!(
+            antigravity_output_target("4:1", (2400, 600)),
+            Some(("2K", (4096, 1024)))
+        );
+        // Oversized crops cap at 4K rather than failing.
+        assert_eq!(
+            antigravity_output_target("1:1", (9000, 9000)),
+            Some(("4K", (4096, 4096)))
+        );
+        // Codex labels are not Antigravity ratios.
+        assert_eq!(antigravity_output_target("codex-crop", (1280, 800)), None);
+    }
+
+    #[test]
+    fn ai_protected_region_drift_ignores_masked_changes() {
+        let mask = drift_mask_png();
+        let source = drift_image_png([80, 80, 80, 255], [200, 30, 30, 255]);
+
+        // Identical candidate drifts by zero.
+        let drift = ai_protected_region_drift(&source, &mask, &source, "test")
+            .expect("drift")
+            .expect("measured");
+        assert_eq!(drift, 0.0);
+
+        // A candidate that only repaints the editable rect still drifts by zero.
+        let edited = drift_image_png([80, 80, 80, 255], [30, 200, 30, 255]);
+        let drift = ai_protected_region_drift(&source, &mask, &edited, "test")
+            .expect("drift")
+            .expect("measured");
+        assert_eq!(drift, 0.0);
+    }
+
+    #[test]
+    fn ai_protected_region_drift_detects_regenerated_protected_pixels() {
+        let mask = drift_mask_png();
+        let source = drift_image_png([80, 80, 80, 255], [200, 30, 30, 255]);
+        let regenerated = drift_image_png([140, 140, 140, 255], [200, 30, 30, 255]);
+
+        let drift = ai_protected_region_drift(&source, &mask, &regenerated, "test")
+            .expect("drift")
+            .expect("measured");
+        assert!(
+            drift > AI_PROTECTED_DRIFT_LIMIT,
+            "expected drift above limit, got {drift}"
+        );
+    }
+
+    #[test]
+    fn ai_protected_region_drift_skips_transparent_baseline_pixels() {
+        let mask = drift_mask_png();
+        // Every protected pixel of the edit target is fully transparent (a
+        // transparent-background document); the opaque candidate must not be
+        // rejected for it — too few comparable pixels, so the gate skips.
+        let baseline = drift_image_png([0, 0, 0, 0], [200, 30, 30, 255]);
+        let candidate = drift_image_png([255, 255, 255, 255], [30, 200, 30, 255]);
+
+        let drift = ai_protected_region_drift(&baseline, &mask, &candidate, "test").expect("drift");
+        assert!(drift.is_none());
+    }
+
+    #[test]
+    fn ai_protected_region_drift_counts_candidate_transparency_as_drift() {
+        let mask = drift_mask_png();
+        let baseline = drift_image_png([200, 200, 200, 255], [80, 80, 80, 255]);
+        // The candidate wipes opaque protected pixels to transparency.
+        let candidate = drift_image_png([200, 200, 200, 0], [80, 80, 80, 255]);
+
+        let drift = ai_protected_region_drift(&baseline, &mask, &candidate, "test")
+            .expect("drift")
+            .expect("measured");
+        assert!(
+            drift > AI_PROTECTED_DRIFT_LIMIT,
+            "expected drift above limit, got {drift}"
+        );
+    }
+
+    #[test]
+    fn ai_protected_region_drift_skips_masks_without_protected_pixels() {
+        let mask = {
+            let all_editable =
+                image::RgbaImage::from_pixel(96, 96, image::Rgba([255, 255, 255, 255]));
+            encode_rgba_png(all_editable, "test mask").expect("mask png")
+        };
+        let source = drift_image_png([80, 80, 80, 255], [200, 30, 30, 255]);
+        let regenerated = drift_image_png([140, 140, 140, 255], [30, 200, 30, 255]);
+
+        let drift = ai_protected_region_drift(&source, &mask, &regenerated, "test").expect("drift");
+        assert!(drift.is_none());
+    }
+
+    #[test]
+    fn ai_protected_region_drift_rejects_size_mismatch() {
+        let mask = drift_mask_png();
+        let source = drift_image_png([80, 80, 80, 255], [200, 30, 30, 255]);
+        let wrong_size = test_rgba_png(1, 1, &[[0, 0, 0, 255]]);
+
+        let err = ai_protected_region_drift(&source, &mask, &wrong_size, "test")
+            .expect_err("size mismatch should fail");
+        assert!(err.contains("identical dimensions"));
     }
 
     #[test]
