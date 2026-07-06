@@ -35,10 +35,11 @@ use crate::ai::{
     image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     safe_job_child_path, safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
-    unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
-    AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
-    DecoupledLayerResult, GeneratedImageResult, TempJobDir, WorkflowSourceImage,
-    AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR, POLL_INTERVAL,
+    synthesize_decouple_asset_manifest, unique_child_path, validate_reference_pngs,
+    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
+    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR,
+    POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -2618,21 +2619,56 @@ pub(crate) async fn decouple_codex_image(
                 .map_err(|e| format!("Failed to run Codex at '{codex_bin}': {e}"))?;
         }
 
-        if !run.output.status.success() {
-            if let Some(message) = final_codex_agent_message(&run.output) {
-                return Err(format!("Codex did not create an asset pack.\n\n{message}"));
+        let manifest_path = job_path.join("manifest.json");
+        if !run.output.status.success() && !manifest_path.exists() {
+            match synthesize_decouple_asset_manifest(&job_path)? {
+                Some(count) => emit_codex_progress(
+                    &app,
+                    &run_id,
+                    format!("Synthesized asset manifest from {count} Codex PNG outputs"),
+                ),
+                None => {
+                    if let Some(message) = final_codex_agent_message(&run.output) {
+                        return Err(format!("Codex did not create an asset pack.\n\n{message}"));
+                    }
+                    return Err(command_failure("Codex asset extraction", &run.output));
+                }
             }
-            return Err(command_failure("Codex asset extraction", &run.output));
         }
 
-        let manifest_path = job_path.join("manifest.json");
         emit_codex_progress(&app, &run_id, "Reading asset manifest");
-        let manifest_text = fs::read_to_string(&manifest_path).map_err(|e| {
-            format!(
-                "Codex did not create manifest.json at {}: {e}",
-                manifest_path.display()
-            )
-        })?;
+        let manifest_text = match fs::read_to_string(&manifest_path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match synthesize_decouple_asset_manifest(&job_path)? {
+                    Some(count) => {
+                        emit_codex_progress(
+                            &app,
+                            &run_id,
+                            format!("Synthesized asset manifest from {count} Codex PNG outputs"),
+                        );
+                        fs::read_to_string(&manifest_path).map_err(|read_error| {
+                            format!(
+                                "Failed to read synthesized asset manifest at {}: {read_error}",
+                                manifest_path.display()
+                            )
+                        })?
+                    }
+                    None => {
+                        return Err(format!(
+                            "Codex did not create manifest.json at {}: {e}",
+                            manifest_path.display()
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Codex did not create manifest.json at {}: {e}",
+                    manifest_path.display()
+                ));
+            }
+        };
         let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
             .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
         if manifest.layers.is_empty() {

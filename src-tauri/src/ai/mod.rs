@@ -834,6 +834,142 @@ pub(crate) fn command_failure_with_required_output(
     message
 }
 
+fn is_fallback_decouple_asset_png(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    if !lower.ends_with(".png") {
+        return false;
+    }
+    if matches!(
+        lower.as_str(),
+        "source.png" | "edit_target.png" | "mask.png" | "part_result.png" | "result.png"
+    ) {
+        return false;
+    }
+    let stem = lower.strip_suffix(".png").unwrap_or(lower.as_str());
+    let debug_tokens = [
+        "alpha",
+        "annotated",
+        "bbox",
+        "comparison",
+        "coordinate",
+        "coordinates",
+        "debug",
+        "grid",
+        "guide",
+        "histogram",
+        "mask",
+        "overlay",
+        "preview",
+    ];
+    !stem
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| debug_tokens.contains(&token))
+}
+
+fn fallback_decouple_asset_name(file_name: &str, index: usize) -> String {
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let mut name = String::new();
+    let mut uppercase_next = true;
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() {
+            let ch = ch.to_ascii_lowercase();
+            name.push(if uppercase_next {
+                ch.to_ascii_uppercase()
+            } else {
+                ch
+            });
+            uppercase_next = false;
+        } else if !name.ends_with(' ') {
+            name.push(' ');
+            uppercase_next = true;
+        }
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        format!("Extracted Asset {}", index + 1)
+    } else {
+        name.chars().take(80).collect()
+    }
+}
+
+fn fallback_decouple_asset_pngs(job_path: &Path) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    let entries = fs::read_dir(job_path).map_err(|e| {
+        format!(
+            "Failed to inspect asset extraction outputs at {}: {e}",
+            job_path.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "Failed to inspect asset extraction output at {}: {e}",
+                job_path.display()
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "Failed to inspect asset extraction output type at {}: {e}",
+                entry.path().display()
+            )
+        })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !is_fallback_decouple_asset_png(&file_name) {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).map_err(|e| {
+            format!(
+                "Failed to read asset extraction output at {}: {e}",
+                entry.path().display()
+            )
+        })?;
+        if is_png(&bytes) && png_dimensions_from_bytes(&bytes).is_some() {
+            files.push(file_name);
+        }
+    }
+    files.sort_by_key(|name| name.to_ascii_lowercase());
+    Ok(files)
+}
+
+pub(crate) fn synthesize_decouple_asset_manifest(job_path: &Path) -> Result<Option<usize>, String> {
+    let files = fallback_decouple_asset_pngs(job_path)?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let layers = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            serde_json::json!({
+                "name": fallback_decouple_asset_name(file, index),
+                "file": file,
+                "alphaMask": serde_json::Value::Null,
+                "keyColor": serde_json::Value::Null,
+                "opacity": 1,
+                "visible": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest = serde_json::json!({
+        "layers": layers,
+        "notes": "PaintNode synthesized this manifest from extracted PNG outputs because manifest.json was missing.",
+    });
+    let manifest_text = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize fallback asset manifest: {e}"))?;
+    fs::write(job_path.join("manifest.json"), manifest_text)
+        .map_err(|e| format!("Failed to write fallback asset manifest: {e}"))?;
+    Ok(Some(files.len()))
+}
+
 pub(crate) fn emit_codex_progress(app: &AppHandle, run_id: &str, message: impl Into<String>) {
     let _ = app.emit(
         CODEX_PROGRESS_EVENT,
@@ -1273,5 +1409,63 @@ mod tests {
 
         assert_eq!(manifest.layers.len(), 1);
         assert_eq!(manifest.layers[0].name, "Girl");
+    }
+
+    #[test]
+    fn fallback_decouple_manifest_uses_asset_pngs_and_skips_debug_outputs() {
+        let job = TempJobDir::new("paintnode-decouple-fallback-test").expect("temp dir");
+        let png = crate::test_util::test_rgba_png(1, 1, &[[20, 40, 80, 255]]);
+        for name in [
+            "source.png",
+            "background.png",
+            "bag.png",
+            "computer.png",
+            "girl.png",
+            "guide.png",
+            "girl-mask.png",
+            "lunchbox.png",
+        ] {
+            fs::write(job.path().join(name), &png).expect("write test png");
+        }
+
+        let count = synthesize_decouple_asset_manifest(job.path())
+            .expect("synthesize manifest")
+            .expect("fallback assets");
+        assert_eq!(count, 5);
+
+        let manifest_text =
+            fs::read_to_string(job.path().join("manifest.json")).expect("read manifest");
+        let manifest: DecoupleManifest =
+            serde_json::from_str(&manifest_text).expect("manifest parses");
+        let names = manifest
+            .layers
+            .iter()
+            .map(|layer| layer.name.as_str())
+            .collect::<Vec<_>>();
+        let files = manifest
+            .layers
+            .iter()
+            .map(|layer| layer.file.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec!["Background", "Bag", "Computer", "Girl", "Lunchbox"]
+        );
+        assert_eq!(
+            files,
+            vec![
+                "background.png",
+                "bag.png",
+                "computer.png",
+                "girl.png",
+                "lunchbox.png"
+            ]
+        );
+        assert!(manifest
+            .notes
+            .as_deref()
+            .unwrap_or("")
+            .contains("synthesized"));
     }
 }
