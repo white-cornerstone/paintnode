@@ -93,6 +93,8 @@ export interface CodexGeneratorConfig {
   serviceTier?: ServiceTier | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
+  /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
+  editChecksLevel?: number | null;
 }
 
 export interface AntigravityGeneratorConfig {
@@ -110,6 +112,8 @@ export interface AntigravityGeneratorConfig {
   approvalMode?: AntigravityApprovalMode | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
+  /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
+  editChecksLevel?: number | null;
 }
 
 export interface TargetDimensions {
@@ -238,6 +242,7 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     reasoningEffort,
     serviceTier: config.serviceTier ?? 'default',
     autonomyLevel: config.autonomyLevel ?? 'low',
+    editChecksLevel: config.editChecksLevel ?? 1,
   };
 }
 
@@ -250,6 +255,7 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
     model: config.model,
     approvalMode: config.approvalMode ?? 'skipPermissions',
     autonomyLevel: config.autonomyLevel ?? 'low',
+    editChecksLevel: config.editChecksLevel ?? 1,
   };
 }
 
@@ -268,6 +274,7 @@ export function codexConfigFromRunOptions(
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,
     autonomyLevel: options.autonomyLevel,
+    editChecksLevel: options.editChecksLevel,
   };
 }
 
@@ -285,6 +292,7 @@ export function antigravityConfigFromRunOptions(
     model: options.antigravityModel,
     approvalMode: options.antigravityApprovalMode,
     autonomyLevel: options.autonomyLevel,
+    editChecksLevel: options.editChecksLevel,
   };
 }
 

@@ -69,6 +69,16 @@ describe('settings normalization', () => {
     expect(normalizeSettings({ workspace: {} }).workspace.layerAnnotationsExpanded).toBe(true);
   });
 
+  it('defaults and clamps the AI result-checks level', () => {
+    // Older settings without the field keep the drift-gate-only behavior.
+    expect(normalizeSettings({ ai: {} }).ai.editChecksLevel).toBe(1);
+    expect(normalizeSettings({ ai: { editChecksLevel: 0 } }).ai.editChecksLevel).toBe(0);
+    expect(normalizeSettings({ ai: { editChecksLevel: 3 } }).ai.editChecksLevel).toBe(3);
+    expect(normalizeSettings({ ai: { editChecksLevel: 9 } }).ai.editChecksLevel).toBe(3);
+    expect(normalizeSettings({ ai: { editChecksLevel: -2 } }).ai.editChecksLevel).toBe(0);
+    expect(normalizeSettings({ ai: { editChecksLevel: 'strict' } }).ai.editChecksLevel).toBe(1);
+  });
+
   it('recovers from malformed JSON', () => {
     expect(parseSettingsJson('{not json').ai.model).toBe('gpt-5.5');
   });

@@ -110,24 +110,29 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     focusTaskDocument(task.documentId);
     const fillInput = fillMode ? await editor.prepareGenerativeFillInput() : null;
     if (fillMode && !fillInput) throw new Error('The current selection has no editable pixels.');
+    // A blank-canvas fill has nothing to preserve or extend, so it runs through
+    // the plain generate path (one document-sized image) rather than the tiled
+    // mask-guided in-place edit — it is still inserted as a mask-linked fill.
+    // `fillEdit` is the subset that actually needs the mask-guided backend.
+    const fillEdit = fillInput && !fillInput.blankCanvas ? fillInput : null;
     const generationPrompt = userPrompt;
-    const generationTarget = fillInput ? null : targetDimensions();
+    const generationTarget = fillEdit ? null : targetDimensions();
     const keepJobDir = settings.value.workspace.keepAiRunInputs;
-    const fillJobProjectPath = fillInput && keepJobDir ? taskProjectPath : null;
+    const fillJobProjectPath = fillEdit && keepJobDir ? taskProjectPath : null;
     if (fillInput) {
       aiTasks.setProgress(
         task.id,
-        'Starting mask-guided generative fill...',
+        fillEdit ? 'Starting mask-guided generative fill...' : 'Generating fill image...',
       );
     }
     const generated =
       runOptions.provider === 'codex'
-        ? fillInput
+        ? fillEdit
           ? await generateCodexFillImage(
               codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
-              fillInput.sourcePng,
-              fillInput.editTargetPng,
-              fillInput.maskPng,
+              fillEdit.sourcePng,
+              fillEdit.editTargetPng,
+              fillEdit.maskPng,
               generationPrompt,
               references,
               false,
@@ -139,12 +144,12 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
               references,
             )
         : runOptions.provider === 'antigravity'
-          ? fillInput
+          ? fillEdit
             ? await generateAntigravityFillImage(
                 antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
-                fillInput.sourcePng,
-                fillInput.editTargetPng,
-                fillInput.maskPng,
+                fillEdit.sourcePng,
+                fillEdit.editTargetPng,
+                fillEdit.maskPng,
                 generationPrompt,
                 references,
                 false,
@@ -172,8 +177,8 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     const blob = await (await fetch(dataUrl)).blob();
     const bmp = await createImageBitmap(blob);
     let fillAsset: ProjectAsset | null = null;
-    if (fillInput && taskProjectPath) {
-      const composite = editor.renderGenerativeFillComposite(bmp, bmp.width, bmp.height, fillInput.mask, fillInput.source);
+    if (fillEdit && taskProjectPath) {
+      const composite = editor.renderGenerativeFillComposite(bmp, bmp.width, bmp.height, fillEdit.mask, fillEdit.source);
       if (!composite) throw new Error('Unable to prepare the generated fill preview.');
       const compositeBlob = await canvasToBlob(composite);
       fillAsset = await project.storeGeneratedBlobAt(

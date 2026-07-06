@@ -33,6 +33,31 @@ const MAX_AI_EDIT_PARTS: usize = 16;
 const MIN_PART_OVERLAP: u32 = 16;
 const MAX_PART_OVERLAP: u32 = 128;
 
+/// Smallest cap on how far adjacent split tiles may overlap; the cap is 20% of
+/// the document extent but never drops below this (except on a document already
+/// narrower than it). A tile shape that would overlap its neighbour by more is
+/// re-submitting — and re-billing the model for — a large redundant region: a
+/// 2400-wide 4:1 tile on a 2600-wide document overlapped by 2200px, so the
+/// second part fed the model an almost entirely already-generated frame just to
+/// fill the last 200px. Shapes within the cap are preferred during tiling.
+const MAX_SPLIT_OVERLAP_FLOOR: u32 = 200;
+
+/// The overlap cap for one axis: at least [`MAX_SPLIT_OVERLAP_FLOOR`] (or the
+/// whole extent on a tiny document), otherwise 20% of the document extent.
+fn max_split_overlap(doc_extent: u32) -> u32 {
+    (doc_extent / 5).max(MAX_SPLIT_OVERLAP_FLOOR.min(doc_extent))
+}
+
+/// Largest overlap between consecutive tiles laid at `origins` (evenly spaced,
+/// non-decreasing) of length `tile_len` along one axis. Zero for a single tile.
+fn axis_max_overlap(origins: &[u32], tile_len: u32) -> u32 {
+    origins
+        .windows(2)
+        .map(|pair| tile_len.saturating_sub(pair[1] - pair[0]))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Preferred protected context ring kept around the mask inside a crop.
 const MASK_CONTEXT_MARGIN: u32 = 16;
 
@@ -269,6 +294,59 @@ fn codex_crop_dimensions(
         .then(|| (free.0, free.1, "codex-crop".into()))
 }
 
+/// Split-tile shapes for Codex. Codex renders any dimensions (results resize
+/// back), so unlike Antigravity's fixed grids it offers a continuous ladder of
+/// full-short-extent tiles — from the portrait aspect limit up to the landscape
+/// limit, on the dimension grid, capped to the document's long extent. A ladder
+/// (rather than one shape) lets tiling pick a wide best-fit anchor and a smaller
+/// finisher: a 2600x600 fill becomes an 1800x600 (3:1) tile plus a snug
+/// finisher instead of three uniform strips. Every tile fills the short axis in
+/// one strip, so a wide document stays a single row.
+fn codex_split_tile_candidates(document: (u32, u32)) -> Vec<(u32, u32, String)> {
+    let codex = ai_codex_image_capability();
+    let max_aspect = codex.max_aspect_ratio.max(1);
+    let step = codex.dimension_multiple.max(1);
+    let split_horizontally = document.0 >= document.1;
+    let short = if split_horizontally {
+        document.1
+    } else {
+        document.0
+    };
+    let long = if split_horizontally {
+        document.0
+    } else {
+        document.1
+    };
+    if short == 0 || long == 0 {
+        return Vec::new();
+    }
+    let min_long = (short / max_aspect).max(1);
+    let max_long = short.saturating_mul(max_aspect).min(long);
+    let shape = |long_dim: u32| {
+        if split_horizontally {
+            (long_dim, short, "codex-crop".to_string())
+        } else {
+            (short, long_dim, "codex-crop".to_string())
+        }
+    };
+    let mut candidates = Vec::new();
+    let mut long_dim = min_long.div_ceil(step) * step;
+    while long_dim <= max_long {
+        candidates.push(shape(long_dim));
+        long_dim += step;
+    }
+    // Always offer the widest anchor even when it is off the dimension grid.
+    if max_long >= min_long
+        && candidates
+            .last()
+            .map(|(width, height, _)| if split_horizontally { *width } else { *height })
+            != Some(max_long)
+    {
+        candidates.push(shape(max_long));
+    }
+    candidates
+}
+
 fn gcd(a: u32, b: u32) -> u32 {
     let (mut x, mut y) = (a.max(1), b.max(1));
     while y != 0 {
@@ -377,7 +455,7 @@ fn split_tile_candidates(
     document: (u32, u32),
 ) -> Vec<(u32, u32, String)> {
     match provider {
-        AiEditProvider::Codex => codex_crop_dimensions(document, None).into_iter().collect(),
+        AiEditProvider::Codex => codex_split_tile_candidates(document),
         AiEditProvider::Antigravity => ratio_crop_candidates(document),
     }
 }
@@ -388,17 +466,38 @@ fn best_tiling(
     candidates: Vec<(u32, u32, String)>,
     document: (u32, u32),
     target: PixelRect,
-) -> Result<(Vec<PixelRect>, String), String> {
-    let mut best: Option<(usize, u64, Vec<PixelRect>, String)> = None;
+) -> Result<Vec<(PixelRect, String)>, String> {
+    let overlap_cap = (max_split_overlap(document.0), max_split_overlap(document.1));
+    let mut best: Option<(bool, usize, usize, u64, Vec<PixelRect>, String)> = None;
     for (tile_width, tile_height, label) in candidates {
         let xs = tile_axis_origins(document.0, target.x, target.width, tile_width);
         let ys = tile_axis_origins(document.1, target.y, target.height, tile_height);
         let count = xs.len() * ys.len();
         let area = u64::from(tile_width) * u64::from(tile_height);
+        // A shape whose tiles overlap past the cap re-bills a large redundant
+        // region; prefer shapes within the cap, and only fall back to an
+        // over-cap shape when nothing else covers the document.
+        let over_cap = axis_max_overlap(&xs, tile_width) > overlap_cap.0
+            || axis_max_overlap(&ys, tile_height) > overlap_cap.1;
+        // Split the document's long axis, keeping the short axis whole where a
+        // shape allows it: a wide document tiles into full-height vertical
+        // strips, not horizontal bands cut through the scene. This counts the
+        // tiles laid along the short axis (fewer is better).
+        let short_axis_tiles = if document.0 >= document.1 {
+            ys.len()
+        } else {
+            xs.len()
+        };
         let is_better = best
             .as_ref()
-            .map(|(best_count, best_area, _, _)| {
-                (count, std::cmp::Reverse(area)) < (*best_count, std::cmp::Reverse(*best_area))
+            .map(|(best_over_cap, best_short, best_count, best_area, _, _)| {
+                (over_cap, short_axis_tiles, count, std::cmp::Reverse(area))
+                    < (
+                        *best_over_cap,
+                        *best_short,
+                        *best_count,
+                        std::cmp::Reverse(*best_area),
+                    )
             })
             .unwrap_or(true);
         if !is_better {
@@ -415,18 +514,191 @@ fn best_tiling(
                 });
             }
         }
-        best = Some((count, area, rects, label));
+        best = Some((over_cap, short_axis_tiles, count, area, rects, label));
     }
-    best.map(|(_, _, rects, label)| (rects, label))
-        .ok_or_else(|| "No supported AI crop shape fits this document.".into())
+    best.map(|(_, _, _, _, rects, label)| {
+        rects.into_iter().map(|rect| (rect, label.clone())).collect()
+    })
+    .ok_or_else(|| "No supported AI crop shape fits this document.".into())
 }
 
 fn split_part_rects(
     provider: AiEditProvider,
     document: (u32, u32),
     target: PixelRect,
-) -> Result<(Vec<PixelRect>, String), String> {
-    best_tiling(split_tile_candidates(provider, document), document, target)
+) -> Result<Vec<(PixelRect, String)>, String> {
+    let candidates = split_tile_candidates(provider, document);
+    let uniform = best_tiling(candidates.clone(), document, target)?;
+    // A heterogeneous cover (a wide best-fit anchor plus smaller finishers) can
+    // beat the uniform grid on a wide/tall document. Use it when it needs fewer
+    // parts, or the same parts with less total submitted area (a leaner cover
+    // the model is billed less for).
+    match heterogeneous_tiling(&candidates, document, target) {
+        Some(hetero)
+            if hetero.len() < uniform.len()
+                || (hetero.len() == uniform.len()
+                    && submitted_area(&hetero) < submitted_area(&uniform)) =>
+        {
+            Ok(hetero)
+        }
+        _ => Ok(uniform),
+    }
+}
+
+/// Total pixel area a tiling submits to the model (sum of tile areas). Overlaps
+/// count twice, so this is the quantity the provider is billed for.
+fn submitted_area(tiling: &[(PixelRect, String)]) -> u64 {
+    tiling
+        .iter()
+        .map(|(rect, _)| u64::from(rect.width) * u64::from(rect.height))
+        .sum()
+}
+
+/// Greedy heterogeneous cover of a wide (or tall) target's long axis using
+/// different supported tile sizes — a large anchor tile for the bulk plus a
+/// smaller tile to finish — so a 2600x600 fill becomes a 2400x600 (4:1) tile
+/// plus a 600x600 (1:1) tile instead of three uniform 1075x600 strips. It tiles
+/// the long axis only and keeps the short axis whole, so it applies when the
+/// target spans the full short axis; it returns `None` (fall back to the
+/// uniform grid) otherwise, or when the cover would exceed the overlap cap.
+fn heterogeneous_tiling(
+    candidates: &[(u32, u32, String)],
+    document: (u32, u32),
+    target: PixelRect,
+) -> Option<Vec<(PixelRect, String)>> {
+    let split_horizontally = document.0 >= document.1;
+    let (doc_long, long_start, long_len, short_extent, spans_short) = if split_horizontally {
+        (
+            document.0,
+            target.x,
+            target.width,
+            document.1,
+            target.y == 0 && target.height == document.1,
+        )
+    } else {
+        (
+            document.1,
+            target.y,
+            target.height,
+            document.0,
+            target.x == 0 && target.width == document.0,
+        )
+    };
+    if !spans_short || long_len == 0 {
+        return None;
+    }
+    // Tiles whose short-axis dimension exactly fills the document's short extent
+    // (each a single full strip), by their long-axis dimension.
+    let mut tiles: Vec<(u32, &str)> = candidates
+        .iter()
+        .filter_map(|(tile_width, tile_height, label)| {
+            let (long_dim, short_dim) = if split_horizontally {
+                (*tile_width, *tile_height)
+            } else {
+                (*tile_height, *tile_width)
+            };
+            (short_dim == short_extent && long_dim > 0 && long_dim <= doc_long)
+                .then_some((long_dim, label.as_str()))
+        })
+        .collect();
+    if tiles.is_empty() {
+        return None;
+    }
+    tiles.sort_unstable_by_key(|(long_dim, _)| *long_dim);
+    let cap = max_split_overlap(doc_long);
+    let end = long_start + long_len;
+    // Blendable overlap a tile wants with its neighbour (mirrors the uniform
+    // tiling's context band).
+    let context_overlap = |long_dim: u32| {
+        (long_dim / 8)
+            .clamp(MIN_PART_OVERLAP, MAX_PART_OVERLAP)
+            .min(long_dim.saturating_sub(1))
+    };
+
+    let mut placements: Vec<(u32, u32, &str)> = Vec::new();
+    let mut frontier = long_start;
+    while frontier < end {
+        if placements.len() > MAX_AI_EDIT_PARTS {
+            return None;
+        }
+        // Prefer to finish: a tile that bridges to the target end with a
+        // blendable, capped overlap.
+        let bridge = |index: usize| {
+            let (long_dim, label) = tiles[index];
+            if long_dim < end.saturating_sub(frontier) {
+                return None; // too small to reach the end from the frontier
+            }
+            let start = end.saturating_sub(long_dim).min(frontier); // flush to the end, still contiguous
+            if let Some(&(prev_start, prev_dim, _)) = placements.last() {
+                let overlap = (prev_start + prev_dim).saturating_sub(start);
+                if overlap < context_overlap(long_dim) || overlap > cap {
+                    return None;
+                }
+            }
+            Some((start, long_dim, label))
+        };
+        // A finisher joining already-placed content takes the LARGEST tile the
+        // overlap cap allows, not the smallest: a snug tail tile carries almost
+        // no finished context, and the image model then composes an unrelated
+        // standalone picture instead of continuing the scene. With no previous
+        // placement there is no context to gain, so keep the smallest cover.
+        let finish = if placements.is_empty() {
+            (0..tiles.len()).find_map(bridge)
+        } else {
+            (0..tiles.len()).rev().find_map(bridge)
+        };
+        if let Some(place) = finish {
+            placements.push(place);
+            break;
+        }
+        // Otherwise advance with the largest tile, keeping a context overlap.
+        let &(long_dim, label) = tiles.last().unwrap();
+        let start = placements
+            .last()
+            .map(|&(prev_start, prev_dim, _)| (prev_start + prev_dim).saturating_sub(context_overlap(long_dim)))
+            .unwrap_or(long_start)
+            .min(doc_long.saturating_sub(long_dim));
+        let new_frontier = start + long_dim;
+        if new_frontier <= frontier {
+            return None; // no forward progress; fall back to the uniform grid
+        }
+        placements.push((start, long_dim, label));
+        frontier = new_frontier;
+    }
+
+    // A clamped last advance could still overshoot the cap; reject it so the
+    // uniform grid wins instead.
+    for pair in placements.windows(2) {
+        let (prev_start, prev_dim, _) = pair[0];
+        let (next_start, _, _) = pair[1];
+        if (prev_start + prev_dim).saturating_sub(next_start) > cap {
+            return None;
+        }
+    }
+
+    Some(
+        placements
+            .into_iter()
+            .map(|(start, long_dim, label)| {
+                let rect = if split_horizontally {
+                    PixelRect {
+                        x: start,
+                        y: 0,
+                        width: long_dim,
+                        height: short_extent,
+                    }
+                } else {
+                    PixelRect {
+                        x: 0,
+                        y: start,
+                        width: short_extent,
+                        height: long_dim,
+                    }
+                };
+                (rect, label.to_string())
+            })
+            .collect(),
+    )
 }
 
 /// Restoration tile shapes: capped at the provider's native output size so
@@ -487,24 +759,24 @@ pub(crate) fn plan_ai_restore_placement(
         width,
         height,
     };
-    let (rects, aspect_label) = best_tiling(
+    let tiling = best_tiling(
         restore_tile_candidates(provider, document_dimensions),
         document_dimensions,
         full,
     )?;
-    if rects.len() > MAX_AI_EDIT_PARTS {
+    if tiling.len() > MAX_AI_EDIT_PARTS {
         return Err(format!(
             "{label} would need {} AI restoration parts for a {width}x{height} image. Use a smaller scale.",
-            rects.len()
+            tiling.len()
         ));
     }
     Ok(AiEditPlacement {
         provider,
         document_dimensions,
         mask_bounds: full,
-        parts: rects
+        parts: tiling
             .into_iter()
-            .map(|rect| ai_edit_part(rect, &aspect_label))
+            .map(|(rect, aspect_label)| ai_edit_part(rect, &aspect_label))
             .collect(),
     })
 }
@@ -634,9 +906,9 @@ pub(crate) fn plan_ai_edit_placement(
         });
     }
 
-    let (rects, aspect_label) = split_part_rects(provider, document_dimensions, target)?;
+    let rects = split_part_rects(provider, document_dimensions, target)?;
     let mut parts = Vec::new();
-    for rect in rects {
+    for (rect, aspect_label) in rects {
         // A part owns every masked pixel inside its crop, so later parts skip
         // those pixels and tiles whose mask region is already owned drop out.
         if !grid.any_in(rect) {
@@ -1049,16 +1321,18 @@ fn draw_rect_outline(
 }
 
 /// Prompt block describing how the attached crop maps back into the document.
+///
+/// No variant of this note may carry pixel numbers, crop coordinates, or
+/// split/tiling structure ("part N of N", part counts): the agent forwards
+/// this text into its image-generation call, and any hint that the crop is
+/// one tile of a larger layout pushes the image model toward rendering a
+/// split or multi-panel design (and stray dimensions toward an unsupported
+/// aspect ratio). Paste-back geometry lives in `placement.json`; the agent
+/// never needs it. See "AI prompts must not leak canvas geometry" in
+/// AGENTS.md.
 pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usize) -> String {
-    let part = &placement.parts[part_index];
-    let (document_width, document_height) = placement.document_dimensions;
-    let crop = part.crop;
+    let crop = placement.parts[part_index].crop;
     if !placement.is_split() {
-        // Single-crop notes carry no pixel numbers on purpose: the agent may
-        // forward this text into its image-generation call, and stray document
-        // dimensions or crop coordinates (often an unsupported aspect ratio)
-        // mislead the image model. Paste-back coordinates live in
-        // `placement.json`; the agent never needs them.
         let is_full_document = crop.x == 0
             && crop.y == 0
             && (crop.width, crop.height) == placement.document_dimensions;
@@ -1073,21 +1347,47 @@ pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usi
 - Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
             .into();
     }
-    format!(
-        r#"PaintNode multi-part edit context:
-- The full PaintNode document is {document_width}x{document_height}. No supported AI image shape can cover this edit at once, so PaintNode split it into {part_count} parts that run one at a time.
-- You are editing part {part_number} of {part_count}: document region x={x}, y={y}, width={width}, height={height}.
-- `overview.png` is a downscaled preview of the whole document with your part's region outlined in red. Use it only to understand the overall composition and content continuity; never copy its pixels, its resolution, or the red outline into your result.
-- Content generated by earlier parts is already included in the attached images. Match its content, lighting, perspective, and style so all parts join seamlessly.
-- The user prompt describes the whole edit across all parts; produce only the portion that belongs inside this part's mask.
-- PaintNode will paste your result back into this part's document region, so treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it."#,
-        part_number = part_index + 1,
-        part_count = placement.parts.len(),
-        x = crop.x,
-        y = crop.y,
-        width = crop.width,
-        height = crop.height
-    )
+    r#"PaintNode image geometry:
+- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.
+- `overview.png` is a downscaled preview of the surrounding document content with the editable region outlined in red. Use it only to understand the overall composition and content continuity; never copy its pixels, its resolution, or the red outline into your result.
+- The attached images already include finished content adjacent to the editable region. Match its content, lighting, perspective, and style so your result joins it seamlessly.
+- The user prompt describes an edit that extends beyond this crop; produce only what belongs inside this crop's mask and let content continue naturally past the crop edges instead of composing a complete standalone picture.
+- Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
+        .into()
+}
+
+/// Prompt block for split parts after the first: the agent must translate the
+/// whole-edit user prompt into a continuation of the already-finished content
+/// instead of forwarding the full scene description to the image model. A
+/// tail crop given the whole scene prompt renders the entire described scene
+/// into its editable strip as an unrelated standalone picture. Returns an
+/// empty string for single-crop runs and for the first part (which has no
+/// finished content to continue). Same forwarding rule as the geometry note:
+/// no pixel numbers, coordinates, or part counts.
+pub(crate) fn ai_part_continuation_note(placement: &AiEditPlacement, part_index: usize) -> String {
+    if !placement.is_split() || part_index == 0 {
+        return String::new();
+    }
+    r#"Continuation rules for this crop:
+- Earlier passes already generated the finished content visible in the attached images; this crop only extends that content. Study `overview.png` and the finished content before calling the image-generation tool.
+- The user prompt describes the whole edit, and its main subjects are usually already present in the finished neighboring content. Do not repeat them in this crop unless `overview.png` clearly shows they belong inside the outlined region; when in doubt, continue the existing scene's surfaces, structures, and background instead of introducing new subjects.
+- Write the image-tool instruction yourself as a continuation instruction: name the visible surfaces and objects that touch the editable area and describe how they extend. Do not pass the user prompt's full scene description to the image-generation tool.
+- Everything crossing the boundary between finished content and the editable area must keep its exact size, scale, perspective, lighting, and style. Do not restart the composition at a different zoom level or camera position."#
+        .into()
+}
+
+/// Geometry note plus, for split parts after the first, the continuation
+/// rules — the prompt context block for fill and retouch part prompts.
+/// (Restore prompts use `ai_part_geometry_note` alone: they carry no user
+/// prompt to mistranslate into a standalone scene.)
+pub(crate) fn ai_part_prompt_context(placement: &AiEditPlacement, part_index: usize) -> String {
+    let geometry = ai_part_geometry_note(placement, part_index);
+    let continuation = ai_part_continuation_note(placement, part_index);
+    if continuation.is_empty() {
+        geometry
+    } else {
+        format!("{geometry}\n\n{continuation}")
+    }
 }
 
 /// Prefix progress messages with the part counter on split runs.
@@ -1358,6 +1658,7 @@ mod tests {
 
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
+        // Clamped to the 3:1 aspect cap (2976 = 992 * 3), floored to the 16px grid.
         assert_eq!((part.crop.width, part.crop.height), (2976, 992));
         assert!(rect_contains(
             PixelRect {
@@ -1481,7 +1782,13 @@ mod tests {
             plan_ai_edit_placement(AiEditProvider::Codex, (6000, 480), &mask, "AI retouch")
                 .expect("placement");
 
-        assert_eq!(placement.parts.len(), 5);
+        // Full-height 3:1 strips (1440x480) across the width — every part a
+        // single full-height strip, each overlapping its predecessor within
+        // the cap, together covering the doc. No snug tail tile: a narrow
+        // finisher carries too little finished context for the image model
+        // to continue the scene.
+        assert!(placement.parts.len() > 1);
+        let cap = max_split_overlap(6000);
         let document = PixelRect {
             x: 0,
             y: 0,
@@ -1490,21 +1797,77 @@ mod tests {
         };
         let mut previous_end = 0_u32;
         for (index, part) in placement.parts.iter().enumerate() {
-            assert_eq!((part.crop.width, part.crop.height), (1440, 480));
+            assert_eq!(part.crop.height, 480, "tiles must fill the full height");
+            assert_eq!(part.crop.y, 0);
             assert!(rect_contains(document, part.crop));
-            assert_eq!(
-                part.working.working_dimensions,
-                (part.crop.width, part.crop.height)
-            );
             if index > 0 {
                 assert!(
                     part.crop.x < previous_end,
                     "part {index} should overlap its predecessor"
                 );
+                assert!(
+                    previous_end - part.crop.x <= cap,
+                    "part {index} overlap must stay within the cap"
+                );
             }
             previous_end = part.crop.x + part.crop.width;
         }
         assert_eq!(previous_end, 6000);
+        // The last part is another full-width strip flush to the edge, not a
+        // context-starved snug finisher.
+        assert_eq!(
+            placement.parts.last().unwrap().crop.width,
+            placement.parts[0].crop.width
+        );
+    }
+
+    #[test]
+    fn codex_split_uses_balanced_wide_strips() {
+        // A 2600x600 codex fill covers with two balanced 1552x600 strips
+        // overlapping 504px — each part keeps a wide band of finished context
+        // near the seam, instead of a wide anchor plus a context-starved snug
+        // finisher.
+        let mask = mask_png_with_rects(2600, 600, &[(0, 0, 2600, 600)]);
+        let placement =
+            plan_ai_edit_placement(AiEditProvider::Codex, (2600, 600), &mask, "AI retouch")
+                .expect("placement");
+
+        assert_eq!(placement.parts.len(), 2);
+        assert_eq!(
+            placement.parts[0].crop,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 1552,
+                height: 600
+            }
+        );
+        assert_eq!(
+            placement.parts[1].crop,
+            PixelRect {
+                x: 1048,
+                y: 0,
+                width: 1552,
+                height: 600
+            }
+        );
+        let overlap = (placement.parts[0].crop.x + placement.parts[0].crop.width)
+            - placement.parts[1].crop.x;
+        assert_eq!(overlap, 504);
+        assert!(overlap <= max_split_overlap(2600));
+        let mut covered = CoverageGrid::empty(2600, 600);
+        for part in &placement.parts {
+            covered.mark_rect(part.crop);
+        }
+        assert_eq!(
+            covered.bounds(),
+            Some(PixelRect {
+                x: 0,
+                y: 0,
+                width: 2600,
+                height: 600
+            })
+        );
     }
 
     #[test]
@@ -1533,6 +1896,69 @@ mod tests {
                 height: 480
             }
         ));
+    }
+
+    #[test]
+    fn antigravity_split_uses_heterogeneous_tiles_within_overlap_cap() {
+        // Regression for the 2600x600 antigravity fill: a uniform 4:1 grid
+        // overlapped by 2200px (re-billing an almost fully generated frame),
+        // and a uniform 16:9 grid needed three strips. A heterogeneous cover
+        // anchors with a 2400x600 (4:1) tile and finishes with the LARGEST
+        // full-height tile the overlap cap allows — a 600x600 (1:1) tile
+        // overlapping 400px — so the finisher carries a substantial band of
+        // the anchor's finished content as context. (A snug 448x600 3:4 tail
+        // once left the model a featureless sliver, and it composed an
+        // unrelated standalone picture.)
+        let mask = mask_png_with_rects(2600, 600, &[(0, 0, 2600, 600)]);
+        let placement = plan_ai_edit_placement(
+            AiEditProvider::Antigravity,
+            (2600, 600),
+            &mask,
+            "AI retouch",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.parts.len(), 2);
+        assert_eq!(
+            placement.parts[0].crop,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2400,
+                height: 600
+            }
+        );
+        assert_eq!(placement.parts[0].working.aspect_label, "4:1");
+        assert_eq!(
+            placement.parts[1].crop,
+            PixelRect {
+                x: 2000,
+                y: 0,
+                width: 600,
+                height: 600
+            }
+        );
+        assert_eq!(placement.parts[1].working.aspect_label, "1:1");
+
+        // The anchor and finisher overlap by 400px — within the cap and a
+        // real context band — and together cover the whole document.
+        let overlap = (placement.parts[0].crop.x + placement.parts[0].crop.width)
+            - placement.parts[1].crop.x;
+        assert_eq!(overlap, 400);
+        assert!(overlap <= max_split_overlap(2600));
+        let mut covered = CoverageGrid::empty(2600, 600);
+        for part in &placement.parts {
+            covered.mark_rect(part.crop);
+        }
+        assert_eq!(
+            covered.bounds(),
+            Some(PixelRect {
+                x: 0,
+                y: 0,
+                width: 2600,
+                height: 600
+            })
+        );
     }
 
     #[test]
@@ -1749,11 +2175,40 @@ mod tests {
             plan_ai_edit_placement(AiEditProvider::Codex, (6000, 480), &wide_mask, "AI retouch")
                 .expect("split placement");
         let note = ai_part_geometry_note(&split, 1);
-        assert!(note.contains("split it into 5 parts"));
-        assert!(note.contains("part 2 of 5"));
+        assert!(note.contains("a crop of a larger PaintNode document"));
         assert!(note.contains("`overview.png`"));
-        assert!(note.contains("Content generated by earlier parts"));
-        assert!(note.contains("produce only the portion that belongs inside this part's mask"));
+        assert!(note.contains("joins it seamlessly"));
+        assert!(note.contains("produce only what belongs inside this crop's mask"));
+        // Split notes must not reveal the tiling to the image model: document
+        // dimensions, part counters, or crop coordinates push it toward
+        // rendering a split/multi-panel design.
+        assert!(!note.contains("6000"));
+        assert!(!note.contains("480"));
+        assert!(!note.contains("part"));
+        assert!(!note.contains("split"));
+        assert!(!note.contains("x="));
+
+        // Continuation rules appear only for split parts after the first, stay
+        // geometry-free, and tell the agent to continue the finished content
+        // instead of forwarding the full scene prompt.
+        assert_eq!(ai_part_continuation_note(&split, 0), "");
+        let continuation = ai_part_continuation_note(&split, 1);
+        assert!(continuation.contains("continuation instruction"));
+        assert!(continuation.contains("Do not pass the user prompt's full scene description"));
+        assert!(continuation.contains("exact size, scale, perspective, lighting, and style"));
+        assert!(!continuation.contains("6000"));
+        assert!(!continuation.contains("part"));
+        let context = ai_part_prompt_context(&split, 1);
+        assert!(context.contains("a crop of a larger PaintNode document"));
+        assert!(context.contains("Continuation rules for this crop:"));
+        assert_eq!(
+            ai_part_prompt_context(&split, 0),
+            ai_part_geometry_note(&split, 0)
+        );
+        assert_eq!(
+            ai_part_prompt_context(&single, 0),
+            ai_part_geometry_note(&single, 0)
+        );
 
         assert_eq!(
             ai_part_progress_message(&split, 1, "Starting local Codex AI retouch"),
@@ -1923,7 +2378,9 @@ mod tests {
         assert_eq!(parts[0]["dir"], "part-1");
         assert_eq!(parts[0]["crop"]["width"], 1440);
         assert_eq!(parts[0]["crop"]["height"], 480);
+        // The last part is another full-width strip flush to the right edge.
         assert_eq!(parts[4]["crop"]["x"], 4560);
+        assert_eq!(parts[4]["crop"]["width"], 1440);
 
         let single_mask = mask_png_with_rects(1280, 800, &[(600, 380, 60, 40)]);
         let single = plan_ai_edit_placement(
@@ -2029,3 +2486,6 @@ mod tests {
         assert!(reuse_part_result(job.path(), &part).is_none());
     }
 }
+
+
+

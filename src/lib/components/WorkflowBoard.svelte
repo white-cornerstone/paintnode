@@ -13,6 +13,7 @@
     isDesktop,
     type ProjectAsset,
   } from '../integrations/desktop';
+  import { ratioLabel } from '../ai/imageModelCapabilities';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
@@ -1390,7 +1391,7 @@
           .map((line, index) => `${index + 1}. ${line}`)
           .join('\n');
         sources.push({
-          name: `Storyboard sketch - mandatory layout guide (${workflow.storyboardWidth}x${workflow.storyboardHeight})`,
+          name: 'Storyboard sketch - mandatory layout guide',
           bytes: await canvasToPngBytes(storyboardSource),
         });
         hasStoryboardSource = true;
@@ -1413,7 +1414,7 @@
       const requiredAssets = sourceNodes.map((node, index) => `${index + 1}. ${node.name}${node.note ? ` - ${node.note}` : ''}`).join('\n');
       const prompt = `${workflow.prompt.trim()}
 
-Final output target: ${targetOutput.finalWidth} x ${targetOutput.finalHeight} pixels.
+Final output aspect ratio: ${ratioLabel(targetOutput.finalWidth, targetOutput.finalHeight)}.
 
 Mandatory connected assets that must be visibly represented:
 ${requiredAssets}

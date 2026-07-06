@@ -13,7 +13,15 @@
   import { ui } from '../state/ui.svelte';
   import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
+  import type { AiEditChecksLevel } from '../state/settings';
   import { Add, Copy, Dismiss } from '../icons';
+
+  const editChecksLevels: { value: AiEditChecksLevel; label: string; hint: string }[] = [
+    { value: 0, label: 'Off', hint: 'No result checks — use when the filled areas are meant to differ from their surroundings (e.g. a grid or index sheet)' },
+    { value: 1, label: 'In-place', hint: 'Reject candidates that repaint pixels outside the mask (default)' },
+    { value: 2, label: '+ Seam', hint: 'Also reject content that does not continue the surrounding scene across the mask boundary' },
+    { value: 3, label: 'Strict', hint: 'Strictest seam-continuity checking; retries or fails on any visible content break' },
+  ];
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
@@ -203,6 +211,24 @@
           </div>
         {/if}
       </div>
+
+      {#if editor.selection && runOptions.provider !== 'custom'}
+        <div class="dlg-field">
+          <span>Result checks</span>
+          <div class="checks-tabs" role="group" aria-label="Result checks level">
+            {#each editChecksLevels as level (level.value)}
+              <button
+                type="button"
+                class:active={runOptions.editChecksLevel === level.value}
+                use:tooltip={{ text: level.hint, placement: 'top' }}
+                onclick={() => (runOptions.editChecksLevel = level.value)}
+              >
+                {level.label}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
     {/if}
 
     {#if !taskDetail && runOptions.provider === 'codex'}
@@ -309,6 +335,28 @@
     border-left: 1px solid var(--border-soft);
   }
   .provider-tabs button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .checks-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .checks-tabs button {
+    border: none;
+    border-radius: 0;
+    background: var(--bg-input);
+    color: var(--text-dim);
+    padding: 5px 8px;
+  }
+  .checks-tabs button + button {
+    border-left: 1px solid var(--border-soft);
+  }
+  .checks-tabs button.active {
     background: var(--accent);
     color: #fff;
   }
