@@ -6,12 +6,10 @@ mod project;
 #[cfg(test)]
 mod test_util;
 
-use tauri::{Emitter, Manager, RunEvent};
+use tauri::{Emitter, RunEvent};
 
 use app::{queue_native_open_paths, PendingOpenPaths};
 use menu::build_app_menu;
-
-const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -23,15 +21,6 @@ pub fn run() {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
-
-            set_application_icon();
-
-            let icon_image = image::load_from_memory(APP_ICON_BYTES)?.to_rgba8();
-            let (icon_width, icon_height) = icon_image.dimensions();
-            let icon = tauri::image::Image::new_owned(icon_image.into_raw(), icon_width, icon_height);
-            for window in app.webview_windows().values() {
-                window.set_icon(icon.clone())?;
-            }
 
             let menu = build_app_menu(app.handle())?;
             app.handle().set_menu(menu)?;
@@ -99,25 +88,3 @@ pub fn run() {
             }
         });
 }
-
-#[cfg(target_os = "macos")]
-fn set_application_icon() {
-    use objc2::{AnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
-
-    let Some(main_thread) = MainThreadMarker::new() else {
-        return;
-    };
-    let icon_data = NSData::with_bytes(APP_ICON_BYTES);
-    let Some(icon_image) = NSImage::initWithData(NSImage::alloc(), &icon_data) else {
-        return;
-    };
-
-    unsafe {
-        NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&icon_image));
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_application_icon() {}
