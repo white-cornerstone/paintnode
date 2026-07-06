@@ -11,7 +11,6 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
     let layer_menu_enabled = false;
     let selection_menu_enabled = false;
     let history_menu_enabled = false;
-    let clipboard_menu_enabled = false;
     let viewport_menu_enabled = false;
 
     let new = MenuItem::with_id(app, "app:new", "New...", true, Some("CmdOrCtrl+N"))?;
@@ -73,27 +72,9 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>>
         history_menu_enabled,
         Some("CmdOrCtrl+Shift+Z"),
     )?;
-    let cut = MenuItem::with_id(
-        app,
-        "app:cut",
-        "Cut",
-        layer_menu_enabled,
-        Some("CmdOrCtrl+X"),
-    )?;
-    let copy = MenuItem::with_id(
-        app,
-        "app:copy",
-        "Copy",
-        layer_menu_enabled,
-        Some("CmdOrCtrl+C"),
-    )?;
-    let paste = MenuItem::with_id(
-        app,
-        "app:paste",
-        "Paste",
-        clipboard_menu_enabled,
-        Some("CmdOrCtrl+V"),
-    )?;
+    let cut = PredefinedMenuItem::cut(app, Some("Cut"))?;
+    let copy = PredefinedMenuItem::copy(app, Some("Copy"))?;
+    let paste = PredefinedMenuItem::paste(app, Some("Paste"))?;
     let fill_fg = MenuItem::with_id(
         app,
         "app:fill-foreground",

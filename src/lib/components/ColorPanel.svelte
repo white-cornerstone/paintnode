@@ -5,7 +5,7 @@
   import { clamp } from '../engine/types';
   import Panel from './Panel.svelte';
   import { tooltip } from '../actions/tooltip';
-  import ColorPickerDialog from './ColorPickerDialog.svelte';
+  import { ui } from '../state/ui.svelte';
 
   let {
     collapsed = $bindable(false),
@@ -15,7 +15,6 @@
   let h = $state(0);
   let s = $state(100);
   let v = $state(0);
-  let dialogTarget = $state<'foreground' | 'background' | null>(null);
 
   $effect(() => {
     const fg = editor.foreground;
@@ -82,14 +81,14 @@
         style={`background:${editor.foregroundCss}`}
         use:tooltip={{ text: 'Foreground color', placement: 'left' }}
         aria-label="Foreground color"
-        onclick={() => (dialogTarget = 'foreground')}
+        onclick={() => ui.openColorPicker('foreground')}
       ></button>
       <button
         class="chip bg"
         style={`background:${editor.backgroundCss}`}
         use:tooltip={{ text: 'Background color', placement: 'left' }}
         aria-label="Background color"
-        onclick={() => (dialogTarget = 'background')}
+        onclick={() => ui.openColorPicker('background')}
       ></button>
     </div>
 
@@ -109,20 +108,6 @@
     </div>
   </div>
 </Panel>
-
-{#if dialogTarget}
-  <ColorPickerDialog
-    target={dialogTarget}
-    initialColor={dialogTarget === 'foreground' ? editor.foreground : editor.background}
-    currentColor={dialogTarget === 'foreground' ? editor.foreground : editor.background}
-    onApply={(rgb) => {
-      if (dialogTarget === 'foreground') editor.setForeground(rgb);
-      else editor.setBackground(rgb);
-      dialogTarget = null;
-    }}
-    onClose={() => (dialogTarget = null)}
-  />
-{/if}
 
 <style>
   .color-panel {

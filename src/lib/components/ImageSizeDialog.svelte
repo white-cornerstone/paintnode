@@ -2,6 +2,9 @@
   import Modal from './Modal.svelte';
   import { editor, type ImageResampleMethod } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
+  import { tooltip } from '../actions/tooltip';
+  import { Link, LinkDismiss } from '../icons';
+  import Icon from './Icon.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -69,24 +72,25 @@
     <div class="size-grid">
       <button
         type="button"
-        class:active={linked}
+        class="aspect-toggle"
+        class:linked
         aria-pressed={linked}
-        aria-label="Constrain proportions"
+        aria-label={linked ? 'Constrain proportions on' : 'Constrain proportions off'}
+        use:tooltip={{ text: linked ? 'Constrain proportions: on' : 'Constrain proportions: off', placement: 'right' }}
         onclick={() => (linked = !linked)}
       >
-        Link
+        <Icon svg={linked ? Link : LinkDismiss} size={15} />
       </button>
-      <label class="dlg-field"><span>Width</span>
+      <label class="dlg-field width-field"><span>Width</span>
         <input type="number" min="1" max="32768" value={w} oninput={(e) => { fitTo = 'custom'; onW(+e.currentTarget.value); }} />
       </label>
-      <label class="dlg-field"><span>Units</span>
+      <label class="dlg-field width-units"><span>Units</span>
         <select disabled><option>Pixels</option></select>
       </label>
-      <span></span>
-      <label class="dlg-field"><span>Height</span>
+      <label class="dlg-field height-field"><span>Height</span>
         <input type="number" min="1" max="32768" value={h} oninput={(e) => { fitTo = 'custom'; onH(+e.currentTarget.value); }} />
       </label>
-      <label class="dlg-field"><span>Units</span>
+      <label class="dlg-field height-units"><span>Units</span>
         <select disabled><option>Pixels</option></select>
       </label>
     </div>
@@ -127,16 +131,47 @@
   }
   .size-grid {
     display: grid;
-    grid-template-columns: 54px 1fr 130px;
-    gap: 8px;
+    grid-template-columns: 34px minmax(0, 1fr) 130px;
+    gap: 12px 8px;
     align-items: end;
   }
-  .size-grid button {
+  .aspect-toggle {
+    grid-column: 1;
+    grid-row: 1 / span 2;
     align-self: center;
+    justify-self: center;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    color: var(--text-dim);
   }
-  .size-grid button.active {
+  .aspect-toggle.linked {
     border-color: var(--accent);
     color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .aspect-toggle:not(.linked) {
+    border-color: var(--border-soft);
+    background: var(--bg-input);
+  }
+  .width-field,
+  .height-field {
+    grid-column: 2;
+  }
+  .width-units,
+  .height-units {
+    grid-column: 3;
+  }
+  .width-field,
+  .width-units {
+    grid-row: 1;
+  }
+  .height-field,
+  .height-units {
+    grid-row: 2;
   }
   .chk {
     display: grid;

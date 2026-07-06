@@ -25,6 +25,22 @@ const TOOL_KEYS: Record<string, string> = {
 
 /** Install global keyboard shortcuts. Returns a cleanup function. */
 export function installKeyboard(): () => void {
+  const onCopy = (e: ClipboardEvent) => {
+    if (isTypingTarget(e.target) || !editor.activeLayer) return;
+    e.preventDefault();
+    editor.copy();
+  };
+  const onCut = (e: ClipboardEvent) => {
+    const layer = editor.activeLayer;
+    if (isTypingTarget(e.target) || !layer || layer.locked) return;
+    e.preventDefault();
+    editor.cut();
+  };
+  const onPaste = (e: ClipboardEvent) => {
+    if (isTypingTarget(e.target) || ui.activeSurface !== 'document' || !editor.doc || !editor.clipboard) return;
+    e.preventDefault();
+    editor.paste();
+  };
   const onKey = (e: KeyboardEvent) => {
     if (isTypingTarget(e.target)) return;
 
@@ -204,11 +220,17 @@ export function installKeyboard(): () => void {
     editor.altDown = false; // don't get stuck "held" if focus leaves mid-press
   };
 
+  document.addEventListener('copy', onCopy);
+  document.addEventListener('cut', onCut);
+  document.addEventListener('paste', onPaste);
   window.addEventListener('keydown', onKey);
   window.addEventListener('keydown', onAltDown);
   window.addEventListener('keyup', onAltUp);
   window.addEventListener('blur', onBlur);
   return () => {
+    document.removeEventListener('copy', onCopy);
+    document.removeEventListener('cut', onCut);
+    document.removeEventListener('paste', onPaste);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keydown', onAltDown);
     window.removeEventListener('keyup', onAltUp);
