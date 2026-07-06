@@ -621,9 +621,10 @@ fn heterogeneous_tiling(
         if placements.len() > MAX_AI_EDIT_PARTS {
             return None;
         }
-        // Prefer to finish: the smallest tile that bridges to the target end
-        // with a blendable, capped overlap.
-        let finish = tiles.iter().find_map(|&(long_dim, label)| {
+        // Prefer to finish: a tile that bridges to the target end with a
+        // blendable, capped overlap.
+        let bridge = |index: usize| {
+            let (long_dim, label) = tiles[index];
             if long_dim < end.saturating_sub(frontier) {
                 return None; // too small to reach the end from the frontier
             }
@@ -635,7 +636,17 @@ fn heterogeneous_tiling(
                 }
             }
             Some((start, long_dim, label))
-        });
+        };
+        // A finisher joining already-placed content takes the LARGEST tile the
+        // overlap cap allows, not the smallest: a snug tail tile carries almost
+        // no finished context, and the image model then composes an unrelated
+        // standalone picture instead of continuing the scene. With no previous
+        // placement there is no context to gain, so keep the smallest cover.
+        let finish = if placements.is_empty() {
+            (0..tiles.len()).find_map(bridge)
+        } else {
+            (0..tiles.len()).rev().find_map(bridge)
+        };
         if let Some(place) = finish {
             placements.push(place);
             break;
@@ -1345,6 +1356,40 @@ pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usi
         .into()
 }
 
+/// Prompt block for split parts after the first: the agent must translate the
+/// whole-edit user prompt into a continuation of the already-finished content
+/// instead of forwarding the full scene description to the image model. A
+/// tail crop given the whole scene prompt renders the entire described scene
+/// into its editable strip as an unrelated standalone picture. Returns an
+/// empty string for single-crop runs and for the first part (which has no
+/// finished content to continue). Same forwarding rule as the geometry note:
+/// no pixel numbers, coordinates, or part counts.
+pub(crate) fn ai_part_continuation_note(placement: &AiEditPlacement, part_index: usize) -> String {
+    if !placement.is_split() || part_index == 0 {
+        return String::new();
+    }
+    r#"Continuation rules for this crop:
+- Earlier passes already generated the finished content visible in the attached images; this crop only extends that content. Study `overview.png` and the finished content before calling the image-generation tool.
+- The user prompt describes the whole edit, and its main subjects are usually already present in the finished neighboring content. Do not repeat them in this crop unless `overview.png` clearly shows they belong inside the outlined region; when in doubt, continue the existing scene's surfaces, structures, and background instead of introducing new subjects.
+- Write the image-tool instruction yourself as a continuation instruction: name the visible surfaces and objects that touch the editable area and describe how they extend. Do not pass the user prompt's full scene description to the image-generation tool.
+- Everything crossing the boundary between finished content and the editable area must keep its exact size, scale, perspective, lighting, and style. Do not restart the composition at a different zoom level or camera position."#
+        .into()
+}
+
+/// Geometry note plus, for split parts after the first, the continuation
+/// rules — the prompt context block for fill and retouch part prompts.
+/// (Restore prompts use `ai_part_geometry_note` alone: they carry no user
+/// prompt to mistranslate into a standalone scene.)
+pub(crate) fn ai_part_prompt_context(placement: &AiEditPlacement, part_index: usize) -> String {
+    let geometry = ai_part_geometry_note(placement, part_index);
+    let continuation = ai_part_continuation_note(placement, part_index);
+    if continuation.is_empty() {
+        geometry
+    } else {
+        format!("{geometry}\n\n{continuation}")
+    }
+}
+
 /// Prefix progress messages with the part counter on split runs.
 pub(crate) fn ai_part_progress_message(
     placement: &AiEditPlacement,
@@ -1737,9 +1782,11 @@ mod tests {
             plan_ai_edit_placement(AiEditProvider::Codex, (6000, 480), &mask, "AI retouch")
                 .expect("placement");
 
-        // Full-height 3:1 anchors (1440x480) across the width, finished by a
-        // snug 720x480 tile — every part a single full-height strip, each
-        // overlapping its predecessor within the cap, together covering the doc.
+        // Full-height 3:1 strips (1440x480) across the width — every part a
+        // single full-height strip, each overlapping its predecessor within
+        // the cap, together covering the doc. No snug tail tile: a narrow
+        // finisher carries too little finished context for the image model
+        // to continue the scene.
         assert!(placement.parts.len() > 1);
         let cap = max_split_overlap(6000);
         let document = PixelRect {
@@ -1766,15 +1813,20 @@ mod tests {
             previous_end = part.crop.x + part.crop.width;
         }
         assert_eq!(previous_end, 6000);
-        // The last part is a smaller finisher, not another full anchor.
-        assert!(placement.parts.last().unwrap().crop.width < placement.parts[0].crop.width);
+        // The last part is another full-width strip flush to the edge, not a
+        // context-starved snug finisher.
+        assert_eq!(
+            placement.parts.last().unwrap().crop.width,
+            placement.parts[0].crop.width
+        );
     }
 
     #[test]
-    fn codex_split_uses_wide_anchor_plus_snug_finisher() {
-        // A 2600x600 codex fill anchors with the widest 3:1 tile (1800x600) and
-        // finishes with a snug 928x600 tile — two full-height parts overlapping
-        // 128px — instead of three uniform strips.
+    fn codex_split_uses_balanced_wide_strips() {
+        // A 2600x600 codex fill covers with two balanced 1552x600 strips
+        // overlapping 504px — each part keeps a wide band of finished context
+        // near the seam, instead of a wide anchor plus a context-starved snug
+        // finisher.
         let mask = mask_png_with_rects(2600, 600, &[(0, 0, 2600, 600)]);
         let placement =
             plan_ai_edit_placement(AiEditProvider::Codex, (2600, 600), &mask, "AI retouch")
@@ -1786,22 +1838,22 @@ mod tests {
             PixelRect {
                 x: 0,
                 y: 0,
-                width: 1800,
+                width: 1552,
                 height: 600
             }
         );
         assert_eq!(
             placement.parts[1].crop,
             PixelRect {
-                x: 1672,
+                x: 1048,
                 y: 0,
-                width: 928,
+                width: 1552,
                 height: 600
             }
         );
         let overlap = (placement.parts[0].crop.x + placement.parts[0].crop.width)
             - placement.parts[1].crop.x;
-        assert_eq!(overlap, 128);
+        assert_eq!(overlap, 504);
         assert!(overlap <= max_split_overlap(2600));
         let mut covered = CoverageGrid::empty(2600, 600);
         for part in &placement.parts {
@@ -1851,9 +1903,12 @@ mod tests {
         // Regression for the 2600x600 antigravity fill: a uniform 4:1 grid
         // overlapped by 2200px (re-billing an almost fully generated frame),
         // and a uniform 16:9 grid needed three strips. A heterogeneous cover
-        // anchors with a 2400x600 (4:1) tile and finishes with the smallest
-        // full-height tile that reaches the edge — a 448x600 (3:4) tile — two
-        // parts overlapping only 248px (within the 20%/520px cap).
+        // anchors with a 2400x600 (4:1) tile and finishes with the LARGEST
+        // full-height tile the overlap cap allows — a 600x600 (1:1) tile
+        // overlapping 400px — so the finisher carries a substantial band of
+        // the anchor's finished content as context. (A snug 448x600 3:4 tail
+        // once left the model a featureless sliver, and it composed an
+        // unrelated standalone picture.)
         let mask = mask_png_with_rects(2600, 600, &[(0, 0, 2600, 600)]);
         let placement = plan_ai_edit_placement(
             AiEditProvider::Antigravity,
@@ -1877,19 +1932,19 @@ mod tests {
         assert_eq!(
             placement.parts[1].crop,
             PixelRect {
-                x: 2152,
+                x: 2000,
                 y: 0,
-                width: 448,
+                width: 600,
                 height: 600
             }
         );
-        assert_eq!(placement.parts[1].working.aspect_label, "3:4");
+        assert_eq!(placement.parts[1].working.aspect_label, "1:1");
 
-        // The anchor and finisher overlap by 248px — within the cap and enough
-        // context — and together cover the whole document.
+        // The anchor and finisher overlap by 400px — within the cap and a
+        // real context band — and together cover the whole document.
         let overlap = (placement.parts[0].crop.x + placement.parts[0].crop.width)
             - placement.parts[1].crop.x;
-        assert_eq!(overlap, 248);
+        assert_eq!(overlap, 400);
         assert!(overlap <= max_split_overlap(2600));
         let mut covered = CoverageGrid::empty(2600, 600);
         for part in &placement.parts {
@@ -2133,6 +2188,28 @@ mod tests {
         assert!(!note.contains("split"));
         assert!(!note.contains("x="));
 
+        // Continuation rules appear only for split parts after the first, stay
+        // geometry-free, and tell the agent to continue the finished content
+        // instead of forwarding the full scene prompt.
+        assert_eq!(ai_part_continuation_note(&split, 0), "");
+        let continuation = ai_part_continuation_note(&split, 1);
+        assert!(continuation.contains("continuation instruction"));
+        assert!(continuation.contains("Do not pass the user prompt's full scene description"));
+        assert!(continuation.contains("exact size, scale, perspective, lighting, and style"));
+        assert!(!continuation.contains("6000"));
+        assert!(!continuation.contains("part"));
+        let context = ai_part_prompt_context(&split, 1);
+        assert!(context.contains("a crop of a larger PaintNode document"));
+        assert!(context.contains("Continuation rules for this crop:"));
+        assert_eq!(
+            ai_part_prompt_context(&split, 0),
+            ai_part_geometry_note(&split, 0)
+        );
+        assert_eq!(
+            ai_part_prompt_context(&single, 0),
+            ai_part_geometry_note(&single, 0)
+        );
+
         assert_eq!(
             ai_part_progress_message(&split, 1, "Starting local Codex AI retouch"),
             "Part 2/5: Starting local Codex AI retouch"
@@ -2301,9 +2378,9 @@ mod tests {
         assert_eq!(parts[0]["dir"], "part-1");
         assert_eq!(parts[0]["crop"]["width"], 1440);
         assert_eq!(parts[0]["crop"]["height"], 480);
-        // The last part is the snug finisher at the right edge.
-        assert_eq!(parts[4]["crop"]["x"], 5280);
-        assert_eq!(parts[4]["crop"]["width"], 720);
+        // The last part is another full-width strip flush to the right edge.
+        assert_eq!(parts[4]["crop"]["x"], 4560);
+        assert_eq!(parts[4]["crop"]["width"], 1440);
 
         let single_mask = mask_png_with_rects(1280, 800, &[(600, 380, 60, 40)]);
         let single = plan_ai_edit_placement(

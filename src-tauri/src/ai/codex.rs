@@ -15,14 +15,15 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_protected_region_drift, ai_retouch_editable_mask_png,
+    ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
     ai_working_canvas_accepts_result_dimensions, read_png_bytes_cropped_to_ai_working_canvas,
     remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
-    AI_CHROMA_KEY_HEX, AI_PROTECTED_DRIFT_LIMIT, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
-    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS,
+    AI_CHROMA_KEY_HEX, AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::placement::{
-    ai_part_geometry_note, ai_part_progress_message, ai_upscale_target_dimensions,
+    ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
+    ai_upscale_target_dimensions,
     cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
     prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result, AiEditComposer,
     AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
@@ -1808,6 +1809,7 @@ pub(crate) async fn generate_codex_fill_image(
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
     autonomy_level: Option<String>,
+    edit_checks_level: Option<u8>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -1844,6 +1846,7 @@ pub(crate) async fn generate_codex_fill_image(
         let codex_bin = configured_or_default_codex_bin(bin)?;
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
             format!("fill-{}", now_id())
         } else {
@@ -1923,7 +1926,7 @@ pub(crate) async fn generate_codex_fill_image(
             }
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "Generative fill")?;
-            let geometry_note = ai_part_geometry_note(&placement, part_index);
+            let geometry_note = ai_part_prompt_context(&placement, part_index);
             let base_prompt_text =
                 generative_fill_prompt(prompt.trim(), autonomy, &geometry_note, &reference_names);
 
@@ -1940,11 +1943,12 @@ pub(crate) async fn generate_codex_fill_image(
             );
             let result_path = part_path.join("result.png");
             let mut accepted_run = None;
+            let mut retry_note = "";
             for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                let prompt_text = if attempt == 0 {
+                let prompt_text = if retry_note.is_empty() {
                     base_prompt_text.clone()
                 } else {
-                    format!("{base_prompt_text}\n\n{CODEX_IN_PLACE_RETRY_NOTE}")
+                    format!("{base_prompt_text}\n\n{retry_note}")
                 };
                 write_ai_job_prompt(&part_path, &prompt_text, "Codex generative fill")?;
                 let part_run = run_codex_fill_part(
@@ -1976,20 +1980,25 @@ pub(crate) async fn generate_codex_fill_image(
                         ),
                     );
                 }
-                // A candidate that repainted protected pixels was regenerated
-                // from scratch rather than edited in place; pasting it back
-                // would leave visible seams at the mask boundary.
-                let drift = ai_protected_region_drift(
+                // Result checks: in-place drift, then seam continuity when
+                // the user's check level enables it.
+                let rejection = ai_candidate_rejection(
+                    checks_level,
                     &inputs.edit_target_png,
+                    &inputs.source_png,
                     &inputs.mask_png,
                     &part_run.normalized_png,
                     "Codex generative fill",
                 )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
-                .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT);
-                let Some(drift) = drift else {
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                let Some(rejection) = rejection else {
                     accepted_run = Some(part_run);
                     break;
+                };
+                retry_note = if rejection.continuation_retry {
+                    AI_SEAM_RETRY_NOTE
+                } else {
+                    CODEX_IN_PLACE_RETRY_NOTE
                 };
                 if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
                     emit_codex_progress(
@@ -1999,7 +2008,8 @@ pub(crate) async fn generate_codex_fill_image(
                             &placement,
                             part_index,
                             &format!(
-                                "Rejected generative fill candidate: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}); retrying with stricter in-place instructions"
+                                "Rejected generative fill candidate: {}; retrying with stricter instructions",
+                                rejection.reason
                             ),
                         ),
                     );
@@ -2014,7 +2024,8 @@ pub(crate) async fn generate_codex_fill_image(
                     &placement,
                     part_index,
                     &format!(
-                        "The AI image model regenerated the scene instead of editing it in place: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}). Try a smaller edit area or a simpler prompt."
+                        "The AI image model produced an unusable candidate: {}. Try a smaller edit area, a simpler prompt, or a lower result-checks level.",
+                        rejection.reason
                     ),
                 ));
             }
@@ -2093,6 +2104,7 @@ pub(crate) async fn generate_codex_retouch_image(
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
     autonomy_level: Option<String>,
+    edit_checks_level: Option<u8>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter an AI retouch prompt.".into());
@@ -2157,6 +2169,7 @@ pub(crate) async fn generate_codex_retouch_image(
         let codex_bin = configured_or_default_codex_bin(bin)?;
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
             format!("retouch-{}", now_id())
         } else {
@@ -2250,7 +2263,7 @@ pub(crate) async fn generate_codex_retouch_image(
             }
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
-            let geometry_note = ai_part_geometry_note(&placement, part_index);
+            let geometry_note = ai_part_prompt_context(&placement, part_index);
             let base_prompt_text = ai_retouch_prompt(
                 prompt.trim(),
                 has_annotated_source,
@@ -2269,11 +2282,12 @@ pub(crate) async fn generate_codex_retouch_image(
             );
             let result_path = part_path.join("result.png");
             let mut accepted_run = None;
+            let mut retry_note = "";
             for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                let prompt_text = if attempt == 0 {
+                let prompt_text = if retry_note.is_empty() {
                     base_prompt_text.clone()
                 } else {
-                    format!("{base_prompt_text}\n\n{CODEX_IN_PLACE_RETRY_NOTE}")
+                    format!("{base_prompt_text}\n\n{retry_note}")
                 };
                 write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
                 let part_run = run_codex_retouch_part(
@@ -2307,20 +2321,25 @@ pub(crate) async fn generate_codex_retouch_image(
                         ),
                     );
                 }
-                // A candidate that repainted protected pixels was regenerated
-                // from scratch rather than edited in place; pasting it back
-                // would leave visible seams at the mask boundary.
-                let drift = ai_protected_region_drift(
+                // Result checks: in-place drift, then seam continuity when
+                // the user's check level enables it.
+                let rejection = ai_candidate_rejection(
+                    checks_level,
                     &inputs.edit_target_png,
+                    &inputs.source_png,
                     &inputs.mask_png,
                     &part_run.normalized_png,
                     "AI retouch candidate",
                 )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
-                .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT);
-                let Some(drift) = drift else {
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                let Some(rejection) = rejection else {
                     accepted_run = Some(part_run);
                     break;
+                };
+                retry_note = if rejection.continuation_retry {
+                    AI_SEAM_RETRY_NOTE
+                } else {
+                    CODEX_IN_PLACE_RETRY_NOTE
                 };
                 if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
                     emit_codex_progress(
@@ -2330,7 +2349,8 @@ pub(crate) async fn generate_codex_retouch_image(
                             &placement,
                             part_index,
                             &format!(
-                                "Rejected AI retouch candidate: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}); retrying with stricter in-place instructions"
+                                "Rejected AI retouch candidate: {}; retrying with stricter instructions",
+                                rejection.reason
                             ),
                         ),
                     );
@@ -2345,7 +2365,8 @@ pub(crate) async fn generate_codex_retouch_image(
                     &placement,
                     part_index,
                     &format!(
-                        "The AI image model regenerated the scene instead of editing it in place: pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT}). Try a smaller edit area or a simpler prompt."
+                        "The AI image model produced an unusable candidate: {}. Try a smaller edit area, a simpler prompt, or a lower result-checks level.",
+                        rejection.reason
                     ),
                 ));
             }

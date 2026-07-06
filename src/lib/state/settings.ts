@@ -35,6 +35,13 @@ export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity' | 'custom';
 export type CanvasBackground = 'white' | 'transparent';
+/**
+ * How strictly PaintNode validates fill/retouch candidates before pasting
+ * them back: 0 = no checks (for intentionally discontinuous content such as
+ * grid/index sheets), 1 = in-place drift gate only (default), 2 = drift +
+ * seam continuity, 3 = drift + strict seam continuity.
+ */
+export type AiEditChecksLevel = 0 | 1 | 2 | 3;
 
 export interface AiRunOptions {
   provider: AiProvider;
@@ -47,6 +54,7 @@ export interface AiRunOptions {
   antigravityModel: AntigravityModelId;
   antigravityApprovalMode: AntigravityApprovalMode;
   customBin: string;
+  editChecksLevel: AiEditChecksLevel;
 }
 
 export interface PaintNodeSettings {
@@ -66,6 +74,7 @@ export interface PaintNodeSettings {
     antigravityBin: string;
     antigravityModel: AntigravityModelId;
     antigravityApprovalMode: AntigravityApprovalMode;
+    editChecksLevel: AiEditChecksLevel;
     customBin: string;
     customArgsText: string;
     customGenerateArgsText: string;
@@ -115,6 +124,7 @@ export function defaultSettings(): PaintNodeSettings {
       antigravityBin: '',
       antigravityModel: 'auto',
       antigravityApprovalMode: 'skipPermissions',
+      editChecksLevel: 1,
       customBin: '',
       customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
       customGenerateArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
@@ -201,6 +211,7 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
         : defaults.ai.antigravityModel,
       antigravityApprovalMode:
         savedAntigravityApprovalMode === 'default' ? 'default' : defaults.ai.antigravityApprovalMode,
+      editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
       customBin: stringOrDefault(ai.customBin, defaults.ai.customBin),
       customArgsText: stringOrDefault(ai.customArgsText, defaults.ai.customArgsText),
       customGenerateArgsText: stringOrDefault(
@@ -255,6 +266,7 @@ export function defaultAiRunOptions(): AiRunOptions {
     antigravityModel: ai.antigravityModel,
     antigravityApprovalMode: ai.antigravityApprovalMode,
     customBin: ai.customBin,
+    editChecksLevel: ai.editChecksLevel,
   };
 }
 
@@ -270,6 +282,7 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
     antigravityModel: value.ai.antigravityModel,
     antigravityApprovalMode: value.ai.antigravityApprovalMode,
     customBin: value.ai.customBin,
+    editChecksLevel: value.ai.editChecksLevel,
   };
 }
 

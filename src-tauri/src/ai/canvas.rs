@@ -293,6 +293,287 @@ pub(crate) fn ai_protected_region_drift(
     Ok(Some(sum as f64 / count as f64))
 }
 
+/// Optional per-run seam-continuity gate limit for a user check level.
+/// Level 0 disables all checks, level 1 is the drift gate only, levels 2 and
+/// 3 add this seam gate at balanced/strict thresholds.
+pub(crate) fn ai_seam_mismatch_limit(check_level: u8) -> Option<f64> {
+    match check_level {
+        2 => Some(18.0),
+        3.. => Some(9.0),
+        _ => None,
+    }
+}
+
+/// User-selected result-check level, defaulted and clamped. Level 1 (drift
+/// gate only) matches the behavior before the level existed; level 0 turns
+/// every check off for intentionally discontinuous edits (e.g. a grid of
+/// unrelated index-sheet cells).
+pub(crate) fn ai_edit_checks_level(level: Option<u8>) -> u8 {
+    level.unwrap_or(1).min(3)
+}
+
+/// Why a candidate was rejected by the result checks, and which retry note
+/// should steer the next attempt.
+pub(crate) struct AiCandidateRejection {
+    pub(crate) reason: String,
+    pub(crate) continuation_retry: bool,
+}
+
+/// Run the enabled result checks against a candidate. Returns the first
+/// failed check (drift before seam continuity), or `None` when the candidate
+/// passes every check enabled at `check_level`.
+pub(crate) fn ai_candidate_rejection(
+    check_level: u8,
+    edit_target_png: &[u8],
+    source_png: &[u8],
+    mask_png: &[u8],
+    candidate_png: &[u8],
+    label: &str,
+) -> Result<Option<AiCandidateRejection>, String> {
+    if check_level == 0 {
+        return Ok(None);
+    }
+    if let Some(drift) = ai_protected_region_drift(edit_target_png, mask_png, candidate_png, label)?
+        .filter(|drift| *drift > AI_PROTECTED_DRIFT_LIMIT)
+    {
+        return Ok(Some(AiCandidateRejection {
+            reason: format!(
+                "pixels outside the mask changed too much (drift {drift:.1}, limit {AI_PROTECTED_DRIFT_LIMIT})"
+            ),
+            continuation_retry: false,
+        }));
+    }
+    if let Some(limit) = ai_seam_mismatch_limit(check_level) {
+        if let Some(mismatch) =
+            ai_seam_continuity_mismatch(source_png, mask_png, candidate_png, label)?
+                .filter(|mismatch| *mismatch > limit)
+        {
+            return Ok(Some(AiCandidateRejection {
+                reason: format!(
+                    "the content inside the mask does not continue the surrounding scene (seam mismatch {mismatch:.1}, limit {limit})"
+                ),
+                continuation_retry: true,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Appended to the prompt when a candidate fails the seam-continuity check:
+/// the masked area read as a separate picture instead of a continuation.
+pub(crate) const AI_SEAM_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejected:
+- The previous candidate's content inside the editable mask did not continue the surrounding scene; it read as a separate, unrelated picture. PaintNode discarded it.
+- Generate the masked area as a direct continuation of the adjacent visible content: extend the same surfaces, structures, lighting, palette, scale, and perspective across the mask boundary.
+- Do not compose a standalone scene, add new focal subjects, or change the zoom level. If the requested content does not fit this area naturally, favor seamless continuation over completeness."#;
+
+/// Band sampled on each side of the mask boundary, past the blend zone.
+const AI_SEAM_BAND_SKIP: u32 = 4;
+const AI_SEAM_BAND_DEPTH: u32 = 28;
+/// Minimum sampled band pixels to judge continuity.
+const AI_SEAM_MIN_SAMPLES: u64 = 512;
+
+/// Seam-continuity mismatch (0-100) between the candidate's newly generated
+/// content just inside the editable mask area and the original content just
+/// outside it. Each fully-editable pixel near the boundary is paired with its
+/// nearest protected pixel (chamfer distance transform), and their
+/// neighborhood color and local texture are compared using blurs that never
+/// mix content across the boundary. A candidate that continues the scene
+/// scores low; a candidate that composed an unrelated picture inside the
+/// mask scores high. Returns `None` when there is too little boundary to
+/// judge (e.g. a mask covering the whole canvas).
+pub(crate) fn ai_seam_continuity_mismatch(
+    source_png: &[u8],
+    mask_png: &[u8],
+    candidate_png: &[u8],
+    label: &str,
+) -> Result<Option<f64>, String> {
+    let source = decode_png_rgba(source_png, label)?;
+    let mask = decode_png_rgba(mask_png, label)?;
+    let candidate = decode_png_rgba(candidate_png, label)?;
+    if mask.dimensions() != source.dimensions() || candidate.dimensions() != source.dimensions() {
+        return Err(format!(
+            "{label} seam-continuity inputs must have identical dimensions."
+        ));
+    }
+    let (width, height) = source.dimensions();
+    let w = width as usize;
+    let h = height as usize;
+    let len = w * h;
+    if len == 0 {
+        return Ok(None);
+    }
+
+    // Fully-protected vs fully-editable pixels; the gray feather in between
+    // belongs to neither side (it is a blend of both).
+    let mut protected = vec![0_u8; len];
+    let mut editable = vec![0_u8; len];
+    for (i, pixel) in mask.pixels().enumerate() {
+        match mask_pixel_coverage(pixel) {
+            0 => protected[i] = 1,
+            255 => editable[i] = 1,
+            _ => {}
+        }
+    }
+
+    // Nearest protected pixel for every position (approximate chebyshev
+    // chamfer transform, forward + backward pass).
+    const FAR: u32 = u32::MAX / 2;
+    let mut dist = vec![FAR; len];
+    let mut nearest = vec![0_u32; len];
+    for i in 0..len {
+        if protected[i] == 1 {
+            dist[i] = 0;
+            nearest[i] = i as u32;
+        }
+    }
+    fn relax(i: usize, n: usize, dist: &mut [u32], nearest: &mut [u32]) {
+        if dist[n] != FAR && dist[n] + 1 < dist[i] {
+            dist[i] = dist[n] + 1;
+            nearest[i] = nearest[n];
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if x > 0 {
+                relax(i, i - 1, &mut dist, &mut nearest);
+            }
+            if y > 0 {
+                relax(i, i - w, &mut dist, &mut nearest);
+                if x > 0 {
+                    relax(i, i - w - 1, &mut dist, &mut nearest);
+                }
+                if x + 1 < w {
+                    relax(i, i - w + 1, &mut dist, &mut nearest);
+                }
+            }
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            if x + 1 < w {
+                relax(i, i + 1, &mut dist, &mut nearest);
+            }
+            if y + 1 < h {
+                relax(i, i + w, &mut dist, &mut nearest);
+                if x + 1 < w {
+                    relax(i, i + w + 1, &mut dist, &mut nearest);
+                }
+                if x > 0 {
+                    relax(i, i + w - 1, &mut dist, &mut nearest);
+                }
+            }
+        }
+    }
+
+    // The editable side starts past the feather gap; sample a band beyond the
+    // model's blend zone so copied edge pixels cannot mask a discontinuity.
+    let gap = editable
+        .iter()
+        .zip(&dist)
+        .filter(|(flag, _)| **flag == 1)
+        .map(|(_, d)| *d)
+        .min()
+        .unwrap_or(FAR);
+    if gap == FAR {
+        return Ok(None);
+    }
+    let band_start = gap + AI_SEAM_BAND_SKIP;
+    let band_end = gap + AI_SEAM_BAND_DEPTH;
+
+    // Side-local planes: blurs weighted by each side's validity mask, so
+    // boundary values never mix editable and protected content.
+    let plane = |image: &image::RgbaImage, channel: usize| -> Vec<u8> {
+        image.pixels().map(|pixel| pixel.0[channel]).collect()
+    };
+    let luma_plane =
+        |image: &image::RgbaImage| -> Vec<u8> { image.pixels().map(pixel_luminance).collect() };
+    let side_planes = |image: &image::RgbaImage, valid: &[u8]| -> [Vec<u8>; 4] {
+        let luma = masked_box_blur(&luma_plane(image), valid, w, h, 2);
+        let deviation: Vec<u8> = luma_plane(image)
+            .iter()
+            .zip(&luma)
+            .map(|(raw, blurred)| raw.abs_diff(*blurred))
+            .collect();
+        [
+            masked_box_blur(&plane(image, 0), valid, w, h, 2),
+            masked_box_blur(&plane(image, 1), valid, w, h, 2),
+            masked_box_blur(&plane(image, 2), valid, w, h, 2),
+            masked_box_blur(&deviation, valid, w, h, 4),
+        ]
+    };
+    let outer = side_planes(&source, &protected);
+    let inner = side_planes(&candidate, &editable);
+    let source_alpha = plane(&source, 3);
+
+    let mut sum = 0_f64;
+    let mut count = 0_u64;
+    for i in 0..len {
+        if editable[i] != 1 || dist[i] < band_start || dist[i] > band_end {
+            continue;
+        }
+        let paired = nearest[i] as usize;
+        // Protected pixels the document never painted carry no context.
+        if source_alpha[paired] != 255 {
+            continue;
+        }
+        let color_diff = (f64::from(inner[0][i].abs_diff(outer[0][paired]))
+            + f64::from(inner[1][i].abs_diff(outer[1][paired]))
+            + f64::from(inner[2][i].abs_diff(outer[2][paired])))
+            / 3.0;
+        let texture_diff = f64::from(inner[3][i].abs_diff(outer[3][paired]));
+        sum += 0.7 * color_diff + 0.3 * texture_diff;
+        count += 1;
+    }
+    if count < AI_SEAM_MIN_SAMPLES {
+        return Ok(None);
+    }
+    Ok(Some((sum / count as f64) / 2.55))
+}
+
+/// Box blur that averages only `valid` (nonzero-flag) pixels; positions with
+/// no valid pixel in the window stay 0. Keeps side-local statistics from
+/// bleeding across the mask boundary.
+fn masked_box_blur(values: &[u8], valid: &[u8], w: usize, h: usize, radius: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; values.len()];
+    let mut row_sum = vec![0_u32; values.len()];
+    let mut row_count = vec![0_u32; values.len()];
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let x0 = x.saturating_sub(radius);
+            let x1 = (x + radius).min(w - 1);
+            let mut sum = 0_u32;
+            let mut count = 0_u32;
+            for sx in x0..=x1 {
+                if valid[row + sx] != 0 {
+                    sum += u32::from(values[row + sx]);
+                    count += 1;
+                }
+            }
+            row_sum[row + x] = sum;
+            row_count[row + x] = count;
+        }
+    }
+    for y in 0..h {
+        let y0 = y.saturating_sub(radius);
+        let y1 = (y + radius).min(h - 1);
+        for x in 0..w {
+            let mut sum = 0_u32;
+            let mut count = 0_u32;
+            for sy in y0..=y1 {
+                sum += row_sum[sy * w + x];
+                count += row_count[sy * w + x];
+            }
+            if let Some(mean) = (sum + count / 2).checked_div(count) {
+                out[y * w + x] = mean as u8;
+            }
+        }
+    }
+    out
+}
+
 fn box_blur_coverage(coverage: &[u8], width: u32, height: u32, radius: u32) -> Vec<u8> {
     if radius == 0 {
         return coverage.to_vec();
@@ -488,6 +769,92 @@ mod tests {
         );
         // Codex labels are not Antigravity ratios.
         assert_eq!(antigravity_output_target("codex-crop", (1280, 800)), None);
+    }
+
+    /// 128x128 seam mask: protected left (x < 56), gray feather strip, fully
+    /// editable right (x >= 72) — a vertical seam with a wide sample band.
+    fn seam_mask_png() -> Vec<u8> {
+        let mask = image::RgbaImage::from_fn(128, 128, |x, _| {
+            if x < 56 {
+                image::Rgba([0, 0, 0, 255])
+            } else if x < 72 {
+                image::Rgba([128, 128, 128, 255])
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            }
+        });
+        encode_rgba_png(mask, "seam mask").expect("seam mask png")
+    }
+
+    fn seam_image_png(left: [u8; 4], right: [u8; 4]) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(
+            128,
+            128,
+            |x, _| {
+                if x < 64 {
+                    image::Rgba(left)
+                } else {
+                    image::Rgba(right)
+                }
+            },
+        );
+        encode_rgba_png(image, "seam image").expect("seam image png")
+    }
+
+    #[test]
+    fn ai_seam_continuity_accepts_continued_content() {
+        let mask = seam_mask_png();
+        let source = seam_image_png([128, 120, 110, 255], [128, 120, 110, 255]);
+        // The candidate carries the same content across the seam.
+        let mismatch = ai_seam_continuity_mismatch(&source, &mask, &source, "test")
+            .expect("mismatch")
+            .expect("measured");
+        assert!(mismatch < 2.0, "expected continuity, got {mismatch}");
+    }
+
+    #[test]
+    fn ai_seam_continuity_flags_unrelated_content() {
+        let mask = seam_mask_png();
+        let source = seam_image_png([150, 110, 70, 255], [150, 110, 70, 255]);
+        // The candidate composed unrelated content inside the editable area.
+        let candidate = seam_image_png([150, 110, 70, 255], [40, 90, 220, 255]);
+        let mismatch = ai_seam_continuity_mismatch(&source, &mask, &candidate, "test")
+            .expect("mismatch")
+            .expect("measured");
+        let lenient = ai_seam_mismatch_limit(2).expect("lenient limit");
+        let strict = ai_seam_mismatch_limit(3).expect("strict limit");
+        assert!(
+            mismatch > lenient && mismatch > strict,
+            "expected mismatch above both limits, got {mismatch}"
+        );
+    }
+
+    #[test]
+    fn ai_seam_continuity_skips_without_boundary_context() {
+        // A mask with no protected pixels (whole-canvas fill) has no seam.
+        let all_editable = {
+            let mask = image::RgbaImage::from_pixel(128, 128, image::Rgba([255, 255, 255, 255]));
+            encode_rgba_png(mask, "all editable").expect("mask png")
+        };
+        let source = seam_image_png([128, 120, 110, 255], [128, 120, 110, 255]);
+        let mismatch =
+            ai_seam_continuity_mismatch(&source, &all_editable, &source, "test").expect("mismatch");
+        assert!(mismatch.is_none());
+
+        // Transparent protected pixels (never-painted canvas) carry no context.
+        let transparent_source = seam_image_png([0, 0, 0, 0], [0, 0, 0, 0]);
+        let mismatch =
+            ai_seam_continuity_mismatch(&transparent_source, &seam_mask_png(), &source, "test")
+                .expect("mismatch");
+        assert!(mismatch.is_none());
+    }
+
+    #[test]
+    fn ai_seam_continuity_levels_gate_only_two_and_above() {
+        assert_eq!(ai_seam_mismatch_limit(0), None);
+        assert_eq!(ai_seam_mismatch_limit(1), None);
+        assert_eq!(ai_seam_mismatch_limit(2), Some(18.0));
+        assert_eq!(ai_seam_mismatch_limit(3), Some(9.0));
     }
 
     #[test]

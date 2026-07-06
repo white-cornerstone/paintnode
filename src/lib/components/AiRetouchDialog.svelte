@@ -17,7 +17,7 @@
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
-  import { aiRunOptionsFromSettings } from '../state/settings';
+  import { aiRunOptionsFromSettings, type AiEditChecksLevel } from '../state/settings';
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
@@ -31,6 +31,13 @@
 
   const desktop = isDesktop();
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
+
+  const editChecksLevels: { value: AiEditChecksLevel; label: string; hint: string }[] = [
+    { value: 0, label: 'Off', hint: 'No result checks — use when the edited areas are meant to differ from their surroundings (e.g. a grid or index sheet)' },
+    { value: 1, label: 'In-place', hint: 'Reject candidates that repaint pixels outside the mask (default)' },
+    { value: 2, label: '+ Seam', hint: 'Also reject content that does not continue the surrounding scene across the mask boundary' },
+    { value: 3, label: 'Strict', hint: 'Strictest seam-continuity checking; retries or fails on any visible content break' },
+  ];
   let prompt = $state(editor.pendingAiRetouch?.prompt ?? '');
   let busy = $state(false);
   let error = $state('');
@@ -376,6 +383,24 @@ Use these annotations as direct user instructions for the regions they point to.
       {/if}
     </label>
 
+    {#if !taskDetail && runOptions.provider !== 'custom'}
+      <div class="dlg-field">
+        <span>Result checks</span>
+        <div class="checks-tabs" role="group" aria-label="Result checks level">
+          {#each editChecksLevels as level (level.value)}
+            <button
+              type="button"
+              class:active={runOptions.editChecksLevel === level.value}
+              use:tooltip={{ text: level.hint, placement: 'top' }}
+              onclick={() => (runOptions.editChecksLevel = level.value)}
+            >
+              {level.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <p class="hint">
       PaintNode crops the canvas around the selected AI mask to a size the provider supports (splitting
       into sequential parts when the document is too wide or tall), sends it with the photo edit target
@@ -506,6 +531,28 @@ Use these annotations as direct user instructions for the regions they point to.
     display: grid;
     gap: 5px;
     color: var(--text-dim);
+  }
+  .checks-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .checks-tabs button {
+    border: none;
+    border-radius: 0;
+    background: var(--bg-input);
+    color: var(--text-dim);
+    padding: 5px 8px;
+  }
+  .checks-tabs button + button {
+    border-left: 1px solid var(--border-soft);
+  }
+  .checks-tabs button.active {
+    background: var(--accent);
+    color: #fff;
   }
   input,
   textarea {
