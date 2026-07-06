@@ -1025,10 +1025,10 @@ Only change pixels necessary to satisfy the user retouch prompt.
 The visible edit must stay inside the white/gray mask footprint.
 Do not use the mask as an instruction to repaint everything inside it. Treat `mask.png` as the maximum allowed edit area.
 Do not change unrequested content inside the mask.
-PaintNode will apply `mask.png` after you finish: white-mask pixels will be inserted from your generated candidate, gray-mask pixels will be blended with `source.png`, and black/transparent-mask protected pixels will be discarded and preserved from `source.png` by the app.
-Even so, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black or transparent. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
+PaintNode imports your candidate as a new layer and attaches `mask.png` as a separate linked layer mask: white-mask pixels show your candidate and black/transparent-mask pixels keep the original visible. The mask is never baked into your candidate's pixels, so the user can still edit the mask afterwards.
+Because of that, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black or transparent. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
 Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
-Any edit whose visible change extends outside the mask is a failed retouch, even if PaintNode later restores protected pixels. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
+Any edit whose visible change extends outside the mask is a failed retouch, even though the app masks the imported layer afterward. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
 
 Person preservation:
 You may redraw clothing inside the editable area.
@@ -3154,7 +3154,10 @@ mod tests {
         assert!(prompt_arg.contains("arrows, labels, and callout positions as guidance"));
         assert!(prompt_arg.contains("red arrows, yellow callout boxes, annotation text"));
         assert!(prompt_arg.contains("User retouch prompt:\nremove glare"));
-        assert!(prompt_arg.contains("PaintNode will apply `mask.png` after you finish"));
+        // The mask is attached as a separate editable layer mask, never baked
+        // into the candidate's pixels.
+        assert!(prompt_arg.contains("attaches `mask.png` as a separate linked layer mask"));
+        assert!(prompt_arg.contains("never baked into your candidate's pixels"));
         assert!(prompt_arg.contains(
             "visually identical to `source.png` everywhere `mask.png` is black or transparent"
         ));

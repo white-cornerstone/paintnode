@@ -580,9 +580,9 @@ Required output:
 - Treat the edit as an in-place retouch of the attached frame; do not crop, zoom, reframe, or shift it.
 - Treat `mask.png` as the maximum allowed edit area, not as an instruction to repaint every white pixel. Change only the content explicitly requested by the user prompt and preserve unrequested masked content.
 - Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
-- Any edit whose visible change extends outside the mask is a failed retouch, even if PaintNode later restores protected pixels. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
+- Any edit whose visible change extends outside the mask is a failed retouch, even though the app masks the imported layer afterward. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
 - If the prompt changes clothing or accessories, preserve the person's identity, face, hair, skin, hands, pose, body proportions, expression, gaze, and all unrequested surrounding content unless the user explicitly asks to alter those details.
-- Blend naturally through any gray feather buffer. PaintNode will apply the mask afterward, but your candidate should still preserve protected and unrequested areas.
+- Blend naturally through any gray feather buffer. PaintNode attaches the mask as a separate user-editable layer mask — it is never baked into your pixels — so your candidate itself must preserve protected and unrequested areas.
 - Keep every black/transparent-mask protected area visually identical to `source.png`: no enhancement, denoise, sharpening, relight, recolor, cleanup, straightening, or reframing outside the mask.
 - Use surrounding texture, lighting, perspective, grain, focus, and edges to blend the retouched area naturally.
 - Do not include UI chrome, checkerboard transparency, selection outlines, masks, annotations, labels, or guide marks in `result.png`.
@@ -610,10 +610,11 @@ fn antigravity_image_tool_call_note(job_dir: &str, working: &AiWorkingCanvas) ->
     };
     format!(
         r#"Image-generation tool call:
-- Give the image-generation tool `{job_dir}/edit_target.png` as its only base image and apply the edit to that image directly. Attach other files only when they are reference images explicitly listed above and the edit needs them.
-- Never attach `{job_dir}/mask.png` or `{job_dir}/paintnode_contract.txt` to the image tool. Read `{job_dir}/mask.png` yourself to locate the editable area, then describe that area in plain words in the tool instruction (for example "the jacket the person is wearing").{target_note}
-- Keep the tool instruction short: state the requested change, then require that everything else stays exactly the same — same framing, same composition, same camera, same crop.
-- Do not mention file names, pixel dimensions, aspect ratios, masks, or these rules inside the tool instruction text; the ratio and size belong in the tool's parameters only."#
+- Give the image-generation tool `{job_dir}/edit_target.png` as the base image (the first image) and apply the edit to that image directly.
+- Also attach `{job_dir}/mask.png` as the second image so the model sees exactly which area is editable. In the tool instruction, explain that the second image is an edit mask over the first: the white area marks the only region to change, black areas must be reproduced pixel-identically from the first image, and the mask itself must never appear in the output.
+- Never attach `{job_dir}/paintnode_contract.txt` to the image tool; attach other files only when they are reference images explicitly listed above and the edit needs them.{target_note}
+- Keep the tool instruction short: state the requested change and the mask rule, then require that everything else stays exactly the same — same framing, same composition, same camera, same crop.
+- Do not mention file names, pixel dimensions, or aspect ratios inside the tool instruction text; the ratio and size belong in the tool's parameters only."#
     )
 }
 
@@ -622,7 +623,7 @@ fn antigravity_image_tool_call_note(job_dir: &str, working: &AiWorkingCanvas) ->
 const AI_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejected:
 - The previous candidate repainted pixels outside the editable mask, which means the scene was regenerated instead of edited in place. PaintNode discarded it.
 - This is a strict in-place edit of `edit_target.png`: apply the requested change only inside the white mask area and reproduce every pixel outside the mask exactly as it appears in `edit_target.png`.
-- Call the image-generation tool with `edit_target.png` as the only base image and a short instruction; do not attach the mask or any other file.
+- Call the image-generation tool with `edit_target.png` as the base image and `mask.png` attached as the second image (the edit mask marking the only editable area), with a short instruction.
 - If the requested change cannot be honored inside the mask, make the closest faithful change the image tool allows rather than re-imagining the scene."#;
 
 /// How many candidates to accept-or-reject per part before failing the run:
@@ -664,9 +665,7 @@ PaintNode will do after `{result_path}` exists:
 - Validate that the file is a PNG.
 - Resize a same-aspect result back to the exact submitted crop dimensions if needed.
 - Paste the result into the document region recorded in `placement.json`.
-- Restore protected black-mask pixels from `source.png`.
-- Blend gray feather-buffer mask pixels between generated and source pixels.
-- Apply the editable mask as the linked retouch mask layer.
+- Import the pasted result as a new layer with the editable mask attached as a separate linked mask layer. The mask is never baked into your result pixels, so the user can still edit the mask afterwards.
 - Store the generated asset in the project.
 {method_limits}
 "#
@@ -2331,14 +2330,18 @@ mod tests {
         assert!(!retouch.contains(
             "Do not create, edit, copy, verify, or delete files in the working directory"
         ));
-        // The agent must drive its image tool with one base image and a short
-        // instruction — attaching the mask makes the model regenerate the scene.
+        // The agent must drive its image tool with the edit target as the
+        // base image and the mask attached as a labeled second image, so the
+        // model has a spatial anchor for the editable region.
         assert!(retouch.contains("Image-generation tool call:"));
         assert!(retouch.contains(
-            "`paintnode/antigravity-runs/job-1/part-1/edit_target.png` as its only base image"
+            "`paintnode/antigravity-runs/job-1/part-1/edit_target.png` as the base image"
+        ));
+        assert!(retouch.contains(
+            "Also attach `paintnode/antigravity-runs/job-1/part-1/mask.png` as the second image"
         ));
         assert!(retouch
-            .contains("Never attach `paintnode/antigravity-runs/job-1/part-1/mask.png`"));
+            .contains("Never attach `paintnode/antigravity-runs/job-1/part-1/paintnode_contract.txt`"));
         assert!(retouch.contains("same framing, same composition, same camera, same crop"));
         // The tool parameters must target the model's real output grid: the
         // smallest tier covering the 1386x588 crop at "21:9" is 1K (1584x672).
@@ -2369,7 +2372,11 @@ mod tests {
             .contains("Paste the result into the document region recorded in `placement.json`"));
         assert!(contract
             .contains("Resize a same-aspect result back to the exact submitted crop dimensions"));
-        assert!(contract.contains("Restore protected black-mask pixels"));
+        // The mask is attached as a separate editable layer mask, never baked
+        // into the result pixels.
+        assert!(contract.contains("attached as a separate linked mask layer"));
+        assert!(contract.contains("never baked into your result pixels"));
+        assert!(!contract.contains("Restore protected black-mask pixels"));
         assert!(contract.contains("Do not run Python, OpenCV, Pillow"));
         assert!(contract.contains("Do not keep working after"));
         assert!(!contract.contains("chroma"));
@@ -2407,8 +2414,10 @@ mod tests {
         );
         assert!(fill.contains("Image-generation tool call:"));
         assert!(fill.contains(
-            "`paintnode/antigravity-runs/job-3/edit_target.png` as its only base image"
+            "`paintnode/antigravity-runs/job-3/edit_target.png` as the base image"
         ));
-        assert!(fill.contains("Never attach `paintnode/antigravity-runs/job-3/mask.png`"));
+        assert!(fill.contains(
+            "Also attach `paintnode/antigravity-runs/job-3/mask.png` as the second image"
+        ));
     }
 }

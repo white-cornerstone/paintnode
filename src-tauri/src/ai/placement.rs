@@ -126,15 +126,13 @@ impl CoverageGrid {
         }
     }
 
-    /// Mark every pixel of `rect` that is editable in `editable` as covered.
-    fn mark_rect_where_editable(&mut self, rect: PixelRect, editable: &CoverageGrid) {
+    /// Mark every pixel of `rect` as covered.
+    fn mark_rect(&mut self, rect: PixelRect) {
         let rect = self.clamped(rect);
         for y in rect.y..rect.y + rect.height {
             let row = y as usize * self.width as usize;
             for x in rect.x..rect.x + rect.width {
-                if editable.coverage[row + x as usize] > 0 {
-                    self.coverage[row + x as usize] = 255;
-                }
+                self.coverage[row + x as usize] = 255;
             }
         }
     }
@@ -729,6 +727,12 @@ fn mix_rgba(old: image::Rgba<u8>, new: image::Rgba<u8>, weight: u8) -> image::Rg
 /// touches pixels an earlier part already generated, its result cross-fades
 /// over them across a feathered band instead of cutting hard at the part
 /// boundary — the hard cut is what made split runs look like stitched images.
+///
+/// The edit mask is deliberately NOT baked into the candidate: each part's
+/// raw result covers its whole crop rect, and the app applies the mask
+/// non-destructively via the linked mask layer, so the user keeps full power
+/// to edit the mask after import. The mask still shapes the per-part agent
+/// inputs (`part_inputs`).
 pub(crate) struct AiEditComposer {
     source: image::RgbaImage,
     edit_target: image::RgbaImage,
@@ -792,10 +796,11 @@ impl AiEditComposer {
         })
     }
 
-    /// Per-pixel paste weights for a part (crop-local, 0..=255): fresh
-    /// editable pixels take the part's result fully; pixels an earlier part
-    /// painted take it with a weight that ramps down over the feather band so
-    /// neighboring parts cross-fade; protected pixels never take it.
+    /// Per-pixel mask weights for a part's agent inputs (crop-local,
+    /// 0..=255): fresh editable pixels stay fully editable; pixels an
+    /// earlier part painted ramp down over the feather band into a gray
+    /// hand-off buffer; protected pixels stay protected. Used only to build
+    /// the per-part `mask.png` — pasting uses `part_paste_weights`.
     fn part_blend_weights(&self, crop: PixelRect) -> Vec<u8> {
         let width = crop.width as usize;
         let height = crop.height as usize;
@@ -925,8 +930,46 @@ impl AiEditComposer {
         encode_rgba_png(thumb, label)
     }
 
-    /// Paste a normalized part result (already resized to the part's crop size)
-    /// into the document composites, but only where this part's mask allowed edits.
+    /// Per-pixel paste weights for a part's result (crop-local, 0..=255):
+    /// the edit mask is NOT applied here — masking stays non-destructive in
+    /// the app via the linked mask layer. Fresh pixels take the result
+    /// fully; pixels an earlier part painted cross-fade over the feather
+    /// band so neighboring parts stitch without hard seams.
+    fn part_paste_weights(&self, crop: PixelRect) -> Vec<u8> {
+        let width = crop.width as usize;
+        let height = crop.height as usize;
+        let mut fresh = vec![false; width * height];
+        let mut any_fresh = false;
+        for y in 0..crop.height {
+            for x in 0..crop.width {
+                if !self.painted.is_covered(crop.x + x, crop.y + y) {
+                    fresh[y as usize * width + x as usize] = true;
+                    any_fresh = true;
+                }
+            }
+        }
+        let feather = part_feather_width(crop);
+        let distances = if any_fresh {
+            city_block_distances(&fresh, width, height)
+        } else {
+            vec![u32::MAX / 2; width * height]
+        };
+        let mut weights = vec![0_u8; width * height];
+        for (index, weight) in weights.iter_mut().enumerate() {
+            *weight = if fresh[index] {
+                255
+            } else {
+                let distance = distances[index].min(u32::from(feather));
+                (255 - distance * 255 / u32::from(feather)) as u8
+            };
+        }
+        weights
+    }
+
+    /// Paste a normalized part result (already resized to the part's crop
+    /// size) into the document composites across the whole crop rect. The
+    /// edit mask is not applied — the app masks the imported layer
+    /// non-destructively so the user can still edit the mask afterwards.
     pub(crate) fn apply_part_result(
         &mut self,
         part: &AiEditPart,
@@ -943,7 +986,7 @@ impl AiEditComposer {
                 result.height()
             ));
         }
-        let weights = self.part_blend_weights(part.crop);
+        let weights = self.part_paste_weights(part.crop);
         for y in 0..part.crop.height {
             for x in 0..part.crop.width {
                 let weight = weights[y as usize * part.crop.width as usize + x as usize];
@@ -965,13 +1008,12 @@ impl AiEditComposer {
                 self.edit_target.put_pixel(document_x, document_y, pixel);
             }
         }
-        self.painted
-            .mark_rect_where_editable(part.crop, &self.editable);
+        self.painted.mark_rect(part.crop);
         Ok(())
     }
 
-    /// Full-document candidate: original pixels everywhere except the pixels
-    /// the parts were allowed to edit.
+    /// Full-document candidate: the parts' raw results pasted at their crop
+    /// positions over the original pixels. The edit mask is not baked in.
     pub(crate) fn composed_png(&self, label: &str) -> Result<Vec<u8>, String> {
         encode_rgba_png(self.source.clone(), label)
     }
@@ -1501,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_pastes_part_results_only_inside_the_mask() {
+    fn composer_pastes_whole_part_rect_without_baking_the_mask() {
         let source = solid_png(64, 32, [0, 0, 200, 255]);
         let mask = mask_png_with_rects(64, 32, &[(8, 8, 16, 16)]);
         let placement =
@@ -1509,6 +1551,7 @@ mod tests {
                 .expect("placement");
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
+        assert_eq!((part.crop.width, part.crop.height), (64, 32));
 
         let mut composer =
             AiEditComposer::new(&source, &source, &mask, None, "AI retouch").expect("composer");
@@ -1517,12 +1560,16 @@ mod tests {
             .apply_part_result(part, &result, "AI retouch")
             .expect("apply");
 
+        // The raw result covers the whole crop rect — including pixels
+        // outside the edit mask. The app applies the mask non-destructively
+        // via the linked mask layer, so the user can still edit the mask
+        // after import.
         let composed = composer.composed_png("AI retouch").expect("composed");
         let composed = decode_png_rgba(&composed, "composed").expect("decode");
         assert_eq!(composed.dimensions(), (64, 32));
         assert_eq!(composed.get_pixel(10, 10).0, [200, 0, 0, 255]);
-        assert_eq!(composed.get_pixel(0, 0).0, [0, 0, 200, 255]);
-        assert_eq!(composed.get_pixel(40, 10).0, [0, 0, 200, 255]);
+        assert_eq!(composed.get_pixel(0, 0).0, [200, 0, 0, 255]);
+        assert_eq!(composed.get_pixel(40, 10).0, [200, 0, 0, 255]);
     }
 
     #[test]
