@@ -1,5 +1,6 @@
 <script lang="ts">
   import Panel from './Panel.svelte';
+  import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks, type AiTask } from '../state/aiTasks.svelte';
@@ -9,6 +10,29 @@
 
   const runningCount = $derived(aiTasks.tasks.filter((task) => task.status === 'running').length);
   const completedCount = $derived(aiTasks.tasks.filter((task) => task.status === 'completed').length);
+  const erroredCount = $derived(aiTasks.tasks.filter((task) => task.status === 'error').length);
+
+  // Confirmation before a Clear that would also drop failed tasks the user may
+  // still want to retry.
+  let confirmClear = $state(false);
+
+  function requestClear(): void {
+    if (erroredCount > 0) {
+      confirmClear = true;
+    } else {
+      aiTasks.clearCompleted();
+    }
+  }
+
+  function clearAll(): void {
+    aiTasks.clearFinished();
+    confirmClear = false;
+  }
+
+  function keepFailed(): void {
+    aiTasks.clearCompleted();
+    confirmClear = false;
+  }
 
   function statusLabel(task: AiTask): string {
     if (task.status === 'running') return 'Running';
@@ -32,13 +56,13 @@
 
 <Panel title={runningCount > 0 ? `Tasks (${runningCount})` : 'Tasks'} {grow} bind:collapsed>
   {#snippet actions()}
-    {#if completedCount > 0}
+    {#if completedCount > 0 || erroredCount > 0}
       <button
         class="clear-completed"
         type="button"
-        aria-label="Clear completed tasks"
-        use:tooltip={{ text: 'Clear completed tasks', placement: 'left' }}
-        onclick={() => aiTasks.clearCompleted()}
+        aria-label="Clear finished tasks"
+        use:tooltip={{ text: 'Clear finished tasks', placement: 'left' }}
+        onclick={requestClear}
       >
         <Icon svg={Broom} size={14} />
       </button>
@@ -107,16 +131,29 @@
               >
                 <Icon svg={Dismiss} size={13} />
               </button>
-            {:else if aiTasks.canRetry(task)}
-              <button
-                class="task-action"
-                type="button"
-                aria-label={`Retry ${task.title}`}
-                use:tooltip={{ text: 'Retry task', placement: 'left' }}
-                onclick={() => aiTasks.retry(task.id)}
-              >
-                <Icon svg={ArrowSync} size={13} />
-              </button>
+            {:else if task.status === 'error'}
+              <div class="task-actions">
+                {#if aiTasks.canRetry(task)}
+                  <button
+                    class="task-action"
+                    type="button"
+                    aria-label={`Retry ${task.title}`}
+                    use:tooltip={{ text: 'Retry task', placement: 'left' }}
+                    onclick={() => aiTasks.retry(task.id)}
+                  >
+                    <Icon svg={ArrowSync} size={13} />
+                  </button>
+                {/if}
+                <button
+                  class="task-action"
+                  type="button"
+                  aria-label={`Dismiss ${task.title}`}
+                  use:tooltip={{ text: 'Dismiss task', placement: 'left' }}
+                  onclick={() => aiTasks.dismissErrorTask(task.id)}
+                >
+                  <Icon svg={Dismiss} size={13} />
+                </button>
+              </div>
             {/if}
           </div>
         {/each}
@@ -124,6 +161,30 @@
     {/if}
   </div>
 </Panel>
+
+{#if confirmClear}
+  <Modal title="Clear Tasks" onClose={() => (confirmClear = false)} width={420}>
+    <p class="confirm-text">
+      {#if completedCount > 0}
+        This clears {completedCount} completed
+        {completedCount === 1 ? 'task' : 'tasks'}. Also dismiss {erroredCount} failed
+        {erroredCount === 1 ? 'task' : 'tasks'}?
+      {:else}
+        Dismiss {erroredCount} failed {erroredCount === 1 ? 'task' : 'tasks'}?
+      {/if}
+    </p>
+    <p class="confirm-note">Dismissed failed tasks can no longer be retried.</p>
+    <div class="dlg-actions">
+      {#if completedCount > 0}
+        <button type="button" onclick={keepFailed}>Keep Failed</button>
+      {/if}
+      <button type="button" onclick={() => (confirmClear = false)}>Cancel</button>
+      <button type="button" class="dlg-primary" onclick={clearAll}>
+        {completedCount > 0 ? 'Clear All' : 'Dismiss All'}
+      </button>
+    </div>
+  </Modal>
+{/if}
 
 <style>
   .clear-completed {
@@ -202,6 +263,11 @@
   .task-open:hover,
   .task-open:focus-visible {
     background: transparent;
+  }
+  .task-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
   }
   .task-action {
     display: grid;
@@ -297,5 +363,17 @@
     to {
       transform: rotate(360deg);
     }
+  }
+  .confirm-text {
+    margin: 0;
+    color: var(--text-bright);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .confirm-note {
+    margin: 8px 0 16px;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.45;
   }
 </style>

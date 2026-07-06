@@ -343,6 +343,24 @@ class AiTaskStore {
     this.persistProject(task?.projectPath ?? this.activeProjectPath);
   }
 
+  /** Dismiss a single failed task, leaving running/completed tasks untouched. */
+  dismissErrorTask(id: string): void {
+    const task = this.find(id);
+    this.allTasks = this.allTasks.filter((item) => item.id !== id || item.status !== 'error');
+    this.persistProject(task?.projectPath ?? this.activeProjectPath);
+  }
+
+  /** Clear every finished task the panel shows — both completed and failed. */
+  clearFinished(): void {
+    const projectPath = this.activeProjectPath;
+    this.allTasks = this.allTasks.filter(
+      (task) =>
+        (task.projectPath !== projectPath && task.projectPath !== null) ||
+        (task.status !== 'completed' && task.status !== 'error'),
+    );
+    this.persistProject(projectPath);
+  }
+
   setProjectPath(projectPath: string | null): void {
     this.activeProjectPath = projectPath;
     if (!projectPath || this.loadedProjectPaths.has(projectPath)) return;
