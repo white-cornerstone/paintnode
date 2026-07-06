@@ -36,10 +36,10 @@ use crate::ai::{
     emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
     project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
     safe_job_child_path, sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
-    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_reference_pngs,
-    AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
-    DecoupledLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    POLL_INTERVAL,
+    synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
+    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
+    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 use crate::png::{is_png, png_data_url, png_dimensions_from_bytes, read_png_data_url};
 use crate::project::{
@@ -1966,21 +1966,59 @@ pub(crate) async fn decouple_antigravity_image(
             run_id.clone(),
             Some("manifest.json"),
         )?;
-        if !run.output.status.success() {
-            return Err(command_failure_with_required_output(
-                "Antigravity asset extraction",
-                &run.output,
-                &job_path,
-                "manifest.json",
-            ));
-        }
         let manifest_path = job_path.join("manifest.json");
-        let manifest_text = fs::read_to_string(&manifest_path).map_err(|e| {
-            format!(
-                "Antigravity did not create manifest.json at {}: {e}",
-                manifest_path.display()
-            )
-        })?;
+        if !run.output.status.success() && !run.satisfied_required_output && !manifest_path.exists()
+        {
+            match synthesize_decouple_asset_manifest(&job_path)? {
+                Some(count) => emit_codex_progress(
+                    &app,
+                    &run_id,
+                    format!("Synthesized asset manifest from {count} Antigravity PNG outputs"),
+                ),
+                None => {
+                    return Err(command_failure_with_required_output(
+                        "Antigravity asset extraction",
+                        &run.output,
+                        &job_path,
+                        "manifest.json",
+                    ));
+                }
+            }
+        }
+        let manifest_text = match fs::read_to_string(&manifest_path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match synthesize_decouple_asset_manifest(&job_path)? {
+                    Some(count) => {
+                        emit_codex_progress(
+                            &app,
+                            &run_id,
+                            format!(
+                                "Synthesized asset manifest from {count} Antigravity PNG outputs"
+                            ),
+                        );
+                        fs::read_to_string(&manifest_path).map_err(|read_error| {
+                            format!(
+                                "Failed to read synthesized asset manifest at {}: {read_error}",
+                                manifest_path.display()
+                            )
+                        })?
+                    }
+                    None => {
+                        return Err(format!(
+                            "Antigravity did not create manifest.json at {}: {e}",
+                            manifest_path.display()
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Antigravity did not create manifest.json at {}: {e}",
+                    manifest_path.display()
+                ));
+            }
+        };
         let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
             .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
         if manifest.layers.is_empty() {
