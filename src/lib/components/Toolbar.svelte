@@ -411,7 +411,7 @@
         style="background:{editor.backgroundCss}"
         use:tooltip={{ text: 'Background color', placement: 'right' }}
         aria-label="Background color"
-        onclick={() => editor.swapColors()}
+        onclick={() => ui.openColorPicker('background')}
         disabled={!hasDocument}
       ></button>
       <button
@@ -419,7 +419,7 @@
         style="background:{editor.foregroundCss}"
         use:tooltip={{ text: 'Foreground color', placement: 'right' }}
         aria-label="Foreground color"
-        onclick={() => editor.swapColors()}
+        onclick={() => ui.openColorPicker('foreground')}
         disabled={!hasDocument}
       ></button>
       <button

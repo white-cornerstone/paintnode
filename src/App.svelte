@@ -8,6 +8,7 @@
   import CanvasView from './lib/components/CanvasView.svelte';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import ColorPanel from './lib/components/ColorPanel.svelte';
+  import ColorPickerDialog from './lib/components/ColorPickerDialog.svelte';
   import SwatchesPanel from './lib/components/SwatchesPanel.svelte';
   import GradientsPanel from './lib/components/GradientsPanel.svelte';
   import PatternsPanel from './lib/components/PatternsPanel.svelte';
@@ -258,6 +259,12 @@
       panels.value.tasksPanelHeight + step,
       maxTasksPanelHeight(divider),
     );
+  }
+
+  function applyPickedColor(rgb: { r: number; g: number; b: number }): void {
+    if (ui.colorPickerTarget === 'foreground') editor.setForeground(rgb);
+    else if (ui.colorPickerTarget === 'background') editor.setBackground(rgb);
+    ui.closeColorPicker();
   }
 
   function documentDisplayName(session: DocumentSession): string {
@@ -1134,6 +1141,16 @@
   {@render lazyDialog(loadSettingsDialog)}
 {:else if ui.dialog === 'update'}
   {@render lazyDialog(loadUpdateDialog)}
+{/if}
+
+{#if ui.colorPickerTarget}
+  <ColorPickerDialog
+    target={ui.colorPickerTarget}
+    initialColor={ui.colorPickerTarget === 'foreground' ? editor.foreground : editor.background}
+    currentColor={ui.colorPickerTarget === 'foreground' ? editor.foreground : editor.background}
+    onApply={applyPickedColor}
+    onClose={() => ui.closeColorPicker()}
+  />
 {/if}
 
 {#if ui.fontEmbed}

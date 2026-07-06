@@ -25,6 +25,7 @@ export type DialogId =
 
 export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust';
 export type AiAutoAdjustKind = 'tone' | 'contrast' | 'color';
+export type ColorPickerTarget = 'foreground' | 'background';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
@@ -45,6 +46,7 @@ class UiState {
   cursor = $state<{ x: number; y: number } | null>(null);
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
+  colorPickerTarget = $state<ColorPickerTarget | null>(null);
   aiTaskDialog = $state<{ kind: AiTaskDialogKind; id: string } | null>(null);
   aiAutoAdjustKind = $state<AiAutoAdjustKind>('tone');
   activeSurface = $state<'document' | 'workflow'>('document');
@@ -82,6 +84,12 @@ class UiState {
   openAiAutoAdjust(kind: AiAutoAdjustKind): void {
     this.aiAutoAdjustKind = kind;
     this.open('aiAutoAdjust');
+  }
+  openColorPicker(target: ColorPickerTarget): void {
+    this.colorPickerTarget = target;
+  }
+  closeColorPicker(): void {
+    this.colorPickerTarget = null;
   }
   consumeAiGeneratePrefill(): string | null {
     const value = this.aiGeneratePrefill;
