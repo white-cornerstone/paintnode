@@ -60,7 +60,7 @@
     saveWorkflowCommand,
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
-  import { isDesktop, quitApplication, takePendingOpenPaths } from './lib/integrations/desktop';
+  import { isDesktop, quitApplication, setNativeMenuEnabledStates, takePendingOpenPaths } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, TASKS_PANEL_MIN_HEIGHT, type PanelGroupId, type PanelId } from './lib/state/panels';
   import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
@@ -111,6 +111,7 @@
   let isFullscreen = $state(false);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
+  let nativeMenuStateKey = '';
 
   type PanelDef = { id: PanelId; title: string; icon: string; grow?: boolean };
   type PanelGroupDef = { id: PanelGroupId; panels: PanelDef[]; grow?: boolean };
@@ -372,8 +373,103 @@
     }
   }
 
+  function nativeMenuEnabledStates(): Record<string, boolean> {
+    editor.rev;
+    const doc = editor.doc;
+    const layer = editor.activeLayer;
+    const hasDoc = !!doc;
+    const hasLayer = !!layer;
+    const hasEditableLayer = !!layer && !layer.locked;
+    const hasSelection = !!editor.selection;
+    const hasOpenTarget = hasDoc || (ui.activeSurface === 'workflow' && workflow.active);
+    const hasLockedLayer = !!doc?.layers.some((item) => item.locked);
+    const hasPsdProtectedLayer = !!doc?.layers.some((item) => item.locked || item.psdMask || item.psd?.clipping);
+    const canTransformDocument = hasDoc && !hasPsdProtectedLayer;
+    const activeLayerId = layer?.id ?? null;
+    const activeLayerIndex = doc && activeLayerId ? doc.indexOf(activeLayerId) : -1;
+    const deletionIds = doc && activeLayerId ? doc.linkedLayerDeletionIds(activeLayerId) : [];
+    const canDeleteActiveLayer =
+      !!doc &&
+      deletionIds.length > 0 &&
+      doc.layers.length - deletionIds.length > 0 &&
+      deletionIds.every((layerId) => !doc.layers.find((item) => item.id === layerId)?.locked);
+    const canMergeDown =
+      !!doc && activeLayerIndex > 0 && !doc.layers[activeLayerIndex]?.locked && !doc.layers[activeLayerIndex - 1]?.locked;
+    const canFlatten = !!doc && doc.layers.length > 1 && !hasLockedLayer;
+    const canRasterizeType = layer?.kind === 'text' && !layer.locked;
+    const hasViewport = hasDoc && !!editor.viewport;
+
+    return {
+      'app:place-image': hasDoc,
+      'app:save-ora': hasOpenTarget,
+      'app:save-copy-ora': hasOpenTarget,
+      'app:export-png': hasDoc,
+      'app:export-psd': hasDoc,
+      'app:close-document': hasDoc,
+      'app:undo': editor.canUndo,
+      'app:redo': editor.canRedo,
+      'app:cut': hasEditableLayer,
+      'app:copy': hasLayer,
+      'app:paste': hasDoc && !!editor.clipboard,
+      'app:fill-foreground': hasEditableLayer,
+      'app:fill-background': hasEditableLayer,
+      'app:clear': hasEditableLayer,
+      'app:free-transform': hasEditableLayer && !editor.freeTransform && !layer?.psdMask,
+      'app:image-adjustments': hasEditableLayer,
+      'app:brightness-contrast': hasEditableLayer,
+      'app:levels': hasEditableLayer,
+      'app:hue-saturation': hasEditableLayer,
+      'app:threshold': hasEditableLayer,
+      'app:invert': hasEditableLayer,
+      'app:desaturate': hasEditableLayer,
+      'app:ai-auto-tone': hasDoc,
+      'app:ai-auto-contrast': hasDoc,
+      'app:ai-auto-color': hasDoc,
+      'app:image-size': canTransformDocument,
+      'app:image-ai-upscale': hasDoc,
+      'app:canvas-size': canTransformDocument,
+      'app:image-rotation': canTransformDocument,
+      'app:rotate-180': canTransformDocument,
+      'app:rotate-cw': canTransformDocument,
+      'app:rotate-ccw': canTransformDocument,
+      'app:flip-horizontal': canTransformDocument,
+      'app:flip-vertical': canTransformDocument,
+      'app:crop-to-selection': canTransformDocument && hasSelection,
+      'app:trim': canTransformDocument,
+      'app:reveal-all': hasDoc && !hasLockedLayer,
+      'app:duplicate-document': hasDoc,
+      'app:new-layer': hasDoc,
+      'app:duplicate-layer': hasEditableLayer,
+      'app:delete-layer': canDeleteActiveLayer,
+      'app:rasterize-type': canRasterizeType,
+      'app:merge-down': canMergeDown,
+      'app:flatten': canFlatten,
+      'app:select-all': hasDoc,
+      'app:deselect': hasDoc && hasSelection,
+      'app:inverse-selection': hasDoc && hasSelection,
+      'app:gaussian-blur': hasEditableLayer,
+      'app:sharpen': hasEditableLayer,
+      'app:ai-decouple': hasLayer,
+      'app:ai-upscale': hasDoc,
+      'app:zoom-in': hasViewport,
+      'app:zoom-out': hasViewport,
+      'app:fit-screen': hasViewport,
+      'app:actual-pixels': hasViewport,
+    };
+  }
+
+  $effect(() => {
+    if (!desktop) return;
+    const enabled = nativeMenuEnabledStates();
+    const nextKey = JSON.stringify(enabled);
+    if (nextKey === nativeMenuStateKey) return;
+    nativeMenuStateKey = nextKey;
+    void setNativeMenuEnabledStates(enabled);
+  });
+
   function runAppMenuAction(id: string): void {
     if (runEditableMenuAction(id)) return;
+    if (nativeMenuEnabledStates()[id] === false) return;
 
     const activeId = () => editor.activeLayer?.id;
     switch (id) {

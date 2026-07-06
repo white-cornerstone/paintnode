@@ -1,5 +1,6 @@
 //! App-level utility commands: clipboard, memory stats, native file drops, quit.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,9 +10,11 @@ use std::time::SystemTime;
 use serde::Serialize;
 use sysinfo::Pid;
 use sysinfo::System;
+use tauri::menu::MenuItemKind;
 use tauri::AppHandle;
 use tauri::Emitter;
 use tauri::Manager;
+use tauri::Runtime;
 
 use crate::project::mime_for_path;
 
@@ -111,6 +114,49 @@ pub(crate) fn app_memory_info() -> Result<AppMemoryInfo, String> {
         resident_bytes,
         process_count,
     })
+}
+
+fn find_menu_item<R: Runtime>(items: Vec<MenuItemKind<R>>, id: &str) -> Option<MenuItemKind<R>> {
+    for item in items {
+        if item.id().as_ref() == id {
+            return Some(item);
+        }
+        if let MenuItemKind::Submenu(submenu) = &item {
+            if let Ok(children) = submenu.items() {
+                if let Some(found) = find_menu_item(children, id) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn set_menu_item_enabled<R: Runtime>(item: &MenuItemKind<R>, enabled: bool) -> tauri::Result<()> {
+    match item {
+        MenuItemKind::MenuItem(item) => item.set_enabled(enabled),
+        MenuItemKind::Submenu(item) => item.set_enabled(enabled),
+        MenuItemKind::Check(item) => item.set_enabled(enabled),
+        MenuItemKind::Icon(item) => item.set_enabled(enabled),
+        MenuItemKind::Predefined(_) => Ok(()),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn set_app_menu_enabled(
+    app: AppHandle,
+    enabled: HashMap<String, bool>,
+) -> Result<(), String> {
+    let menu = app
+        .menu()
+        .ok_or_else(|| "Application menu is unavailable".to_string())?;
+    for (id, is_enabled) in enabled {
+        let items = menu.items().map_err(|error| error.to_string())?;
+        if let Some(item) = find_menu_item(items, &id) {
+            set_menu_item_enabled(&item, is_enabled).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
