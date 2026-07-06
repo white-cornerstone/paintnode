@@ -113,8 +113,10 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     // A blank-canvas fill has nothing to preserve or extend, so it runs through
     // the plain generate path (one document-sized image) rather than the tiled
     // mask-guided in-place edit — it is still inserted as a mask-linked fill.
+    // The Plain fill method uses that same path intentionally for selected fills.
     // `fillEdit` is the subset that actually needs the mask-guided backend.
-    const fillEdit = fillInput && !fillInput.blankCanvas ? fillInput : null;
+    const plainFill = fillInput && runOptions.fillMethod === 'plainGenerate';
+    const fillEdit = fillInput && !fillInput.blankCanvas && !plainFill ? fillInput : null;
     const generationPrompt = userPrompt;
     const generationTarget = fillEdit ? null : targetDimensions();
     const keepJobDir = settings.value.workspace.keepAiRunInputs;

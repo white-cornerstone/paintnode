@@ -13,7 +13,7 @@
   import { ui } from '../state/ui.svelte';
   import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
-  import type { AiEditChecksLevel } from '../state/settings';
+  import type { AiEditChecksLevel, GenerativeFillMethod, GenerativeFillRedundancy } from '../state/settings';
   import { Add, Copy, Dismiss } from '../icons';
 
   const editChecksLevels: { value: AiEditChecksLevel; label: string; hint: string }[] = [
@@ -21,6 +21,19 @@
     { value: 1, label: 'In-place', hint: 'Reject candidates that repaint pixels outside the mask (default)' },
     { value: 2, label: '+ Seam', hint: 'Also reject content that does not continue the surrounding scene across the mask boundary' },
     { value: 3, label: 'Strict', hint: 'Strictest seam-continuity checking; retries or fails on any visible content break' },
+  ];
+  const fillMethods: { value: GenerativeFillMethod; label: string; hint: string }[] = [
+    { value: 'auto', label: 'Auto', hint: 'Choose the best fill plan from the provider, mask coverage, and document shape' },
+    { value: 'exactInPlace', label: 'Exact', hint: 'Use the current in-place crop or split plan for local edits and supported ratios' },
+    { value: 'wideCover', label: 'Cover', hint: 'Use one wider provider frame, then scale and crop it back into the document' },
+    { value: 'wideStarterContinue', label: 'Starter', hint: 'Start with the widest good scene anchor, then continue with overlapping parts' },
+    { value: 'balancedStrips', label: 'Strips', hint: 'Use overlapping strips of similar size across the long axis' },
+    { value: 'plainGenerate', label: 'Plain', hint: 'Generate one full image and apply the selection mask afterward' },
+  ];
+  const fillRedundancies: { value: GenerativeFillRedundancy; label: string; hint: string }[] = [
+    { value: 'low', label: 'Low', hint: 'Lean continuation frames with minimal repeated generated context' },
+    { value: 'medium', label: 'Medium', hint: 'More repeated context for later parts; good default for wide Antigravity fills' },
+    { value: 'high', label: 'High', hint: 'Maximum continuation context, using larger repeated frames when the provider supports them' },
   ];
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
@@ -214,6 +227,38 @@
 
       {#if editor.selection && runOptions.provider !== 'custom'}
         <div class="dlg-field">
+          <span>Fill method</span>
+          <div class="method-tabs" role="group" aria-label="Generative fill method">
+            {#each fillMethods as method (method.value)}
+              <button
+                type="button"
+                class:active={runOptions.fillMethod === method.value}
+                use:tooltip={{ text: method.hint, placement: 'top' }}
+                onclick={() => (runOptions.fillMethod = method.value)}
+              >
+                {method.label}
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        <div class="dlg-field">
+          <span>Context</span>
+          <div class="method-tabs" role="group" aria-label="Generative fill context redundancy">
+            {#each fillRedundancies as level (level.value)}
+              <button
+                type="button"
+                class:active={runOptions.fillRedundancy === level.value}
+                use:tooltip={{ text: level.hint, placement: 'top' }}
+                onclick={() => (runOptions.fillRedundancy = level.value)}
+              >
+                {level.label}
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        <div class="dlg-field">
           <span>Result checks</span>
           <div class="checks-tabs" role="group" aria-label="Result checks level">
             {#each editChecksLevels as level (level.value)}
@@ -357,6 +402,31 @@
     border-left: 1px solid var(--border-soft);
   }
   .checks-tabs button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .method-tabs {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 0;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .method-tabs button {
+    min-width: 0;
+    border: none;
+    border-radius: 0;
+    background: var(--bg-input);
+    color: var(--text-dim);
+    padding: 5px 6px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .method-tabs button + button {
+    border-left: 1px solid var(--border-soft);
+  }
+  .method-tabs button.active {
     background: var(--accent);
     color: #fff;
   }

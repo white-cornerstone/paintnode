@@ -1797,11 +1797,9 @@ export class EditorStore implements ToolHost {
     this.structural(
       'Canvas Size',
       () => {
-        const layers = doc.layers.map((layer) => {
-          const next = this.cloneLayerExact(layer);
-          next.x = layer.x + xOffset;
-          next.y = layer.y + yOffset;
-          return next;
+        const activeLayerId = doc.activeLayerId;
+        const layers = this.remapLayers(w, h, (c, layer) => {
+          c.drawImage(layer.canvas, layer.x + xOffset, layer.y + yOffset);
         });
         const css = this.canvasExtensionFillCss(fill);
         if (css) {
@@ -1829,6 +1827,8 @@ export class EditorStore implements ToolHost {
         doc.width = w;
         doc.height = h;
         doc.layers = layers;
+        doc.activeLayerId =
+          activeLayerId && layers.some((layer) => layer.id === activeLayerId) ? activeLayerId : (layers.at(-1)?.id ?? null);
       },
       true,
     );

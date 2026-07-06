@@ -26,8 +26,9 @@ use crate::ai::canvas::{
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
     ai_upscale_target_dimensions, cover_crop_png_to_dimensions, plan_ai_edit_placement,
-    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, AiEditComposer, AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
+    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
+    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
@@ -1172,6 +1173,8 @@ pub(crate) async fn generate_antigravity_fill_image(
     approval_mode: Option<String>,
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
+    fill_method: Option<String>,
+    fill_redundancy: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -1196,6 +1199,8 @@ pub(crate) async fn generate_antigravity_fill_image(
         let options = antigravity_command_options(model, approval_mode);
         let autonomy = ai_autonomy_level(autonomy_level);
         let checks_level = ai_edit_checks_level(edit_checks_level);
+        let fill_method = AiFillMethod::from_option(fill_method);
+        let fill_redundancy = AiFillRedundancy::from_option(fill_redundancy);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-fill-{}", now_id())
         } else {
@@ -1220,8 +1225,10 @@ pub(crate) async fn generate_antigravity_fill_image(
             .to_path_buf();
         let new_antigravity_project = job_project_dir.is_none();
 
-        let placement = plan_ai_edit_placement(
+        let placement = plan_ai_fill_placement(
             AiEditProvider::Antigravity,
+            fill_method,
+            fill_redundancy,
             source_dimensions,
             &mask_png,
             "Generative fill",
@@ -1355,8 +1362,8 @@ pub(crate) async fn generate_antigravity_fill_image(
                                 "Normalized Antigravity fill from {}x{} to {}x{}",
                                 result_dimensions.0,
                                 result_dimensions.1,
-                                part.crop.width,
-                                part.crop.height
+                                part.working.original_dimensions.0,
+                                part.working.original_dimensions.1
                             ),
                         ),
                     );
@@ -2438,8 +2445,9 @@ mod tests {
         assert!(retouch.contains(
             "Also attach `paintnode/antigravity-runs/job-1/part-2/mask.png` as the second image"
         ));
-        assert!(retouch
-            .contains("Never attach `paintnode/antigravity-runs/job-1/part-2/paintnode_contract.txt`"));
+        assert!(retouch.contains(
+            "Never attach `paintnode/antigravity-runs/job-1/part-2/paintnode_contract.txt`"
+        ));
         assert!(retouch.contains("same framing, same composition, same camera, same crop"));
         // Continuation parts hand the overview to the image model as a
         // scene-continuity reference and phrase the instruction as a
@@ -2525,9 +2533,9 @@ mod tests {
             &ai_exact_working_canvas((600, 600), "1:1"),
         );
         assert!(fill.contains("Image-generation tool call:"));
-        assert!(fill.contains(
-            "`paintnode/antigravity-runs/job-3/edit_target.png` as the base image"
-        ));
+        assert!(
+            fill.contains("`paintnode/antigravity-runs/job-3/edit_target.png` as the base image")
+        );
         assert!(fill.contains(
             "Also attach `paintnode/antigravity-runs/job-3/mask.png` as the second image"
         ));

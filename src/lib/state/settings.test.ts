@@ -79,6 +79,17 @@ describe('settings normalization', () => {
     expect(normalizeSettings({ ai: { editChecksLevel: 'strict' } }).ai.editChecksLevel).toBe(1);
   });
 
+  it('defaults and normalizes the generative fill method', () => {
+    expect(defaultSettings().ai.fillMethod).toBe('auto');
+    expect(normalizeSettings({ ai: {} }).ai.fillMethod).toBe('auto');
+    expect(normalizeSettings({ ai: { fillMethod: 'wideCover' } }).ai.fillMethod).toBe('wideCover');
+    expect(normalizeSettings({ ai: { fillMethod: 'old-wide' } }).ai.fillMethod).toBe('auto');
+    expect(defaultSettings().ai.fillRedundancy).toBe('medium');
+    expect(normalizeSettings({ ai: {} }).ai.fillRedundancy).toBe('medium');
+    expect(normalizeSettings({ ai: { fillRedundancy: 'high' } }).ai.fillRedundancy).toBe('high');
+    expect(normalizeSettings({ ai: { fillRedundancy: 'extreme' } }).ai.fillRedundancy).toBe('medium');
+  });
+
   it('recovers from malformed JSON', () => {
     expect(parseSettingsJson('{not json').ai.model).toBe('gpt-5.5');
   });
@@ -146,6 +157,8 @@ describe('settings normalization', () => {
 
     expect(runOptions.antigravityBin).toBe('/bin/agy');
     expect(runOptions.autonomyLevel).toBe('guided');
+    expect(runOptions.fillMethod).toBe('auto');
+    expect(runOptions.fillRedundancy).toBe('medium');
     expect(value.ai.provider).toBe('antigravity');
   });
 });

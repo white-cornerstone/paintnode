@@ -24,8 +24,9 @@ use crate::ai::canvas::{
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
     ai_upscale_target_dimensions, cover_crop_png_to_dimensions, plan_ai_edit_placement,
-    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, AiEditComposer, AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
+    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
+    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
@@ -1811,6 +1812,8 @@ pub(crate) async fn generate_codex_fill_image(
     service_tier: Option<String>,
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
+    fill_method: Option<String>,
+    fill_redundancy: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -1848,6 +1851,8 @@ pub(crate) async fn generate_codex_fill_image(
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
         let checks_level = ai_edit_checks_level(edit_checks_level);
+        let fill_method = AiFillMethod::from_option(fill_method);
+        let fill_redundancy = AiFillRedundancy::from_option(fill_redundancy);
         let run_id = if run_id.trim().is_empty() {
             format!("fill-{}", now_id())
         } else {
@@ -1867,8 +1872,10 @@ pub(crate) async fn generate_codex_fill_image(
             temp_job.path().to_path_buf()
         };
 
-        let placement = plan_ai_edit_placement(
+        let placement = plan_ai_fill_placement(
             AiEditProvider::Codex,
+            fill_method,
+            fill_redundancy,
             source_dimensions,
             &mask_png,
             "Generative fill",
@@ -1975,8 +1982,8 @@ pub(crate) async fn generate_codex_fill_image(
                                 "Normalized Codex fill from {}x{} to {}x{}",
                                 part_run.result_dimensions.0,
                                 part_run.result_dimensions.1,
-                                part.crop.width,
-                                part.crop.height
+                                part.working.original_dimensions.0,
+                                part.working.original_dimensions.1
                             ),
                         ),
                     );

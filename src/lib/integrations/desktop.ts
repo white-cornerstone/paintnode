@@ -6,6 +6,8 @@ import type {
   CodexModelId,
   AntigravityApprovalMode,
   AntigravityModelId,
+  GenerativeFillMethod,
+  GenerativeFillRedundancy,
   ReasoningEffort,
   ServiceTier,
 } from '../state/settings';
@@ -104,6 +106,10 @@ export interface CodexGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
+  /** Geometry strategy for mask-guided generative fill. */
+  fillMethod?: GenerativeFillMethod | null;
+  /** How much generated context later fill parts may re-submit for continuity. */
+  fillRedundancy?: GenerativeFillRedundancy | null;
 }
 
 export interface AntigravityGeneratorConfig {
@@ -123,6 +129,10 @@ export interface AntigravityGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
+  /** Geometry strategy for mask-guided generative fill. */
+  fillMethod?: GenerativeFillMethod | null;
+  /** How much generated context later fill parts may re-submit for continuity. */
+  fillRedundancy?: GenerativeFillRedundancy | null;
 }
 
 export interface TargetDimensions {
@@ -252,6 +262,8 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     serviceTier: config.serviceTier ?? 'default',
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
+    fillMethod: config.fillMethod ?? 'auto',
+    fillRedundancy: config.fillRedundancy ?? 'medium',
   };
 }
 
@@ -265,6 +277,8 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
     approvalMode: config.approvalMode ?? 'skipPermissions',
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
+    fillMethod: config.fillMethod ?? 'auto',
+    fillRedundancy: config.fillRedundancy ?? 'medium',
   };
 }
 
@@ -284,6 +298,8 @@ export function codexConfigFromRunOptions(
     serviceTier: options.serviceTier,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
+    fillMethod: options.fillMethod,
+    fillRedundancy: options.fillRedundancy,
   };
 }
 
@@ -302,6 +318,8 @@ export function antigravityConfigFromRunOptions(
     approvalMode: options.antigravityApprovalMode,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
+    fillMethod: options.fillMethod,
+    fillRedundancy: options.fillRedundancy,
   };
 }
 

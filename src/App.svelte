@@ -413,11 +413,13 @@
       'app:export-png': hasDoc,
       'app:export-psd': hasDoc,
       'app:close-document': hasDoc,
-      'app:undo': editor.canUndo,
-      'app:redo': editor.canRedo,
-      'app:cut': hasEditableLayer,
-      'app:copy': hasLayer,
-      'app:paste': hasDoc && !!editor.clipboard,
+      // Keep native Edit shortcuts enabled so focused text controls in dialogs
+      // can receive Cmd+Z/X/C/V even when no document/layer action is available.
+      'app:undo': true,
+      'app:redo': true,
+      'app:cut': true,
+      'app:copy': true,
+      'app:paste': true,
       'app:fill-foreground': hasEditableLayer,
       'app:fill-background': hasEditableLayer,
       'app:clear': hasEditableLayer,
