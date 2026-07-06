@@ -23,22 +23,22 @@ use crate::ai::canvas::{
 };
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
-    ai_upscale_target_dimensions,
-    cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
-    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result, AiEditComposer,
-    AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_upscale_target_dimensions, cover_crop_png_to_dimensions, plan_ai_edit_placement,
+    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
+    reuse_part_result, AiEditComposer, AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled, clean_option,
-    cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
-    codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
-    emit_codex_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
-    optional_project_dir, output_tail, project_agent_run_dir, project_agent_run_dir_for_run,
-    reference_prompt_note, safe_job_child_path, safe_png_source_file_name, should_keep_job_dir,
-    spawn_output_reader, unique_child_path, validate_reference_pngs, write_ai_job_prompt,
-    write_reference_pngs, AgentRunResult, AiAutonomyLevel, CodexDetectionResult,
-    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageResult, TempJobDir,
-    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR, POLL_INTERVAL,
+    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
+    apply_ai_cli_environment, clean_option, cleanup_project_agent_job, cleanup_project_job_enabled,
+    clear_ai_run_cancelled, codex_agent_message_text, command_failure, copy_png_candidate,
+    emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir,
+    image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
+    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
+    safe_job_child_path, safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
+    unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
+    AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
+    DecoupledLayerResult, GeneratedImageResult, TempJobDir, WorkflowSourceImage,
+    AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -575,13 +575,12 @@ fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String
 
     let candidates = ["codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"];
     for candidate in candidates {
-        if Command::new(candidate)
+        let mut command = Command::new(candidate);
+        apply_ai_cli_environment(&mut command)
             .arg("--version")
             .env_remove("OPENAI_API_KEY")
-            .env_remove("CODEX_API_KEY")
-            .output()
-            .is_ok()
-        {
+            .env_remove("CODEX_API_KEY");
+        if command.output().is_ok() {
             return Ok(candidate.to_string());
         }
     }
@@ -667,7 +666,7 @@ fn build_codex_command(
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
-    command
+    apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg("-s")
         .arg("workspace-write")
@@ -775,7 +774,7 @@ fn build_decouple_codex_command(
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
-    command
+    apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg("-s")
         .arg("workspace-write")
@@ -918,7 +917,7 @@ fn build_generative_fill_codex_command(
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
-    command
+    apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg("-s")
         .arg("workspace-write")
@@ -1076,7 +1075,7 @@ fn build_ai_retouch_codex_command(
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
-    command
+    apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg("-s")
         .arg("workspace-write")
@@ -1125,7 +1124,7 @@ fn build_workflow_compose_codex_command(
     json_progress: bool,
 ) -> Command {
     let mut command = Command::new(codex_bin);
-    command
+    apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg("-s")
         .arg("workspace-write")
@@ -1185,12 +1184,13 @@ pub(crate) async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionRe
             }
         };
 
-        match Command::new(&codex_bin)
+        let mut command = Command::new(&codex_bin);
+        apply_ai_cli_environment(&mut command)
             .arg("--version")
             .env_remove("OPENAI_API_KEY")
-            .env_remove("CODEX_API_KEY")
-            .output()
-        {
+            .env_remove("CODEX_API_KEY");
+
+        match command.output() {
             Ok(output) if output.status.success() => {
                 let version = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -2964,6 +2964,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_command_uses_augmented_cli_path() {
+        let job = TempJobDir::new("paintnode-codex-path-test").expect("temp dir");
+        let command = build_codex_command(
+            "codex",
+            job.path(),
+            "make an image",
+            &[],
+            &[],
+            &CodexCommandOptions::default(),
+            AiAutonomyLevel::Low,
+            true,
+        );
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().to_string())
+            .expect("PATH should be set");
+
+        assert!(path.split(':').any(|entry| entry == "/opt/homebrew/bin"));
+        assert!(path.split(':').any(|entry| entry == "/usr/local/bin"));
+    }
+
+    #[test]
     fn codex_generate_command_attaches_reference_images_before_prompt() {
         let job = TempJobDir::new("paintnode-codex-reference-test").expect("temp dir");
         let reference_paths = vec![job.path().join("references").join("reference-1-style.png")];
@@ -2993,7 +3017,8 @@ mod tests {
         assert!(args[image_idx + 3].contains("`references/reference-1-style.png`"));
     }
 
-    const TEST_GEOMETRY_NOTE: &str = "PaintNode image geometry:\n- The attached images are the full PaintNode document.";
+    const TEST_GEOMETRY_NOTE: &str =
+        "PaintNode image geometry:\n- The attached images are the full PaintNode document.";
 
     #[test]
     fn unmanaged_autonomy_prompts_omit_method_guardrails() {

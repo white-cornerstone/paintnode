@@ -1,6 +1,6 @@
 [package]
 name = "paintnode"
-version = "0.1.5"
+version = "0.1.6"
 description = "Use Codex CLI and Antigravity to generate and edit image layers with your existing CLI login."
 authors = ["White Cornerstone Pty Ltd"]
 license = "GPL-3.0-or-later"

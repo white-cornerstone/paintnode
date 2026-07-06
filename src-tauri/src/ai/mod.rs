@@ -84,6 +84,46 @@ pub(crate) const PAINTNODE_WORK_DIR: &str = "paintnode";
 pub(crate) const CODEX_RUNS_DIR: &str = "codex-runs";
 pub(crate) const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 
+fn ai_cli_path() -> String {
+    let mut entries: Vec<String> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|entry| entry.to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Ok(home) = std::env::var("HOME") {
+        entries.extend([
+            format!("{home}/.local/bin"),
+            format!("{home}/.npm-global/bin"),
+            format!("{home}/.volta/bin"),
+            format!("{home}/.bun/bin"),
+            format!("{home}/.antigravity/antigravity/bin"),
+        ]);
+    }
+
+    entries.extend([
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+    ]);
+
+    let mut seen = HashSet::new();
+    entries.retain(|entry| !entry.is_empty() && seen.insert(entry.clone()));
+    std::env::join_paths(entries.iter().map(Path::new))
+        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into())
+        .to_string_lossy()
+        .to_string()
+}
+
+pub(crate) fn apply_ai_cli_environment(command: &mut Command) -> &mut Command {
+    command.env("PATH", ai_cli_path())
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GeneratedImageResult {
@@ -972,6 +1012,7 @@ pub(crate) async fn generate_image(
             .collect();
 
         let mut command = Command::new(&bin);
+        apply_ai_cli_environment(&mut command);
         command.args(&final_args);
         let output = run_with_timeout(&mut command, GENERATION_TIMEOUT)
             .map_err(|e| format!("Failed to launch '{bin}': {e}"))?;
@@ -1168,6 +1209,19 @@ mod tests {
         assert!(cleanup_project_job_enabled(&project_dir, false));
         assert!(!cleanup_project_job_enabled(&project_dir, true));
         assert!(!cleanup_project_job_enabled(&None, false));
+    }
+
+    #[test]
+    fn ai_cli_path_includes_common_gui_missing_tool_dirs() {
+        let path = ai_cli_path();
+        let entries: Vec<String> = std::env::split_paths(&path)
+            .map(|entry| entry.to_string_lossy().to_string())
+            .collect();
+
+        assert!(entries.contains(&"/opt/homebrew/bin".to_string()));
+        assert!(entries.contains(&"/usr/local/bin".to_string()));
+        assert!(entries.contains(&"/usr/bin".to_string()));
+        assert!(entries.contains(&"/bin".to_string()));
     }
 
     #[test]

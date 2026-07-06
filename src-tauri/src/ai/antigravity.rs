@@ -25,14 +25,13 @@ use crate::ai::canvas::{
 };
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
-    ai_upscale_target_dimensions,
-    cover_crop_png_to_dimensions, plan_ai_edit_placement, plan_ai_restore_placement,
-    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result, AiEditComposer,
-    AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_upscale_target_dimensions, cover_crop_png_to_dimensions, plan_ai_edit_placement,
+    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
+    reuse_part_result, AiEditComposer, AiEditProvider, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, clean_option,
-    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
+    ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
+    clean_option, cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
     command_failure_with_required_output, emit_codex_part_progress, emit_codex_progress,
     emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
     project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
@@ -337,7 +336,9 @@ fn configured_or_default_antigravity_bin(bin: Option<String>) -> Result<String, 
         "/usr/local/bin/agy".to_string(),
     ]);
     for candidate in candidates {
-        if Command::new(&candidate).arg("--version").output().is_ok() {
+        let mut command = Command::new(&candidate);
+        apply_ai_cli_environment(&mut command).arg("--version");
+        if command.output().is_ok() {
             return Ok(candidate.to_string());
         }
     }
@@ -376,6 +377,7 @@ fn build_antigravity_command(
     _json_progress: bool,
 ) -> Command {
     let mut command = Command::new(antigravity_bin);
+    apply_ai_cli_environment(&mut command);
     command.current_dir(workspace_path);
     apply_antigravity_command_options(&mut command, options);
     if new_project {
@@ -769,7 +771,10 @@ pub(crate) async fn detect_antigravity(
             }
         };
 
-        match Command::new(&antigravity_bin).arg("--version").output() {
+        let mut command = Command::new(&antigravity_bin);
+        apply_ai_cli_environment(&mut command).arg("--version");
+
+        match command.output() {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
