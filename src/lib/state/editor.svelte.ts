@@ -118,6 +118,14 @@ export interface GenerativeFillInput {
   mask: HTMLCanvasElement;
   editablePixels: number;
   mode: 'transparent-selection' | 'selection';
+  /**
+   * The whole document is empty: every selected pixel is transparent and no
+   * opaque pixel sits outside the selection. There is nothing to preserve or
+   * extend, so this is a generate-from-scratch, not a mask-guided in-place
+   * edit — the executor routes it to the plain generate path, which produces
+   * one document-sized image instead of splitting a wide canvas into tiles.
+   */
+  blankCanvas: boolean;
 }
 
 const GENERATIVE_FILL_ALPHA_EMPTY = 8;
@@ -816,12 +824,22 @@ export class EditorStore implements ToolHost {
 
     let selectedPixels = 0;
     let selectedTransparentPixels = 0;
+    let protectedOpaquePixels = 0;
     for (let i = 0; i < sourceData.data.length; i += 4) {
-      if (selectionData.data[i + 3] < 128) continue;
+      const hasContent = sourceData.data[i + 3] > GENERATIVE_FILL_ALPHA_EMPTY;
+      if (selectionData.data[i + 3] < 128) {
+        if (hasContent) protectedOpaquePixels++;
+        continue;
+      }
       selectedPixels++;
-      if (sourceData.data[i + 3] <= GENERATIVE_FILL_ALPHA_EMPTY) selectedTransparentPixels++;
+      if (!hasContent) selectedTransparentPixels++;
     }
     if (selectedPixels === 0) return null;
+
+    // Nothing outside the selection to protect, and nothing inside it to
+    // extend: a fully blank document. Fills like this should generate one
+    // whole image, not run the tiled in-place-edit path.
+    const blankCanvas = protectedOpaquePixels === 0 && selectedTransparentPixels === selectedPixels;
 
     const clipToTransparent = selectedTransparentPixels > 0;
     const { mask, editablePixels } = softGenerativeFillMask(sourceData, selectionData, doc.width, doc.height, clipToTransparent);
@@ -835,6 +853,7 @@ export class EditorStore implements ToolHost {
       mask,
       editablePixels,
       mode: clipToTransparent ? 'transparent-selection' : 'selection',
+      blankCanvas,
     };
   }
 

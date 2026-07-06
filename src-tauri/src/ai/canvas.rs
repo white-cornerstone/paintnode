@@ -49,6 +49,10 @@ pub(crate) struct CodexImageCapability {
     pub(crate) dimension_multiple: u32,
     max_long_side: u32,
     max_short_side: u32,
+    /// Widest aspect ratio the model reliably renders for one tile. Wider
+    /// documents crop to a sub-region or split into tiles; a full-canvas
+    /// ultrawide fill (which used to letterbox) now routes to the plain
+    /// generate path instead of a masked tile.
     pub(crate) max_aspect_ratio: u32,
     /// Largest tile side for AI detail restoration: tiles at or below this
     /// size regenerate at the model's native output density.
@@ -201,11 +205,17 @@ pub(crate) fn mask_pixel_coverage(mask_pixel: &image::Rgba<u8>) -> u8 {
     ((luminance * u32::from(a) + 127) / 255) as u8
 }
 
-/// Fully-protected mask pixels must come back visually identical: a faithful
-/// in-place edit re-encodes them nearly losslessly (drift well under this),
-/// while a model that regenerated the scene from scratch drifts far above it.
-/// Mean absolute luminance difference on a 0-255 scale.
-pub(crate) const AI_PROTECTED_DRIFT_LIMIT: f64 = 8.0;
+/// Mean absolute luminance drift (0-255 scale) allowed over fully-protected
+/// mask pixels before a candidate is rejected as a from-scratch regeneration.
+/// This is a backstop against a model that ignores the frame and paints a
+/// wholly different scene (drift climbs into the tens-to-hundreds), NOT a
+/// pixel-fidelity check: providers like Antigravity re-render the whole frame
+/// every part rather than editing in place, so a faithful result still drifts
+/// noticeably where its regenerated protected region meets an earlier part's.
+/// Kept generous so legitimate tiled re-renders pass; earlier ultrawide
+/// regressions were an aspect-ratio mismatch (now fixed in placement), not a
+/// fidelity problem this gate should catch.
+pub(crate) const AI_PROTECTED_DRIFT_LIMIT: f64 = 32.0;
 
 /// How many candidates to accept-or-reject per part before failing the run:
 /// the first attempt plus one retry with the stricter in-place note.
