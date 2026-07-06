@@ -18,6 +18,7 @@
     sep?: boolean;
     action?: () => void;
     disabled?: () => boolean;
+    items?: MItem[];
   }
   interface Menu {
     label: string;
@@ -38,7 +39,7 @@
         { sep: true },
         { label: 'Save', shortcut: '⌘S', action: () => void saveActiveCommand() },
         { label: 'Save a Copy…', shortcut: '⇧⌘S', action: () => void saveActiveCopyCommand() },
-        { label: 'Export PNG…', shortcut: '⌘E', action: () => void exportPngCommand() },
+        { label: 'Export PNG…', action: () => void exportPngCommand() },
         { label: 'Export PSD…', action: () => void exportPsdCommand() },
       ],
     },
@@ -67,22 +68,43 @@
     {
       label: 'Image',
       items: [
-        { label: 'Image Size…', action: () => ui.open('imageSize') },
+        {
+          label: 'Adjustments',
+          items: [
+            { label: 'Brightness/Contrast…', action: () => ui.open('brightnessContrast') },
+            { label: 'Levels…', shortcut: '⌘L', action: () => ui.open('levels') },
+            { label: 'Hue/Saturation…', shortcut: '⌘U', action: () => ui.open('hueSaturation') },
+            { label: 'Threshold…', action: () => ui.open('threshold') },
+            { sep: true },
+            { label: 'Invert', shortcut: '⌘I', action: () => editor.adjustInvert() },
+            { sep: true },
+            { label: 'Desaturate', shortcut: '⇧⌘U', action: () => editor.adjustDesaturate() },
+          ],
+        },
+        { sep: true },
+        { label: 'Auto Tone', shortcut: '⇧⌘L', action: () => ui.openAiAutoAdjust('tone') },
+        { label: 'Auto Contrast', shortcut: '⌥⇧⌘L', action: () => ui.openAiAutoAdjust('contrast') },
+        { label: 'Auto Color', shortcut: '⇧⌘B', action: () => ui.openAiAutoAdjust('color') },
+        { sep: true },
+        { label: 'Image Size…', shortcut: '⌥⌘I', action: () => ui.open('imageSize') },
+        { label: 'AI Upscale…', shortcut: '⌥⇧⌘U', action: () => ui.open('aiUpscale') },
+        { label: 'Canvas Size…', shortcut: '⌥⌘C', action: () => ui.open('canvasSize') },
+        {
+          label: 'Image Rotation',
+          items: [
+            { label: '180°', action: () => editor.rotate(180) },
+            { label: '90° Clockwise', action: () => editor.rotate(90) },
+            { label: '90° Counter Clockwise', action: () => editor.rotate(270) },
+            { sep: true },
+            { label: 'Flip Canvas Horizontal', action: () => editor.flip('h') },
+            { label: 'Flip Canvas Vertical', action: () => editor.flip('v') },
+          ],
+        },
+        { label: 'Crop', action: () => editor.cropToSelection(), disabled: () => !hasSel() },
+        { label: 'Trim…', action: () => ui.open('trim') },
         { label: 'Reveal All', action: () => editor.revealAll() },
-        { label: 'Crop to Selection', action: () => editor.cropToSelection(), disabled: () => !hasSel() },
         { sep: true },
-        { label: 'Rotate 90° CW', action: () => editor.rotate(90) },
-        { label: 'Rotate 90° CCW', action: () => editor.rotate(270) },
-        { label: 'Rotate 180°', action: () => editor.rotate(180) },
-        { label: 'Flip Horizontal', action: () => editor.flip('h') },
-        { label: 'Flip Vertical', action: () => editor.flip('v') },
-        { sep: true },
-        { label: 'Brightness/Contrast…', action: () => ui.open('brightnessContrast') },
-        { label: 'Hue/Saturation…', action: () => ui.open('hueSaturation') },
-        { label: 'Desaturate', action: () => editor.adjustDesaturate() },
-        { label: 'Invert', shortcut: '⌘I', action: () => editor.adjustInvert() },
-        { sep: true },
-        { label: 'Flatten Image', action: () => editor.flatten() },
+        { label: 'Duplicate…', action: () => ui.open('duplicateDocument') },
       ],
     },
     {
@@ -98,7 +120,8 @@
           disabled: () => editor.activeLayer?.kind !== 'text',
         },
         { sep: true },
-        { label: 'Merge Down', action: () => { const id = activeId(); if (id) editor.mergeDown(id); } },
+        { label: 'Merge Down', shortcut: '⌘E', action: () => { const id = activeId(); if (id) editor.mergeDown(id); } },
+        { label: 'Flatten Image', action: () => editor.flatten() },
       ],
     },
     {
@@ -149,20 +172,28 @@
   ];
 
   let open = $state<number | null>(null);
+  let openSub = $state<number | null>(null);
 
   function toggle(i: number) {
     open = open === i ? null : i;
+    openSub = null;
   }
   function enter(i: number) {
-    if (open !== null) open = i;
+    if (open !== null) {
+      open = i;
+      openSub = null;
+    }
   }
   function run(item: MItem) {
     if (item.disabled?.()) return;
+    if (item.items) return;
     open = null;
+    openSub = null;
     item.action?.();
   }
   function closeAll() {
     open = null;
+    openSub = null;
   }
 </script>
 
@@ -186,10 +217,32 @@
             {#if item.sep}
               <div class="sep"></div>
             {:else}
-              <button class="item" disabled={item.disabled?.()} onclick={() => run(item)}>
-                <span>{item.label}</span>
-                {#if item.shortcut}<span class="sc">{item.shortcut}</span>{/if}
-              </button>
+              <div class="item-wrap">
+                <button
+                  class="item"
+                  class:has-sub={!!item.items}
+                  disabled={item.disabled?.()}
+                  onclick={() => run(item)}
+                  onpointerenter={() => (openSub = item.items ? j : null)}
+                >
+                  <span>{item.label}</span>
+                  {#if item.items}<span class="sc">›</span>{:else if item.shortcut}<span class="sc">{item.shortcut}</span>{/if}
+                </button>
+                {#if item.items && openSub === j}
+                  <div class="submenu">
+                    {#each item.items as child, k (k)}
+                      {#if child.sep}
+                        <div class="sep"></div>
+                      {:else}
+                        <button class="item" disabled={child.disabled?.()} onclick={() => run(child)}>
+                          <span>{child.label}</span>
+                          {#if child.shortcut}<span class="sc">{child.shortcut}</span>{/if}
+                        </button>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             {/if}
           {/each}
         </div>
@@ -244,6 +297,21 @@
     padding: 4px;
     z-index: 50;
   }
+  .item-wrap {
+    position: relative;
+  }
+  .submenu {
+    position: absolute;
+    left: calc(100% - 4px);
+    top: 0;
+    min-width: 220px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+    z-index: 51;
+  }
   .item {
     display: flex;
     justify-content: space-between;
@@ -258,6 +326,9 @@
   .item:hover:not(:disabled) {
     background: var(--accent);
     color: #fff;
+  }
+  .item.has-sub {
+    position: relative;
   }
   .sc {
     color: var(--text-dim);

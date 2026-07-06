@@ -9,12 +9,18 @@
   }: { collapsed?: boolean; onToggle?: (collapsed: boolean) => void } = $props();
 
   const hasLayer = $derived(!!editor.activeLayer);
+  const hasDoc = $derived(!!editor.doc);
 </script>
 
 <Panel title="Adjustments" bind:collapsed {onToggle}>
   <div class="adjustments">
+    <button disabled={!hasDoc} onclick={() => ui.openAiAutoAdjust('tone')}>AI Auto Tone</button>
+    <button disabled={!hasDoc} onclick={() => ui.openAiAutoAdjust('contrast')}>AI Auto Contrast</button>
+    <button disabled={!hasDoc} onclick={() => ui.openAiAutoAdjust('color')}>AI Auto Color</button>
     <button disabled={!hasLayer} onclick={() => ui.open('brightnessContrast')}>Brightness / Contrast</button>
+    <button disabled={!hasLayer} onclick={() => ui.open('levels')}>Levels</button>
     <button disabled={!hasLayer} onclick={() => ui.open('hueSaturation')}>Hue / Saturation</button>
+    <button disabled={!hasLayer} onclick={() => ui.open('threshold')}>Threshold</button>
     <button disabled={!hasLayer} onclick={() => editor.adjustDesaturate()}>Desaturate</button>
     <button disabled={!hasLayer} onclick={() => editor.adjustInvert()}>Invert</button>
   </div>
