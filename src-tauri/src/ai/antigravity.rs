@@ -17,18 +17,27 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
-    antigravity_output_target, read_png_bytes_cropped_to_ai_working_canvas,
-    remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
-    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
-    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
+    ai_candidate_rejection, ai_edit_checks_level, ai_effective_checks_level,
+    ai_retouch_editable_mask_png, antigravity_output_target,
+    read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
+    validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
+    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
+};
+use crate::ai::fill_storyboard::{
+    fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
+    fill_storyboard_master_prompt, fill_storyboard_part_is_anchor, fill_storyboard_part_prompt,
+    preserve_invalid_fill_storyboard_file, read_fill_storyboard_file,
+    record_fill_storyboard_failure, should_storyboard_fill, write_fill_storyboard_file,
+    FillStoryboard, FILL_STORYBOARD_DRAFT_CANVAS_FILE, FILL_STORYBOARD_DRAFT_FILE,
+    FILL_STORYBOARD_DRAFT_MASK_FILE, FILL_STORYBOARD_FILE, FILL_STORYBOARD_OVERVIEW_FILE,
 };
 use crate::ai::placement::{
-    ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
-    ai_upscale_target_dimensions, cover_crop_png_to_dimensions, plan_ai_edit_placement,
-    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
+    ai_part_prompt_context, ai_upscale_target_dimensions, cover_crop_png_to_dimensions,
+    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
+    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
+    reuse_part_result, storyboard_draft_canvas_png, storyboard_draft_mask_png, AiEditComposer,
+    AiEditPlacement, AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
@@ -457,20 +466,37 @@ fn antigravity_overview_note(job_dir: &str, has_overview: bool) -> String {
     }
 }
 
+fn antigravity_storyboard_draft_note(_job_dir: &str, _has_storyboard_draft: bool) -> String {
+    String::new()
+}
+
 fn antigravity_fill_prompt(
     prompt: &str,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
     geometry_note: &str,
+    storyboard_note: &str,
+    storyboard_anchor: bool,
+    storyboard_fallback: bool,
     has_overview: bool,
+    has_storyboard_draft: bool,
     continuation: bool,
     reference_names: &[String],
     working: &AiWorkingCanvas,
 ) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
-    let tool_call_note = antigravity_image_tool_call_note(job_dir, working, continuation);
+    let has_storyboard = !storyboard_note.trim().is_empty();
+    let tool_call_note = antigravity_image_tool_call_note(
+        job_dir,
+        working,
+        continuation,
+        has_storyboard,
+        storyboard_anchor,
+        has_storyboard_draft,
+    );
     let overview_note = antigravity_overview_note(job_dir, has_overview);
+    let storyboard_draft_note = antigravity_storyboard_draft_note(job_dir, has_storyboard_draft);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -482,6 +508,100 @@ fn antigravity_fill_prompt(
         format!("{job_dir}/")
     };
     let reference_note = reference_prompt_note(reference_names, &reference_prefix);
+    if has_storyboard_draft {
+        let overview_note = if continuation && has_overview {
+            format!(
+                "\n- `{job_dir}/overview.png`: downscaled surrounding-document preview. Use it only to align with already-finished neighboring pixels; never copy its pixels, resolution, or red outline."
+            )
+        } else {
+            String::new()
+        };
+        return format!(
+            r#"Perform one masked PaintNode draft enhancement using the PNG files in `{job_dir}`.
+
+Input files:
+- `{job_dir}/edit_target.png`: same-size base image to enhance in place. Editable pixels already contain a rough low-detail visual draft.
+- `{job_dir}/source.png`: same-size current PaintNode content for comparison; it should match the base image's composition.
+- `{job_dir}/mask.png`: edit mask. White pixels are the area to enhance; gray pixels are a transition buffer; black or transparent pixels are protected context.{overview_note}
+
+{geometry_note}
+
+Task:
+- This is an image enhancement/restoration pass at the same size, not a new composition, new generative fill, outpaint, story continuation, or scene redesign.
+- Improve clarity, texture, natural detail, edge quality, lighting consistency, and local realism only for pixels already visible in the low-detail draft.
+- Preserve the exact subject count, object count, identities/classes, poses, placement, scale, camera angle, horizon, shoreline, lighting, colors, and activities already visible in `edit_target.png`.
+- Do not add, remove, duplicate, replace, move, resize, re-pose, or reinterpret any visible person, object, prop, landform, wave, cloud, or scene element.
+- If a draft area is soft or ambiguous, refine the existing visible shapes conservatively instead of inventing extra content.
+
+{autonomy_contract}
+
+{tool_call_note}
+
+Required output:
+- Save exactly one PNG file as `{result_path}`.
+- Keep the attached frame registered: no crop, zoom, reframe, or shift.
+- Change only the white-mask area and blend through gray-mask transition pixels.
+- Preserve black/transparent-mask protected context visually.
+{workspace_rule}
+- Do not ask follow-up questions.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+        );
+    }
+    if has_storyboard {
+        let source_input_note = if has_storyboard_draft {
+            "current PaintNode content for this edit frame. In unpainted editable areas, it already contains the orchestrator's rough visual draft."
+        } else {
+            "current PaintNode content for this edit frame."
+        };
+        let edit_target_input_note = if has_storyboard_draft {
+            "base image to enhance in place. In unpainted editable areas, it already contains the same rough visual draft."
+        } else {
+            "base image to edit in place."
+        };
+        let draft_output_note = if has_storyboard_draft {
+            "- Retouch/up-res the low-detail draft already present in `edit_target.png`; do not ignore it, replace it with a new composition, or start from blank.\n- The visible draft is the composition authority. Preserve its subject count, placement, pose, activity, horizon, shoreline, lighting, camera, and scale, and add no new people, props, activities, story beats, or separate scenes beyond what is already visible in the draft."
+        } else {
+            "- Use the orchestrator subtask prompt as the local instruction for the editable white mask."
+        };
+        let fallback_prompt = if storyboard_fallback && storyboard_anchor {
+            format!(
+                "\nFallback anchor user prompt:\n{prompt}\n\nUse this only because the orchestrator plan fell back; the orchestrator subtask prompt remains the main local instruction."
+            )
+        } else {
+            String::new()
+        };
+        return format!(
+            r#"Perform one mask-guided PaintNode generative fill using the PNG files in `{job_dir}`.
+
+Input files:
+- `{job_dir}/source.png`: {source_input_note}
+- `{job_dir}/edit_target.png`: {edit_target_input_note}
+- `{job_dir}/mask.png`: edit mask. White pixels are editable; gray pixels are transition buffer; black or transparent pixels are protected context.{overview_note}{storyboard_draft_note}
+
+{reference_note}
+
+{geometry_note}
+
+{storyboard_note}{fallback_prompt}
+
+{autonomy_contract}
+
+{tool_call_note}
+
+Required output:
+- Save exactly one PNG file as `{result_path}`.
+- Keep the attached frame registered: no crop, zoom, reframe, or shift.
+{draft_output_note}
+- Change only the white-mask area and blend through gray-mask transition pixels.
+- Preserve black/transparent-mask protected context visually.
+{workspace_rule}
+- Do not ask follow-up questions.
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+        );
+    }
+    let user_prompt_heading = "Original user fill prompt:";
     format!(
         r#"Perform one mask-guided PaintNode generative fill using the PNG files in `{job_dir}`.
 
@@ -494,7 +614,9 @@ Input files:
 
 {geometry_note}
 
-User fill prompt:
+{storyboard_note}
+
+{user_prompt_heading}
 {prompt}
 
 {autonomy_contract}
@@ -544,7 +666,8 @@ fn antigravity_retouch_prompt(
     let extra_reference_note = reference_prompt_note(reference_names, &reference_prefix);
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
-    let tool_call_note = antigravity_image_tool_call_note(job_dir, working, continuation);
+    let tool_call_note =
+        antigravity_image_tool_call_note(job_dir, working, continuation, false, false, false);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
     let contract_note = if autonomy == AiAutonomyLevel::Unmanaged {
         format!(
@@ -613,6 +736,9 @@ fn antigravity_image_tool_call_note(
     job_dir: &str,
     working: &AiWorkingCanvas,
     continuation: bool,
+    has_storyboard: bool,
+    storyboard_anchor: bool,
+    has_storyboard_draft: bool,
 ) -> String {
     let aspect_label = &working.aspect_label;
     let target = antigravity_output_target(aspect_label, working.original_dimensions);
@@ -622,14 +748,30 @@ fn antigravity_image_tool_call_note(
         ),
         None => String::new(),
     };
-    let overview_attach_note = if continuation {
+    let overview_attach_note = if continuation && has_storyboard_draft {
+        format!(
+            "\n- Also attach `{job_dir}/overview.png` as the third image and explain in the tool instruction that it shows the surrounding finished pixels and whole rough draft for alignment only; its pixels, its resolution, and the red outline must never appear in the output."
+        )
+    } else if continuation {
         format!(
             "\n- Also attach `{job_dir}/overview.png` as the third image and explain in the tool instruction that it shows the surrounding artwork the output must continue seamlessly; its pixels, its resolution, and the red outline must never appear in the output."
         )
     } else {
         String::new()
     };
-    let instruction_subject = if continuation {
+    let storyboard_draft_attach_note = if has_storyboard_draft {
+        "\n- Do not attach storyboard draft files as extra image references. The base image already contains the orchestrator's rough composition; the image tool should enhance that base in place."
+            .to_string()
+    } else {
+        String::new()
+    };
+    let instruction_subject = if has_storyboard_draft {
+        "state that this is masked image enhancement/restoration of the low-detail draft already in the base image; improve detail only, preserve the exact composition, and add/remove/move/replace no visible subject, object, prop, activity, or scene element"
+    } else if has_storyboard && storyboard_anchor {
+        "use the orchestrator subtask prompt above as the local image instruction; include the requested anchor subject only if that subtask prompt says to"
+    } else if has_storyboard {
+        "use the orchestrator subtask prompt above as the local image instruction; continue the protected neighboring content exactly as that subtask prompt describes"
+    } else if continuation {
         "state how the editable area continues the neighboring finished content (per the continuation rules above)"
     } else {
         "state the requested change"
@@ -637,7 +779,7 @@ fn antigravity_image_tool_call_note(
     format!(
         r#"Image-generation tool call:
 - Give the image-generation tool `{job_dir}/edit_target.png` as the base image (the first image) and apply the edit to that image directly.
-- Also attach `{job_dir}/mask.png` as the second image so the model sees exactly which area is editable. In the tool instruction, explain that the second image is an edit mask over the first: the white area marks the only region to change, black areas must be reproduced pixel-identically from the first image, and the mask itself must never appear in the output.{overview_attach_note}
+- Also attach `{job_dir}/mask.png` as the second image so the model sees exactly which area is editable. In the tool instruction, explain that the second image is an edit mask over the first: the white area marks the only region to change, black areas must be reproduced pixel-identically from the first image, and the mask itself must never appear in the output.{overview_attach_note}{storyboard_draft_attach_note}
 - Never attach `{job_dir}/paintnode_contract.txt` to the image tool; attach other files only when they are reference images explicitly listed above and the edit needs them.{target_note}
 - Keep the tool instruction short: {instruction_subject} and the mask rule, then require that everything else stays exactly the same — same framing, same composition, same camera, same crop.
 - Do not mention file names, pixel dimensions, or aspect ratios inside the tool instruction text; the ratio and size belong in the tool's parameters only."#
@@ -833,6 +975,168 @@ fn run_antigravity(
         required_output,
     )
     .map_err(|e| format!("Failed to run Antigravity at '{antigravity_bin}': {e}"))
+}
+
+fn write_antigravity_storyboard_draft_guides(
+    job_path: &Path,
+    placement: &AiEditPlacement,
+    overview_png: &[u8],
+) -> Result<(), String> {
+    let aspect_label = fill_storyboard_antigravity_draft_aspect_label(placement);
+    let Some((_tier, provider_dimensions)) = antigravity_output_target(aspect_label, (1, 1)) else {
+        return Ok(());
+    };
+    let draft_canvas = storyboard_draft_canvas_png(
+        overview_png,
+        provider_dimensions,
+        placement.document_dimensions,
+        "Antigravity fill storyboard draft canvas",
+    )?;
+    fs::write(
+        job_path.join(FILL_STORYBOARD_DRAFT_CANVAS_FILE),
+        draft_canvas,
+    )
+    .map_err(|e| format!("Failed to write generative fill storyboard draft canvas: {e}"))?;
+    let draft_mask = storyboard_draft_mask_png(
+        provider_dimensions,
+        placement.document_dimensions,
+        "Antigravity fill storyboard draft mask",
+    )?;
+    fs::write(job_path.join(FILL_STORYBOARD_DRAFT_MASK_FILE), draft_mask)
+        .map_err(|e| format!("Failed to write generative fill storyboard draft mask: {e}"))
+}
+
+fn normalize_storyboard_draft_result(
+    job_path: &Path,
+    placement: &AiEditPlacement,
+) -> Result<bool, String> {
+    let draft_path = job_path.join(FILL_STORYBOARD_DRAFT_FILE);
+    let Ok(draft_png) = fs::read(&draft_path) else {
+        return Ok(false);
+    };
+    if !is_png(&draft_png) {
+        return Ok(false);
+    }
+    let (normalized, _source_dimensions, changed) = normalize_storyboard_draft_png(
+        &draft_png,
+        placement.document_dimensions,
+        "Antigravity fill storyboard draft",
+    )?;
+    if changed {
+        fs::write(&draft_path, normalized).map_err(|e| {
+            format!(
+                "Failed to normalize generative fill storyboard draft at {}: {e}",
+                draft_path.display()
+            )
+        })?;
+    }
+    Ok(changed)
+}
+
+fn read_storyboard_draft(job_path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let draft_path = job_path.join(FILL_STORYBOARD_DRAFT_FILE);
+    let Ok(draft_png) = fs::read(&draft_path) else {
+        return Ok(None);
+    };
+    if !is_png(&draft_png) {
+        return Ok(None);
+    }
+    Ok(Some(draft_png))
+}
+
+fn remove_legacy_storyboard_part_guides(part_path: &Path) {
+    let _ = fs::remove_file(part_path.join(FILL_STORYBOARD_DRAFT_FILE));
+    let _ = fs::remove_file(part_path.join("storyboard-draft-crop.png"));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_antigravity_fill_storyboard(
+    app: &AppHandle,
+    run_id: &str,
+    antigravity_bin: &str,
+    workspace_path: &Path,
+    job_path: &Path,
+    placement: &crate::ai::placement::AiEditPlacement,
+    composer: &AiEditComposer,
+    prompt: &str,
+    reference_pngs: &[WorkflowSourceImage],
+    options: &AntigravityCommandOptions,
+) -> Result<Option<FillStoryboard>, String> {
+    if !should_storyboard_fill(placement) {
+        return Ok(None);
+    }
+    if let Ok(storyboard) = read_fill_storyboard_file(job_path, placement.parts.len()) {
+        normalize_storyboard_draft_result(job_path, placement)?;
+        return Ok(Some(storyboard));
+    }
+
+    let storyboard_overview =
+        composer.storyboard_overview_png("Generative fill storyboard overview")?;
+    fs::write(
+        job_path.join(FILL_STORYBOARD_OVERVIEW_FILE),
+        &storyboard_overview,
+    )
+    .map_err(|e| format!("Failed to write generative fill storyboard overview: {e}"))?;
+    write_antigravity_storyboard_draft_guides(job_path, placement, &storyboard_overview)?;
+    let (_reference_paths, reference_names) =
+        write_reference_pngs(job_path, reference_pngs, "Generative fill storyboard")?;
+    let job_dir = antigravity_job_dir_label(workspace_path, job_path);
+    let prompt_text = fill_storyboard_master_prompt(
+        prompt.trim(),
+        "Antigravity",
+        &job_dir,
+        placement,
+        &reference_names,
+    );
+    write_ai_job_prompt(job_path, &prompt_text, "Antigravity fill storyboard")?;
+    emit_codex_progress(
+        app,
+        run_id,
+        "Planning split fill storyboard with Antigravity",
+    );
+
+    let run_result = run_antigravity(
+        antigravity_bin,
+        workspace_path,
+        job_path,
+        &prompt_text,
+        options,
+        false,
+        app.clone(),
+        run_id.to_string(),
+        None,
+    );
+    let mut failure = match run_result {
+        Ok(run) if run.output.status.success() || job_path.join(FILL_STORYBOARD_FILE).exists() => {
+            None
+        }
+        Ok(run) => Some(command_failure("Antigravity fill storyboard", &run.output)),
+        Err(error) => Some(error),
+    };
+    normalize_storyboard_draft_result(job_path, placement)?;
+
+    match read_fill_storyboard_file(job_path, placement.parts.len()) {
+        Ok(storyboard) => Ok(Some(storyboard)),
+        Err(error) => {
+            if let Some(previous) = failure.take() {
+                failure = Some(format!("{previous}\n\n{error}"));
+            } else {
+                failure = Some(error);
+            }
+            let failure =
+                failure.unwrap_or_else(|| "Antigravity did not write storyboard.json.".into());
+            preserve_invalid_fill_storyboard_file(job_path);
+            record_fill_storyboard_failure(job_path, &failure);
+            emit_codex_progress(
+                app,
+                run_id,
+                "Using PaintNode fallback storyboard after Antigravity planning failed",
+            );
+            let fallback = fallback_fill_storyboard(placement);
+            write_fill_storyboard_file(job_path, &fallback)?;
+            Ok(Some(fallback))
+        }
+    }
 }
 
 fn antigravity_restore_prompt(
@@ -1242,6 +1546,18 @@ pub(crate) async fn generate_antigravity_fill_image(
         )?;
         let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "Generative fill")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
+        let storyboard = prepare_antigravity_fill_storyboard(
+            &app,
+            &run_id,
+            &antigravity_bin,
+            &workspace_path,
+            &job_path,
+            &placement,
+            &composer,
+            prompt.trim(),
+            &reference_pngs,
+            &options,
+        )?;
 
         for (part_index, part) in placement.parts.iter().enumerate() {
             let part_path = match placement.part_dir_name(part_index) {
@@ -1269,8 +1585,36 @@ pub(crate) async fn generate_antigravity_fill_image(
                 let _ = fs::remove_file(part_path.join("part_result.png"));
                 let _ = fs::remove_file(part_path.join("result.png"));
             }
+            remove_legacy_storyboard_part_guides(&part_path);
             let job_dir = antigravity_job_dir_label(&workspace_path, &part_path);
-            let inputs = composer.part_inputs(part, "Generative fill")?;
+            let storyboard_draft_png = if storyboard.is_some() {
+                match read_storyboard_draft(&job_path) {
+                    Ok(draft_png) => draft_png,
+                    Err(error) => {
+                        emit_codex_progress(
+                            &app,
+                            &run_id,
+                            &format!("Skipping storyboard draft guide: {error}"),
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let has_storyboard_draft = storyboard_draft_png.is_some();
+            let inputs = if let Some(draft_png) = storyboard_draft_png.as_deref() {
+                composer.part_inputs_with_storyboard_draft(
+                    part,
+                    draft_png,
+                    "Generative fill",
+                    true,
+                )?
+            } else if storyboard.is_some() {
+                composer.part_inputs_hiding_unpainted_editable(part, "Generative fill", true)?
+            } else {
+                composer.part_inputs(part, "Generative fill")?
+            };
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
             fs::write(part_path.join("edit_target.png"), &inputs.edit_target_png)
@@ -1279,21 +1623,55 @@ pub(crate) async fn generate_antigravity_fill_image(
                 .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
             let has_overview = placement.is_split();
             if has_overview {
+                let overview_png = if let Some(draft_png) = storyboard_draft_png.as_deref() {
+                    composer.overview_png_with_storyboard_draft(part, draft_png, "Generative fill")?
+                } else if storyboard.is_some() {
+                    composer.overview_png_hiding_unpainted_editable(part, "Generative fill")?
+                } else {
+                    composer.overview_png(part, "Generative fill")?
+                };
                 fs::write(
                     part_path.join("overview.png"),
-                    composer.overview_png(part, "Generative fill")?,
+                    overview_png,
                 )
                 .map_err(|e| format!("Failed to write generative fill overview image: {e}"))?;
             }
-            let (_reference_paths, reference_names) =
-                write_reference_pngs(&part_path, &reference_pngs, "Generative fill")?;
-            let geometry_note = ai_part_prompt_context(&placement, part_index);
+            let reference_names = if has_storyboard_draft {
+                Vec::new()
+            } else {
+                let (_reference_paths, reference_names) =
+                    write_reference_pngs(&part_path, &reference_pngs, "Generative fill")?;
+                reference_names
+            };
+            let geometry_note = if storyboard.is_some() {
+                ai_orchestrated_part_prompt_context(&placement, part_index, has_storyboard_draft)
+            } else {
+                ai_part_prompt_context(&placement, part_index)
+            };
+            let storyboard_note = storyboard
+                .as_ref()
+                .map(|storyboard| {
+                    fill_storyboard_part_prompt(storyboard, part_index, has_storyboard_draft)
+                })
+                .unwrap_or_default();
+            let storyboard_anchor = storyboard
+                .as_ref()
+                .map(|storyboard| fill_storyboard_part_is_anchor(storyboard, part_index))
+                .unwrap_or(false);
+            let storyboard_fallback = storyboard
+                .as_ref()
+                .map(|storyboard| storyboard.fallback)
+                .unwrap_or(false);
             let base_prompt_text = antigravity_fill_prompt(
                 prompt.trim(),
                 &job_dir,
                 autonomy,
                 &geometry_note,
-                has_overview,
+                &storyboard_note,
+                storyboard_anchor,
+                storyboard_fallback,
+                has_overview && (!has_storyboard_draft || part_index > 0),
+                has_storyboard_draft,
                 placement.is_split() && part_index > 0,
                 &reference_names,
                 &part.working,
@@ -1370,8 +1748,12 @@ pub(crate) async fn generate_antigravity_fill_image(
                 }
                 // Result checks: in-place drift, then seam continuity when
                 // the user's check level enables it.
-                let rejection = ai_candidate_rejection(
+                let effective_checks_level = ai_effective_checks_level(
                     checks_level,
+                    storyboard.is_some() && part_index > 0,
+                );
+                let rejection = ai_candidate_rejection(
+                    effective_checks_level,
                     &inputs.edit_target_png,
                     &inputs.source_png,
                     &inputs.mask_png,
@@ -1419,6 +1801,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             }
             fs::write(part_path.join("part_result.png"), &generated_bytes)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
+            let _ = fs::remove_file(&result_path);
             composer.apply_part_result(part, &generated_bytes, "Generative fill")?;
         }
 
@@ -2527,6 +2910,10 @@ mod tests {
             "paintnode/antigravity-runs/job-3",
             AiAutonomyLevel::Low,
             "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document.",
+            "",
+            false,
+            false,
+            false,
             false,
             false,
             &[],
@@ -2539,5 +2926,32 @@ mod tests {
         assert!(fill.contains(
             "Also attach `paintnode/antigravity-runs/job-3/mask.png` as the second image"
         ));
+
+        let storyboard_fill = antigravity_fill_prompt(
+            "a beach photo in film style",
+            "paintnode/antigravity-runs/job-4/part-1",
+            AiAutonomyLevel::Low,
+            "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document.",
+            "",
+            true,
+            false,
+            true,
+            true,
+            false,
+            &[],
+            &ai_exact_working_canvas((1914, 812), "21:9"),
+        );
+        assert!(storyboard_fill.contains("masked PaintNode draft enhancement"));
+        assert!(storyboard_fill.contains("same-size base image to enhance in place"));
+        assert!(storyboard_fill.contains("image enhancement/restoration pass at the same size"));
+        assert!(storyboard_fill.contains("Do not add, remove, duplicate, replace, move"));
+        assert!(storyboard_fill.contains("Do not attach storyboard draft files"));
+        assert!(!storyboard_fill.contains("storyboard-draft-crop.png"));
+        assert!(!storyboard_fill.contains("Orchestrator"));
+        assert!(!storyboard_fill.contains("beach photo in film style"));
+        assert!(!storyboard_fill.contains("beach anchor"));
+        assert!(!storyboard_fill.contains("Original user fill prompt"));
+        assert!(!storyboard_fill.contains("Global style rules"));
+        assert!(!storyboard_fill.contains("part 1 of"));
     }
 }

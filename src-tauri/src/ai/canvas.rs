@@ -312,6 +312,17 @@ pub(crate) fn ai_edit_checks_level(level: Option<u8>) -> u8 {
     level.unwrap_or(1).min(3)
 }
 
+/// Continuation crops can pass protected-pixel drift while still reading as a
+/// separate image. When checks are enabled, promote them to the balanced seam
+/// gate; level 0 remains the user's explicit escape hatch.
+pub(crate) fn ai_effective_checks_level(check_level: u8, continuation: bool) -> u8 {
+    if continuation && check_level > 0 {
+        check_level.max(2)
+    } else {
+        check_level
+    }
+}
+
 /// Why a candidate was rejected by the result checks, and which retry note
 /// should steer the next attempt.
 pub(crate) struct AiCandidateRejection {
@@ -756,11 +767,11 @@ mod tests {
             antigravity_output_target("21:9", (2000, 849)),
             Some(("2K", (3168, 1344)))
         );
-        // The extreme 4:1 grid (1K = 2048x512) needs 2K for a full-height
+        // The extreme 4:1 grid (1K = 2064x512) needs 2K for a full-height
         // 2400x600 crop of a 2600x600 document.
         assert_eq!(
             antigravity_output_target("4:1", (2400, 600)),
-            Some(("2K", (4096, 1024)))
+            Some(("2K", (4128, 1024)))
         );
         // Oversized crops cap at 4K rather than failing.
         assert_eq!(
@@ -787,17 +798,13 @@ mod tests {
     }
 
     fn seam_image_png(left: [u8; 4], right: [u8; 4]) -> Vec<u8> {
-        let image = image::RgbaImage::from_fn(
-            128,
-            128,
-            |x, _| {
-                if x < 64 {
-                    image::Rgba(left)
-                } else {
-                    image::Rgba(right)
-                }
-            },
-        );
+        let image = image::RgbaImage::from_fn(128, 128, |x, _| {
+            if x < 64 {
+                image::Rgba(left)
+            } else {
+                image::Rgba(right)
+            }
+        });
         encode_rgba_png(image, "seam image").expect("seam image png")
     }
 
@@ -855,6 +862,10 @@ mod tests {
         assert_eq!(ai_seam_mismatch_limit(1), None);
         assert_eq!(ai_seam_mismatch_limit(2), Some(18.0));
         assert_eq!(ai_seam_mismatch_limit(3), Some(9.0));
+        assert_eq!(ai_effective_checks_level(0, true), 0);
+        assert_eq!(ai_effective_checks_level(1, false), 1);
+        assert_eq!(ai_effective_checks_level(1, true), 2);
+        assert_eq!(ai_effective_checks_level(3, true), 3);
     }
 
     #[test]

@@ -15,7 +15,7 @@
         { "label": "2:3", "width": 848, "height": 1264 },
         { "label": "3:2", "width": 1264, "height": 848 },
         { "label": "3:4", "width": 896, "height": 1200 },
-        { "label": "4:1", "width": 2048, "height": 512 },
+        { "label": "4:1", "width": 2064, "height": 512 },
         { "label": "4:3", "width": 1200, "height": 896 },
         { "label": "4:5", "width": 928, "height": 1152 },
         { "label": "5:4", "width": 1152, "height": 928 },

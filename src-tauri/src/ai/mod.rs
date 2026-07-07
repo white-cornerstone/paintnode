@@ -3,6 +3,7 @@
 pub(crate) mod antigravity;
 pub(crate) mod canvas;
 pub(crate) mod codex;
+pub(crate) mod fill_storyboard;
 pub(crate) mod placement;
 
 use std::collections::HashMap;

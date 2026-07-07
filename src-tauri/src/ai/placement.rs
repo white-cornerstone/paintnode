@@ -64,6 +64,7 @@ const MASK_CONTEXT_MARGIN: u32 = 16;
 const OVERVIEW_MAX_SIDE: u32 = 768;
 const OVERVIEW_OUTLINE_THICKNESS: u32 = 3;
 const OVERVIEW_OUTLINE_COLOR: image::Rgba<u8> = image::Rgba([255, 48, 48, 255]);
+const UNKNOWN_EDIT_FILL: image::Rgba<u8> = image::Rgba([139, 143, 152, 255]);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiEditProvider {
@@ -1692,6 +1693,52 @@ impl AiEditComposer {
         encode_rgba_png(cropped, label)
     }
 
+    fn image_hiding_unpainted_editable(
+        &self,
+        image: &image::RgbaImage,
+        fill: image::Rgba<u8>,
+    ) -> image::RgbaImage {
+        let mut hidden = image.clone();
+        let (width, height) = hidden.dimensions();
+        for y in 0..height {
+            for x in 0..width {
+                if self.editable.is_covered(x, y) && !self.painted.is_covered(x, y) {
+                    hidden.put_pixel(x, y, fill);
+                }
+            }
+        }
+        hidden
+    }
+
+    fn image_with_draft_unpainted_editable(
+        &self,
+        draft_png: &[u8],
+        label: &str,
+    ) -> Result<image::RgbaImage, String> {
+        let draft = decode_png_rgba(draft_png, label)?;
+        let dimensions = self.source.dimensions();
+        let draft = if draft.dimensions() == dimensions {
+            draft
+        } else {
+            image::imageops::resize(
+                &draft,
+                dimensions.0,
+                dimensions.1,
+                image::imageops::FilterType::Triangle,
+            )
+        };
+        let mut image = self.source.clone();
+        let (width, height) = image.dimensions();
+        for y in 0..height {
+            for x in 0..width {
+                if self.editable.is_covered(x, y) && !self.painted.is_covered(x, y) {
+                    image.put_pixel(x, y, *draft.get_pixel(x, y));
+                }
+            }
+        }
+        Ok(image)
+    }
+
     fn frame_png(
         image: &image::RgbaImage,
         part: &AiEditPart,
@@ -1738,13 +1785,66 @@ impl AiEditComposer {
         part: &AiEditPart,
         label: &str,
     ) -> Result<AiEditPartInputs, String> {
+        self.part_inputs_with_padding_rule(part, label, false, false)
+    }
+
+    pub(crate) fn part_inputs_hiding_unpainted_editable(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+        protect_frame_padding: bool,
+    ) -> Result<AiEditPartInputs, String> {
+        self.part_inputs_with_padding_rule(part, label, protect_frame_padding, true)
+    }
+
+    fn part_inputs_with_padding_rule(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+        protect_frame_padding: bool,
+        hide_unpainted_editable: bool,
+    ) -> Result<AiEditPartInputs, String> {
+        let hidden_source = hide_unpainted_editable
+            .then(|| self.image_hiding_unpainted_editable(&self.source, UNKNOWN_EDIT_FILL));
+        let hidden_edit_target = hide_unpainted_editable
+            .then(|| self.image_hiding_unpainted_editable(&self.edit_target, UNKNOWN_EDIT_FILL));
+        let source = hidden_source.as_ref().unwrap_or(&self.source);
+        let edit_target = hidden_edit_target.as_ref().unwrap_or(&self.edit_target);
+        self.part_inputs_from_images(part, label, protect_frame_padding, source, edit_target)
+    }
+
+    pub(crate) fn part_inputs_with_storyboard_draft(
+        &self,
+        part: &AiEditPart,
+        draft_png: &[u8],
+        label: &str,
+        protect_frame_padding: bool,
+    ) -> Result<AiEditPartInputs, String> {
+        let draft_backed = self.image_with_draft_unpainted_editable(draft_png, label)?;
+        self.part_inputs_from_images(
+            part,
+            label,
+            protect_frame_padding,
+            &draft_backed,
+            &draft_backed,
+        )
+    }
+
+    fn part_inputs_from_images(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+        protect_frame_padding: bool,
+        source: &image::RgbaImage,
+        edit_target: &image::RgbaImage,
+    ) -> Result<AiEditPartInputs, String> {
         let crop = part.crop;
         let (input_width, input_height) = part.working.original_dimensions;
         let weights = self.part_blend_weights(crop);
         let input_is_larger = (input_width, input_height) != (crop.width, crop.height)
             || part.input_paste_rect.x != 0
             || part.input_paste_rect.y != 0;
-        let outside_mask = if input_is_larger {
+        let outside_mask = if input_is_larger && !protect_frame_padding {
             image::Rgba([255, 255, 255, 255])
         } else {
             image::Rgba([0, 0, 0, 255])
@@ -1782,13 +1882,8 @@ impl AiEditComposer {
             }
         }
         Ok(AiEditPartInputs {
-            source_png: Self::frame_png(&self.source, part, image::Rgba([0, 0, 0, 0]), label)?,
-            edit_target_png: Self::frame_png(
-                &self.edit_target,
-                part,
-                image::Rgba([139, 143, 152, 255]),
-                label,
-            )?,
+            source_png: Self::frame_png(source, part, image::Rgba([0, 0, 0, 0]), label)?,
+            edit_target_png: Self::frame_png(edit_target, part, UNKNOWN_EDIT_FILL, label)?,
             mask_png: encode_rgba_png(part_mask, label)?,
             annotated_source_png: self
                 .annotated_source
@@ -1801,30 +1896,65 @@ impl AiEditComposer {
     /// Downscaled full-document preview with the part's region outlined,
     /// so a part-run agent can see the whole composition it belongs to.
     pub(crate) fn overview_png(&self, part: &AiEditPart, label: &str) -> Result<Vec<u8>, String> {
-        let (width, height) = self.source.dimensions();
+        self.overview_png_from_image(&self.source, Some(part), label)
+    }
+
+    pub(crate) fn overview_png_hiding_unpainted_editable(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let hidden = self.image_hiding_unpainted_editable(&self.source, UNKNOWN_EDIT_FILL);
+        self.overview_png_from_image(&hidden, Some(part), label)
+    }
+
+    pub(crate) fn overview_png_with_storyboard_draft(
+        &self,
+        part: &AiEditPart,
+        draft_png: &[u8],
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let draft_backed = self.image_with_draft_unpainted_editable(draft_png, label)?;
+        self.overview_png_from_image(&draft_backed, Some(part), label)
+    }
+
+    pub(crate) fn storyboard_overview_png(&self, label: &str) -> Result<Vec<u8>, String> {
+        let hidden = self.image_hiding_unpainted_editable(&self.source, UNKNOWN_EDIT_FILL);
+        self.overview_png_from_image(&hidden, None, label)
+    }
+
+    fn overview_png_from_image(
+        &self,
+        image: &image::RgbaImage,
+        part: Option<&AiEditPart>,
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let (width, height) = image.dimensions();
         let long_side = width.max(height).max(1);
         let scale = f64::from(OVERVIEW_MAX_SIDE.min(long_side)) / f64::from(long_side);
         let scaled = |value: u32| (f64::from(value) * scale).round() as u32;
         let out_width = scaled(width).max(1);
         let out_height = scaled(height).max(1);
         let mut thumb = image::imageops::resize(
-            &self.source,
+            image,
             out_width,
             out_height,
             image::imageops::FilterType::Triangle,
         );
-        let outline = PixelRect {
-            x: scaled(part.crop.x),
-            y: scaled(part.crop.y),
-            width: scaled(part.crop.width).max(OVERVIEW_OUTLINE_THICKNESS * 2),
-            height: scaled(part.crop.height).max(OVERVIEW_OUTLINE_THICKNESS * 2),
-        };
-        draw_rect_outline(
-            &mut thumb,
-            outline,
-            OVERVIEW_OUTLINE_THICKNESS,
-            OVERVIEW_OUTLINE_COLOR,
-        );
+        if let Some(part) = part {
+            let outline = PixelRect {
+                x: scaled(part.crop.x),
+                y: scaled(part.crop.y),
+                width: scaled(part.crop.width).max(OVERVIEW_OUTLINE_THICKNESS * 2),
+                height: scaled(part.crop.height).max(OVERVIEW_OUTLINE_THICKNESS * 2),
+            };
+            draw_rect_outline(
+                &mut thumb,
+                outline,
+                OVERVIEW_OUTLINE_THICKNESS,
+                OVERVIEW_OUTLINE_COLOR,
+            );
+        }
         encode_rgba_png(thumb, label)
     }
 
@@ -1942,6 +2072,137 @@ fn draw_rect_outline(
     }
 }
 
+fn centered_aspect_crop(dimensions: (u32, u32), target_aspect: (u32, u32)) -> PixelRect {
+    let (width, height) = dimensions;
+    let (target_width, target_height) = target_aspect;
+    let image_aspect = f64::from(width) / f64::from(height.max(1));
+    let target_aspect = f64::from(target_width.max(1)) / f64::from(target_height.max(1));
+    if image_aspect > target_aspect {
+        let crop_width = (f64::from(height) * target_aspect)
+            .round()
+            .clamp(1.0, f64::from(width)) as u32;
+        PixelRect {
+            x: (width - crop_width) / 2,
+            y: 0,
+            width: crop_width,
+            height,
+        }
+    } else {
+        let crop_height = (f64::from(width) / target_aspect)
+            .round()
+            .clamp(1.0, f64::from(height)) as u32;
+        PixelRect {
+            x: 0,
+            y: (height - crop_height) / 2,
+            width,
+            height: crop_height,
+        }
+    }
+}
+
+fn centered_aspect_fit(dimensions: (u32, u32), target_aspect: (u32, u32)) -> PixelRect {
+    let (width, height) = dimensions;
+    let (target_width, target_height) = target_aspect;
+    let frame_aspect = f64::from(width) / f64::from(height.max(1));
+    let target_aspect = f64::from(target_width.max(1)) / f64::from(target_height.max(1));
+    if frame_aspect > target_aspect {
+        let fit_width = (f64::from(height) * target_aspect)
+            .round()
+            .clamp(1.0, f64::from(width)) as u32;
+        PixelRect {
+            x: (width - fit_width) / 2,
+            y: 0,
+            width: fit_width,
+            height,
+        }
+    } else {
+        let fit_height = (f64::from(width) / target_aspect)
+            .round()
+            .clamp(1.0, f64::from(height)) as u32;
+        PixelRect {
+            x: 0,
+            y: (height - fit_height) / 2,
+            width,
+            height: fit_height,
+        }
+    }
+}
+
+pub(crate) fn storyboard_draft_canvas_png(
+    overview_png: &[u8],
+    provider_dimensions: (u32, u32),
+    document_dimensions: (u32, u32),
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let overview = decode_png_rgba(overview_png, label)?;
+    let composition_rect = centered_aspect_fit(provider_dimensions, document_dimensions);
+    let resized = image::imageops::resize(
+        &overview,
+        composition_rect.width,
+        composition_rect.height,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut canvas = image::RgbaImage::from_pixel(
+        provider_dimensions.0,
+        provider_dimensions.1,
+        image::Rgba([0, 0, 0, 255]),
+    );
+    for y in 0..composition_rect.height {
+        for x in 0..composition_rect.width {
+            canvas.put_pixel(
+                composition_rect.x + x,
+                composition_rect.y + y,
+                *resized.get_pixel(x, y),
+            );
+        }
+    }
+    encode_rgba_png(canvas, label)
+}
+
+pub(crate) fn storyboard_draft_mask_png(
+    provider_dimensions: (u32, u32),
+    document_dimensions: (u32, u32),
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let composition_rect = centered_aspect_fit(provider_dimensions, document_dimensions);
+    let mut mask = image::RgbaImage::from_pixel(
+        provider_dimensions.0,
+        provider_dimensions.1,
+        image::Rgba([0, 0, 0, 255]),
+    );
+    for y in 0..composition_rect.height {
+        for x in 0..composition_rect.width {
+            mask.put_pixel(
+                composition_rect.x + x,
+                composition_rect.y + y,
+                image::Rgba([255, 255, 255, 255]),
+            );
+        }
+    }
+    encode_rgba_png(mask, label)
+}
+
+pub(crate) fn normalize_storyboard_draft_png(
+    draft_png: &[u8],
+    document_dimensions: (u32, u32),
+    label: &str,
+) -> Result<(Vec<u8>, (u32, u32), bool), String> {
+    let draft = decode_png_rgba(draft_png, label)?;
+    let source_dimensions = draft.dimensions();
+    let crop = centered_aspect_crop(source_dimensions, document_dimensions);
+    if crop.x == 0
+        && crop.y == 0
+        && crop.width == source_dimensions.0
+        && crop.height == source_dimensions.1
+    {
+        return Ok((draft_png.to_vec(), source_dimensions, false));
+    }
+    let cropped =
+        image::imageops::crop_imm(&draft, crop.x, crop.y, crop.width, crop.height).to_image();
+    let normalized = encode_rgba_png(cropped, label)?;
+    Ok((normalized, source_dimensions, true))
+}
+
 /// Prompt block describing how the attached crop maps back into the document.
 ///
 /// No variant of this note may carry pixel numbers, crop coordinates, or
@@ -2020,6 +2281,45 @@ pub(crate) fn ai_part_prompt_context(placement: &AiEditPlacement, part_index: us
     } else {
         format!("{geometry}\n\n{continuation}")
     }
+}
+
+/// Compact context for orchestrated split fill parts. The orchestrator owns
+/// the local image prompt; this wrapper only states how PaintNode will use the
+/// attached files. Same forwarding rule as the geometry note: no pixel
+/// numbers, coordinates, or part counts.
+pub(crate) fn ai_orchestrated_part_prompt_context(
+    placement: &AiEditPlacement,
+    part_index: usize,
+    has_storyboard_draft: bool,
+) -> String {
+    if has_storyboard_draft {
+        let neighbor_note = if placement.is_split() && part_index > 0 {
+            "\n- Protected pixels in the base image include already-finished high-resolution neighboring content. Match it while enhancing the visible draft."
+        } else {
+            ""
+        };
+        return format!(
+            r#"PaintNode draft enhancement frame:
+- PaintNode will paste this result back into the document automatically.
+- This is a same-size masked image enhancement/restoration pass, not a new generation, outpaint, or composition pass.
+- The pixels already visible in `edit_target.png` are the source of truth for composition. Retouch/up-res what is already there.
+- Preserve every visible subject, object, pose, placement, scale, camera angle, horizon, shoreline, lighting, color relationship, and activity. Do not add, remove, replace, move, duplicate, or reinterpret content.{neighbor_note}
+- Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or mention document geometry in the image-tool instruction."#
+        );
+    }
+    let neighbor_note = if placement.is_split() && part_index > 0 {
+        "\n- `overview.png` and the protected pixels in the base image show the already-finished neighboring content to continue; never copy the red outline."
+    } else if placement.is_split() {
+        "\n- `overview.png` shows the broader editable document for composition only; never copy the red outline."
+    } else {
+        ""
+    };
+    format!(
+        r#"PaintNode edit frame:
+- PaintNode will paste this result back into the document automatically.
+- Use the orchestrator note below only to identify the intended local content for the editable white mask.
+- Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or mention document geometry in the image-tool instruction.{neighbor_note}"#
+    )
 }
 
 /// Prefix progress messages with the part counter on split runs.
@@ -2355,7 +2655,7 @@ mod tests {
     fn antigravity_wide_document_uses_extreme_ratio_crop() {
         // Regression for the 2600x600 retouch runs: with the extreme ratios
         // available, a full-height 4:1 crop covers the widest document slice
-        // in one part (2048x512 output reduces to exactly 4:1).
+        // in one part using the model's real 2064x512 output grid.
         let mask = mask_png_with_rects(2600, 600, &[(1316, 157, 651, 443)]);
         let placement = plan_ai_edit_placement(
             AiEditProvider::Antigravity,
@@ -2368,7 +2668,7 @@ mod tests {
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
         assert_eq!(part.working.aspect_label, "4:1");
-        assert_eq!((part.crop.width, part.crop.height), (2400, 600));
+        assert_eq!((part.crop.width, part.crop.height), (2322, 576));
         assert!(rect_contains(part.crop, placement.mask_bounds));
     }
 
@@ -2559,15 +2859,9 @@ mod tests {
 
     #[test]
     fn antigravity_split_uses_heterogeneous_tiles_within_overlap_cap() {
-        // Regression for the 2600x600 antigravity fill: a uniform 4:1 grid
-        // overlapped by 2200px (re-billing an almost fully generated frame),
-        // and a uniform 16:9 grid needed three strips. A heterogeneous cover
-        // anchors with a 2400x600 (4:1) tile and finishes with the LARGEST
-        // full-height tile the overlap cap allows — a 600x600 (1:1) tile
-        // overlapping 400px — so the finisher carries a substantial band of
-        // the anchor's finished content as context. (A snug 448x600 3:4 tail
-        // once left the model a featureless sliver, and it composed an
-        // unrelated standalone picture.)
+        // Regression for the 2600x600 antigravity fill: use supported real
+        // provider grids, keep overlaps bounded, and cover the whole document
+        // without leaving featureless continuation gaps.
         let mask = mask_png_with_rects(2600, 600, &[(0, 0, 2600, 600)]);
         let placement = plan_ai_edit_placement(
             AiEditProvider::Antigravity,
@@ -2577,34 +2871,18 @@ mod tests {
         )
         .expect("placement");
 
-        assert_eq!(placement.parts.len(), 2);
-        assert_eq!(
-            placement.parts[0].crop,
-            PixelRect {
-                x: 0,
-                y: 0,
-                width: 2400,
-                height: 600
-            }
-        );
-        assert_eq!(placement.parts[0].working.aspect_label, "4:1");
-        assert_eq!(
-            placement.parts[1].crop,
-            PixelRect {
-                x: 2000,
-                y: 0,
-                width: 600,
-                height: 600
-            }
-        );
-        assert_eq!(placement.parts[1].working.aspect_label, "1:1");
-
-        // The anchor and finisher overlap by 400px — within the cap and a
-        // real context band — and together cover the whole document.
-        let overlap =
-            (placement.parts[0].crop.x + placement.parts[0].crop.width) - placement.parts[1].crop.x;
-        assert_eq!(overlap, 400);
-        assert!(overlap <= max_split_overlap(2600));
+        assert!((2..=3).contains(&placement.parts.len()));
+        assert_ne!(placement.parts[0].working.aspect_label, "1:1");
+        assert!(placement.parts[0].crop.width > placement.parts[0].crop.height);
+        assert!(placement
+            .parts
+            .iter()
+            .all(|part| part.working.aspect_label != "21:9"));
+        for pair in placement.parts.windows(2) {
+            let overlap = (pair[0].crop.x + pair[0].crop.width).saturating_sub(pair[1].crop.x);
+            assert!(overlap <= max_split_overlap(2600));
+            assert!(pair[1].crop.x <= pair[0].crop.x + pair[0].crop.width);
+        }
         let mut covered = CoverageGrid::empty(2600, 600);
         for part in &placement.parts {
             covered.mark_rect(part.crop);
@@ -2723,6 +3001,33 @@ mod tests {
     }
 
     #[test]
+    fn split_fill_inputs_protect_expanded_frame_padding() {
+        let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
+        let source = solid_png(3000, 800, [20, 40, 80, 255]);
+        let placement = plan_ai_fill_placement(
+            AiEditProvider::Antigravity,
+            AiFillMethod::WideStarterContinue,
+            AiFillRedundancy::High,
+            (3000, 800),
+            &mask,
+            "Generative fill",
+        )
+        .expect("placement");
+        let composer = AiEditComposer::new(&source, &source, &mask, None, "Generative fill")
+            .expect("composer");
+        let inputs = composer
+            .part_inputs_hiding_unpainted_editable(&placement.parts[0], "Generative fill", true)
+            .expect("inputs");
+        let mask = decode_png_rgba(&inputs.mask_png, "mask").expect("decode mask");
+        assert_eq!(mask.dimensions(), (1914, 812));
+        assert_eq!(mask.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(mask.get_pixel(0, 5).0, [0, 0, 0, 255]);
+        assert_eq!(mask.get_pixel(0, 6).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(0, 805).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(0, 806).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
     fn antigravity_starter_context_redundancy_controls_continuation_overlap() {
         let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
         let plan = |redundancy| {
@@ -2778,7 +3083,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_auto_preserves_wide_starter_for_twenty_six_hundred_by_six_hundred_fill() {
+    fn antigravity_auto_uses_wide_cover_for_twenty_six_hundred_by_six_hundred_fill() {
         let mask = mask_png_with_rects(2600, 600, &[(0, 0, 2600, 600)]);
         let placement = plan_ai_fill_placement(
             AiEditProvider::Antigravity,
@@ -2790,28 +3095,18 @@ mod tests {
         )
         .expect("placement");
 
-        assert_eq!(placement.method, AiFillMethod::WideStarterContinue);
-        assert_eq!(placement.parts.len(), 2);
+        assert_eq!(placement.method, AiFillMethod::WideCover);
+        assert_eq!(placement.parts.len(), 1);
         assert_eq!(
             placement.parts[0].crop,
             PixelRect {
                 x: 0,
                 y: 0,
-                width: 2400,
+                width: 2600,
                 height: 600
             }
         );
         assert_eq!(placement.parts[0].working.aspect_label, "4:1");
-        assert_eq!(
-            placement.parts[1].crop,
-            PixelRect {
-                x: 2000,
-                y: 0,
-                width: 600,
-                height: 600
-            }
-        );
-        assert_eq!(placement.parts[1].working.aspect_label, "1:1");
     }
 
     #[test]
@@ -2994,6 +3289,115 @@ mod tests {
     }
 
     #[test]
+    fn generative_fill_inputs_hide_unpainted_editable_pixels_but_keep_completed_overlap() {
+        let source = solid_png(48, 32, [0, 0, 200, 255]);
+        let mask = mask_png_with_rects(48, 32, &[(0, 0, 48, 32)]);
+        let first = ai_edit_part(
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            "codex",
+        );
+        let second = ai_edit_part(
+            PixelRect {
+                x: 16,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            "codex",
+        );
+
+        let mut composer = AiEditComposer::new(&source, &source, &mask, None, "Generative fill")
+            .expect("composer");
+        let red = solid_png(32, 32, [200, 0, 0, 255]);
+        composer
+            .apply_part_result(&first, &red, "Generative fill")
+            .expect("apply first");
+
+        let second_inputs = composer
+            .part_inputs_hiding_unpainted_editable(&second, "Generative fill", false)
+            .expect("inputs");
+        let second_source =
+            decode_png_rgba(&second_inputs.source_png, "second source").expect("decode source");
+        let second_target = decode_png_rgba(&second_inputs.edit_target_png, "second target")
+            .expect("decode target");
+
+        assert_eq!(second_source.get_pixel(0, 16).0, [200, 0, 0, 255]);
+        assert_eq!(second_target.get_pixel(0, 16).0, [200, 0, 0, 255]);
+        assert_eq!(second_source.get_pixel(31, 16).0, UNKNOWN_EDIT_FILL.0);
+        assert_eq!(second_target.get_pixel(31, 16).0, UNKNOWN_EDIT_FILL.0);
+
+        let overview = composer
+            .overview_png_hiding_unpainted_editable(&second, "Generative fill")
+            .expect("overview");
+        let overview = decode_png_rgba(&overview, "overview").expect("decode overview");
+        assert_eq!(overview.get_pixel(8, 16).0, [200, 0, 0, 255]);
+        assert_eq!(overview.get_pixel(40, 16).0, UNKNOWN_EDIT_FILL.0);
+    }
+
+    #[test]
+    fn generative_fill_inputs_use_storyboard_draft_for_unpainted_editable_pixels() {
+        let source = solid_png(48, 32, [0, 0, 200, 255]);
+        let mask = mask_png_with_rects(48, 32, &[(0, 0, 48, 32)]);
+        let draft = solid_png(48, 32, [0, 200, 0, 255]);
+        let first = ai_edit_part(
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            "codex",
+        );
+        let second = ai_edit_part(
+            PixelRect {
+                x: 16,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            "codex",
+        );
+
+        let mut composer = AiEditComposer::new(&source, &source, &mask, None, "Generative fill")
+            .expect("composer");
+        let first_inputs = composer
+            .part_inputs_with_storyboard_draft(&first, &draft, "Generative fill", true)
+            .expect("first inputs");
+        let first_target =
+            decode_png_rgba(&first_inputs.edit_target_png, "first target").expect("decode");
+        assert_eq!(first_target.get_pixel(16, 16).0, [0, 200, 0, 255]);
+
+        let overview = composer
+            .overview_png_with_storyboard_draft(&first, &draft, "Generative fill")
+            .expect("overview");
+        let overview = decode_png_rgba(&overview, "overview").expect("decode overview");
+        assert_eq!(overview.get_pixel(40, 16).0, [0, 200, 0, 255]);
+
+        let red = solid_png(32, 32, [200, 0, 0, 255]);
+        composer
+            .apply_part_result(&first, &red, "Generative fill")
+            .expect("apply first");
+
+        let second_inputs = composer
+            .part_inputs_with_storyboard_draft(&second, &draft, "Generative fill", true)
+            .expect("second inputs");
+        let second_source =
+            decode_png_rgba(&second_inputs.source_png, "second source").expect("decode source");
+        let second_target = decode_png_rgba(&second_inputs.edit_target_png, "second target")
+            .expect("decode target");
+
+        assert_eq!(second_source.get_pixel(0, 16).0, [200, 0, 0, 255]);
+        assert_eq!(second_target.get_pixel(0, 16).0, [200, 0, 0, 255]);
+        assert_eq!(second_source.get_pixel(31, 16).0, [0, 200, 0, 255]);
+        assert_eq!(second_target.get_pixel(31, 16).0, [0, 200, 0, 255]);
+    }
+
+    #[test]
     fn composer_rejects_part_results_with_wrong_dimensions() {
         let source = solid_png(64, 32, [0, 0, 200, 255]);
         let mask = mask_png_with_rects(64, 32, &[(8, 8, 16, 16)]);
@@ -3040,6 +3444,70 @@ mod tests {
         // Left edge of the outlined region: 400 * 768 / 1600 = 192.
         assert_eq!(overview.get_pixel(192, 96).0, OVERVIEW_OUTLINE_COLOR.0);
         assert_eq!(overview.get_pixel(10, 96).0, [10, 10, 10, 255]);
+    }
+
+    #[test]
+    fn storyboard_overview_has_no_part_outline() {
+        let source = solid_png(1600, 400, [10, 10, 10, 255]);
+        let mask = mask_png_with_rects(1600, 400, &[(0, 0, 1600, 400)]);
+        let composer = AiEditComposer::new(&source, &source, &mask, None, "Generative fill")
+            .expect("composer");
+
+        let overview = composer
+            .storyboard_overview_png("Generative fill storyboard")
+            .expect("overview");
+        let overview = decode_png_rgba(&overview, "overview").expect("decode");
+
+        assert_eq!(overview.dimensions(), (768, 192));
+        assert!(overview
+            .pixels()
+            .all(|pixel| pixel.0 != OVERVIEW_OUTLINE_COLOR.0));
+        assert_eq!(overview.get_pixel(192, 96).0, UNKNOWN_EDIT_FILL.0);
+    }
+
+    #[test]
+    fn storyboard_draft_canvas_and_normalized_result_keep_document_ratio() {
+        let overview = solid_png(768, 205, [80, 90, 100, 255]);
+        let canvas = storyboard_draft_canvas_png(
+            &overview,
+            (2064, 512),
+            (3000, 800),
+            "storyboard draft canvas",
+        )
+        .expect("canvas");
+        let canvas = decode_png_rgba(&canvas, "canvas").expect("decode");
+        assert_eq!(canvas.dimensions(), (2064, 512));
+        assert_eq!(canvas.get_pixel(1032, 256).0, [80, 90, 100, 255]);
+        assert_eq!(canvas.get_pixel(10, 256).0, [0, 0, 0, 255]);
+
+        let mask = storyboard_draft_mask_png((2064, 512), (3000, 800), "storyboard draft mask")
+            .expect("mask");
+        let mask = decode_png_rgba(&mask, "mask").expect("decode mask");
+        assert_eq!(mask.dimensions(), (2064, 512));
+        assert_eq!(mask.get_pixel(10, 256).0, [0, 0, 0, 255]);
+        assert_eq!(mask.get_pixel(72, 256).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(1991, 256).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(1992, 256).0, [0, 0, 0, 255]);
+
+        let provider_draft = image::RgbaImage::from_fn(2064, 512, |x, _y| {
+            if x < 72 {
+                image::Rgba([0, 0, 0, 255])
+            } else if x < 1992 {
+                image::Rgba([120, 130, 140, 255])
+            } else {
+                image::Rgba([0, 0, 0, 255])
+            }
+        });
+        let provider_draft = encode_rgba_png(provider_draft, "provider draft").expect("draft");
+        let (normalized, source_dimensions, changed) =
+            normalize_storyboard_draft_png(&provider_draft, (3000, 800), "storyboard draft")
+                .expect("normalized");
+        let normalized = decode_png_rgba(&normalized, "normalized").expect("decode");
+
+        assert_eq!(source_dimensions, (2064, 512));
+        assert!(changed);
+        assert_eq!(normalized.dimensions(), (1920, 512));
+        assert_eq!(normalized.get_pixel(960, 256).0, [120, 130, 140, 255]);
     }
 
     #[test]
@@ -3129,6 +3597,18 @@ mod tests {
             ai_part_prompt_context(&single, 0),
             ai_part_geometry_note(&single, 0)
         );
+        let orchestrated = ai_orchestrated_part_prompt_context(&split, 1, true);
+        assert!(orchestrated.contains("draft enhancement frame"));
+        assert!(orchestrated.contains("same-size masked image enhancement/restoration pass"));
+        assert!(orchestrated.contains("Retouch/up-res what is already there"));
+        assert!(orchestrated.contains("Do not add, remove, replace, move, duplicate"));
+        assert!(!orchestrated.contains("storyboard-draft-crop.png"));
+        assert!(!orchestrated.contains("orchestrator note"));
+        assert!(!orchestrated.contains("Continuation rules for this crop"));
+        assert!(!orchestrated.contains("6000"));
+        assert!(!orchestrated.contains("part"));
+        assert!(!orchestrated.contains("split"));
+        assert!(!orchestrated.contains("x="));
 
         assert_eq!(
             ai_part_progress_message(&split, 1, "Starting local Codex AI retouch"),
