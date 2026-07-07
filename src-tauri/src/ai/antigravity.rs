@@ -462,7 +462,7 @@ Final response should be one short sentence confirming `{result_path}` was creat
 
 fn antigravity_overview_note(job_dir: &str, has_overview: bool) -> String {
     if has_overview {
-        format!("\n- `{job_dir}/overview.png`: downscaled preview of the surrounding document content with the editable region outlined in red. Use it only as composition and continuity guidance; never copy its pixels or the red outline into the result.")
+        format!("\n- `{job_dir}/overview.png`: downscaled preview of the surrounding document content with the editable region outlined in red. Use it only as non-editable composition and continuity guidance. `{job_dir}/source.png` is the only base/edit image; never use `overview.png` as the source or base image, never copy its pixels or resolution, and never reproduce the red outline.")
     } else {
         String::new()
     }
@@ -511,13 +511,6 @@ fn antigravity_fill_prompt(
     };
     let reference_note = reference_prompt_note(reference_names, &reference_prefix);
     if has_storyboard_draft {
-        let overview_note = if continuation && has_overview {
-            format!(
-                "\n- `{job_dir}/overview.png`: downscaled surrounding-document preview. Use it only to align with already-finished neighboring pixels; never copy its pixels, resolution, or red outline."
-            )
-        } else {
-            String::new()
-        };
         return format!(
             r#"Perform one PaintNode draft enhancement using the PNG files in `{job_dir}`.
 
@@ -1774,7 +1767,7 @@ pub(crate) async fn generate_antigravity_fill_image(
                 &storyboard_note,
                 storyboard_anchor,
                 storyboard_fallback,
-                has_overview && (!has_storyboard_draft || part_index > 0),
+                has_overview,
                 has_storyboard_draft,
                 placement.is_split() && part_index > 0,
                 &reference_names,
@@ -3066,6 +3059,9 @@ mod tests {
         );
         assert!(storyboard_fill.contains("PaintNode draft enhancement"));
         assert!(storyboard_fill.contains("source.png`: PaintNode edit frame to enhance"));
+        assert!(storyboard_fill.contains("`paintnode/antigravity-runs/job-4/part-1/overview.png`"));
+        assert!(storyboard_fill.contains("never use `overview.png` as the source or base image"));
+        assert!(storyboard_fill.contains("never reproduce the red outline"));
         assert!(storyboard_fill.contains("image enhancement/restoration pass at the same size"));
         assert!(storyboard_fill.contains("Do not add, remove, duplicate, replace, move"));
         assert!(storyboard_fill.contains("Do not attach storyboard draft files"));

@@ -101,10 +101,10 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     focusTaskDocument(task.documentId);
     const fillInput = fillMode ? await editor.prepareGenerativeFillInput() : null;
     if (fillMode && !fillInput) throw new Error('The current selection has no editable pixels.');
-    // A blank-canvas fill has nothing to preserve or extend, so it runs through
-    // the plain generate path (one document-sized image). Nonblank selected
-    // fills use the mask-guided backend with deterministic frame planning.
-    const fillEdit = fillInput && !fillInput.blankCanvas ? fillInput : null;
+    // If the user starts from a selection, keep the mask-guided fill path even
+    // when the selected pixels are blank. The fill backends own ratio matching,
+    // storyboard/draft planning, and paste-back masks for this workflow.
+    const fillEdit = fillInput;
     const generationPrompt = userPrompt;
     const generationTarget = fillEdit ? null : targetDimensions();
     const keepJobDir = settings.value.workspace.keepAiRunInputs;
@@ -112,7 +112,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     if (fillInput) {
       aiTasks.setProgress(
         task.id,
-        fillEdit ? 'Starting mask-guided generative fill...' : 'Generating fill image...',
+        'Starting mask-guided generative fill...',
       );
     }
     const generated =

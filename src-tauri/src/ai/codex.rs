@@ -873,6 +873,7 @@ fn generative_fill_prompt(
     storyboard_note: &str,
     storyboard_anchor: bool,
     storyboard_fallback: bool,
+    has_overview: bool,
     has_storyboard_draft: bool,
     reference_names: &[String],
 ) -> String {
@@ -885,12 +886,18 @@ fn generative_fill_prompt(
     };
     let reference_note = reference_prompt_note(reference_names, "");
     let has_storyboard = !storyboard_note.trim().is_empty();
+    let overview_note = if has_overview {
+        "\n2. `overview.png` may be present as a downscaled surrounding-document preview with a red outline around this local frame. Use it only as non-editable composition and continuity guidance. `source.png` is the only base/edit image; never use `overview.png` as the source or base image, never copy its pixels or resolution, and never reproduce the red outline."
+    } else {
+        ""
+    };
     if has_storyboard_draft {
         return format!(
             r#"Use $imagegen to perform one PaintNode draft enhancement.
 
-Attached images:
+Input files:
 1. `source.png` is the PaintNode edit frame to enhance. It already contains the orchestrator's rough low-detail visual draft.
+{overview_note}
 
 {geometry_note}
 
@@ -906,6 +913,7 @@ Task:
 Requirements:
 - Save the final PNG as `result.png` in the current working directory. This file is required.
 - Treat `result.png` as an in-place enhancement of `source.png`, not as a newly composed independent image.
+- When using the image-generation tool, use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
 - PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
@@ -937,8 +945,9 @@ Final response should be one short sentence confirming `result.png` was created.
         return format!(
             r#"{task_intro}
 
-Attached images:
+Input files:
 1. `source.png` {source_input_note}
+{overview_note}
 
 {reference_note}
 
@@ -952,6 +961,7 @@ Requirements:
 - Save the final PNG as `result.png` in the current working directory. This file is required.
 - Treat `result.png` as an in-place edit of `source.png`, not as a newly composed independent image.
 {storyboard_instruction_note}
+- When using the image-generation tool, use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
 - PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
@@ -966,8 +976,9 @@ Final response should be one short sentence confirming `result.png` was created.
     format!(
         r#"{task_intro}
 
-Attached images:
+Input files:
 1. `source.png` is the current content of the document area being edited.
+{overview_note}
 
 {reference_note}
 
@@ -984,6 +995,7 @@ Requirements:
 - Prefer one full PNG with the exact same framing as `source.png`.
 - Save the final PNG as `result.png` in the current working directory. This file is required.
 - Treat `result.png` as an in-place edit of `source.png`, not as a newly composed photograph.
+- When using the image-generation tool, use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
 - Fill the intended editable/empty area implied by the attached frame and prompt, matching surrounding scene, perspective, lighting, focus, color, grain, and camera style.
 - Keep existing visible context stable and registered. PaintNode will crop, paste, and apply the editable mask after import.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
@@ -2378,6 +2390,7 @@ pub(crate) async fn generate_codex_fill_image(
                 &storyboard_note,
                 storyboard_anchor,
                 storyboard_fallback,
+                has_overview,
                 has_storyboard_draft,
                 &reference_names,
             );
@@ -3556,6 +3569,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
         );
         assert!(fill.contains("Autonomy level: Unmanaged"));
@@ -3658,6 +3672,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &reference_names,
         );
         let command = build_generative_fill_codex_command(
@@ -3712,10 +3727,14 @@ mod tests {
             true,
             false,
             true,
+            true,
             &[],
         );
         assert!(storyboard_prompt.contains("PaintNode draft enhancement"));
         assert!(storyboard_prompt.contains("source.png` is the PaintNode edit frame to enhance"));
+        assert!(storyboard_prompt.contains("`overview.png` may be present"));
+        assert!(storyboard_prompt.contains("never use `overview.png` as the source or base image"));
+        assert!(storyboard_prompt.contains("never reproduce the red outline"));
         assert!(storyboard_prompt.contains("image enhancement/restoration pass at the same size"));
         assert!(storyboard_prompt.contains("Do not add, remove, duplicate, replace, move"));
         assert!(!storyboard_prompt.contains("edit_target.png"));
