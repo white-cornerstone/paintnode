@@ -2193,15 +2193,7 @@ impl AiEditComposer {
         part: &AiEditPart,
         label: &str,
     ) -> Result<AiEditPartInputs, String> {
-        self.part_inputs_with_padding_rule(part, label, false, false, false)
-    }
-
-    pub(crate) fn part_inputs_with_editable_frame_padding(
-        &self,
-        part: &AiEditPart,
-        label: &str,
-    ) -> Result<AiEditPartInputs, String> {
-        self.part_inputs_with_padding_rule(part, label, false, false, true)
+        self.part_inputs_with_padding_rule(part, label, false, false)
     }
 
     pub(crate) fn part_inputs_hiding_unpainted_editable(
@@ -2210,7 +2202,7 @@ impl AiEditComposer {
         label: &str,
         protect_frame_padding: bool,
     ) -> Result<AiEditPartInputs, String> {
-        self.part_inputs_with_padding_rule(part, label, protect_frame_padding, true, true)
+        self.part_inputs_with_padding_rule(part, label, protect_frame_padding, true)
     }
 
     fn part_inputs_with_padding_rule(
@@ -2219,7 +2211,6 @@ impl AiEditComposer {
         label: &str,
         protect_frame_padding: bool,
         hide_unpainted_editable: bool,
-        fill_source_padding_as_editable: bool,
     ) -> Result<AiEditPartInputs, String> {
         let hidden_source = hide_unpainted_editable
             .then(|| self.image_hiding_unpainted_editable(&self.source, UNKNOWN_EDIT_FILL));
@@ -2227,14 +2218,7 @@ impl AiEditComposer {
             .then(|| self.image_hiding_unpainted_editable(&self.edit_target, UNKNOWN_EDIT_FILL));
         let source = hidden_source.as_ref().unwrap_or(&self.source);
         let edit_target = hidden_edit_target.as_ref().unwrap_or(&self.edit_target);
-        self.part_inputs_from_images(
-            part,
-            label,
-            protect_frame_padding,
-            fill_source_padding_as_editable,
-            source,
-            edit_target,
-        )
+        self.part_inputs_from_images(part, label, protect_frame_padding, source, edit_target)
     }
 
     pub(crate) fn part_inputs_with_storyboard_draft(
@@ -2249,7 +2233,6 @@ impl AiEditComposer {
             part,
             label,
             protect_frame_padding,
-            true,
             &draft_backed,
             &draft_backed,
         )
@@ -2260,7 +2243,6 @@ impl AiEditComposer {
         part: &AiEditPart,
         label: &str,
         protect_frame_padding: bool,
-        fill_source_padding_as_editable: bool,
         source: &image::RgbaImage,
         edit_target: &image::RgbaImage,
     ) -> Result<AiEditPartInputs, String> {
@@ -2307,13 +2289,8 @@ impl AiEditComposer {
                 );
             }
         }
-        let source_padding = if input_is_larger && fill_source_padding_as_editable {
-            UNKNOWN_EDIT_FILL
-        } else {
-            image::Rgba([0, 0, 0, 0])
-        };
         Ok(AiEditPartInputs {
-            source_png: Self::frame_png(source, part, source_padding, label)?,
+            source_png: Self::frame_png(source, part, image::Rgba([0, 0, 0, 0]), label)?,
             edit_target_png: Self::frame_png(edit_target, part, UNKNOWN_EDIT_FILL, label)?,
             mask_png: encode_rgba_png(part_mask, label)?,
             annotated_source_png: self
@@ -2707,12 +2684,14 @@ pub(crate) fn normalize_storyboard_draft_png(
 /// AGENTS.md.
 pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usize) -> String {
     let crop = placement.parts[part_index].crop;
-    let input_is_expanded = part_input_is_expanded(placement, part_index);
+    let input_dimensions = placement.parts[part_index].working.original_dimensions;
+    let input_is_expanded = input_dimensions != (crop.width, crop.height)
+        || placement.parts[part_index].input_paste_rect.x != 0
+        || placement.parts[part_index].input_paste_rect.y != 0;
     if !placement.is_split() {
         if input_is_expanded {
             return r#"PaintNode image geometry:
 - The attached images are an expanded working frame for a PaintNode document; PaintNode will paste the generated document region back automatically.
-- Any neutral placeholder area around the document content is editable provider-frame space. Replace it with natural image content; do not preserve it as a border, mat, shadow, or background.
 - Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
                 .into();
         }
@@ -2737,14 +2716,6 @@ pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usi
 - The user prompt describes an edit that extends beyond this crop; produce only what belongs inside this crop's mask and let content continue naturally past the crop edges instead of composing a complete standalone picture.
 - Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
         .into()
-}
-
-fn part_input_is_expanded(placement: &AiEditPlacement, part_index: usize) -> bool {
-    let part = &placement.parts[part_index];
-    let crop = part.crop;
-    part.working.original_dimensions != (crop.width, crop.height)
-        || part.input_paste_rect.x != 0
-        || part.input_paste_rect.y != 0
 }
 
 /// Prompt block for split parts after the first: the agent must translate the
@@ -2790,11 +2761,6 @@ pub(crate) fn ai_orchestrated_part_prompt_context(
     part_index: usize,
     has_storyboard_draft: bool,
 ) -> String {
-    let placeholder_note = if part_input_is_expanded(placement, part_index) {
-        "\n- Any neutral placeholder area around the document content is editable provider-frame space. Replace it with natural image content; do not preserve it as a border, mat, shadow, or background."
-    } else {
-        ""
-    };
     if has_storyboard_draft {
         let neighbor_note = if placement.is_split() && part_index > 0 {
             "\n- Protected pixels in the base image include already-finished high-resolution neighboring content. Match it while enhancing the visible draft."
@@ -2806,7 +2772,7 @@ pub(crate) fn ai_orchestrated_part_prompt_context(
 - PaintNode will paste this result back into the document automatically.
 - This is a same-size masked image enhancement/restoration pass, not a new generation, outpaint, or composition pass.
 - The pixels already visible in `edit_target.png` are the source of truth for composition. Retouch/up-res what is already there.
-- Preserve every visible subject, object, pose, placement, scale, camera angle, horizon, shoreline, lighting, color relationship, and activity. Do not add, remove, replace, move, duplicate, or reinterpret content.{placeholder_note}{neighbor_note}
+- Preserve every visible subject, object, pose, placement, scale, camera angle, horizon, shoreline, lighting, color relationship, and activity. Do not add, remove, replace, move, duplicate, or reinterpret content.{neighbor_note}
 - Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or mention document geometry in the image-tool instruction."#
         );
     }
@@ -2821,7 +2787,7 @@ pub(crate) fn ai_orchestrated_part_prompt_context(
         r#"PaintNode edit frame:
 - PaintNode will paste this result back into the document automatically.
 - Use the orchestrator note below only to identify the intended local content for the editable white mask.
-- Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or mention document geometry in the image-tool instruction.{placeholder_note}{neighbor_note}"#
+- Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or mention document geometry in the image-tool instruction.{neighbor_note}"#
     )
 }
 
@@ -3603,53 +3569,6 @@ mod tests {
         assert_eq!(mask.get_pixel(0, 6).0, [255, 255, 255, 255]);
         assert_eq!(mask.get_pixel(0, 805).0, [255, 255, 255, 255]);
         assert_eq!(mask.get_pixel(0, 806).0, [0, 0, 0, 255]);
-        let source = decode_png_rgba(&inputs.source_png, "source").expect("decode source");
-        assert_eq!(source.get_pixel(0, 0).0, UNKNOWN_EDIT_FILL.0);
-        assert_eq!(source.get_pixel(0, 5).0, UNKNOWN_EDIT_FILL.0);
-        assert_eq!(source.get_pixel(0, 6).0, UNKNOWN_EDIT_FILL.0);
-        assert_eq!(source.get_pixel(0, 806).0, UNKNOWN_EDIT_FILL.0);
-    }
-
-    #[test]
-    fn wide_cover_fill_source_padding_is_editable_placeholder() {
-        let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
-        let source = solid_png(3000, 800, [20, 40, 80, 255]);
-        let placement = plan_ai_fill_placement(
-            AiEditProvider::Antigravity,
-            AiFillMethod::WideCover,
-            AiFillRedundancy::Medium,
-            (3000, 800),
-            &mask,
-            Some("4:1"),
-            "Generative fill",
-        )
-        .expect("placement");
-        let part = &placement.parts[0];
-        assert_eq!(part.working.original_dimensions, (3225, 800));
-        assert_eq!(
-            part.input_paste_rect,
-            PixelRect {
-                x: 112,
-                y: 0,
-                width: 3000,
-                height: 800
-            }
-        );
-        let composer = AiEditComposer::new(&source, &source, &mask, None, "Generative fill")
-            .expect("composer");
-        let inputs = composer
-            .part_inputs_with_editable_frame_padding(part, "Generative fill")
-            .expect("inputs");
-        let source = decode_png_rgba(&inputs.source_png, "source").expect("decode source");
-        assert_eq!(source.dimensions(), (3225, 800));
-        assert_eq!(source.get_pixel(0, 400).0, UNKNOWN_EDIT_FILL.0);
-        assert_eq!(source.get_pixel(111, 400).0, UNKNOWN_EDIT_FILL.0);
-        assert_eq!(source.get_pixel(112, 400).0, [20, 40, 80, 255]);
-        assert_eq!(source.get_pixel(3111, 400).0, [20, 40, 80, 255]);
-        assert_eq!(source.get_pixel(3112, 400).0, UNKNOWN_EDIT_FILL.0);
-        let mask = decode_png_rgba(&inputs.mask_png, "mask").expect("decode mask");
-        assert_eq!(mask.get_pixel(0, 400).0, [255, 255, 255, 255]);
-        assert_eq!(mask.get_pixel(3224, 400).0, [255, 255, 255, 255]);
     }
 
     #[test]

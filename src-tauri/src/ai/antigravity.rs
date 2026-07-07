@@ -1720,7 +1720,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             } else if storyboard.is_some() {
                 composer.part_inputs_hiding_unpainted_editable(part, "Generative fill", true)?
             } else {
-                composer.part_inputs_with_editable_frame_padding(part, "Generative fill")?
+                composer.part_inputs(part, "Generative fill")?
             };
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
