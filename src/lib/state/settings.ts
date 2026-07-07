@@ -35,19 +35,10 @@ export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity' | 'custom';
 export type CanvasBackground = 'white' | 'transparent';
-export type GenerativeFillMethod =
-  | 'auto'
-  | 'exactInPlace'
-  | 'wideCover'
-  | 'wideStarterContinue'
-  | 'balancedStrips'
-  | 'plainGenerate';
-export type GenerativeFillRedundancy = 'low' | 'medium' | 'high';
 /**
  * How strictly PaintNode validates fill/retouch candidates before pasting
- * them back: 0 = no checks (for intentionally discontinuous content such as
- * grid/index sheets), 1 = in-place drift gate only (default), 2 = drift +
- * seam continuity, 3 = drift + strict seam continuity.
+ * them back for AI retouch: 0 = no checks, 1 = in-place drift gate only
+ * (default), 2 = drift + seam continuity, 3 = strict seam continuity.
  */
 export type AiEditChecksLevel = 0 | 1 | 2 | 3;
 
@@ -63,8 +54,7 @@ export interface AiRunOptions {
   antigravityApprovalMode: AntigravityApprovalMode;
   customBin: string;
   editChecksLevel: AiEditChecksLevel;
-  fillMethod: GenerativeFillMethod;
-  fillRedundancy: GenerativeFillRedundancy;
+  fillAspectRatio?: string | null;
 }
 
 export interface PaintNodeSettings {
@@ -85,8 +75,6 @@ export interface PaintNodeSettings {
     antigravityModel: AntigravityModelId;
     antigravityApprovalMode: AntigravityApprovalMode;
     editChecksLevel: AiEditChecksLevel;
-    fillMethod: GenerativeFillMethod;
-    fillRedundancy: GenerativeFillRedundancy;
     customBin: string;
     customArgsText: string;
     customGenerateArgsText: string;
@@ -117,15 +105,6 @@ const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((opt
 const AUTOSAVE_INTERVALS = new Set<number>(AUTOSAVE_INTERVAL_OPTIONS.map((option) => option.value));
 const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
-const GENERATIVE_FILL_METHODS = new Set<string>([
-  'auto',
-  'exactInPlace',
-  'wideCover',
-  'wideStarterContinue',
-  'balancedStrips',
-  'plainGenerate',
-]);
-const GENERATIVE_FILL_REDUNDANCY_LEVELS = new Set<string>(['low', 'medium', 'high']);
 
 export function defaultSettings(): PaintNodeSettings {
   return {
@@ -146,8 +125,6 @@ export function defaultSettings(): PaintNodeSettings {
       antigravityModel: 'auto',
       antigravityApprovalMode: 'skipPermissions',
       editChecksLevel: 1,
-      fillMethod: 'auto',
-      fillRedundancy: 'medium',
       customBin: '',
       customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
       customGenerateArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
@@ -235,12 +212,6 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
       antigravityApprovalMode:
         savedAntigravityApprovalMode === 'default' ? 'default' : defaults.ai.antigravityApprovalMode,
       editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
-      fillMethod: GENERATIVE_FILL_METHODS.has(String(ai.fillMethod))
-        ? (ai.fillMethod as GenerativeFillMethod)
-        : defaults.ai.fillMethod,
-      fillRedundancy: GENERATIVE_FILL_REDUNDANCY_LEVELS.has(String(ai.fillRedundancy))
-        ? (ai.fillRedundancy as GenerativeFillRedundancy)
-        : defaults.ai.fillRedundancy,
       customBin: stringOrDefault(ai.customBin, defaults.ai.customBin),
       customArgsText: stringOrDefault(ai.customArgsText, defaults.ai.customArgsText),
       customGenerateArgsText: stringOrDefault(
@@ -296,8 +267,7 @@ export function defaultAiRunOptions(): AiRunOptions {
     antigravityApprovalMode: ai.antigravityApprovalMode,
     customBin: ai.customBin,
     editChecksLevel: ai.editChecksLevel,
-    fillMethod: ai.fillMethod,
-    fillRedundancy: ai.fillRedundancy,
+    fillAspectRatio: null,
   };
 }
 
@@ -314,8 +284,7 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
     antigravityApprovalMode: value.ai.antigravityApprovalMode,
     customBin: value.ai.customBin,
     editChecksLevel: value.ai.editChecksLevel,
-    fillMethod: value.ai.fillMethod,
-    fillRedundancy: value.ai.fillRedundancy,
+    fillAspectRatio: null,
   };
 }
 

@@ -15,27 +15,25 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_candidate_rejection, ai_edit_checks_level, ai_effective_checks_level,
-    ai_retouch_editable_mask_png, ai_working_canvas_accepts_result_dimensions,
-    read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
-    validate_optional_target_dimensions, AiWorkingCanvas, AI_CHROMA_KEY_HEX,
-    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
+    ai_working_canvas_accepts_result_dimensions, read_png_bytes_cropped_to_ai_working_canvas,
+    remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
+    AI_CHROMA_KEY_HEX, AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::fill_storyboard::{
-    fallback_fill_storyboard, fill_storyboard_master_prompt, fill_storyboard_part_is_anchor,
-    fill_storyboard_part_prompt, preserve_invalid_fill_storyboard_file, read_fill_storyboard_file,
-    record_fill_storyboard_failure, should_storyboard_fill, write_fill_storyboard_file,
-    FillStoryboard, FILL_STORYBOARD_DRAFT_FILE, FILL_STORYBOARD_FILE,
-    FILL_STORYBOARD_OVERVIEW_FILE,
+    fill_storyboard_master_prompt, fill_storyboard_part_is_anchor, fill_storyboard_part_prompt,
+    preserve_invalid_fill_storyboard_file, read_fill_storyboard_file,
+    record_fill_storyboard_failure, should_storyboard_fill, FillStoryboard,
+    FILL_STORYBOARD_DRAFT_FILE, FILL_STORYBOARD_FILE, FILL_STORYBOARD_OVERVIEW_FILE,
 };
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
-    ai_part_prompt_context, ai_upscale_target_dimensions, cover_crop_png_to_dimensions,
-    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
+    cover_crop_png_to_dimensions, normalize_storyboard_draft_png, plan_ai_edit_placement,
+    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
+    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider,
+    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
@@ -44,12 +42,12 @@ use crate::ai::{
     emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir,
     image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
-    safe_job_child_path, safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, unique_child_path, validate_reference_pngs,
-    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR,
-    POLL_INTERVAL,
+    remove_legacy_generative_fill_agent_inputs, safe_job_child_path, safe_png_source_file_name,
+    should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
+    unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
+    AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
+    DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, TempJobDir,
+    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -879,29 +877,27 @@ fn generative_fill_prompt(
     reference_names: &[String],
 ) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
-    let task_intro = "Use $imagegen to perform one mask-guided generative fill for PaintNode.";
+    let task_intro = "Use $imagegen to perform one PaintNode generative fill.";
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic paste-back into the document and import; the mask is attached as a separate user-editable layer mask and is never baked into your candidate, so protected areas must stay visually identical to `source.png` in the candidate itself.\n"
+        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic crop, paste-back, masking, and import from `placement.json`; do not try to apply a mask yourself.\n"
     } else {
-        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic paste-back into the document and import; the mask is attached as a separate user-editable layer mask and is never baked into your candidate, so protected areas must stay visually identical to `source.png` in the candidate itself.\n- Do not create, edit, or delete files in the working directory except `result.png`.\n"
+        "- Use the normal Codex image-generation flow for the visual fill. PaintNode owns deterministic crop, paste-back, masking, and import from `placement.json`; do not try to apply a mask yourself.\n- Do not create, edit, or delete files in the working directory except `result.png`.\n"
     };
     let reference_note = reference_prompt_note(reference_names, "");
     let has_storyboard = !storyboard_note.trim().is_empty();
     if has_storyboard_draft {
         return format!(
-            r#"Use $imagegen to perform one masked PaintNode draft enhancement.
+            r#"Use $imagegen to perform one PaintNode draft enhancement.
 
 Attached images:
-1. `edit_target.png` is the same-size base image to enhance in place. Editable pixels already contain a rough low-detail visual draft.
-2. `source.png` is the same-size current PaintNode content for comparison; it should match the base image's composition.
-3. `mask.png` is the edit mask. White pixels are the area to enhance; gray pixels are transition buffer; black or transparent pixels are protected context.
+1. `source.png` is the PaintNode edit frame to enhance. It already contains the orchestrator's rough low-detail visual draft.
 
 {geometry_note}
 
 Task:
 - This is an image enhancement/restoration pass at the same size, not a new composition, new generative fill, outpaint, story continuation, or scene redesign.
 - Improve clarity, texture, natural detail, edge quality, lighting consistency, and local realism only for pixels already visible in the low-detail draft.
-- Preserve the exact subject count, object count, identities/classes, poses, placement, scale, camera angle, horizon, shoreline, lighting, colors, and activities already visible in `edit_target.png`.
+- Preserve the exact subject count, object count, identities/classes, poses, placement, scale, camera angle, horizon, shoreline, lighting, colors, and activities already visible in `source.png`.
 - Do not add, remove, duplicate, replace, move, resize, re-pose, or reinterpret any visible person, object, prop, landform, wave, cloud, or scene element.
 - If a draft area is soft or ambiguous, refine the existing visible shapes conservatively instead of inventing extra content.
 
@@ -909,9 +905,9 @@ Task:
 
 Requirements:
 - Save the final PNG as `result.png` in the current working directory. This file is required.
-- Treat `result.png` as an in-place enhancement of `edit_target.png`, not as a newly composed independent image.
+- Treat `result.png` as an in-place enhancement of `source.png`, not as a newly composed independent image.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
-- Change only the white-mask area, blend through gray-mask transition pixels, and preserve protected context visually.
+- PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 {managed_method_requirements}
 - Do not ask follow-up questions.
@@ -926,13 +922,8 @@ Final response should be one short sentence confirming `result.png` was created.
         } else {
             "is the current PaintNode content for this edit frame."
         };
-        let edit_target_input_note = if has_storyboard_draft {
-            "is the base image to enhance in place. In unpainted editable areas, it already contains the same rough visual draft."
-        } else {
-            "is the base image to edit in place."
-        };
         let storyboard_instruction_note = if has_storyboard_draft {
-            "- Use the orchestrator note only to identify what the visible low-detail draft is meant to contain.\n- Retouch/up-res the low-detail draft already present in `edit_target.png`; do not ignore it, replace it with a new composition, or start from blank.\n- The visible draft is the composition authority. Preserve its subject count, placement, pose, activity, horizon, shoreline, lighting, camera, and scale, and add no new people, props, activities, story beats, or separate scenes beyond what is already visible in the draft."
+            "- Use the orchestrator note only to identify what the visible low-detail draft is meant to contain.\n- Retouch/up-res the low-detail draft already present in `source.png`; do not ignore it, replace it with a new composition, or start from blank.\n- The visible draft is the composition authority. Preserve its subject count, placement, pose, activity, horizon, shoreline, lighting, camera, and scale, and add no new people, props, activities, story beats, or separate scenes beyond what is already visible in the draft."
         } else {
             "- Use the orchestrator subtask prompt above as the local image instruction."
         };
@@ -948,8 +939,6 @@ Final response should be one short sentence confirming `result.png` was created.
 
 Attached images:
 1. `source.png` {source_input_note}
-2. `edit_target.png` {edit_target_input_note}
-3. `mask.png` is the edit mask. White pixels are editable; gray pixels are transition buffer; black or transparent pixels are protected context.
 
 {reference_note}
 
@@ -961,10 +950,10 @@ Attached images:
 
 Requirements:
 - Save the final PNG as `result.png` in the current working directory. This file is required.
-- Treat `result.png` as an in-place edit of `edit_target.png`, not as a newly composed independent image.
+- Treat `result.png` as an in-place edit of `source.png`, not as a newly composed independent image.
 {storyboard_instruction_note}
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
-- Change only the white-mask area, blend through gray-mask transition pixels, and preserve protected context visually.
+- PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 {managed_method_requirements}
 - Do not ask follow-up questions.
@@ -979,8 +968,6 @@ Final response should be one short sentence confirming `result.png` was created.
 
 Attached images:
 1. `source.png` is the current content of the document area being edited.
-2. `edit_target.png` is the same-size image to edit in place. It has the protected photo content plus a neutral gray placeholder where PaintNode needs generated pixels.
-3. `mask.png` is the same-size edit mask. White pixels are the full editable/generated area. Gray pixels are a narrow seam-blending transition zone. Black or transparent pixels are protected context and are not editable.
 
 {reference_note}
 
@@ -994,15 +981,12 @@ Attached images:
 {autonomy_contract}
 
 Requirements:
-- Prefer one full PNG with the exact same pixel dimensions as `edit_target.png` and `source.png`.
+- Prefer one full PNG with the exact same framing as `source.png`.
 - Save the final PNG as `result.png` in the current working directory. This file is required.
-- Treat `result.png` as an in-place edit of `edit_target.png`, not as a newly composed photograph.
-- Preserve every black/transparent-mask protected pixel from `source.png` visually unchanged. Treat protected content as context only.
-- Fill the white-mask area, matching the surrounding scene, perspective, lighting, focus, color, grain, and camera style.
-- Use the gray-mask transition zone only to keep edges registered and seamless with the original photo; do not make visible subject or composition changes there.
-- Blend naturally across the mask boundary, but do not repaint protected subjects, vehicles, people, buildings, signs, road markings, or other black/transparent-mask content.
+- Treat `result.png` as an in-place edit of `source.png`, not as a newly composed photograph.
+- Fill the intended editable/empty area implied by the attached frame and prompt, matching surrounding scene, perspective, lighting, focus, color, grain, and camera style.
+- Keep existing visible context stable and registered. PaintNode will crop, paste, and apply the editable mask after import.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
-- Do not leave the neutral gray placeholder visible in the white-mask area.
 - If extending a real photo, avoid inventing crisp readable text in newly generated distant signs or advertisements; partial or indistinct text is preferable.
 {managed_method_requirements}
 - Do not ask follow-up questions.
@@ -1036,11 +1020,7 @@ fn build_generative_fill_codex_command(
     if json_progress {
         command.arg("--json");
     }
-    command
-        .arg("-i")
-        .arg(job_path.join("source.png"))
-        .arg(job_path.join("edit_target.png"))
-        .arg(job_path.join("mask.png"));
+    command.arg("-i").arg(job_path.join("source.png"));
     if has_overview {
         command.arg(job_path.join("overview.png"));
     }
@@ -1596,6 +1576,7 @@ pub(crate) async fn generate_codex_image(
             asset,
             assets,
             mask_data_url: None,
+            layers: Vec::new(),
         })
     })
     .await
@@ -1733,7 +1714,14 @@ fn prepare_codex_fill_storyboard(
     }
     if let Ok(storyboard) = read_fill_storyboard_file(job_path, placement.parts.len()) {
         normalize_storyboard_draft_result(job_path, placement)?;
-        return Ok(Some(storyboard));
+        if read_storyboard_draft(job_path)?.is_some() {
+            return Ok(Some(storyboard));
+        }
+        emit_codex_progress(
+            app,
+            run_id,
+            "Existing split fill storyboard has no visual draft; replanning with Codex",
+        );
     }
 
     let storyboard_overview =
@@ -1764,7 +1752,19 @@ fn prepare_codex_fill_storyboard(
     normalize_storyboard_draft_result(job_path, placement)?;
 
     match read_fill_storyboard_file(job_path, placement.parts.len()) {
-        Ok(storyboard) => Ok(Some(storyboard)),
+        Ok(storyboard) => {
+            if read_storyboard_draft(job_path)?.is_some() {
+                Ok(Some(storyboard))
+            } else {
+                let failure = format!(
+                    "Codex split fill did not create required {FILL_STORYBOARD_DRAFT_FILE}."
+                );
+                record_fill_storyboard_failure(job_path, &failure);
+                Err(format!(
+                    "{failure} The part agents were not started, because running them without the visual draft makes split fills behave like independent image generations."
+                ))
+            }
+        }
         Err(error) => {
             if let Some(previous) = failure.take() {
                 failure = Some(format!("{previous}\n\n{error}"));
@@ -1774,14 +1774,9 @@ fn prepare_codex_fill_storyboard(
             let failure = failure.unwrap_or_else(|| "Codex did not write storyboard.json.".into());
             preserve_invalid_fill_storyboard_file(job_path);
             record_fill_storyboard_failure(job_path, &failure);
-            emit_codex_progress(
-                app,
-                run_id,
-                "Using PaintNode fallback storyboard after Codex planning failed",
-            );
-            let fallback = fallback_fill_storyboard(placement);
-            write_fill_storyboard_file(job_path, &fallback)?;
-            Ok(Some(fallback))
+            Err(format!(
+                "{failure}\n\nCodex split fill needs a valid storyboard and {FILL_STORYBOARD_DRAFT_FILE} before part agents can run."
+            ))
         }
     }
 }
@@ -2143,8 +2138,7 @@ pub(crate) async fn generate_codex_fill_image(
     service_tier: Option<String>,
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
-    fill_method: Option<String>,
-    fill_redundancy: Option<String>,
+    fill_aspect_ratio: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -2181,9 +2175,11 @@ pub(crate) async fn generate_codex_fill_image(
         let codex_bin = configured_or_default_codex_bin(bin)?;
         let codex_options = codex_command_options(model, reasoning_effort, service_tier);
         let autonomy = ai_autonomy_level(autonomy_level);
-        let checks_level = ai_edit_checks_level(edit_checks_level);
-        let fill_method = AiFillMethod::from_option(fill_method);
-        let fill_redundancy = AiFillRedundancy::from_option(fill_redundancy);
+        let _checks_level = ai_edit_checks_level(edit_checks_level);
+        let fill_aspect_ratio = fill_aspect_ratio
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let run_id = if run_id.trim().is_empty() {
             format!("fill-{}", now_id())
         } else {
@@ -2205,10 +2201,11 @@ pub(crate) async fn generate_codex_fill_image(
 
         let placement = plan_ai_fill_placement(
             AiEditProvider::Codex,
-            fill_method,
-            fill_redundancy,
+            AiFillMethod::Auto,
+            AiFillRedundancy::Medium,
             source_dimensions,
             &mask_png,
+            fill_aspect_ratio,
             "Generative fill",
         )?;
         let mut composer = AiEditComposer::new(
@@ -2233,6 +2230,9 @@ pub(crate) async fn generate_codex_fill_image(
         )?;
 
         let mut recovered_source_path: Option<PathBuf> = None;
+        let return_part_layers = placement.is_split();
+        let mut layer_results = Vec::new();
+        let mut layer_assets = Vec::new();
         for (part_index, part) in placement.parts.iter().enumerate() {
             let part_path = match placement.part_dir_name(part_index) {
                 Some(dir) => job_path.join(dir),
@@ -2240,6 +2240,7 @@ pub(crate) async fn generate_codex_fill_image(
             };
             fs::create_dir_all(&part_path)
                 .map_err(|e| format!("Failed to create generative fill part folder: {e}"))?;
+            remove_legacy_generative_fill_agent_inputs(&part_path);
             if resumable {
                 if let Some(bytes) = reuse_part_result(&part_path, part) {
                     emit_codex_part_progress(
@@ -2253,6 +2254,46 @@ pub(crate) async fn generate_codex_fill_image(
                             "Reusing this part's previous result",
                         ),
                     );
+                    if return_part_layers {
+                        let layer_png =
+                            composer.part_result_layer_png(part, &bytes, "Generative fill")?;
+                        let mask_png =
+                            composer.part_result_mask_png(part, "Generative fill mask")?;
+                        let layer_name = format!("Generative fill part {}", part_index + 1);
+                        let asset = if store_asset {
+                            if let Some(project_dir) = project_dir.as_ref() {
+                                let (id, relative_path) = write_asset_file(
+                                    project_dir,
+                                    "generated",
+                                    &layer_name,
+                                    "png",
+                                    &layer_png,
+                                )?;
+                                let asset = add_asset(
+                                    project_dir,
+                                    ProjectAsset::generated_png(
+                                        id,
+                                        relative_path,
+                                        layer_name.clone(),
+                                        Some(prompt.trim().into()),
+                                        None,
+                                    ),
+                                )?;
+                                layer_assets.push(asset.clone());
+                                Some(asset)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        layer_results.push(GeneratedImageLayerResult {
+                            name: layer_name,
+                            data_url: png_data_url(&layer_png)?,
+                            asset,
+                            mask_data_url: Some(png_data_url(&mask_png)?),
+                        });
+                    }
                     composer.apply_part_result(part, &bytes, "Generative fill")?;
                     continue;
                 }
@@ -2290,24 +2331,21 @@ pub(crate) async fn generate_codex_fill_image(
             };
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
-            fs::write(part_path.join("edit_target.png"), &inputs.edit_target_png)
-                .map_err(|e| format!("Failed to write generative fill edit target image: {e}"))?;
-            fs::write(part_path.join("mask.png"), &inputs.mask_png)
-                .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
             let has_overview = placement.is_split();
             if has_overview {
                 let overview_png = if let Some(draft_png) = storyboard_draft_png.as_deref() {
-                    composer.overview_png_with_storyboard_draft(part, draft_png, "Generative fill")?
+                    composer.overview_png_with_storyboard_draft(
+                        part,
+                        draft_png,
+                        "Generative fill",
+                    )?
                 } else if storyboard.is_some() {
                     composer.overview_png_hiding_unpainted_editable(part, "Generative fill")?
                 } else {
                     composer.overview_png(part, "Generative fill")?
                 };
-                fs::write(
-                    part_path.join("overview.png"),
-                    overview_png,
-                )
-                .map_err(|e| format!("Failed to write generative fill overview image: {e}"))?;
+                fs::write(part_path.join("overview.png"), overview_png)
+                    .map_err(|e| format!("Failed to write generative fill overview image: {e}"))?;
             }
             let (reference_paths, reference_names) = if has_storyboard_draft {
                 (Vec::new(), Vec::new())
@@ -2357,110 +2395,109 @@ pub(crate) async fn generate_codex_fill_image(
                 ),
             );
             let result_path = part_path.join("result.png");
-            let mut accepted_run = None;
-            let mut retry_note = "";
-            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                let prompt_text = if retry_note.is_empty() {
-                    base_prompt_text.clone()
-                } else {
-                    format!("{base_prompt_text}\n\n{retry_note}")
-                };
-                write_ai_job_prompt(&part_path, &prompt_text, "Codex generative fill")?;
-                let part_run = run_codex_fill_part(
+            write_ai_job_prompt(&part_path, &base_prompt_text, "Codex generative fill")?;
+            let part_run = run_codex_fill_part(
+                &app,
+                &run_id,
+                &codex_bin,
+                &codex_options,
+                &part_path,
+                &base_prompt_text,
+                has_overview && (!has_storyboard_draft || part_index > 0),
+                &storyboard_draft_paths,
+                &reference_paths,
+                &part.working,
+            )
+            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+            if part_run.normalized {
+                emit_codex_progress(
                     &app,
                     &run_id,
-                    &codex_bin,
-                    &codex_options,
-                    &part_path,
-                    &prompt_text,
-                    has_overview && (!has_storyboard_draft || part_index > 0),
-                    &storyboard_draft_paths,
-                    &reference_paths,
-                    &part.working,
-                )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                if part_run.normalized {
-                    emit_codex_progress(
-                        &app,
-                        &run_id,
-                        ai_part_progress_message(
-                            &placement,
-                            part_index,
-                            &format!(
-                                "Normalized Codex fill from {}x{} to {}x{}",
-                                part_run.result_dimensions.0,
-                                part_run.result_dimensions.1,
-                                part.working.original_dimensions.0,
-                                part.working.original_dimensions.1
-                            ),
+                    ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &format!(
+                            "Normalized Codex fill from {}x{} to {}x{}",
+                            part_run.result_dimensions.0,
+                            part_run.result_dimensions.1,
+                            part.working.original_dimensions.0,
+                            part.working.original_dimensions.1
                         ),
-                    );
-                }
-                // Result checks: in-place drift, then seam continuity when
-                // the user's check level enables it.
-                let effective_checks_level = ai_effective_checks_level(
-                    checks_level,
-                    storyboard.is_some() && part_index > 0,
-                );
-                let rejection = ai_candidate_rejection(
-                    effective_checks_level,
-                    &inputs.edit_target_png,
-                    &inputs.source_png,
-                    &inputs.mask_png,
-                    &part_run.normalized_png,
-                    "Codex generative fill",
-                )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                let Some(rejection) = rejection else {
-                    accepted_run = Some(part_run);
-                    break;
-                };
-                retry_note = if rejection.continuation_retry {
-                    AI_SEAM_RETRY_NOTE
-                } else {
-                    CODEX_IN_PLACE_RETRY_NOTE
-                };
-                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                    emit_codex_progress(
-                        &app,
-                        &run_id,
-                        ai_part_progress_message(
-                            &placement,
-                            part_index,
-                            &format!(
-                                "Rejected generative fill candidate: {}; retrying with stricter instructions",
-                                rejection.reason
-                            ),
-                        ),
-                    );
-                    remove_rejected_ai_candidate(&result_path)
-                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                    continue;
-                }
-                // Drop the rejected candidate so a resumed retry cannot
-                // silently import it via reuse_part_result.
-                let _ = fs::remove_file(&result_path);
-                return Err(ai_part_progress_message(
-                    &placement,
-                    part_index,
-                    &format!(
-                        "The AI image model produced an unusable candidate: {}. Try a smaller edit area, a simpler prompt, or a lower result-checks level.",
-                        rejection.reason
                     ),
-                ));
+                );
             }
-            let part_run = accepted_run
-                .ok_or_else(|| "Generative fill produced no accepted candidate.".to_string())?;
-            fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
+            let (part_result_png, drift_correction) = correct_part_result_drift(
+                &inputs.source_png,
+                &part_run.normalized_png,
+                "Generative fill",
+            )?;
+            if let Some(correction) = drift_correction {
+                let _ = fs::write(
+                    part_path.join("part_result-unaligned.png"),
+                    &part_run.normalized_png,
+                );
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &format!(
+                            "Corrected fill drift by ({}, {}) px (confidence {:.3})",
+                            correction.dx, correction.dy, correction.confidence
+                        ),
+                    ),
+                );
+            }
+            fs::write(part_path.join("part_result.png"), &part_result_png)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
             let _ = fs::remove_file(&result_path);
-            composer.apply_part_result(part, &part_run.normalized_png, "Generative fill")?;
+            if return_part_layers {
+                let layer_png =
+                    composer.part_result_layer_png(part, &part_result_png, "Generative fill")?;
+                let mask_png = composer.part_result_mask_png(part, "Generative fill mask")?;
+                let layer_name = format!("Generative fill part {}", part_index + 1);
+                let asset = if store_asset {
+                    if let Some(project_dir) = project_dir.as_ref() {
+                        let (id, relative_path) = write_asset_file(
+                            project_dir,
+                            "generated",
+                            &layer_name,
+                            "png",
+                            &layer_png,
+                        )?;
+                        let asset = add_asset(
+                            project_dir,
+                            ProjectAsset::generated_png(
+                                id,
+                                relative_path,
+                                layer_name.clone(),
+                                Some(prompt.trim().into()),
+                                None,
+                            ),
+                        )?;
+                        layer_assets.push(asset.clone());
+                        Some(asset)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                layer_results.push(GeneratedImageLayerResult {
+                    name: layer_name,
+                    data_url: png_data_url(&layer_png)?,
+                    asset,
+                    mask_data_url: Some(png_data_url(&mask_png)?),
+                });
+            }
+            composer.apply_part_result(part, &part_result_png, "Generative fill")?;
             recovered_source_path = Some(part_run.recovered_source_path);
         }
 
         let bytes = composer.composed_png("Generative fill")?;
         let data_url = png_data_url(&bytes)?;
-        let asset = if store_asset {
+        let asset = if store_asset && !return_part_layers {
             if let Some(project_dir) = project_dir {
                 emit_codex_progress(&app, &run_id, "Saving generative fill to the project");
                 let source_file_name = recovered_source_path
@@ -2494,12 +2531,17 @@ pub(crate) async fn generate_codex_fill_image(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        let assets = asset.iter().cloned().collect();
+        let assets = if return_part_layers {
+            layer_assets
+        } else {
+            asset.iter().cloned().collect()
+        };
         Ok(GeneratedImageResult {
             data_url,
             asset,
             assets,
             mask_data_url: None,
+            layers: layer_results,
         })
     })
     .await
@@ -2840,6 +2882,7 @@ pub(crate) async fn generate_codex_retouch_image(
             asset,
             assets,
             mask_data_url,
+            layers: Vec::new(),
         })
     })
     .await
@@ -2950,6 +2993,7 @@ pub(crate) async fn upscale_codex_image(
             asset,
             assets,
             mask_data_url: None,
+            layers: Vec::new(),
         })
     })
     .await
@@ -3363,6 +3407,7 @@ pub(crate) async fn compose_codex_workflow(
             asset,
             assets,
             mask_data_url: None,
+            layers: Vec::new(),
         })
     })
     .await
@@ -3601,7 +3646,7 @@ mod tests {
     }
 
     #[test]
-    fn generative_fill_command_attaches_source_and_mask_before_prompt() {
+    fn generative_fill_command_attaches_only_source_before_prompt() {
         let job = TempJobDir::new("paintnode-fill-command-test").expect("temp dir");
         let reference_paths = vec![job.path().join("references").join("reference-1-style.png")];
         let reference_names = vec!["references/reference-1-style.png".to_string()];
@@ -3638,27 +3683,23 @@ mod tests {
             args[image_idx + 1],
             job.path().join("source.png").to_string_lossy()
         );
-        assert_eq!(
-            args[image_idx + 2],
-            job.path().join("edit_target.png").to_string_lossy()
-        );
-        assert_eq!(
-            args[image_idx + 3],
-            job.path().join("mask.png").to_string_lossy()
-        );
-        assert_eq!(args[image_idx + 4], reference_paths[0].to_string_lossy());
-        assert_eq!(args[image_idx + 5], "--");
-        let prompt_arg = &args[image_idx + 6];
+        assert_eq!(args[image_idx + 2], reference_paths[0].to_string_lossy());
+        assert_eq!(args[image_idx + 3], "--");
+        assert!(!args
+            .iter()
+            .any(|arg| arg == &job.path().join("edit_target.png").to_string_lossy()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == &job.path().join("mask.png").to_string_lossy()));
+        let prompt_arg = &args[image_idx + 4];
         assert!(prompt_arg.contains("the full PaintNode document"));
         assert!(!prompt_arg.contains("chroma"));
         assert!(!prompt_arg.contains("#00ff00"));
         assert!(!prompt_arg.contains("centered content rectangle"));
-        assert!(!prompt_arg.contains("PaintNode will crop"));
-        assert!(prompt_arg
-            .contains("Black or transparent pixels are protected context and are not editable"));
+        assert!(prompt_arg.contains("PaintNode will crop, paste, and apply the editable mask"));
+        assert!(!prompt_arg.contains("edit_target.png"));
+        assert!(!prompt_arg.contains("mask.png"));
         assert!(prompt_arg.contains("Save the final PNG as `result.png`"));
-        assert!(prompt_arg.contains("White pixels are the full editable/generated area"));
-        assert!(prompt_arg.contains("Gray pixels are a narrow seam-blending transition zone"));
         assert!(prompt_arg.contains("`references/reference-1-style.png`"));
         assert!(prompt_arg.contains("Original user edit prompt:\nextend photo"));
         assert!(!prompt_arg.contains("master image-extension guidance"));
@@ -3673,10 +3714,12 @@ mod tests {
             true,
             &[],
         );
-        assert!(storyboard_prompt.contains("masked PaintNode draft enhancement"));
-        assert!(storyboard_prompt.contains("same-size base image to enhance in place"));
+        assert!(storyboard_prompt.contains("PaintNode draft enhancement"));
+        assert!(storyboard_prompt.contains("source.png` is the PaintNode edit frame to enhance"));
         assert!(storyboard_prompt.contains("image enhancement/restoration pass at the same size"));
         assert!(storyboard_prompt.contains("Do not add, remove, duplicate, replace, move"));
+        assert!(!storyboard_prompt.contains("edit_target.png"));
+        assert!(!storyboard_prompt.contains("mask.png"));
         assert!(!storyboard_prompt.contains("Orchestrator"));
         assert!(!storyboard_prompt.contains("beach photo in film style"));
         assert!(!storyboard_prompt.contains("beach anchor"));
@@ -3702,15 +3745,21 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        let mask_idx = fill_args
+        let source_idx = fill_args
             .iter()
-            .position(|arg| *arg == job.path().join("mask.png").to_string_lossy())
-            .expect("mask arg");
+            .position(|arg| *arg == job.path().join("source.png").to_string_lossy())
+            .expect("source arg");
         assert_eq!(
-            fill_args[mask_idx + 1],
+            fill_args[source_idx + 1],
             job.path().join("overview.png").to_string_lossy()
         );
-        assert_eq!(fill_args[mask_idx + 2], "--");
+        assert_eq!(fill_args[source_idx + 2], "--");
+        assert!(!fill_args
+            .iter()
+            .any(|arg| *arg == job.path().join("edit_target.png").to_string_lossy()));
+        assert!(!fill_args
+            .iter()
+            .any(|arg| *arg == job.path().join("mask.png").to_string_lossy()));
         assert!(!fill_args
             .iter()
             .any(|arg| arg.contains("storyboard-draft-crop.png")));

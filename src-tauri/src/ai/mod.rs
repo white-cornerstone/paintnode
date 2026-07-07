@@ -132,6 +132,16 @@ pub(crate) struct GeneratedImageResult {
     asset: Option<ProjectAssetView>,
     assets: Vec<ProjectAssetView>,
     mask_data_url: Option<String>,
+    layers: Vec<GeneratedImageLayerResult>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeneratedImageLayerResult {
+    name: String,
+    data_url: String,
+    asset: Option<ProjectAssetView>,
+    mask_data_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -421,6 +431,11 @@ pub(crate) fn write_ai_job_prompt(
 ) -> Result<(), String> {
     fs::write(job_path.join("prompt.txt"), prompt)
         .map_err(|e| format!("Failed to write {label} prompt file: {e}"))
+}
+
+pub(crate) fn remove_legacy_generative_fill_agent_inputs(part_path: &Path) {
+    let _ = fs::remove_file(part_path.join("edit_target.png"));
+    let _ = fs::remove_file(part_path.join("mask.png"));
 }
 
 pub(crate) fn emit_kept_job_dir(

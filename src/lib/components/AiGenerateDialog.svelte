@@ -4,6 +4,7 @@
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { copyTextToClipboard, providerLabel } from '../ai/taskSupport';
   import { defaultFillPrompt } from '../ai/generateExecutor';
+  import { fillFrameSummary } from '../ai/imageModelCapabilities';
   import { loadAiReferenceImages, type AiReferenceImage } from '../ai/references';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -13,28 +14,7 @@
   import { ui } from '../state/ui.svelte';
   import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
-  import type { AiEditChecksLevel, GenerativeFillMethod, GenerativeFillRedundancy } from '../state/settings';
   import { Add, Copy, Dismiss } from '../icons';
-
-  const editChecksLevels: { value: AiEditChecksLevel; label: string; hint: string }[] = [
-    { value: 0, label: 'Off', hint: 'No result checks — use when the filled areas are meant to differ from their surroundings (e.g. a grid or index sheet)' },
-    { value: 1, label: 'In-place', hint: 'Reject candidates that repaint pixels outside the mask (default)' },
-    { value: 2, label: '+ Seam', hint: 'Also reject content that does not continue the surrounding scene across the mask boundary' },
-    { value: 3, label: 'Strict', hint: 'Strictest seam-continuity checking; retries or fails on any visible content break' },
-  ];
-  const fillMethods: { value: GenerativeFillMethod; label: string; hint: string }[] = [
-    { value: 'auto', label: 'Auto', hint: 'Choose the best fill plan from the provider, mask coverage, and document shape' },
-    { value: 'exactInPlace', label: 'Exact', hint: 'Use the current in-place crop or split plan for local edits and supported ratios' },
-    { value: 'wideCover', label: 'Cover', hint: 'Use one wider provider frame, then scale and crop it back into the document' },
-    { value: 'wideStarterContinue', label: 'Starter', hint: 'Start with the widest good scene anchor, then continue with overlapping parts' },
-    { value: 'balancedStrips', label: 'Strips', hint: 'Use overlapping strips of similar size across the long axis' },
-    { value: 'plainGenerate', label: 'Plain', hint: 'Generate one full image and apply the selection mask afterward' },
-  ];
-  const fillRedundancies: { value: GenerativeFillRedundancy; label: string; hint: string }[] = [
-    { value: 'low', label: 'Low', hint: 'Lean continuation frames with minimal repeated generated context' },
-    { value: 'medium', label: 'Medium', hint: 'More repeated context for later parts; good default for wide Antigravity fills' },
-    { value: 'high', label: 'High', hint: 'Maximum continuation context, using larger repeated frames when the provider supports them' },
-  ];
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
 
@@ -48,11 +28,25 @@
   let error = $state('');
   let copied = $state(false);
   let references = $state<AiReferenceImage[]>([]);
+  let antigravityRatioOverride = $state<string | null>(null);
   const task = $derived(aiTasks.find(taskId));
   const taskDetail = $derived(task?.detail.kind === 'generate' ? task.detail : null);
   const currentError = $derived(task?.error ?? error);
   const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
+  const fillFrame = $derived.by(() => {
+    const doc = editor.doc;
+    const selection = editor.selection;
+    if (!doc || !selection || runOptions.provider === 'custom') return null;
+    return fillFrameSummary(
+      runOptions.provider,
+      doc.width,
+      doc.height,
+      selection.bounds.w,
+      selection.bounds.h,
+      runOptions.provider === 'antigravity' ? antigravityRatioOverride : null,
+    );
+  });
 
   async function copyError() {
     if (!currentError) return;
@@ -104,6 +98,8 @@
       return;
     }
     const userPrompt = prompt.trim();
+    runOptions.fillAspectRatio =
+      runOptions.provider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null;
     busy = true;
     const task = aiTasks.create({
       kind: 'generate',
@@ -225,54 +221,34 @@
         {/if}
       </div>
 
-      {#if editor.selection && runOptions.provider !== 'custom'}
-        <div class="dlg-field">
-          <span>Fill method</span>
-          <div class="method-tabs" role="group" aria-label="Generative fill method">
-            {#each fillMethods as method (method.value)}
-              <button
-                type="button"
-                class:active={runOptions.fillMethod === method.value}
-                use:tooltip={{ text: method.hint, placement: 'top' }}
-                onclick={() => (runOptions.fillMethod = method.value)}
-              >
-                {method.label}
-              </button>
-            {/each}
+      {#if fillFrame}
+        <div class="frame-summary">
+          <div>
+            <span>Selection</span>
+            <strong>{fillFrame.selectionLabel}</strong>
+          </div>
+          <div>
+            <span>{runOptions.provider === 'antigravity' ? 'Ratio' : 'Frame'}</span>
+            <strong>{runOptions.provider === 'antigravity' ? fillFrame.ratioLabel : fillFrame.frameLabel}</strong>
+          </div>
+          <div>
+            <span>Scale</span>
+            <strong>{fillFrame.needsRestoration ? `${fillFrame.scalePercent}% + restore` : '100%'}</strong>
           </div>
         </div>
-
-        <div class="dlg-field">
-          <span>Context</span>
-          <div class="method-tabs" role="group" aria-label="Generative fill context redundancy">
-            {#each fillRedundancies as level (level.value)}
-              <button
-                type="button"
-                class:active={runOptions.fillRedundancy === level.value}
-                use:tooltip={{ text: level.hint, placement: 'top' }}
-                onclick={() => (runOptions.fillRedundancy = level.value)}
-              >
-                {level.label}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <div class="dlg-field">
-          <span>Result checks</span>
-          <div class="checks-tabs" role="group" aria-label="Result checks level">
-            {#each editChecksLevels as level (level.value)}
-              <button
-                type="button"
-                class:active={runOptions.editChecksLevel === level.value}
-                use:tooltip={{ text: level.hint, placement: 'top' }}
-                onclick={() => (runOptions.editChecksLevel = level.value)}
-              >
-                {level.label}
-              </button>
-            {/each}
-          </div>
-        </div>
+        {#if runOptions.provider === 'antigravity' && (fillFrame.needsRatioChoice || antigravityRatioOverride)}
+          <label class="dlg-field">
+            <span>Antigravity ratio</span>
+            <select
+              value={antigravityRatioOverride ?? fillFrame.ratioLabel}
+              onchange={(event) => (antigravityRatioOverride = (event.currentTarget as HTMLSelectElement).value)}
+            >
+              {#each fillFrame.choices as choice (choice.label)}
+                <option value={choice.label}>{choice.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
       {/if}
     {/if}
 
@@ -383,52 +359,33 @@
     background: var(--accent);
     color: #fff;
   }
-  .checks-tabs {
+  .frame-summary {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 8px;
     border: 1px solid var(--border-soft);
     border-radius: 4px;
-    overflow: hidden;
-  }
-  .checks-tabs button {
-    border: none;
-    border-radius: 0;
     background: var(--bg-input);
-    color: var(--text-dim);
-    padding: 5px 8px;
   }
-  .checks-tabs button + button {
-    border-left: 1px solid var(--border-soft);
-  }
-  .checks-tabs button.active {
-    background: var(--accent);
-    color: #fff;
-  }
-  .method-tabs {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 0;
-    border: 1px solid var(--border-soft);
-    border-radius: 4px;
-    overflow: hidden;
-  }
-  .method-tabs button {
+  .frame-summary div {
     min-width: 0;
-    border: none;
-    border-radius: 0;
-    background: var(--bg-input);
+    display: grid;
+    gap: 2px;
+  }
+  .frame-summary span {
     color: var(--text-dim);
-    padding: 5px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+  .frame-summary strong {
+    min-width: 0;
+    color: var(--text);
     font-size: 11px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .method-tabs button + button {
-    border-left: 1px solid var(--border-soft);
-  }
-  .method-tabs button.active {
-    background: var(--accent);
-    color: #fff;
   }
   .warn {
     margin: 0;

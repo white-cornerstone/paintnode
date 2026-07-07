@@ -2911,6 +2911,44 @@ export class EditorStore implements ToolHost {
     return layerId;
   }
 
+  insertGenerativeFillLayer(
+    source: CanvasImageSource,
+    sw: number,
+    sh: number,
+    mask: CanvasImageSource,
+    name = 'Generative fill',
+    sourceMeta: LayerSourceMeta = {},
+  ): string | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    if (sw !== doc.width || sh !== doc.height) return null;
+
+    let layerId: string | null = null;
+    this.structural('Generative Fill', () => {
+      const activeIndex = doc.activeLayerId ? doc.indexOf(doc.activeLayerId) : doc.layers.length - 1;
+      const insertAt = activeIndex < 0 ? doc.layers.length : activeIndex + 1;
+      const maskLayer = new Layer(doc.width, doc.height, `${name} mask`, undefined, 0, 0);
+      maskLayer.kind = 'ai-retouch-mask';
+      maskLayer.visible = false;
+      maskLayer.ctx.drawImage(mask, 0, 0, doc.width, doc.height);
+      maskLayer.touch();
+
+      const layer = new Layer(doc.width, doc.height, name, undefined, 0, 0);
+      layer.sourceAssetId = sourceMeta.assetId ?? null;
+      layer.sourcePath = sourceMeta.path ?? null;
+      layer.maskLayerId = maskLayer.id;
+      layer.ctx.drawImage(source, 0, 0);
+      layer.touch();
+
+      const next = doc.layers.slice();
+      next.splice(insertAt, 0, maskLayer, layer);
+      doc.layers = next;
+      doc.activeLayerId = layer.id;
+      layerId = layer.id;
+    });
+    return layerId;
+  }
+
   insertAiRetouchResult(
     request: AiRetouchRequest,
     source: CanvasImageSource,

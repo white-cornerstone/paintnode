@@ -366,7 +366,7 @@ fn contains_forbidden_extension_plan_text(value: &str) -> bool {
         let mut search_from = 0;
         while let Some(relative) = lower[search_from..].find(phrase) {
             let start = search_from + relative;
-            let prefix_start = start.saturating_sub(36);
+            let prefix_start = start.saturating_sub(96);
             let prefix = &lower[prefix_start..start];
             let negated = prefix.contains("do not ")
                 || prefix.contains("not ")
@@ -672,9 +672,9 @@ Original user fill prompt:
 
 Treat the original prompt as final still-image intent and global style, not as permission to repeat all subjects in every extension area.
 
-Provider and method:
+Provider and frame plan:
 - Provider: {provider_label}
-- Fill method: {method}
+- Frame plan: {method}
 
 Planned extension roles:
 {roles}
@@ -717,7 +717,7 @@ Draft/refinement plan rules:
   - It may be low-resolution, soft, and missing fine detail, but it must not include borders, frames, masks, checkerboards, UI, red guide marks, labels, or multiple panels.
   - Later part agents will use this draft as the locked composition guide while rendering their own local high-quality crop. They should refine what is visible in the draft, not invent new scene content.
   {draft_note}
-- Finish with one short confirmation after both files are written. If the draft image tool is unavailable, still write `{storyboard_path}` and leave the draft absent so PaintNode can continue with text guidance."#,
+- Finish with one short confirmation after both files are written. Do not stop after writing only `{storyboard_path}`; `{draft_path}` is required because later part agents use it as their visual composition authority."#,
         method = fill_method_label(placement.method),
         roles = planned_roles_summary(placement),
     )
@@ -758,6 +758,7 @@ mod tests {
             AiFillRedundancy::High,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("split placement")
@@ -846,6 +847,13 @@ mod tests {
         let storyboard = parse_fill_storyboard_json(&added_subjects, 2)
             .expect("orchestrator can allocate requested companions to a non-anchor area");
         assert!(storyboard.parts[1].expected_content[0].contains("Additional female friends"));
+
+        let spatial_continuation = valid.replace(
+            "Refine the visible draft into the same still image.",
+            "Refine the existing draft area into the same wide-angle train interior, matching the protected left edge in perspective, light, and texture. Sharpen the bench, windows, and seaside background details without changing the composition or adding a new scene beat.",
+        );
+        parse_fill_storyboard_json(&spatial_continuation, 2)
+            .expect("spatial continuation with negated story-beat language is valid");
 
         let negated_subjects = valid.replace(
             "Continue water, beach, and horizon.",

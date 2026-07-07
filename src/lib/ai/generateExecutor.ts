@@ -33,15 +33,6 @@ function targetDimensions(): TargetDimensions | null {
   return { width: doc.width, height: doc.height };
 }
 
-async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error('Unable to encode generated fill preview.'));
-    }, 'image/png');
-  });
-}
-
 async function executeGenerateTask(task: AiTask): Promise<void> {
   const detail = task.detail.kind === 'generate' ? task.detail : null;
   if (!detail) return;
@@ -111,12 +102,9 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     const fillInput = fillMode ? await editor.prepareGenerativeFillInput() : null;
     if (fillMode && !fillInput) throw new Error('The current selection has no editable pixels.');
     // A blank-canvas fill has nothing to preserve or extend, so it runs through
-    // the plain generate path (one document-sized image) rather than the tiled
-    // mask-guided in-place edit — it is still inserted as a mask-linked fill.
-    // The Plain fill method uses that same path intentionally for selected fills.
-    // `fillEdit` is the subset that actually needs the mask-guided backend.
-    const plainFill = fillInput && runOptions.fillMethod === 'plainGenerate';
-    const fillEdit = fillInput && !fillInput.blankCanvas && !plainFill ? fillInput : null;
+    // the plain generate path (one document-sized image). Nonblank selected
+    // fills use the mask-guided backend with deterministic frame planning.
+    const fillEdit = fillInput && !fillInput.blankCanvas ? fillInput : null;
     const generationPrompt = userPrompt;
     const generationTarget = fillEdit ? null : targetDimensions();
     const keepJobDir = settings.value.workspace.keepAiRunInputs;
@@ -163,7 +151,14 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
                 references,
               )
           : null;
-    if (generated?.asset) await project.refresh(taskProjectPath);
+    const generatedAssetIds = new Set<string>();
+    if (generated?.asset?.id) generatedAssetIds.add(generated.asset.id);
+    for (const asset of generated?.assets ?? []) generatedAssetIds.add(asset.id);
+    for (const layer of generated?.layers ?? []) {
+      if (layer.asset?.id) generatedAssetIds.add(layer.asset.id);
+    }
+    const generatedAssetCount = generatedAssetIds.size;
+    if (generated?.asset || generatedAssetCount > 0) await project.refresh(taskProjectPath);
     const dataUrl =
       generated?.dataUrl ??
       (await generateImage(
@@ -178,18 +173,15 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
       ));
     const blob = await (await fetch(dataUrl)).blob();
     const bmp = await createImageBitmap(blob);
-    let fillAsset: ProjectAsset | null = null;
-    if (fillEdit && taskProjectPath) {
-      const composite = editor.renderGenerativeFillComposite(bmp, bmp.width, bmp.height, fillEdit.mask, fillEdit.source);
-      if (!composite) throw new Error('Unable to prepare the generated fill preview.');
-      const compositeBlob = await canvasToBlob(composite);
+    let fillAsset: ProjectAsset | null = generated?.asset ?? null;
+    if (fillInput && !fillAsset && !generated && taskProjectPath) {
       fillAsset = await project.storeGeneratedBlobAt(
         taskProjectPath,
-        compositeBlob,
+        blob,
         `Generative fill ${generationPrompt.slice(0, 48) || 'outpaint'}.png`,
         generationPrompt,
-        composite.width,
-        composite.height,
+        bmp.width,
+        bmp.height,
       );
     }
     const customAsset =
@@ -197,20 +189,57 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         ? await project.storeGeneratedBlobAt(taskProjectPath, blob, `AI ${userPrompt.slice(0, 48) || 'generated'}.png`, generationPrompt, bmp.width, bmp.height)
         : null;
     const sourceMeta = {
-      assetId: fillAsset?.id ?? generated?.asset?.id ?? customAsset?.id ?? null,
-      path: fillAsset?.relativePath ?? generated?.asset?.relativePath ?? customAsset?.relativePath ?? null,
+      assetId: fillAsset?.id ?? customAsset?.id ?? null,
+      path: fillAsset?.relativePath ?? customAsset?.relativePath ?? null,
     };
     focusTaskDocument(task.documentId);
     const oversized = fillInput
       ? false
       : editor.placeImage(bmp, bmp.width, bmp.height, `AI: ${userPrompt.slice(0, 24)}`, sourceMeta).oversized;
     if (fillInput) {
-      editor.insertGenerativeFill(bmp, bmp.width, bmp.height, fillInput.mask, `Generative fill: ${generationPrompt.slice(0, 24)}`, sourceMeta);
+      const layerResults = generated?.layers ?? [];
+      if (layerResults.length) {
+        bmp.close();
+        for (const [index, layer] of layerResults.entries()) {
+          const layerBmp = await createImageBitmap(await (await fetch(layer.dataUrl)).blob());
+          const layerMaskBmp = layer.maskDataUrl
+            ? await createImageBitmap(await (await fetch(layer.maskDataUrl)).blob())
+            : null;
+          const inserted = editor.insertGenerativeFillLayer(
+            layerBmp,
+            layerBmp.width,
+            layerBmp.height,
+            layerMaskBmp ?? fillInput.mask,
+            layer.name || `Generative fill ${index + 1}`,
+            {
+              assetId: layer.asset?.id ?? null,
+              path: layer.asset?.relativePath ?? null,
+            },
+          );
+          layerMaskBmp?.close();
+          layerBmp.close();
+          if (!inserted) throw new Error('Unable to place the generated fill layer in the document.');
+        }
+      } else {
+        const inserted = editor.insertGenerativeFillLayer(
+          bmp,
+          bmp.width,
+          bmp.height,
+          fillInput.mask,
+          `Generative fill: ${generationPrompt.slice(0, 24)}`,
+          sourceMeta,
+        );
+        bmp.close();
+        if (!inserted) throw new Error('Unable to place the generated fill layer in the document.');
+      }
+    } else {
+      bmp.close();
     }
-    bmp.close();
     editor.flash(
       fillInput
-        ? 'Generative fill added'
+        ? generatedAssetCount > 1
+          ? `Generative fill added; ${generatedAssetCount} generated assets saved`
+          : 'Generative fill added'
         : oversized
           ? 'Image generated full-size; use Move or Image > Reveal All to show hidden edges'
           : 'Image generated',

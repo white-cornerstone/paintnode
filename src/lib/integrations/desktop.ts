@@ -6,8 +6,6 @@ import type {
   CodexModelId,
   AntigravityApprovalMode,
   AntigravityModelId,
-  GenerativeFillMethod,
-  GenerativeFillRedundancy,
   ReasoningEffort,
   ServiceTier,
 } from '../state/settings';
@@ -106,10 +104,8 @@ export interface CodexGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
-  /** Geometry strategy for mask-guided generative fill. */
-  fillMethod?: GenerativeFillMethod | null;
-  /** How much generated context later fill parts may re-submit for continuity. */
-  fillRedundancy?: GenerativeFillRedundancy | null;
+  /** Optional provider aspect-ratio override for mask-guided generative fill. */
+  fillAspectRatio?: string | null;
 }
 
 export interface AntigravityGeneratorConfig {
@@ -129,10 +125,8 @@ export interface AntigravityGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
-  /** Geometry strategy for mask-guided generative fill. */
-  fillMethod?: GenerativeFillMethod | null;
-  /** How much generated context later fill parts may re-submit for continuity. */
-  fillRedundancy?: GenerativeFillRedundancy | null;
+  /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
+  fillAspectRatio?: string | null;
 }
 
 export interface TargetDimensions {
@@ -186,6 +180,14 @@ export interface GeneratedImageResult {
   dataUrl: string;
   asset?: ProjectAsset | null;
   assets?: ProjectAsset[];
+  maskDataUrl?: string | null;
+  layers?: GeneratedImageLayerResult[];
+}
+
+export interface GeneratedImageLayerResult {
+  name: string;
+  dataUrl: string;
+  asset?: ProjectAsset | null;
   maskDataUrl?: string | null;
 }
 
@@ -262,8 +264,7 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     serviceTier: config.serviceTier ?? 'default',
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
-    fillMethod: config.fillMethod ?? 'auto',
-    fillRedundancy: config.fillRedundancy ?? 'medium',
+    fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
 }
 
@@ -277,8 +278,7 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
     approvalMode: config.approvalMode ?? 'skipPermissions',
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
-    fillMethod: config.fillMethod ?? 'auto',
-    fillRedundancy: config.fillRedundancy ?? 'medium',
+    fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
 }
 
@@ -298,8 +298,7 @@ export function codexConfigFromRunOptions(
     serviceTier: options.serviceTier,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
-    fillMethod: options.fillMethod,
-    fillRedundancy: options.fillRedundancy,
+    fillAspectRatio: options.fillAspectRatio ?? null,
   };
 }
 
@@ -318,8 +317,7 @@ export function antigravityConfigFromRunOptions(
     approvalMode: options.antigravityApprovalMode,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
-    fillMethod: options.fillMethod,
-    fillRedundancy: options.fillRedundancy,
+    fillAspectRatio: options.fillAspectRatio ?? null,
   };
 }
 

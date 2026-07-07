@@ -65,6 +65,12 @@ const OVERVIEW_MAX_SIDE: u32 = 768;
 const OVERVIEW_OUTLINE_THICKNESS: u32 = 3;
 const OVERVIEW_OUTLINE_COLOR: image::Rgba<u8> = image::Rgba([255, 48, 48, 255]);
 const UNKNOWN_EDIT_FILL: image::Rgba<u8> = image::Rgba([139, 143, 152, 255]);
+const AI_PART_DRIFT_MAX_SHIFT: i32 = 16;
+const AI_PART_DRIFT_TARGET_SAMPLES: usize = 80_000;
+const AI_PART_DRIFT_MIN_SAMPLES: u64 = 2_048;
+const AI_PART_DRIFT_MIN_SCORE_GAIN: f64 = 0.012;
+const AI_PART_DRIFT_MIN_CORRELATION: f64 = 0.03;
+const AI_PART_DRIFT_MIN_EDGE_SAMPLES: u64 = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiEditProvider {
@@ -91,16 +97,6 @@ pub(crate) enum AiFillMethod {
 }
 
 impl AiFillMethod {
-    pub(crate) fn from_option(value: Option<String>) -> Self {
-        match value.as_deref() {
-            Some("exactInPlace") => AiFillMethod::ExactInPlace,
-            Some("wideCover") => AiFillMethod::WideCover,
-            Some("wideStarterContinue") => AiFillMethod::WideStarterContinue,
-            Some("balancedStrips") => AiFillMethod::BalancedStrips,
-            _ => AiFillMethod::Auto,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             AiFillMethod::Auto => "auto",
@@ -112,6 +108,7 @@ impl AiFillMethod {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiFillRedundancy {
     Low,
@@ -120,14 +117,6 @@ pub(crate) enum AiFillRedundancy {
 }
 
 impl AiFillRedundancy {
-    pub(crate) fn from_option(value: Option<String>) -> Self {
-        match value.as_deref() {
-            Some("low") => AiFillRedundancy::Low,
-            Some("high") => AiFillRedundancy::High,
-            _ => AiFillRedundancy::Medium,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             AiFillRedundancy::Low => "low",
@@ -1049,7 +1038,22 @@ fn first_part_long_axis_coverage(placement: &AiEditPlacement) -> f64 {
     }
 }
 
-fn antigravity_wide_cover_ratio(document: (u32, u32)) -> Option<SupportedAspectRatio> {
+fn antigravity_wide_cover_ratio(
+    document: (u32, u32),
+    forced_label: Option<&str>,
+) -> Option<SupportedAspectRatio> {
+    if let Some(label) = forced_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
+        if let Some(ratio) = ai_antigravity_image_capability()
+            .aspect_ratios
+            .iter()
+            .find(|ratio| ratio.label == label)
+        {
+            return Some(ratio.clone());
+        }
+    }
     let target = f64::from(document.0) / f64::from(document.1.max(1));
     let landscape = document.0 >= document.1;
     let capability = ai_antigravity_image_capability();
@@ -1109,6 +1113,7 @@ fn plan_ai_wide_cover_placement(
     redundancy: AiFillRedundancy,
     document_dimensions: (u32, u32),
     mask_bounds: PixelRect,
+    forced_aspect_label: Option<&str>,
 ) -> Result<AiEditPlacement, String> {
     let crop = PixelRect {
         x: 0,
@@ -1118,9 +1123,10 @@ fn plan_ai_wide_cover_placement(
     };
     let (input_dimensions, aspect_label) = match provider {
         AiEditProvider::Antigravity => {
-            let ratio = antigravity_wide_cover_ratio(document_dimensions).ok_or_else(|| {
-                "No Antigravity image ratio is available for wide-cover fill.".to_string()
-            })?;
+            let ratio = antigravity_wide_cover_ratio(document_dimensions, forced_aspect_label)
+                .ok_or_else(|| {
+                    "No Antigravity image ratio is available for wide-cover fill.".to_string()
+                })?;
             let (unit, _) = ratio_unit(&ratio);
             let dimensions = cover_frame_for_ratio(document_dimensions, unit);
             let (_, output) =
@@ -1327,9 +1333,10 @@ fn plan_ai_wide_starter_continue_placement(
     } else {
         (document_dimensions.1, document_dimensions.0)
     };
-    let starter_ratio = antigravity_wide_cover_ratio(document_dimensions).ok_or_else(|| {
-        "No Antigravity image ratio is available for wide-starter fill.".to_string()
-    })?;
+    let starter_ratio =
+        antigravity_wide_cover_ratio(document_dimensions, None).ok_or_else(|| {
+            "No Antigravity image ratio is available for wide-starter fill.".to_string()
+        })?;
     let starter_min = if split_horizontally {
         (1, doc_short)
     } else {
@@ -1421,12 +1428,87 @@ fn plan_ai_wide_starter_continue_placement(
     })
 }
 
+fn plan_ai_codex_max_ratio_strips_placement(
+    redundancy: AiFillRedundancy,
+    document_dimensions: (u32, u32),
+    mask_bounds: PixelRect,
+) -> Result<AiEditPlacement, String> {
+    if !mask_is_mostly_full(mask_bounds, document_dimensions)
+        || !is_wide_or_tall(document_dimensions)
+    {
+        return Err("Codex max-ratio strips are only available for full wide/tall masks.".into());
+    }
+
+    let split_horizontally = document_dimensions.0 >= document_dimensions.1;
+    let (doc_long, doc_short) = if split_horizontally {
+        (document_dimensions.0, document_dimensions.1)
+    } else {
+        (document_dimensions.1, document_dimensions.0)
+    };
+    let codex = ai_codex_image_capability();
+    let input_long = doc_short
+        .saturating_mul(codex.max_aspect_ratio.max(1))
+        .min(doc_long);
+    if input_long == 0 || doc_short == 0 {
+        return Err("Codex max-ratio strip dimensions are invalid.".into());
+    }
+    let input_dimensions = if split_horizontally {
+        (input_long, doc_short)
+    } else {
+        (doc_short, input_long)
+    };
+
+    let mut parts = Vec::new();
+    let mut covered_to = 0_u32;
+    while covered_to < doc_long {
+        if parts.len() >= MAX_AI_EDIT_PARTS {
+            return Err(format!(
+                "Generative fill would need more than {MAX_AI_EDIT_PARTS} Codex parts."
+            ));
+        }
+        let start = if let Some(previous) = parts.last() {
+            let previous_long = part_oriented_input_long(previous, split_horizontally);
+            let overlap = starter_continuation_overlap(redundancy, doc_long, previous_long);
+            let remaining = doc_long.saturating_sub(covered_to);
+            if input_long >= remaining + overlap {
+                doc_long.saturating_sub(input_long)
+            } else {
+                covered_to.saturating_sub(overlap)
+            }
+        } else {
+            0
+        };
+        parts.push(oriented_part(
+            document_dimensions,
+            split_horizontally,
+            start,
+            input_dimensions,
+            "codex-crop",
+        ));
+        let next_covered_to = part_oriented_crop_end(parts.last().unwrap(), split_horizontally);
+        if next_covered_to <= covered_to {
+            return Err("Codex max-ratio strips made no progress.".into());
+        }
+        covered_to = next_covered_to;
+    }
+
+    Ok(AiEditPlacement {
+        provider: AiEditProvider::Codex,
+        method: AiFillMethod::BalancedStrips,
+        redundancy,
+        document_dimensions,
+        mask_bounds,
+        parts,
+    })
+}
+
 pub(crate) fn plan_ai_fill_placement(
     provider: AiEditProvider,
     requested_method: AiFillMethod,
     requested_redundancy: AiFillRedundancy,
     document_dimensions: (u32, u32),
     mask_png: &[u8],
+    forced_aspect_label: Option<&str>,
     label: &str,
 ) -> Result<AiEditPlacement, String> {
     let mut exact = plan_ai_edit_placement(provider, document_dimensions, mask_png, label)?;
@@ -1439,6 +1521,7 @@ pub(crate) fn plan_ai_fill_placement(
                 requested_redundancy,
                 document_dimensions,
                 exact.mask_bounds,
+                forced_aspect_label,
             )
         }
         AiFillMethod::WideStarterContinue => {
@@ -1457,6 +1540,16 @@ pub(crate) fn plan_ai_fill_placement(
             return Ok(exact);
         }
         AiFillMethod::BalancedStrips => {
+            if provider == AiEditProvider::Codex
+                && mask_is_mostly_full(exact.mask_bounds, document_dimensions)
+                && is_wide_or_tall(document_dimensions)
+            {
+                return plan_ai_codex_max_ratio_strips_placement(
+                    requested_redundancy,
+                    document_dimensions,
+                    exact.mask_bounds,
+                );
+            }
             if provider == AiEditProvider::Antigravity
                 && mask_is_mostly_full(exact.mask_bounds, document_dimensions)
                 && is_wide_or_tall(document_dimensions)
@@ -1484,10 +1577,18 @@ pub(crate) fn plan_ai_fill_placement(
             requested_redundancy,
             document_dimensions,
             exact.mask_bounds,
+            forced_aspect_label,
         );
     }
 
     if exact.parts.len() > 1 && mask_is_mostly_full(exact.mask_bounds, document_dimensions) {
+        if provider == AiEditProvider::Codex && is_wide_or_tall(document_dimensions) {
+            return plan_ai_codex_max_ratio_strips_placement(
+                requested_redundancy,
+                document_dimensions,
+                exact.mask_bounds,
+            );
+        }
         exact.method = match provider {
             AiEditProvider::Codex => AiFillMethod::BalancedStrips,
             AiEditProvider::Antigravity => AiFillMethod::WideStarterContinue,
@@ -1502,6 +1603,313 @@ pub(crate) struct AiEditPartInputs {
     pub(crate) edit_target_png: Vec<u8>,
     pub(crate) mask_png: Vec<u8>,
     pub(crate) annotated_source_png: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AiPartDriftCorrection {
+    pub(crate) dx: i32,
+    pub(crate) dy: i32,
+    pub(crate) zero_score: f64,
+    pub(crate) corrected_score: f64,
+    pub(crate) confidence: f64,
+    pub(crate) correlation: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DriftCandidate {
+    dx: i32,
+    dy: i32,
+    score: f64,
+    correlation: f64,
+}
+
+fn image_luma(image: &image::RgbaImage) -> Vec<u8> {
+    image
+        .pixels()
+        .map(|pixel| {
+            let [r, g, b, _] = pixel.0;
+            ((u16::from(r) * 54 + u16::from(g) * 183 + u16::from(b) * 19 + 128) / 256) as u8
+        })
+        .collect()
+}
+
+fn high_pass_luma(luma: &[u8], width: usize, height: usize) -> Vec<i16> {
+    let mut out = vec![0_i16; luma.len()];
+    for y in 0..height {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(height - 1);
+        for x in 0..width {
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(width - 1);
+            let mut sum = 0_u32;
+            let mut count = 0_u32;
+            for sy in y0..=y1 {
+                for sx in x0..=x1 {
+                    sum += u32::from(luma[sy * width + sx]);
+                    count += 1;
+                }
+            }
+            let blurred = (sum / count.max(1)) as i16;
+            out[y * width + x] = i16::from(luma[y * width + x]) - blurred;
+        }
+    }
+    out
+}
+
+fn gradient_magnitude(luma: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; luma.len()];
+    if width < 3 || height < 3 {
+        return out;
+    }
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let at = |dx: isize, dy: isize| -> i32 {
+                i32::from(luma[(y.wrapping_add_signed(dy)) * width + x.wrapping_add_signed(dx)])
+            };
+            let gx = -at(-1, -1) + at(1, -1) - 2 * at(-1, 0) + 2 * at(1, 0) - at(-1, 1) + at(1, 1);
+            let gy = -at(-1, -1) - 2 * at(0, -1) - at(1, -1) + at(-1, 1) + 2 * at(0, 1) + at(1, 1);
+            out[y * width + x] = ((gx.abs() + gy.abs()) / 8).min(255) as u8;
+        }
+    }
+    out
+}
+
+fn gradient_edge_threshold(gradient: &[u8]) -> u8 {
+    let mut histogram = [0_u32; 256];
+    for value in gradient {
+        histogram[*value as usize] += 1;
+    }
+    let target = (gradient.len() as u32 * 88 / 100).max(1);
+    let mut seen = 0_u32;
+    for (value, count) in histogram.iter().enumerate() {
+        seen += *count;
+        if seen >= target {
+            return (value as u8).max(18);
+        }
+    }
+    18
+}
+
+fn shifted_overlap(
+    width: usize,
+    height: usize,
+    dx: i32,
+    dy: i32,
+) -> Option<(usize, usize, usize, usize)> {
+    let x_start = dx.max(0) as usize;
+    let y_start = dy.max(0) as usize;
+    let x_end = (width as i32 + dx.min(0)).max(0) as usize;
+    let y_end = (height as i32 + dy.min(0)).max(0) as usize;
+    (x_start < x_end && y_start < y_end).then_some((x_start, y_start, x_end, y_end))
+}
+
+fn drift_sample_stride(width: usize, height: usize) -> usize {
+    let area = width.saturating_mul(height).max(1);
+    ((area as f64 / AI_PART_DRIFT_TARGET_SAMPLES as f64)
+        .sqrt()
+        .ceil() as usize)
+        .clamp(2, 8)
+}
+
+fn high_pass_correlation(
+    source: &[i16],
+    result: &[i16],
+    width: usize,
+    height: usize,
+    dx: i32,
+    dy: i32,
+) -> Option<f64> {
+    let (x_start, y_start, x_end, y_end) = shifted_overlap(width, height, dx, dy)?;
+    let mut count = 0_u64;
+    let mut sum_source = 0_f64;
+    let mut sum_result = 0_f64;
+    let mut sum_source_sq = 0_f64;
+    let mut sum_result_sq = 0_f64;
+    let mut sum_cross = 0_f64;
+    let stride = drift_sample_stride(width, height);
+    for y in (y_start..y_end).step_by(stride) {
+        let ry = (y as i32 - dy) as usize;
+        for x in (x_start..x_end).step_by(stride) {
+            let rx = (x as i32 - dx) as usize;
+            let a = f64::from(source[y * width + x]);
+            let b = f64::from(result[ry * width + rx]);
+            sum_source += a;
+            sum_result += b;
+            sum_source_sq += a * a;
+            sum_result_sq += b * b;
+            sum_cross += a * b;
+            count += 1;
+        }
+    }
+    if count < AI_PART_DRIFT_MIN_SAMPLES {
+        return None;
+    }
+    let n = count as f64;
+    let numerator = n * sum_cross - sum_source * sum_result;
+    let source_var = n * sum_source_sq - sum_source * sum_source;
+    let result_var = n * sum_result_sq - sum_result * sum_result;
+    if source_var <= 1.0 || result_var <= 1.0 {
+        return None;
+    }
+    Some((numerator / (source_var.sqrt() * result_var.sqrt())).clamp(-1.0, 1.0))
+}
+
+fn edge_chamfer_distance(source_gradient: &[u8], width: usize, height: usize) -> Vec<u32> {
+    let source_threshold = gradient_edge_threshold(source_gradient);
+    let source_edges = source_gradient
+        .iter()
+        .map(|value| *value >= source_threshold)
+        .collect::<Vec<_>>();
+    city_block_distances(&source_edges, width, height)
+}
+
+fn edge_chamfer_score(
+    source_edge_distance: &[u32],
+    result_gradient: &[u8],
+    result_threshold: u8,
+    width: usize,
+    height: usize,
+    dx: i32,
+    dy: i32,
+) -> Option<f64> {
+    let mut count = 0_u64;
+    let mut sum = 0_u64;
+    let max_distance = u32::try_from(AI_PART_DRIFT_MAX_SHIFT * 2 + 1)
+        .unwrap_or(33)
+        .max(1);
+    let stride = drift_sample_stride(width, height);
+    for y in (0..height).step_by(stride) {
+        for x in (0..width).step_by(stride) {
+            if result_gradient[y * width + x] < result_threshold {
+                continue;
+            }
+            let sx = x as i32 + dx;
+            let sy = y as i32 + dy;
+            if sx < 0 || sy < 0 || sx >= width as i32 || sy >= height as i32 {
+                continue;
+            }
+            sum += u64::from(
+                source_edge_distance[sy as usize * width + sx as usize].min(max_distance),
+            );
+            count += 1;
+        }
+    }
+    (count >= AI_PART_DRIFT_MIN_EDGE_SAMPLES).then(|| sum as f64 / count as f64)
+}
+
+fn detect_part_result_drift(
+    source: &image::RgbaImage,
+    result: &image::RgbaImage,
+) -> Option<AiPartDriftCorrection> {
+    if source.dimensions() != result.dimensions() {
+        return None;
+    }
+    let (width, height) = source.dimensions();
+    let width = width as usize;
+    let height = height as usize;
+    if width < 8 || height < 8 {
+        return None;
+    }
+    let source_luma = image_luma(source);
+    let result_luma = image_luma(result);
+    let source_high = high_pass_luma(&source_luma, width, height);
+    let result_high = high_pass_luma(&result_luma, width, height);
+    let source_gradient = gradient_magnitude(&source_luma, width, height);
+    let result_gradient = gradient_magnitude(&result_luma, width, height);
+    let source_edge_distance = edge_chamfer_distance(&source_gradient, width, height);
+    let result_edge_threshold = gradient_edge_threshold(&result_gradient);
+
+    let mut zero: Option<DriftCandidate> = None;
+    let mut best: Option<DriftCandidate> = None;
+    for dy in -AI_PART_DRIFT_MAX_SHIFT..=AI_PART_DRIFT_MAX_SHIFT {
+        for dx in -AI_PART_DRIFT_MAX_SHIFT..=AI_PART_DRIFT_MAX_SHIFT {
+            let correlation =
+                high_pass_correlation(&source_high, &result_high, width, height, dx, dy)?;
+            let mut score = 1.0 - correlation;
+            if let Some(chamfer) = edge_chamfer_score(
+                &source_edge_distance,
+                &result_gradient,
+                result_edge_threshold,
+                width,
+                height,
+                dx,
+                dy,
+            ) {
+                score += 0.035 * chamfer;
+            }
+            let candidate = DriftCandidate {
+                dx,
+                dy,
+                score,
+                correlation,
+            };
+            if dx == 0 && dy == 0 {
+                zero = Some(candidate);
+            }
+            if best
+                .as_ref()
+                .map(|current| candidate.score < current.score)
+                .unwrap_or(true)
+            {
+                best = Some(candidate);
+            }
+        }
+    }
+    let zero = zero?;
+    let best = best?;
+    if best.dx == 0 && best.dy == 0 {
+        return None;
+    }
+    let confidence = zero.score - best.score;
+    if confidence < AI_PART_DRIFT_MIN_SCORE_GAIN || best.correlation < AI_PART_DRIFT_MIN_CORRELATION
+    {
+        return None;
+    }
+    Some(AiPartDriftCorrection {
+        dx: best.dx,
+        dy: best.dy,
+        zero_score: zero.score,
+        corrected_score: best.score,
+        confidence,
+        correlation: best.correlation,
+    })
+}
+
+fn shift_image_with_source_fill(
+    source: &image::RgbaImage,
+    result: &image::RgbaImage,
+    dx: i32,
+    dy: i32,
+) -> image::RgbaImage {
+    let (width, height) = result.dimensions();
+    image::RgbaImage::from_fn(width, height, |x, y| {
+        let sx = x as i32 - dx;
+        let sy = y as i32 - dy;
+        if sx >= 0 && sy >= 0 && sx < width as i32 && sy < height as i32 {
+            *result.get_pixel(sx as u32, sy as u32)
+        } else {
+            *source.get_pixel(x, y)
+        }
+    })
+}
+
+pub(crate) fn correct_part_result_drift(
+    source_png: &[u8],
+    result_png: &[u8],
+    label: &str,
+) -> Result<(Vec<u8>, Option<AiPartDriftCorrection>), String> {
+    let source = decode_png_rgba(source_png, label)?;
+    let result = decode_png_rgba(result_png, label)?;
+    if source.dimensions() != result.dimensions() {
+        return Err(format!(
+            "{label} drift-correction inputs must have identical dimensions."
+        ));
+    }
+    let Some(correction) = detect_part_result_drift(&source, &result) else {
+        return Ok((result_png.to_vec(), None));
+    };
+    let shifted = shift_image_with_source_fill(&source, &result, correction.dx, correction.dy);
+    Ok((encode_rgba_png(shifted, label)?, Some(correction)))
 }
 
 /// Width of the cross-fade band between a part and previously generated
@@ -1731,7 +2139,7 @@ impl AiEditComposer {
         let (width, height) = image.dimensions();
         for y in 0..height {
             for x in 0..width {
-                if self.editable.is_covered(x, y) && !self.painted.is_covered(x, y) {
+                if self.editable.is_covered(x, y) {
                     image.put_pixel(x, y, *draft.get_pixel(x, y));
                 }
             }
@@ -2039,6 +2447,67 @@ impl AiEditComposer {
         }
         self.painted.mark_rect(part.crop);
         Ok(())
+    }
+
+    pub(crate) fn part_result_layer_png(
+        &self,
+        part: &AiEditPart,
+        result_png: &[u8],
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let result = decode_png_rgba(result_png, label)?;
+        let input_dimensions = part.working.original_dimensions;
+        if result.dimensions() != input_dimensions {
+            return Err(format!(
+                "{label} part result must be {}x{}, but it is {}x{}.",
+                input_dimensions.0,
+                input_dimensions.1,
+                result.width(),
+                result.height()
+            ));
+        }
+        let (width, height) = self.source.dimensions();
+        let mut layer = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+        for y in 0..part.crop.height {
+            for x in 0..part.crop.width {
+                layer.put_pixel(
+                    part.crop.x + x,
+                    part.crop.y + y,
+                    *result.get_pixel(part.input_paste_rect.x + x, part.input_paste_rect.y + y),
+                );
+            }
+        }
+        encode_rgba_png(layer, label)
+    }
+
+    pub(crate) fn part_result_mask_png(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+    ) -> Result<Vec<u8>, String> {
+        let (width, height) = self.source.dimensions();
+        let mut mask = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+        let weights = self.part_paste_weights(part.crop);
+        for y in 0..part.crop.height {
+            for x in 0..part.crop.width {
+                let weight = weights[y as usize * part.crop.width as usize + x as usize];
+                if weight == 0 {
+                    continue;
+                }
+                let document_x = part.crop.x + x;
+                let document_y = part.crop.y + y;
+                let coverage = self
+                    .mask
+                    .as_ref()
+                    .map(|edit_mask| {
+                        mask_pixel_coverage(edit_mask.get_pixel(document_x, document_y))
+                    })
+                    .unwrap_or(255);
+                let value = ((u16::from(weight) * u16::from(coverage) + 127) / 255) as u8;
+                mask.put_pixel(document_x, document_y, image::Rgba([255, 255, 255, value]));
+            }
+        }
+        encode_rgba_png(mask, label)
     }
 
     /// Full-document candidate: the parts' raw results pasted at their crop
@@ -2535,11 +3004,83 @@ mod tests {
         encode_rgba_png(image, "test image").expect("solid png")
     }
 
+    fn structural_test_image(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let mut value = ((x * 3 + y * 5) % 80 + 80) as u8;
+            if x % 31 < 3 || y % 29 < 3 {
+                value = 225;
+            }
+            if (30..70).contains(&x) && (24..80).contains(&y) {
+                value = 35;
+            }
+            if (95..130).contains(&x) && (20..42).contains(&y) {
+                value = 190;
+            }
+            image::Rgba([value, value.saturating_add(8), value.saturating_sub(8), 255])
+        })
+    }
+
+    fn soft_cloud_test_image(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let wave_a = ((x as f64 / 11.0).sin() + (y as f64 / 17.0).cos()) * 22.0;
+            let wave_b = (((x + y) as f64 / 23.0).sin() * 18.0).round();
+            let value = (142.0 + wave_a + wave_b).round().clamp(80.0, 220.0) as u8;
+            image::Rgba([value, value.saturating_add(8), 235, 255])
+        })
+    }
+
+    fn encode_test_image(image: image::RgbaImage) -> Vec<u8> {
+        encode_rgba_png(image, "test image").expect("image png")
+    }
+
     fn rect_contains(outer: PixelRect, inner: PixelRect) -> bool {
         inner.x >= outer.x
             && inner.y >= outer.y
             && inner.x + inner.width <= outer.x + outer.width
             && inner.y + inner.height <= outer.y + outer.height
+    }
+
+    #[test]
+    fn drift_correction_realigns_small_structural_translation() {
+        let source = structural_test_image(160, 112);
+        let drifted = shift_image_with_source_fill(&source, &source, -5, 3);
+        let source_png = encode_test_image(source.clone());
+        let drifted_png = encode_test_image(drifted);
+
+        let (corrected_png, correction) =
+            correct_part_result_drift(&source_png, &drifted_png, "drift").expect("corrected");
+        let correction = correction.expect("drift detected");
+        assert_eq!((correction.dx, correction.dy), (5, -3));
+        assert!(correction.confidence > 0.01);
+
+        let corrected = decode_png_rgba(&corrected_png, "corrected").expect("decode corrected");
+        assert_eq!(
+            corrected.get_pixel(80, 56).0,
+            source.get_pixel(80, 56).0,
+            "center structure should be registered after correction"
+        );
+    }
+
+    #[test]
+    fn drift_correction_uses_soft_texture_when_edges_are_weak() {
+        let source = soft_cloud_test_image(192, 128);
+        let drifted = shift_image_with_source_fill(&source, &source, 4, -2);
+        let source_png = encode_test_image(source.clone());
+        let drifted_png = encode_test_image(drifted);
+
+        let (_corrected_png, correction) =
+            correct_part_result_drift(&source_png, &drifted_png, "soft drift").expect("corrected");
+        let correction = correction.expect("soft drift detected");
+        assert_eq!((correction.dx, correction.dy), (-4, 2));
+    }
+
+    #[test]
+    fn drift_correction_skips_flat_images_without_signal() {
+        let source_png = solid_png(160, 112, [120, 160, 220, 255]);
+        let (corrected_png, correction) =
+            correct_part_result_drift(&source_png, &source_png, "flat").expect("checked");
+        assert!(correction.is_none());
+        assert_eq!(corrected_png, source_png);
     }
 
     #[test]
@@ -2907,6 +3448,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
@@ -2951,6 +3493,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
@@ -3010,6 +3553,7 @@ mod tests {
             AiFillRedundancy::High,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
@@ -3037,6 +3581,7 @@ mod tests {
                 redundancy,
                 (3000, 800),
                 &mask,
+                None,
                 "Generative fill",
             )
             .expect("placement")
@@ -3070,6 +3615,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
@@ -3091,6 +3637,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (2600, 600),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
@@ -3118,6 +3665,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
@@ -3134,7 +3682,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_auto_uses_balanced_full_height_strips_for_wide_fill() {
+    fn codex_auto_uses_max_ratio_full_height_strips_for_wide_fill() {
         let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
         let placement = plan_ai_fill_placement(
             AiEditProvider::Codex,
@@ -3142,19 +3690,34 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &mask,
+            None,
             "Generative fill",
         )
         .expect("placement");
 
         assert_eq!(placement.method, AiFillMethod::BalancedStrips);
-        assert!(placement.parts.len() > 1);
+        assert_eq!(placement.parts.len(), 2);
+        assert_eq!(
+            placement.parts[0].crop,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2400,
+                height: 800
+            }
+        );
+        assert_eq!(
+            placement.parts[1].crop,
+            PixelRect {
+                x: 600,
+                y: 0,
+                width: 2400,
+                height: 800
+            }
+        );
         for part in &placement.parts {
-            assert_eq!(part.crop.y, 0);
-            assert_eq!(part.crop.height, 800);
-            assert!(
-                part.crop.width > 800,
-                "Codex fill should not start with square strips"
-            );
+            assert_eq!(part.working.original_dimensions, (2400, 800));
+            assert_eq!(part.working.aspect_label, "codex-crop");
         }
     }
 
@@ -3265,6 +3828,17 @@ mod tests {
         assert_eq!(second_mask.get_pixel(0, 0).0, [0, 0, 0, 255]);
         assert_eq!(second_mask.get_pixel(15, 0).0, [128, 128, 128, 255]);
         assert_eq!(second_mask.get_pixel(31, 0).0, [255, 255, 255, 255]);
+
+        let second_layer_mask = composer
+            .part_result_mask_png(&second, "AI retouch mask")
+            .expect("layer mask");
+        let second_layer_mask =
+            decode_png_rgba(&second_layer_mask, "second layer mask").expect("decode mask");
+        assert_eq!(second_layer_mask.dimensions(), (48, 32));
+        assert_eq!(second_layer_mask.get_pixel(0, 10).0, [0, 0, 0, 0]);
+        assert_eq!(second_layer_mask.get_pixel(16, 10).0, [0, 0, 0, 0]);
+        assert_eq!(second_layer_mask.get_pixel(24, 10).0, [255, 255, 255, 128]);
+        assert_eq!(second_layer_mask.get_pixel(40, 10).0, [255, 255, 255, 255]);
 
         let green = solid_png(32, 32, [0, 200, 0, 255]);
         composer
@@ -3391,10 +3965,17 @@ mod tests {
         let second_target = decode_png_rgba(&second_inputs.edit_target_png, "second target")
             .expect("decode target");
 
-        assert_eq!(second_source.get_pixel(0, 16).0, [200, 0, 0, 255]);
-        assert_eq!(second_target.get_pixel(0, 16).0, [200, 0, 0, 255]);
+        assert_eq!(second_source.get_pixel(0, 16).0, [0, 200, 0, 255]);
+        assert_eq!(second_target.get_pixel(0, 16).0, [0, 200, 0, 255]);
         assert_eq!(second_source.get_pixel(31, 16).0, [0, 200, 0, 255]);
         assert_eq!(second_target.get_pixel(31, 16).0, [0, 200, 0, 255]);
+
+        let second_overview = composer
+            .overview_png_with_storyboard_draft(&second, &draft, "Generative fill")
+            .expect("second overview");
+        let second_overview =
+            decode_png_rgba(&second_overview, "second overview").expect("decode overview");
+        assert_eq!(second_overview.get_pixel(8, 16).0, [0, 200, 0, 255]);
     }
 
     #[test]
@@ -3565,6 +4146,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &wide_cover_mask,
+            None,
             "Generative fill",
         )
         .expect("wide-cover placement");
@@ -3811,6 +4393,7 @@ mod tests {
             AiFillRedundancy::Medium,
             (3000, 800),
             &wide_mask,
+            None,
             "Generative fill",
         )
         .expect("wide placement");

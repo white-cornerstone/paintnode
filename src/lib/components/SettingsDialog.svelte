@@ -15,8 +15,6 @@
     type CodexModelId,
     type AntigravityApprovalMode,
     type AntigravityModelId,
-    type GenerativeFillMethod,
-    type GenerativeFillRedundancy,
     type ReasoningEffort,
     type ServiceTier,
   } from '../state/settings';
@@ -38,20 +36,6 @@
     { value: 'default', label: 'Default', hint: 'Use normal Codex speed.' },
     { value: 'fast', label: 'Fast', hint: 'Ask Codex to use fast mode for AI runs.' },
   ];
-  const fillMethods: { value: GenerativeFillMethod; label: string }[] = [
-    { value: 'auto', label: 'Auto' },
-    { value: 'exactInPlace', label: 'Exact in-place' },
-    { value: 'wideCover', label: 'Wide cover' },
-    { value: 'wideStarterContinue', label: 'Wide starter + continue' },
-    { value: 'balancedStrips', label: 'Balanced strips' },
-    { value: 'plainGenerate', label: 'Plain generate' },
-  ];
-  const fillRedundancies: { value: GenerativeFillRedundancy; label: string }[] = [
-    { value: 'low', label: 'Low' },
-    { value: 'medium', label: 'Medium' },
-    { value: 'high', label: 'High' },
-  ];
-
   let tab = $state<Tab>('general');
   let detectBusy = $state(false);
   let antigravityDetectBusy = $state(false);
@@ -223,30 +207,6 @@
             <option value="codex">Local Codex CLI</option>
             <option value="antigravity">Local Antigravity CLI</option>
             <option value="custom">Custom CLI</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span>Default fill method</span>
-          <select
-            value={settings.value.ai.fillMethod}
-            onchange={(event) => settings.update({ ai: { fillMethod: textValue(event) as GenerativeFillMethod } })}
-          >
-            {#each fillMethods as option (option.value)}
-              <option value={option.value}>{option.label}</option>
-            {/each}
-          </select>
-        </label>
-
-        <label class="field">
-          <span>Default fill context</span>
-          <select
-            value={settings.value.ai.fillRedundancy}
-            onchange={(event) => settings.update({ ai: { fillRedundancy: textValue(event) as GenerativeFillRedundancy } })}
-          >
-            {#each fillRedundancies as option (option.value)}
-              <option value={option.value}>{option.label}</option>
-            {/each}
           </select>
         </label>
 

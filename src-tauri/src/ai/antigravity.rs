@@ -17,11 +17,11 @@ use std::time::SystemTime;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_candidate_rejection, ai_edit_checks_level, ai_effective_checks_level,
-    ai_retouch_editable_mask_png, antigravity_output_target,
-    read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
-    validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
-    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
+    ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
+    antigravity_output_target, read_png_bytes_cropped_to_ai_working_canvas,
+    remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
+    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::fill_storyboard::{
     fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
@@ -33,23 +33,25 @@ use crate::ai::fill_storyboard::{
 };
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
-    ai_part_prompt_context, ai_upscale_target_dimensions, cover_crop_png_to_dimensions,
-    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, storyboard_draft_canvas_png, storyboard_draft_mask_png, AiEditComposer,
-    AiEditPlacement, AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
+    cover_crop_png_to_dimensions, normalize_storyboard_draft_png, plan_ai_edit_placement,
+    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
+    resize_png_to_dimensions, reuse_part_result, storyboard_draft_canvas_png,
+    storyboard_draft_mask_png, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
     clean_option, cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
     command_failure_with_required_output, emit_codex_part_progress, emit_codex_progress,
     emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
-    project_or_temp_job_path, reference_prompt_note, required_png_output_is_ready,
-    safe_job_child_path, sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
-    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
+    project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
+    required_png_output_is_ready, safe_job_child_path, sanitize_progress_line, should_keep_job_dir,
+    spawn_output_reader, synthesize_decouple_asset_manifest, validate_reference_pngs,
+    watched_job_files, write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
     CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    POLL_INTERVAL,
 };
 use crate::png::{is_png, png_data_url, png_dimensions_from_bytes, read_png_data_url};
 use crate::project::{
@@ -487,7 +489,7 @@ fn antigravity_fill_prompt(
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
     let has_storyboard = !storyboard_note.trim().is_empty();
-    let tool_call_note = antigravity_image_tool_call_note(
+    let tool_call_note = antigravity_fill_image_tool_call_note(
         job_dir,
         working,
         continuation,
@@ -517,19 +519,17 @@ fn antigravity_fill_prompt(
             String::new()
         };
         return format!(
-            r#"Perform one masked PaintNode draft enhancement using the PNG files in `{job_dir}`.
+            r#"Perform one PaintNode draft enhancement using the PNG files in `{job_dir}`.
 
 Input files:
-- `{job_dir}/edit_target.png`: same-size base image to enhance in place. Editable pixels already contain a rough low-detail visual draft.
-- `{job_dir}/source.png`: same-size current PaintNode content for comparison; it should match the base image's composition.
-- `{job_dir}/mask.png`: edit mask. White pixels are the area to enhance; gray pixels are a transition buffer; black or transparent pixels are protected context.{overview_note}
+- `{job_dir}/source.png`: PaintNode edit frame to enhance. It already contains the orchestrator's rough low-detail visual draft.{overview_note}
 
 {geometry_note}
 
 Task:
 - This is an image enhancement/restoration pass at the same size, not a new composition, new generative fill, outpaint, story continuation, or scene redesign.
 - Improve clarity, texture, natural detail, edge quality, lighting consistency, and local realism only for pixels already visible in the low-detail draft.
-- Preserve the exact subject count, object count, identities/classes, poses, placement, scale, camera angle, horizon, shoreline, lighting, colors, and activities already visible in `edit_target.png`.
+- Preserve the exact subject count, object count, identities/classes, poses, placement, scale, camera angle, horizon, shoreline, lighting, colors, and activities already visible in `source.png`.
 - Do not add, remove, duplicate, replace, move, resize, re-pose, or reinterpret any visible person, object, prop, landform, wave, cloud, or scene element.
 - If a draft area is soft or ambiguous, refine the existing visible shapes conservatively instead of inventing extra content.
 
@@ -540,8 +540,7 @@ Task:
 Required output:
 - Save exactly one PNG file as `{result_path}`.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
-- Change only the white-mask area and blend through gray-mask transition pixels.
-- Preserve black/transparent-mask protected context visually.
+- PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 {workspace_rule}
 - Do not ask follow-up questions.
 
@@ -554,15 +553,10 @@ Final response should be one short sentence confirming `{result_path}` was creat
         } else {
             "current PaintNode content for this edit frame."
         };
-        let edit_target_input_note = if has_storyboard_draft {
-            "base image to enhance in place. In unpainted editable areas, it already contains the same rough visual draft."
-        } else {
-            "base image to edit in place."
-        };
         let draft_output_note = if has_storyboard_draft {
-            "- Retouch/up-res the low-detail draft already present in `edit_target.png`; do not ignore it, replace it with a new composition, or start from blank.\n- The visible draft is the composition authority. Preserve its subject count, placement, pose, activity, horizon, shoreline, lighting, camera, and scale, and add no new people, props, activities, story beats, or separate scenes beyond what is already visible in the draft."
+            "- Retouch/up-res the low-detail draft already present in `source.png`; do not ignore it, replace it with a new composition, or start from blank.\n- The visible draft is the composition authority. Preserve its subject count, placement, pose, activity, horizon, shoreline, lighting, camera, and scale, and add no new people, props, activities, story beats, or separate scenes beyond what is already visible in the draft."
         } else {
-            "- Use the orchestrator subtask prompt as the local instruction for the editable white mask."
+            "- Use the orchestrator subtask prompt as the local instruction for this frame."
         };
         let fallback_prompt = if storyboard_fallback && storyboard_anchor {
             format!(
@@ -572,12 +566,11 @@ Final response should be one short sentence confirming `{result_path}` was creat
             String::new()
         };
         return format!(
-            r#"Perform one mask-guided PaintNode generative fill using the PNG files in `{job_dir}`.
+            r#"Perform one PaintNode generative fill using the PNG files in `{job_dir}`.
 
 Input files:
 - `{job_dir}/source.png`: {source_input_note}
-- `{job_dir}/edit_target.png`: {edit_target_input_note}
-- `{job_dir}/mask.png`: edit mask. White pixels are editable; gray pixels are transition buffer; black or transparent pixels are protected context.{overview_note}{storyboard_draft_note}
+{overview_note}{storyboard_draft_note}
 
 {reference_note}
 
@@ -593,8 +586,7 @@ Required output:
 - Save exactly one PNG file as `{result_path}`.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
 {draft_output_note}
-- Change only the white-mask area and blend through gray-mask transition pixels.
-- Preserve black/transparent-mask protected context visually.
+- PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 {workspace_rule}
 - Do not ask follow-up questions.
 
@@ -603,12 +595,11 @@ Final response should be one short sentence confirming `{result_path}` was creat
     }
     let user_prompt_heading = "Original user fill prompt:";
     format!(
-        r#"Perform one mask-guided PaintNode generative fill using the PNG files in `{job_dir}`.
+        r#"Perform one PaintNode generative fill using the PNG files in `{job_dir}`.
 
 Input files:
 - `{job_dir}/source.png`: the current content of the document area being edited.
-- `{job_dir}/edit_target.png`: same-size image to edit in place.
-- `{job_dir}/mask.png`: same-size edit mask. White pixels are editable. Gray pixels are a feathered transition buffer. Black or transparent pixels are protected context and are not editable.{overview_note}
+{overview_note}
 
 {reference_note}
 
@@ -625,10 +616,11 @@ Input files:
 
 Required output:
 - Save exactly one PNG file as `{result_path}`.
-- Prefer the same pixel dimensions as `source.png`, `edit_target.png`, and `mask.png`.
-- Change only the white-mask area and keep black/transparent-mask context visually preserved.
+- Prefer the same framing as `source.png`.
+- Fill the intended editable/empty area implied by the attached frame and prompt.
 - Match surrounding texture, lighting, perspective, color, focus, and grain.
 - Do not crop, zoom, reframe, or shift the attached frame.
+- PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 {workspace_rule}
 - Do not ask follow-up questions.
 
@@ -782,6 +774,60 @@ fn antigravity_image_tool_call_note(
 - Also attach `{job_dir}/mask.png` as the second image so the model sees exactly which area is editable. In the tool instruction, explain that the second image is an edit mask over the first: the white area marks the only region to change, black areas must be reproduced pixel-identically from the first image, and the mask itself must never appear in the output.{overview_attach_note}{storyboard_draft_attach_note}
 - Never attach `{job_dir}/paintnode_contract.txt` to the image tool; attach other files only when they are reference images explicitly listed above and the edit needs them.{target_note}
 - Keep the tool instruction short: {instruction_subject} and the mask rule, then require that everything else stays exactly the same — same framing, same composition, same camera, same crop.
+- Do not mention file names, pixel dimensions, or aspect ratios inside the tool instruction text; the ratio and size belong in the tool's parameters only."#
+    )
+}
+
+fn antigravity_fill_image_tool_call_note(
+    job_dir: &str,
+    working: &AiWorkingCanvas,
+    continuation: bool,
+    has_storyboard: bool,
+    storyboard_anchor: bool,
+    has_storyboard_draft: bool,
+) -> String {
+    let aspect_label = &working.aspect_label;
+    let target = antigravity_output_target(aspect_label, working.original_dimensions);
+    let target_note = match target {
+        Some((tier, _)) => format!(
+            "\n- Set the image tool's aspect ratio parameter to `{aspect_label}` and its image size / resolution parameter to `{tier}`. That tier's output grid matches the attached frame's ratio exactly, so a faithful generation maps 1:1 onto the frame with no cropping or reframing."
+        ),
+        None => String::new(),
+    };
+    let overview_attach_note = if continuation && has_storyboard_draft {
+        format!(
+            "\n- Also attach `{job_dir}/overview.png` as an additional alignment reference only; it shows surrounding finished pixels and the rough draft. Its pixels, resolution, and red outline must never appear in the output."
+        )
+    } else if continuation {
+        format!(
+            "\n- Also attach `{job_dir}/overview.png` as an additional continuity reference only. Its pixels, resolution, and red outline must never appear in the output."
+        )
+    } else {
+        String::new()
+    };
+    let storyboard_draft_attach_note = if has_storyboard_draft {
+        "\n- Do not attach storyboard draft files as extra image references. The base image already contains the orchestrator's rough composition; the image tool should enhance that base in place."
+            .to_string()
+    } else {
+        String::new()
+    };
+    let instruction_subject = if has_storyboard_draft {
+        "state that this is image enhancement/restoration of the low-detail draft already in the base image; improve detail only, preserve the exact composition, and add/remove/move/replace no visible subject, object, prop, activity, or scene element"
+    } else if has_storyboard && storyboard_anchor {
+        "use the orchestrator subtask prompt above as the local image instruction; include the requested anchor subject only if that subtask prompt says to"
+    } else if has_storyboard {
+        "use the orchestrator subtask prompt above as the local image instruction; continue the protected neighboring content exactly as that subtask prompt describes"
+    } else if continuation {
+        "state how the generated area continues the neighboring finished content (per the continuation rules above)"
+    } else {
+        "state the requested fill"
+    };
+    format!(
+        r#"Image-generation tool call:
+- Give the image-generation tool `{job_dir}/source.png` as the base image (the first image) and generate directly against that frame.
+- Do not attach synthetic edit-target or mask images. PaintNode owns crop-back, paste-back, and editable masking from `placement.json` after the generated PNG is returned.{overview_attach_note}{storyboard_draft_attach_note}
+- Never attach `{job_dir}/paintnode_contract.txt` to the image tool; attach other files only when they are reference images explicitly listed above and the edit needs them.{target_note}
+- Keep the tool instruction short: {instruction_subject}, then require that the result keeps the same framing, same composition, same camera, and same crop.
 - Do not mention file names, pixel dimensions, or aspect ratios inside the tool instruction text; the ratio and size belong in the tool's parameters only."#
     )
 }
@@ -1454,6 +1500,7 @@ pub(crate) async fn generate_antigravity_image(
             asset,
             assets,
             mask_data_url: None,
+            layers: Vec::new(),
         })
     })
     .await
@@ -1477,8 +1524,7 @@ pub(crate) async fn generate_antigravity_fill_image(
     approval_mode: Option<String>,
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
-    fill_method: Option<String>,
-    fill_redundancy: Option<String>,
+    fill_aspect_ratio: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -1502,9 +1548,11 @@ pub(crate) async fn generate_antigravity_fill_image(
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
         let options = antigravity_command_options(model, approval_mode);
         let autonomy = ai_autonomy_level(autonomy_level);
-        let checks_level = ai_edit_checks_level(edit_checks_level);
-        let fill_method = AiFillMethod::from_option(fill_method);
-        let fill_redundancy = AiFillRedundancy::from_option(fill_redundancy);
+        let _checks_level = ai_edit_checks_level(edit_checks_level);
+        let fill_aspect_ratio = fill_aspect_ratio
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-fill-{}", now_id())
         } else {
@@ -1531,10 +1579,11 @@ pub(crate) async fn generate_antigravity_fill_image(
 
         let placement = plan_ai_fill_placement(
             AiEditProvider::Antigravity,
-            fill_method,
-            fill_redundancy,
+            AiFillMethod::Auto,
+            AiFillRedundancy::Medium,
             source_dimensions,
             &mask_png,
+            fill_aspect_ratio,
             "Generative fill",
         )?;
         let mut composer = AiEditComposer::new(
@@ -1559,6 +1608,10 @@ pub(crate) async fn generate_antigravity_fill_image(
             &options,
         )?;
 
+        let return_part_layers = placement.is_split();
+        let mut layer_results = Vec::new();
+        let mut layer_assets = Vec::new();
+        let mut raw_assets = Vec::new();
         for (part_index, part) in placement.parts.iter().enumerate() {
             let part_path = match placement.part_dir_name(part_index) {
                 Some(dir) => job_path.join(dir),
@@ -1566,6 +1619,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             };
             fs::create_dir_all(&part_path)
                 .map_err(|e| format!("Failed to create generative fill part folder: {e}"))?;
+            remove_legacy_generative_fill_agent_inputs(&part_path);
             if resumable {
                 if let Some(bytes) = reuse_part_result(&part_path, part) {
                     emit_codex_part_progress(
@@ -1579,6 +1633,59 @@ pub(crate) async fn generate_antigravity_fill_image(
                             "Reusing this part's previous result",
                         ),
                     );
+                    if store_asset {
+                        if let Some(project_dir) = project_dir.as_ref() {
+                            let raw_name = format!("Generative fill raw part {}", part_index + 1);
+                            let raw_asset = store_generated_png_asset(
+                                project_dir,
+                                &bytes,
+                                raw_name,
+                                Some(prompt.trim().into()),
+                                Some("part_result.png".into()),
+                            )?;
+                            raw_assets.push(raw_asset);
+                        }
+                    }
+                    if return_part_layers {
+                        let layer_png =
+                            composer.part_result_layer_png(part, &bytes, "Generative fill")?;
+                        let mask_png =
+                            composer.part_result_mask_png(part, "Generative fill mask")?;
+                        let layer_name = format!("Generative fill part {}", part_index + 1);
+                        let asset = if store_asset {
+                            if let Some(project_dir) = project_dir.as_ref() {
+                                let (id, relative_path) = write_asset_file(
+                                    project_dir,
+                                    "generated",
+                                    &layer_name,
+                                    "png",
+                                    &layer_png,
+                                )?;
+                                let asset = add_asset(
+                                    project_dir,
+                                    ProjectAsset::generated_png(
+                                        id,
+                                        relative_path,
+                                        layer_name.clone(),
+                                        Some(prompt.trim().into()),
+                                        None,
+                                    ),
+                                )?;
+                                layer_assets.push(asset.clone());
+                                Some(asset)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        layer_results.push(GeneratedImageLayerResult {
+                            name: layer_name,
+                            data_url: png_data_url(&layer_png)?,
+                            asset,
+                            mask_data_url: Some(png_data_url(&mask_png)?),
+                        });
+                    }
                     composer.apply_part_result(part, &bytes, "Generative fill")?;
                     continue;
                 }
@@ -1617,24 +1724,21 @@ pub(crate) async fn generate_antigravity_fill_image(
             };
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
-            fs::write(part_path.join("edit_target.png"), &inputs.edit_target_png)
-                .map_err(|e| format!("Failed to write generative fill edit target image: {e}"))?;
-            fs::write(part_path.join("mask.png"), &inputs.mask_png)
-                .map_err(|e| format!("Failed to write generative fill mask image: {e}"))?;
             let has_overview = placement.is_split();
             if has_overview {
                 let overview_png = if let Some(draft_png) = storyboard_draft_png.as_deref() {
-                    composer.overview_png_with_storyboard_draft(part, draft_png, "Generative fill")?
+                    composer.overview_png_with_storyboard_draft(
+                        part,
+                        draft_png,
+                        "Generative fill",
+                    )?
                 } else if storyboard.is_some() {
                     composer.overview_png_hiding_unpainted_editable(part, "Generative fill")?
                 } else {
                     composer.overview_png(part, "Generative fill")?
                 };
-                fs::write(
-                    part_path.join("overview.png"),
-                    overview_png,
-                )
-                .map_err(|e| format!("Failed to write generative fill overview image: {e}"))?;
+                fs::write(part_path.join("overview.png"), overview_png)
+                    .map_err(|e| format!("Failed to write generative fill overview image: {e}"))?;
             }
             let reference_names = if has_storyboard_draft {
                 Vec::new()
@@ -1689,125 +1793,137 @@ pub(crate) async fn generate_antigravity_fill_image(
                 ),
             );
             let result_path = part_path.join("result.png");
-            let mut generated_bytes = Vec::new();
-            let mut retry_note = "";
-            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                let prompt_text = if retry_note.is_empty() {
-                    base_prompt_text.clone()
-                } else {
-                    format!("{base_prompt_text}\n\n{retry_note}")
-                };
-                write_ai_job_prompt(&part_path, &prompt_text, "Antigravity generative fill")?;
-                let run = run_antigravity(
-                    &antigravity_bin,
-                    &workspace_path,
-                    &part_path,
-                    &prompt_text,
-                    &options,
-                    new_antigravity_project && part_index == 0 && attempt == 0,
-                    app.clone(),
-                    run_id.clone(),
-                    Some("result.png"),
-                )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                if !run.output.status.success() && !run.satisfied_required_output {
-                    return Err(ai_part_progress_message(
-                        &placement,
-                        part_index,
-                        &command_failure_with_required_output(
-                            "Antigravity generative fill",
-                            &run.output,
-                            &part_path,
-                            "result.png",
-                        ),
-                    ));
-                }
-                let (bytes, result_dimensions, normalized_result) =
-                    read_png_bytes_cropped_to_ai_working_canvas(
-                        &result_path,
-                        &part.working,
-                        "Antigravity generative fill",
-                    )
-                    .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                if normalized_result {
-                    emit_codex_progress(
-                        &app,
-                        &run_id,
-                        ai_part_progress_message(
-                            &placement,
-                            part_index,
-                            &format!(
-                                "Normalized Antigravity fill from {}x{} to {}x{}",
-                                result_dimensions.0,
-                                result_dimensions.1,
-                                part.working.original_dimensions.0,
-                                part.working.original_dimensions.1
-                            ),
-                        ),
-                    );
-                }
-                // Result checks: in-place drift, then seam continuity when
-                // the user's check level enables it.
-                let effective_checks_level = ai_effective_checks_level(
-                    checks_level,
-                    storyboard.is_some() && part_index > 0,
-                );
-                let rejection = ai_candidate_rejection(
-                    effective_checks_level,
-                    &inputs.edit_target_png,
-                    &inputs.source_png,
-                    &inputs.mask_png,
-                    &bytes,
-                    "Antigravity generative fill",
-                )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                let Some(rejection) = rejection else {
-                    generated_bytes = bytes;
-                    break;
-                };
-                retry_note = if rejection.continuation_retry {
-                    AI_SEAM_RETRY_NOTE
-                } else {
-                    AI_IN_PLACE_RETRY_NOTE
-                };
-                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                    emit_codex_progress(
-                        &app,
-                        &run_id,
-                        ai_part_progress_message(
-                            &placement,
-                            part_index,
-                            &format!(
-                                "Rejected generative fill candidate: {}; retrying with stricter instructions",
-                                rejection.reason
-                            ),
-                        ),
-                    );
-                    remove_rejected_ai_candidate(&result_path)
-                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                    continue;
-                }
-                // Drop the rejected candidate so a resumed retry cannot
-                // silently import it via reuse_part_result.
-                let _ = fs::remove_file(&result_path);
+            write_ai_job_prompt(&part_path, &base_prompt_text, "Antigravity generative fill")?;
+            let run = run_antigravity(
+                &antigravity_bin,
+                &workspace_path,
+                &part_path,
+                &base_prompt_text,
+                &options,
+                new_antigravity_project && part_index == 0,
+                app.clone(),
+                run_id.clone(),
+                Some("result.png"),
+            )
+            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+            if !run.output.status.success() && !run.satisfied_required_output {
                 return Err(ai_part_progress_message(
                     &placement,
                     part_index,
-                    &format!(
-                        "The AI image model produced an unusable candidate: {}. Try a smaller edit area, a simpler prompt, or a lower result-checks level.",
-                        rejection.reason
+                    &command_failure_with_required_output(
+                        "Antigravity generative fill",
+                        &run.output,
+                        &part_path,
+                        "result.png",
                     ),
                 ));
             }
+            let (generated_bytes, result_dimensions, normalized_result) =
+                read_png_bytes_cropped_to_ai_working_canvas(
+                    &result_path,
+                    &part.working,
+                    "Antigravity generative fill",
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+            if normalized_result {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &format!(
+                            "Normalized Antigravity fill from {}x{} to {}x{}",
+                            result_dimensions.0,
+                            result_dimensions.1,
+                            part.working.original_dimensions.0,
+                            part.working.original_dimensions.1
+                        ),
+                    ),
+                );
+            }
+            let _ = fs::remove_file(&result_path);
+            if store_asset {
+                if let Some(project_dir) = project_dir.as_ref() {
+                    let raw_name = format!("Generative fill raw part {}", part_index + 1);
+                    let raw_asset = store_generated_png_asset(
+                        project_dir,
+                        &generated_bytes,
+                        raw_name,
+                        Some(prompt.trim().into()),
+                        Some("part_result.png".into()),
+                    )?;
+                    raw_assets.push(raw_asset);
+                }
+            }
+            let unaligned_bytes = generated_bytes.clone();
+            let (generated_bytes, drift_correction) =
+                correct_part_result_drift(&inputs.source_png, &generated_bytes, "Generative fill")?;
+            if let Some(correction) = drift_correction {
+                let _ = fs::write(
+                    part_path.join("part_result-unaligned.png"),
+                    &unaligned_bytes,
+                );
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &format!(
+                            "Corrected fill drift by ({}, {}) px (confidence {:.3})",
+                            correction.dx, correction.dy, correction.confidence
+                        ),
+                    ),
+                );
+            }
             fs::write(part_path.join("part_result.png"), &generated_bytes)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
-            let _ = fs::remove_file(&result_path);
+            if return_part_layers {
+                let layer_png =
+                    composer.part_result_layer_png(part, &generated_bytes, "Generative fill")?;
+                let mask_png = composer.part_result_mask_png(part, "Generative fill mask")?;
+                let layer_name = format!("Generative fill part {}", part_index + 1);
+                let asset = if store_asset {
+                    if let Some(project_dir) = project_dir.as_ref() {
+                        let (id, relative_path) = write_asset_file(
+                            project_dir,
+                            "generated",
+                            &layer_name,
+                            "png",
+                            &layer_png,
+                        )?;
+                        let asset = add_asset(
+                            project_dir,
+                            ProjectAsset::generated_png(
+                                id,
+                                relative_path,
+                                layer_name.clone(),
+                                Some(prompt.trim().into()),
+                                None,
+                            ),
+                        )?;
+                        layer_assets.push(asset.clone());
+                        Some(asset)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                layer_results.push(GeneratedImageLayerResult {
+                    name: layer_name,
+                    data_url: png_data_url(&layer_png)?,
+                    asset,
+                    mask_data_url: Some(png_data_url(&mask_png)?),
+                });
+            }
             composer.apply_part_result(part, &generated_bytes, "Generative fill")?;
         }
 
         let bytes = composer.composed_png("Generative fill")?;
         let data_url = png_data_url(&bytes)?;
-        let asset = if store_asset {
+        let asset = if store_asset && !return_part_layers {
             if let Some(project_dir) = project_dir {
                 let (id, relative_path) =
                     write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
@@ -1831,12 +1947,18 @@ pub(crate) async fn generate_antigravity_fill_image(
             cleanup_project_agent_job(&job_path);
         }
         emit_codex_progress(&app, &run_id, "Done");
-        let assets = asset.iter().cloned().collect();
+        let mut assets = if return_part_layers {
+            layer_assets
+        } else {
+            asset.iter().cloned().collect()
+        };
+        assets.extend(raw_assets);
         Ok(GeneratedImageResult {
             data_url,
             asset,
             assets,
             mask_data_url: None,
+            layers: layer_results,
         })
     })
     .await
@@ -2167,6 +2289,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
             asset,
             assets,
             mask_data_url,
+            layers: Vec::new(),
         })
     })
     .await
@@ -2281,6 +2404,7 @@ pub(crate) async fn upscale_antigravity_image(
             asset,
             assets,
             mask_data_url: None,
+            layers: Vec::new(),
         })
     })
     .await
@@ -2633,6 +2757,7 @@ pub(crate) async fn compose_antigravity_workflow(
             asset,
             assets,
             mask_data_url: None,
+            layers: Vec::new(),
         })
     })
     .await
@@ -2920,12 +3045,10 @@ mod tests {
             &ai_exact_working_canvas((600, 600), "1:1"),
         );
         assert!(fill.contains("Image-generation tool call:"));
-        assert!(
-            fill.contains("`paintnode/antigravity-runs/job-3/edit_target.png` as the base image")
-        );
-        assert!(fill.contains(
-            "Also attach `paintnode/antigravity-runs/job-3/mask.png` as the second image"
-        ));
+        assert!(fill.contains("`paintnode/antigravity-runs/job-3/source.png` as the base image"));
+        assert!(fill.contains("Do not attach synthetic edit-target or mask images"));
+        assert!(!fill.contains("edit_target.png"));
+        assert!(!fill.contains("mask.png"));
 
         let storyboard_fill = antigravity_fill_prompt(
             "a beach photo in film style",
@@ -2941,11 +3064,13 @@ mod tests {
             &[],
             &ai_exact_working_canvas((1914, 812), "21:9"),
         );
-        assert!(storyboard_fill.contains("masked PaintNode draft enhancement"));
-        assert!(storyboard_fill.contains("same-size base image to enhance in place"));
+        assert!(storyboard_fill.contains("PaintNode draft enhancement"));
+        assert!(storyboard_fill.contains("source.png`: PaintNode edit frame to enhance"));
         assert!(storyboard_fill.contains("image enhancement/restoration pass at the same size"));
         assert!(storyboard_fill.contains("Do not add, remove, duplicate, replace, move"));
         assert!(storyboard_fill.contains("Do not attach storyboard draft files"));
+        assert!(!storyboard_fill.contains("edit_target.png"));
+        assert!(!storyboard_fill.contains("mask.png"));
         assert!(!storyboard_fill.contains("storyboard-draft-crop.png"));
         assert!(!storyboard_fill.contains("Orchestrator"));
         assert!(!storyboard_fill.contains("beach photo in film style"));

@@ -312,17 +312,6 @@ pub(crate) fn ai_edit_checks_level(level: Option<u8>) -> u8 {
     level.unwrap_or(1).min(3)
 }
 
-/// Continuation crops can pass protected-pixel drift while still reading as a
-/// separate image. When checks are enabled, promote them to the balanced seam
-/// gate; level 0 remains the user's explicit escape hatch.
-pub(crate) fn ai_effective_checks_level(check_level: u8, continuation: bool) -> u8 {
-    if continuation && check_level > 0 {
-        check_level.max(2)
-    } else {
-        check_level
-    }
-}
-
 /// Why a candidate was rejected by the result checks, and which retry note
 /// should steer the next attempt.
 pub(crate) struct AiCandidateRejection {
@@ -862,10 +851,6 @@ mod tests {
         assert_eq!(ai_seam_mismatch_limit(1), None);
         assert_eq!(ai_seam_mismatch_limit(2), Some(18.0));
         assert_eq!(ai_seam_mismatch_limit(3), Some(9.0));
-        assert_eq!(ai_effective_checks_level(0, true), 0);
-        assert_eq!(ai_effective_checks_level(1, false), 1);
-        assert_eq!(ai_effective_checks_level(1, true), 2);
-        assert_eq!(ai_effective_checks_level(3, true), 3);
     }
 
     #[test]
