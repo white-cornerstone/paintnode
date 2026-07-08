@@ -565,7 +565,6 @@
     -webkit-user-select: text;
   }
   textarea {
-    resize: vertical;
     font-family: inherit;
   }
   .dlg-action-spacer {

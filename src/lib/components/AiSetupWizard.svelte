@@ -768,7 +768,7 @@
     width: 100%;
   }
   .field textarea {
-    resize: vertical;
+    resize: none;
     min-height: 56px;
     color: var(--text);
     background: var(--bg-input);

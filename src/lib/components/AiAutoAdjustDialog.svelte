@@ -336,7 +336,7 @@
     color: #ffd28a;
   }
   textarea {
-    resize: vertical;
+    resize: none;
   }
   .prompt-field {
     display: flex;

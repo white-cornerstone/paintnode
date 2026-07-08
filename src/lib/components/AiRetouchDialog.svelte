@@ -570,7 +570,6 @@ Use these annotations as direct user instructions for the regions they point to.
     box-sizing: border-box;
   }
   textarea {
-    resize: vertical;
     min-height: 92px;
   }
   .hint,
