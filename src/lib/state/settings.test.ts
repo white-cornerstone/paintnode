@@ -6,6 +6,8 @@ import {
   ANTIGRAVITY_MODEL_OPTIONS,
   ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
   ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
+  aiProfileRunOptionsFromSettings,
+  aiProviderDefaultsFromSettings,
   aiRunOptionsFromSettings,
   defaultSettings,
   normalizeSettings,
@@ -134,6 +136,8 @@ describe('settings normalization', () => {
     expect(defaults.ai.antigravitySafetyHateSpeech).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
     expect(defaults.ai.antigravitySafetySexuallyExplicit).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
     expect(defaults.ai.antigravitySafetyDangerousContent).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
+    expect(defaults.ai.profiles).toEqual([]);
+    expect(defaults.ai.defaultProfileId).toBeNull();
     expect(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id)).toContain('Gemini 3.5 Flash (High)');
   });
 
@@ -247,5 +251,67 @@ describe('settings normalization', () => {
     expect(runOptions.antigravitySafetyHarassment).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
     expect(runOptions.fillAspectRatio).toBeNull();
     expect(value.ai.provider).toBe('antigravity');
+  });
+
+  it('normalizes saved AI profiles and applies the default profile to new run options', () => {
+    const value = normalizeSettings({
+      ai: {
+        provider: 'codex',
+        codexBin: '/new/codex',
+        antigravityBin: '/new/agy',
+        profiles: [
+          {
+            id: 'final-pass',
+            name: ' Final pass ',
+            options: {
+              provider: 'antigravity',
+              model: 'gpt-5.4-mini',
+              reasoningEffort: 'high',
+              imageQuality: 'ultra',
+              antigravityImageSize: '2K',
+              antigravitySafetyFiltering: 'custom',
+              antigravitySafetyHarassment: 'BLOCK_NONE',
+            },
+          },
+        ],
+        defaultProfileId: 'final-pass',
+      },
+    });
+
+    const runOptions = aiRunOptionsFromSettings(value);
+
+    expect(value.ai.profiles).toHaveLength(1);
+    expect(value.ai.profiles[0].name).toBe('Final pass');
+    expect(value.ai.defaultProfileId).toBe('final-pass');
+    expect(runOptions.provider).toBe('antigravity');
+    expect(runOptions.antigravityImageSize).toBe('2K');
+    expect(runOptions.antigravitySafetyFiltering).toBe('custom');
+    expect(runOptions.antigravitySafetyHarassment).toBe('BLOCK_NONE');
+    expect(runOptions.imageQuality).toBe('auto');
+    expect(runOptions.codexBin).toBe('/new/codex');
+    expect(runOptions.antigravityBin).toBe('/new/agy');
+  });
+
+  it('can fetch provider defaults separately from a selected default profile', () => {
+    const value = normalizeSettings({
+      ai: {
+        provider: 'codex',
+        profiles: [
+          {
+            id: 'draft',
+            name: 'Draft',
+            options: {
+              provider: 'antigravity',
+              antigravityImageSize: '1K',
+            },
+          },
+        ],
+        defaultProfileId: 'draft',
+      },
+    });
+
+    expect(aiProviderDefaultsFromSettings(value).provider).toBe('codex');
+    expect(aiProfileRunOptionsFromSettings(value, 'draft').provider).toBe('antigravity');
+    expect(aiRunOptionsFromSettings(value).provider).toBe('antigravity');
   });
 });

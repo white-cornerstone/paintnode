@@ -132,8 +132,9 @@
   }
 </script>
 
-<Modal title="Generate Image (AI)" {onClose} width={560}>
+<Modal title="Generate Image (AI)" {onClose} width={560} height={560} minWidth={520} minHeight={420} resizable>
   <div class="dlg-form">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">
         This runs a <strong>local command</strong> and only works in the desktop app. Launch it
@@ -147,7 +148,7 @@
         <span>{taskDetail.providerLabel}</span>
       </div>
 
-      <label class="dlg-field">
+      <label class="dlg-field prompt-field">
         <span>Prompt</span>
         <textarea value={taskDetail.prompt} rows="3" readonly></textarea>
       </label>
@@ -172,19 +173,7 @@
         </div>
       {/if}
     {:else}
-      <div class="provider-tabs" role="group" aria-label="Image generator">
-        <button class:active={runOptions.provider === 'codex'} onclick={() => (runOptions.provider = 'codex')}>
-          Local Codex
-        </button>
-        <button class:active={runOptions.provider === 'antigravity'} onclick={() => (runOptions.provider = 'antigravity')}>
-          Antigravity account
-        </button>
-        <button class:active={runOptions.provider === 'custom'} onclick={() => (runOptions.provider = 'custom')}>
-          Custom CLI
-        </button>
-      </div>
-
-      <label class="dlg-field">
+      <label class="dlg-field prompt-field">
         <span>Prompt</span>
         <textarea bind:value={prompt} rows="3" placeholder="a serene mountain lake at sunset"></textarea>
       </label>
@@ -255,22 +244,7 @@
       {/if}
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'codex'}
-      <p class="hint">
-        Uses your local Codex login. If this fails, run <code>codex login</code> in Terminal and try again.
-        PaintNode copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.
-      </p>
-    {:else if !taskDetail && runOptions.provider === 'antigravity'}
-      <label class="dlg-field">
-        <span>Antigravity CLI auth helper (optional)</span>
-        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
-      </label>
-
-      <p class="hint">
-        Uses your Antigravity sign-in. If this fails, run <code>agy</code> in Terminal and sign in.
-        PaintNode refreshes auth with <code>agy models</code> before calling the image backend directly.
-      </p>
-    {:else if !taskDetail}
+    {#if !taskDetail && runOptions.provider === 'custom'}
       <label class="dlg-field">
         <span>Command (local CLI)</span>
         <input type="text" bind:value={runOptions.customBin} placeholder="Full path to your image-gen CLI" spellcheck="false" />
@@ -315,6 +289,7 @@
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -335,27 +310,20 @@
 </Modal>
 
 <style>
-  .provider-tabs {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 0;
-    border: 1px solid var(--border-soft);
-    border-radius: 4px;
-    overflow: hidden;
+  .dlg-form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
-  .provider-tabs button {
-    border: none;
-    border-radius: 0;
-    background: var(--bg-input);
-    color: var(--text-dim);
-    padding: 6px 8px;
-  }
-  .provider-tabs button + button {
-    border-left: 1px solid var(--border-soft);
-  }
-  .provider-tabs button.active {
-    background: var(--accent);
-    color: #fff;
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
   }
   .frame-summary {
     display: grid;
@@ -429,6 +397,27 @@
     margin: 0;
     color: var(--text-dim);
     font-size: 11px;
+  }
+  .dlg-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-height: 0;
+    color: var(--text-dim);
+  }
+  .dlg-field textarea,
+  .dlg-field input,
+  .dlg-field select {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .prompt-field {
+    flex: 1 1 180px;
+    min-height: 120px;
+  }
+  .prompt-field textarea {
+    flex: 1 1 auto;
+    min-height: 88px;
   }
   .reference-section {
     display: grid;
@@ -581,5 +570,15 @@
   }
   .dlg-action-spacer {
     flex: 1;
+  }
+  .dlg-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
 </style>

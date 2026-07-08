@@ -29,7 +29,9 @@
     type AntigravitySafetyThreshold,
     type ReasoningEffort,
     type ServiceTier,
+    aiProfileRunOptionsFromSettings,
   } from '../state/settings';
+  import { settings } from '../state/settings.svelte';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
 
   type AntigravityModelScope = 'all' | 'image';
@@ -153,6 +155,12 @@
   function setProvider(provider: AiProvider): void {
     options = { ...options, provider };
     submenu = provider === 'codex' ? 'reasoning' : provider === 'antigravity' ? 'antigravityImageModel' : null;
+  }
+
+  function applyProfile(profileId: string): void {
+    options = aiProfileRunOptionsFromSettings(settings.value, profileId);
+    submenu = null;
+    close();
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {
@@ -338,6 +346,17 @@
 <div class="ai-options">
   {#if open}
     <div bind:this={menuElement} use:portal class="menu" style={menuStyle} role="presentation" onpointerdown={stopPointer}>
+      {#if settings.value.ai.profiles.length}
+        <div class="menu-title">Profile</div>
+        {#each settings.value.ai.profiles as profile (profile.id)}
+          <button type="button" onclick={() => applyProfile(profile.id)}>
+            <span>{profile.name}</span>
+            {#if settings.value.ai.defaultProfileId === profile.id}<span class="value">Default</span>{/if}
+          </button>
+        {/each}
+        <div class="separator"></div>
+      {/if}
+
       <div class="menu-title">Provider</div>
       {#each providers as provider (provider.value)}
         <button type="button" class:active={options.provider === provider.value} onclick={() => setProvider(provider.value)}>

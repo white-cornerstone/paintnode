@@ -1,5 +1,6 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
+  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { detectCodex, detectAntigravity, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
   import {
     AUTOSAVE_INTERVAL_OPTIONS,
@@ -30,6 +31,10 @@
     type AntigravitySafetyThreshold,
     type ReasoningEffort,
     type ServiceTier,
+    aiProfileOptionsFromRunOptions,
+    aiProviderDefaultsFromSettings,
+    aiProfileRunOptionsFromSettings,
+    cloneAiRunOptions,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
@@ -64,6 +69,10 @@
   let antigravityDetectBusy = $state(false);
   let codexDetection = $state<CodexDetectionResult | null>(null);
   let antigravityDetection = $state<CodexDetectionResult | null>(null);
+  let aiDefaultsProvider = $state<AiProvider>(settings.value.ai.provider);
+  let profileName = $state('');
+  let selectedProfileId = $state(settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '');
+  let selectedProfileOptions = $state(cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value)));
 
   function textValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
@@ -82,6 +91,78 @@
     if (!value) return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function newProfileId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `ai-profile-${Date.now()}`;
+  }
+
+  function profileLabel(provider: AiProvider): string {
+    if (provider === 'codex') return 'Local Codex';
+    if (provider === 'antigravity') return 'Antigravity';
+    return 'Custom CLI';
+  }
+
+  function createProfileFromDefaults(): void {
+    const id = newProfileId();
+    const defaults = cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value));
+    defaults.provider = aiDefaultsProvider;
+    const name = profileName.trim() || `${profileLabel(aiDefaultsProvider)} Profile`;
+    const profiles = [
+      ...settings.value.ai.profiles,
+      {
+        id,
+        name,
+        options: aiProfileOptionsFromRunOptions(defaults),
+      },
+    ];
+    settings.update({
+      ai: {
+        profiles,
+        defaultProfileId: settings.value.ai.defaultProfileId ?? id,
+      },
+    });
+    selectedProfileId = id;
+    selectedProfileOptions = cloneAiRunOptions(aiProfileRunOptionsFromSettings(settings.value, id));
+    profileName = '';
+  }
+
+  function updateSelectedProfileName(name: string): void {
+    if (!selectedProfileId) return;
+    settings.update({
+      ai: {
+        profiles: settings.value.ai.profiles.map((profile) =>
+          profile.id === selectedProfileId ? { ...profile, name: name.trim() || 'AI Profile' } : profile,
+        ),
+      },
+    });
+  }
+
+  function updateSelectedProfileOptions(): void {
+    if (!selectedProfileId) return;
+    settings.update({
+      ai: {
+        profiles: settings.value.ai.profiles.map((profile) =>
+          profile.id === selectedProfileId
+            ? { ...profile, options: aiProfileOptionsFromRunOptions(selectedProfileOptions) }
+            : profile,
+        ),
+      },
+    });
+  }
+
+  function setDefaultProfile(id: string | null): void {
+    settings.update({ ai: { defaultProfileId: id } });
+  }
+
+  function deleteSelectedProfile(): void {
+    if (!selectedProfileId) return;
+    const profiles = settings.value.ai.profiles.filter((profile) => profile.id !== selectedProfileId);
+    const defaultProfileId =
+      settings.value.ai.defaultProfileId === selectedProfileId ? (profiles[0]?.id ?? null) : settings.value.ai.defaultProfileId;
+    settings.update({ ai: { profiles, defaultProfileId } });
+    selectedProfileId = defaultProfileId ?? profiles[0]?.id ?? '';
+    selectedProfileOptions = cloneAiRunOptions(aiProfileRunOptionsFromSettings(settings.value, selectedProfileId || null));
   }
 
   function antigravitySafetyCategoryValue(setting: AntigravitySafetyCategorySetting): AntigravitySafetyThreshold {
@@ -176,9 +257,18 @@
       },
     });
   }
+
+  $effect(() => {
+    if (settings.value.ai.profiles.some((profile) => profile.id === selectedProfileId)) return;
+    selectedProfileId = settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '';
+  });
+
+  $effect(() => {
+    selectedProfileOptions = cloneAiRunOptions(aiProfileRunOptionsFromSettings(settings.value, selectedProfileId || null));
+  });
 </script>
 
-<Modal title="Settings" {onClose} width={760}>
+<Modal title="Settings" {onClose} width={900} height={700} minWidth={680} minHeight={480} resizable>
   <div class="settings-shell">
     <nav class="settings-tabs" aria-label="Settings sections">
       <button class:active={tab === 'general'} onclick={() => (tab = 'general')}>General</button>
@@ -187,6 +277,7 @@
     </nav>
 
     <section class="settings-body">
+      <div class="settings-scroll">
       {#if tab === 'general'}
         <div class="section-head">
           <h2>General</h2>
@@ -253,10 +344,14 @@
         </button>
 
         <label class="field">
-          <span>Default image provider</span>
+          <span>Default provider for new AI runs</span>
           <select
             value={settings.value.ai.provider}
-            onchange={(event) => settings.update({ ai: { provider: textValue(event) as AiProvider } })}
+            onchange={(event) => {
+              const provider = textValue(event) as AiProvider;
+              settings.update({ ai: { provider } });
+              aiDefaultsProvider = provider;
+            }}
           >
             <option value="codex">Local Codex</option>
             <option value="antigravity">Antigravity account / image generation</option>
@@ -264,7 +359,40 @@
           </select>
         </label>
 
-        {#if settings.value.ai.provider === 'codex'}
+        <div class="provider-defaults">
+          <div class="subsection-title">
+            <h3>Provider Defaults</h3>
+            <span>{profileLabel(aiDefaultsProvider)}</span>
+          </div>
+          <div class="provider-tabs" role="tablist" aria-label="AI provider defaults">
+            <button
+              class:active={aiDefaultsProvider === 'codex'}
+              role="tab"
+              aria-selected={aiDefaultsProvider === 'codex'}
+              onclick={() => (aiDefaultsProvider = 'codex')}
+            >
+              Local Codex
+            </button>
+            <button
+              class:active={aiDefaultsProvider === 'antigravity'}
+              role="tab"
+              aria-selected={aiDefaultsProvider === 'antigravity'}
+              onclick={() => (aiDefaultsProvider = 'antigravity')}
+            >
+              Antigravity
+            </button>
+            <button
+              class:active={aiDefaultsProvider === 'custom'}
+              role="tab"
+              aria-selected={aiDefaultsProvider === 'custom'}
+              onclick={() => (aiDefaultsProvider = 'custom')}
+            >
+              Custom CLI
+            </button>
+          </div>
+        </div>
+
+        {#if aiDefaultsProvider === 'codex'}
           <div class="detect-row">
             <label class="field">
               <span>Advanced Codex binary override</span>
@@ -361,7 +489,7 @@
               <small>{imageModerations.find((option) => option.value === settings.value.ai.imageModeration)?.hint}</small>
             </label>
           </div>
-        {:else if settings.value.ai.provider === 'antigravity'}
+        {:else if aiDefaultsProvider === 'antigravity'}
           <div class="detect-row">
             <label class="field">
               <span>Advanced Antigravity CLI auth helper</span>
@@ -372,7 +500,7 @@
 	                spellcheck="false"
 	                oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
 	              />
-              <small>Used for <code>agy models</code> auth refresh before direct image requests.</small>
+              <small>Used to refresh Antigravity account authentication when needed.</small>
             </label>
             <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
               {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
@@ -570,6 +698,70 @@
             <button type="button" class="secondary" onclick={resetCustomArgs}>Reset arguments</button>
           </div>
         {/if}
+
+        <div class="subsection profile-manager">
+          <div class="subsection-title">
+            <h3>Profiles</h3>
+            <span>{settings.value.ai.profiles.length} saved</span>
+          </div>
+          <div class="profile-create">
+            <label class="field">
+              <span>New profile</span>
+              <input
+                type="text"
+                value={profileName}
+                placeholder={`${profileLabel(aiDefaultsProvider)} Profile`}
+                oninput={(event) => (profileName = textValue(event))}
+              />
+            </label>
+            <button type="button" onclick={createProfileFromDefaults}>Save Current Defaults</button>
+          </div>
+
+          {#if settings.value.ai.profiles.length}
+            <div class="profile-editor">
+              <label class="field">
+                <span>Saved profile</span>
+                <select
+                  value={selectedProfileId}
+                  onchange={(event) => (selectedProfileId = textValue(event))}
+                >
+                  {#each settings.value.ai.profiles as profile (profile.id)}
+                    <option value={profile.id}>{profile.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="field">
+                <span>Profile name</span>
+                <input
+                  type="text"
+                  value={settings.value.ai.profiles.find((profile) => profile.id === selectedProfileId)?.name ?? ''}
+                  onchange={(event) => updateSelectedProfileName(textValue(event))}
+                />
+              </label>
+              <div class="profile-options">
+                <AiRunOptionsControl bind:options={selectedProfileOptions} />
+                <button type="button" class="secondary" onclick={updateSelectedProfileOptions}>
+                  Save Profile Settings
+                </button>
+              </div>
+              <div class="profile-actions">
+                <button type="button" onclick={() => setDefaultProfile(selectedProfileId)}>
+                  {settings.value.ai.defaultProfileId === selectedProfileId ? 'Default Profile' : 'Use by Default'}
+                </button>
+                <button
+                  type="button"
+                  onclick={() => setDefaultProfile(null)}
+                  disabled={!settings.value.ai.defaultProfileId}
+                >
+                  Use Provider Defaults
+                </button>
+                <button type="button" onclick={deleteSelectedProfile}>Delete Profile</button>
+              </div>
+            </div>
+          {:else}
+            <p class="status-line">Save a profile from the provider defaults above, then pick it inside AI dialogs.</p>
+          {/if}
+        </div>
       {:else}
         <div class="section-head">
           <h2>Workspace</h2>
@@ -636,6 +828,7 @@
           </span>
         </label>
       {/if}
+      </div>
 
       <div class="actions">
         <button type="button" onclick={() => settings.reset()}>Reset Defaults</button>
@@ -649,8 +842,8 @@
   .settings-shell {
     display: grid;
     grid-template-columns: 148px minmax(0, 1fr);
-    min-height: 500px;
-    max-height: min(680px, calc(100vh - 96px));
+    height: 100%;
+    min-height: 0;
   }
   .settings-tabs {
     display: flex;
@@ -675,8 +868,16 @@
   .settings-body {
     display: flex;
     flex-direction: column;
-    gap: 12px;
     min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .settings-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
     overflow: auto;
     padding: 14px;
   }
@@ -748,6 +949,69 @@
     padding-top: 4px;
     border-top: 1px solid var(--border);
   }
+  .provider-defaults {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .subsection-title {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .subsection-title h3 {
+    margin: 0;
+  }
+  .subsection-title span {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .provider-tabs {
+    display: flex;
+    gap: 18px;
+    min-width: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .provider-tabs button {
+    justify-content: center;
+    min-width: 0;
+    padding: 7px 2px 8px;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    color: var(--text);
+  }
+  .provider-tabs button.active {
+    color: var(--text-bright);
+    border-bottom-color: var(--accent);
+  }
+  .profile-create,
+  .profile-editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: end;
+  }
+  .profile-editor {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+  .profile-options,
+  .profile-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .profile-options {
+    grid-column: 1 / -1;
+  }
+  .profile-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
   .status-line {
     margin: 0;
     padding: 7px 9px;
@@ -766,11 +1030,12 @@
   }
   .actions {
     display: flex;
+    flex: 0 0 auto;
     justify-content: flex-end;
     gap: 8px;
-    margin-top: auto;
-    padding-top: 10px;
+    padding: 10px 14px 14px;
     border-top: 1px solid var(--border);
+    background: var(--bg-panel);
   }
   .primary {
     background: var(--accent);

@@ -261,7 +261,7 @@
 
 <svelte:window onkeydown={onDialogKeydown} />
 
-<Modal title="New" {onClose} width={980}>
+<Modal title="New" {onClose} width={980} height={680} minWidth={720} minHeight={460} resizable>
   <div class="new-dialog">
     <div class="tabs" role="tablist" aria-label="New item type">
       <button class:active={tab === 'image'} onclick={() => (tab = 'image')} role="tab">
@@ -418,8 +418,8 @@
 
 <style>
   .new-dialog {
-    height: min(640px, calc(100vh - 96px));
-    min-height: min(520px, calc(100vh - 96px));
+    height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     margin: -14px;

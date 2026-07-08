@@ -291,8 +291,9 @@
   }
 </script>
 
-<Modal title="Extract Assets (AI)" {onClose} width={500}>
+<Modal title="Extract Assets (AI)" {onClose} width={500} height={560} minWidth={480} minHeight={420} resizable>
   <div class="dlg-form">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">
         This runs local Codex and only works in the desktop app. Launch it with
@@ -307,14 +308,7 @@
       </div>
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'antigravity'}
-      <label class="dlg-field">
-        <span>Antigravity command (optional)</span>
-        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
-      </label>
-    {/if}
-
-    <label class="dlg-field">
+    <label class="dlg-field prompt-field">
       <span>Asset guidance</span>
       {#if taskDetail}
         <textarea value={taskDetail.prompt} rows="4" readonly></textarea>
@@ -389,6 +383,7 @@
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -409,6 +404,21 @@
 </Modal>
 
 <style>
+  .dlg-form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
+  }
   .split-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 132px;
@@ -434,6 +444,16 @@
   }
   .compact-field input {
     width: 100%;
+  }
+  .prompt-field {
+    display: flex;
+    flex: 1 1 160px;
+    flex-direction: column;
+    min-height: 120px;
+  }
+  .prompt-field textarea {
+    flex: 1 1 auto;
+    min-height: 88px;
   }
   .task-summary {
     display: flex;
@@ -523,5 +543,14 @@
   }
   .dlg-action-spacer {
     flex: 1;
+  }
+  .dlg-actions {
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
 </style>

@@ -178,8 +178,9 @@
   }
 </script>
 
-<Modal title="AI Upscale" onClose={onClose} width={480}>
+<Modal title="AI Upscale" onClose={onClose} width={480} height={520} minWidth={460} minHeight={420} resizable>
   <div class="dlg-form">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">AI Upscale runs a local AI provider and only works in the desktop app.</p>
     {/if}
@@ -263,6 +264,7 @@
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -284,9 +286,20 @@
 
 <style>
   .dlg-form {
-    display: grid;
-    gap: 12px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
     font-size: 12px;
+  }
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
   }
   .summary {
     display: flex;
@@ -398,8 +411,12 @@
   }
   .dlg-actions {
     display: flex;
+    flex: 0 0 auto;
     justify-content: flex-end;
     gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .dlg-action-spacer {
     flex: 1;

@@ -244,8 +244,9 @@ Use these annotations as direct user instructions for the regions they point to.
   }
 </script>
 
-<Modal title="AI Retouch" onClose={close} width={560}>
+<Modal title="AI Retouch" onClose={close} width={560} height={640} minWidth={520} minHeight={420} resizable>
   <div class="dlg-form">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">
         This runs local Codex and only works in the desktop app. The captured retouch request is kept
@@ -362,14 +363,7 @@ Use these annotations as direct user instructions for the regions they point to.
       </div>
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'antigravity'}
-      <label class="dlg-field">
-        <span>Antigravity CLI auth helper (optional)</span>
-        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
-      </label>
-    {/if}
-
-    <label class="dlg-field">
+    <label class="dlg-field prompt-field">
       <span>Retouch prompt</span>
       {#if taskDetail}
         <textarea value={taskDetail.prompt} rows="5" readonly></textarea>
@@ -432,6 +426,7 @@ Use these annotations as direct user instructions for the regions they point to.
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -453,9 +448,20 @@ Use these annotations as direct user instructions for the regions they point to.
 
 <style>
   .dlg-form {
-    display: grid;
-    gap: 12px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
     font-size: 12px;
+  }
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
   }
   .summary {
     display: flex;
@@ -527,6 +533,16 @@ Use these annotations as direct user instructions for the regions they point to.
     gap: 5px;
     color: var(--text-dim);
   }
+  .prompt-field {
+    display: flex;
+    flex: 1 1 180px;
+    flex-direction: column;
+    min-height: 140px;
+  }
+  .prompt-field textarea {
+    flex: 1 1 auto;
+    min-height: 100px;
+  }
   .checks-tabs {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -549,7 +565,6 @@ Use these annotations as direct user instructions for the regions they point to.
     background: var(--accent);
     color: #fff;
   }
-  input,
   textarea {
     width: 100%;
     box-sizing: border-box;
@@ -614,8 +629,12 @@ Use these annotations as direct user instructions for the regions they point to.
   }
   .dlg-actions {
     display: flex;
+    flex: 0 0 auto;
     justify-content: flex-end;
     gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .dlg-action-spacer {
     flex: 1;

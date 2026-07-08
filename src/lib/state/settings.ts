@@ -122,6 +122,14 @@ export interface AiRunOptions {
   fillAspectRatio?: string | null;
 }
 
+export type AiProfileOptions = Omit<AiRunOptions, 'codexBin' | 'antigravityBin' | 'customBin' | 'fillAspectRatio'>;
+
+export interface AiSettingsProfile {
+  id: string;
+  name: string;
+  options: AiProfileOptions;
+}
+
 export interface PaintNodeSettings {
   general: {
     autosaveEnabled: boolean;
@@ -160,6 +168,8 @@ export interface PaintNodeSettings {
     customRetouchArgsText: string;
     customExtractArgsText: string;
     customWorkflowArgsText: string;
+    profiles: AiSettingsProfile[];
+    defaultProfileId: string | null;
   };
   workspace: {
     defaultCanvasWidth: number;
@@ -251,6 +261,8 @@ export function defaultSettings(): PaintNodeSettings {
       customRetouchArgsText: DEFAULT_CUSTOM_RETOUCH_ARGS,
       customExtractArgsText: DEFAULT_CUSTOM_EXTRACT_ARGS,
       customWorkflowArgsText: DEFAULT_CUSTOM_WORKFLOW_ARGS,
+      profiles: [],
+      defaultProfileId: null,
     },
     workspace: {
       defaultCanvasWidth: 1280,
@@ -289,6 +301,98 @@ function nullableClampedInt(value: unknown, min: number, max: number): number | 
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
+function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai']): AiProfileOptions {
+  const value = isRecord(raw) ? raw : {};
+  const savedProvider = String(value.provider);
+  const savedReasoningEffort = value.reasoningEffort === 'minimal' ? 'low' : value.reasoningEffort;
+  return {
+    provider:
+      savedProvider === 'custom'
+        ? 'custom'
+        : savedProvider === 'antigravity' || savedProvider === 'gemini'
+          ? 'antigravity'
+          : fallback.provider,
+    model: MODEL_IDS.has(String(value.model)) ? (value.model as CodexModelId) : fallback.model,
+    reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
+      ? (savedReasoningEffort as ReasoningEffort)
+      : fallback.reasoningEffort,
+    serviceTier: value.serviceTier === 'fast' ? 'fast' : fallback.serviceTier,
+    imageQuality: IMAGE_QUALITIES.has(String(value.imageQuality))
+      ? (value.imageQuality as CodexImageQuality)
+      : fallback.imageQuality,
+    imageModeration: IMAGE_MODERATIONS.has(String(value.imageModeration))
+      ? (value.imageModeration as CodexImageModeration)
+      : fallback.imageModeration,
+    autonomyLevel: AI_AUTONOMY_LEVELS.has(String(value.autonomyLevel))
+      ? (value.autonomyLevel as AiAutonomyLevel)
+      : fallback.autonomyLevel,
+    antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(value.antigravityModel))
+      ? (value.antigravityModel as AntigravityModelId)
+      : fallback.antigravityModel,
+    antigravityApprovalMode:
+      value.antigravityApprovalMode === 'default' || value.antigravityApprovalMode === 'skipPermissions'
+        ? (value.antigravityApprovalMode as AntigravityApprovalMode)
+        : fallback.antigravityApprovalMode,
+    antigravityImageModel: ANTIGRAVITY_IMAGE_MODEL_IDS.has(String(value.antigravityImageModel))
+      ? (value.antigravityImageModel as AntigravityImageModelId)
+      : fallback.antigravityImageModel,
+    antigravityImageSize: ANTIGRAVITY_IMAGE_SIZE_IDS.has(String(value.antigravityImageSize))
+      ? (value.antigravityImageSize as AntigravityImageSize)
+      : fallback.antigravityImageSize,
+    antigravityPersonGeneration: ANTIGRAVITY_PERSON_GENERATION_IDS.has(String(value.antigravityPersonGeneration))
+      ? (value.antigravityPersonGeneration as AntigravityPersonGeneration)
+      : fallback.antigravityPersonGeneration,
+    antigravityProminentPeople: ANTIGRAVITY_PROMINENT_PEOPLE_IDS.has(String(value.antigravityProminentPeople))
+      ? (value.antigravityProminentPeople as AntigravityProminentPeople)
+      : fallback.antigravityProminentPeople,
+    antigravityCompressionQuality: nullableClampedInt(value.antigravityCompressionQuality, 0, 100),
+    antigravityAdvancedOptionsJson: stringOrDefault(
+      value.antigravityAdvancedOptionsJson,
+      fallback.antigravityAdvancedOptionsJson,
+    ),
+    antigravitySafetyFiltering: normalizeAntigravitySafetyFiltering(
+      value.antigravitySafetyFiltering,
+      fallback.antigravitySafetyFiltering,
+    ),
+    antigravitySafetyHarassment: normalizeAntigravitySafetyThreshold(
+      value.antigravitySafetyHarassment,
+      fallback.antigravitySafetyHarassment,
+    ),
+    antigravitySafetyHateSpeech: normalizeAntigravitySafetyThreshold(
+      value.antigravitySafetyHateSpeech,
+      fallback.antigravitySafetyHateSpeech,
+    ),
+    antigravitySafetySexuallyExplicit: normalizeAntigravitySafetyThreshold(
+      value.antigravitySafetySexuallyExplicit,
+      fallback.antigravitySafetySexuallyExplicit,
+    ),
+    antigravitySafetyDangerousContent: normalizeAntigravitySafetyThreshold(
+      value.antigravitySafetyDangerousContent,
+      fallback.antigravitySafetyDangerousContent,
+    ),
+    editChecksLevel: clampInt(value.editChecksLevel, fallback.editChecksLevel, 0, 3) as AiEditChecksLevel,
+  };
+}
+
+function normalizeAiProfiles(raw: unknown, fallback: PaintNodeSettings['ai']): AiSettingsProfile[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const profiles: AiSettingsProfile[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : '';
+    if (!id || seen.has(id)) continue;
+    const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 80) : 'AI Profile';
+    seen.add(id);
+    profiles.push({
+      id,
+      name,
+      options: normalizeAiProfileOptions(item.options, fallback),
+    });
+  }
+  return profiles.slice(0, 24);
+}
+
 export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const defaults = defaultSettings();
   if (!isRecord(raw)) return defaults;
@@ -306,6 +410,84 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const savedAntigravityBin = ai.antigravityBin ?? ai.geminiBin;
   const savedAntigravityModel = ai.antigravityModel ?? ai.geminiModel;
   const savedAntigravityApprovalMode = ai.antigravityApprovalMode ?? ai.geminiApprovalMode;
+  const normalizedAiBase: Omit<PaintNodeSettings['ai'], 'profiles' | 'defaultProfileId'> = {
+    provider,
+    codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
+    model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
+    reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
+      ? (savedReasoningEffort as ReasoningEffort)
+      : defaults.ai.reasoningEffort,
+    serviceTier: ai.serviceTier === 'fast' ? 'fast' : 'default',
+    imageQuality: IMAGE_QUALITIES.has(String(ai.imageQuality))
+      ? (ai.imageQuality as CodexImageQuality)
+      : defaults.ai.imageQuality,
+    imageModeration: IMAGE_MODERATIONS.has(String(ai.imageModeration))
+      ? (ai.imageModeration as CodexImageModeration)
+      : defaults.ai.imageModeration,
+    autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))
+      ? (ai.autonomyLevel as AiAutonomyLevel)
+      : defaults.ai.autonomyLevel,
+    antigravityBin: stringOrDefault(savedAntigravityBin, defaults.ai.antigravityBin),
+    antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(savedAntigravityModel))
+      ? (savedAntigravityModel as AntigravityModelId)
+      : defaults.ai.antigravityModel,
+    antigravityApprovalMode:
+      savedAntigravityApprovalMode === 'default' ? 'default' : defaults.ai.antigravityApprovalMode,
+    antigravityImageModel: ANTIGRAVITY_IMAGE_MODEL_IDS.has(String(ai.antigravityImageModel))
+      ? (ai.antigravityImageModel as AntigravityImageModelId)
+      : defaults.ai.antigravityImageModel,
+    antigravityImageSize: ANTIGRAVITY_IMAGE_SIZE_IDS.has(String(ai.antigravityImageSize))
+      ? (ai.antigravityImageSize as AntigravityImageSize)
+      : defaults.ai.antigravityImageSize,
+    antigravityPersonGeneration: ANTIGRAVITY_PERSON_GENERATION_IDS.has(String(ai.antigravityPersonGeneration))
+      ? (ai.antigravityPersonGeneration as AntigravityPersonGeneration)
+      : defaults.ai.antigravityPersonGeneration,
+    antigravityProminentPeople: ANTIGRAVITY_PROMINENT_PEOPLE_IDS.has(String(ai.antigravityProminentPeople))
+      ? (ai.antigravityProminentPeople as AntigravityProminentPeople)
+      : defaults.ai.antigravityProminentPeople,
+    antigravityCompressionQuality: nullableClampedInt(ai.antigravityCompressionQuality, 0, 100),
+    antigravityAdvancedOptionsJson: stringOrDefault(
+      ai.antigravityAdvancedOptionsJson,
+      defaults.ai.antigravityAdvancedOptionsJson,
+    ),
+    antigravitySafetyFiltering: normalizeAntigravitySafetyFiltering(
+      ai.antigravitySafetyFiltering,
+      defaults.ai.antigravitySafetyFiltering,
+    ),
+    antigravitySafetyHarassment: normalizeAntigravitySafetyThreshold(
+      ai.antigravitySafetyHarassment,
+      defaults.ai.antigravitySafetyHarassment,
+    ),
+    antigravitySafetyHateSpeech: normalizeAntigravitySafetyThreshold(
+      ai.antigravitySafetyHateSpeech,
+      defaults.ai.antigravitySafetyHateSpeech,
+    ),
+    antigravitySafetySexuallyExplicit: normalizeAntigravitySafetyThreshold(
+      ai.antigravitySafetySexuallyExplicit,
+      defaults.ai.antigravitySafetySexuallyExplicit,
+    ),
+    antigravitySafetyDangerousContent: normalizeAntigravitySafetyThreshold(
+      ai.antigravitySafetyDangerousContent,
+      defaults.ai.antigravitySafetyDangerousContent,
+    ),
+    editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
+    customBin: stringOrDefault(ai.customBin, defaults.ai.customBin),
+    customArgsText: stringOrDefault(ai.customArgsText, defaults.ai.customArgsText),
+    customGenerateArgsText: stringOrDefault(
+      ai.customGenerateArgsText ?? ai.customArgsText,
+      defaults.ai.customGenerateArgsText,
+    ),
+    customFillArgsText: stringOrDefault(ai.customFillArgsText, defaults.ai.customFillArgsText),
+    customRetouchArgsText: stringOrDefault(ai.customRetouchArgsText, defaults.ai.customRetouchArgsText),
+    customExtractArgsText: stringOrDefault(ai.customExtractArgsText, defaults.ai.customExtractArgsText),
+    customWorkflowArgsText: stringOrDefault(ai.customWorkflowArgsText, defaults.ai.customWorkflowArgsText),
+  };
+  const profileFallback = { ...normalizedAiBase, profiles: [], defaultProfileId: null };
+  const profiles = normalizeAiProfiles(ai.profiles, profileFallback);
+  const defaultProfileId =
+    typeof ai.defaultProfileId === 'string' && profiles.some((profile) => profile.id === ai.defaultProfileId)
+      ? ai.defaultProfileId
+      : null;
 
   return {
     general: {
@@ -320,76 +502,9 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
       ),
     },
     ai: {
-      provider,
-      codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
-      model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
-      reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
-        ? (savedReasoningEffort as ReasoningEffort)
-        : defaults.ai.reasoningEffort,
-      serviceTier: ai.serviceTier === 'fast' ? 'fast' : 'default',
-      imageQuality: IMAGE_QUALITIES.has(String(ai.imageQuality))
-        ? (ai.imageQuality as CodexImageQuality)
-        : defaults.ai.imageQuality,
-      imageModeration: IMAGE_MODERATIONS.has(String(ai.imageModeration))
-        ? (ai.imageModeration as CodexImageModeration)
-        : defaults.ai.imageModeration,
-      autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))
-        ? (ai.autonomyLevel as AiAutonomyLevel)
-        : defaults.ai.autonomyLevel,
-      antigravityBin: stringOrDefault(savedAntigravityBin, defaults.ai.antigravityBin),
-      antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(savedAntigravityModel))
-        ? (savedAntigravityModel as AntigravityModelId)
-        : defaults.ai.antigravityModel,
-      antigravityApprovalMode:
-        savedAntigravityApprovalMode === 'default' ? 'default' : defaults.ai.antigravityApprovalMode,
-      antigravityImageModel: ANTIGRAVITY_IMAGE_MODEL_IDS.has(String(ai.antigravityImageModel))
-        ? (ai.antigravityImageModel as AntigravityImageModelId)
-        : defaults.ai.antigravityImageModel,
-      antigravityImageSize: ANTIGRAVITY_IMAGE_SIZE_IDS.has(String(ai.antigravityImageSize))
-        ? (ai.antigravityImageSize as AntigravityImageSize)
-        : defaults.ai.antigravityImageSize,
-      antigravityPersonGeneration: ANTIGRAVITY_PERSON_GENERATION_IDS.has(String(ai.antigravityPersonGeneration))
-        ? (ai.antigravityPersonGeneration as AntigravityPersonGeneration)
-        : defaults.ai.antigravityPersonGeneration,
-      antigravityProminentPeople: ANTIGRAVITY_PROMINENT_PEOPLE_IDS.has(String(ai.antigravityProminentPeople))
-        ? (ai.antigravityProminentPeople as AntigravityProminentPeople)
-        : defaults.ai.antigravityProminentPeople,
-      antigravityCompressionQuality: nullableClampedInt(ai.antigravityCompressionQuality, 0, 100),
-      antigravityAdvancedOptionsJson: stringOrDefault(
-        ai.antigravityAdvancedOptionsJson,
-        defaults.ai.antigravityAdvancedOptionsJson,
-      ),
-      antigravitySafetyFiltering: normalizeAntigravitySafetyFiltering(
-        ai.antigravitySafetyFiltering,
-        defaults.ai.antigravitySafetyFiltering,
-      ),
-      antigravitySafetyHarassment: normalizeAntigravitySafetyThreshold(
-        ai.antigravitySafetyHarassment,
-        defaults.ai.antigravitySafetyHarassment,
-      ),
-      antigravitySafetyHateSpeech: normalizeAntigravitySafetyThreshold(
-        ai.antigravitySafetyHateSpeech,
-        defaults.ai.antigravitySafetyHateSpeech,
-      ),
-      antigravitySafetySexuallyExplicit: normalizeAntigravitySafetyThreshold(
-        ai.antigravitySafetySexuallyExplicit,
-        defaults.ai.antigravitySafetySexuallyExplicit,
-      ),
-      antigravitySafetyDangerousContent: normalizeAntigravitySafetyThreshold(
-        ai.antigravitySafetyDangerousContent,
-        defaults.ai.antigravitySafetyDangerousContent,
-      ),
-      editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
-      customBin: stringOrDefault(ai.customBin, defaults.ai.customBin),
-      customArgsText: stringOrDefault(ai.customArgsText, defaults.ai.customArgsText),
-      customGenerateArgsText: stringOrDefault(
-        ai.customGenerateArgsText ?? ai.customArgsText,
-        defaults.ai.customGenerateArgsText,
-      ),
-      customFillArgsText: stringOrDefault(ai.customFillArgsText, defaults.ai.customFillArgsText),
-      customRetouchArgsText: stringOrDefault(ai.customRetouchArgsText, defaults.ai.customRetouchArgsText),
-      customExtractArgsText: stringOrDefault(ai.customExtractArgsText, defaults.ai.customExtractArgsText),
-      customWorkflowArgsText: stringOrDefault(ai.customWorkflowArgsText, defaults.ai.customWorkflowArgsText),
+      ...normalizedAiBase,
+      profiles,
+      defaultProfileId,
     },
     workspace: {
       defaultCanvasWidth: clampInt(
@@ -452,7 +567,7 @@ export function defaultAiRunOptions(): AiRunOptions {
   };
 }
 
-export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions {
+export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunOptions {
   return {
     provider: value.ai.provider,
     codexBin: value.ai.codexBin,
@@ -480,6 +595,35 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
     editChecksLevel: value.ai.editChecksLevel,
     fillAspectRatio: null,
   };
+}
+
+export function aiProfileOptionsFromRunOptions(options: AiRunOptions): AiProfileOptions {
+  const {
+    codexBin: _codexBin,
+    antigravityBin: _antigravityBin,
+    customBin: _customBin,
+    fillAspectRatio: _fillAspectRatio,
+    ...profileOptions
+  } = options;
+  return profileOptions;
+}
+
+export function aiProfileRunOptionsFromSettings(value: PaintNodeSettings, profileId: string | null): AiRunOptions {
+  const base = aiProviderDefaultsFromSettings(value);
+  const profile = value.ai.profiles.find((item) => item.id === profileId);
+  if (!profile) return base;
+  return {
+    ...base,
+    ...profile.options,
+    codexBin: value.ai.codexBin,
+    antigravityBin: value.ai.antigravityBin,
+    customBin: value.ai.customBin,
+    fillAspectRatio: null,
+  };
+}
+
+export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions {
+  return aiProfileRunOptionsFromSettings(value, value.ai.defaultProfileId);
 }
 
 export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
