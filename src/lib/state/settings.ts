@@ -315,6 +315,26 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
   };
 }
 
+export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
+  return {
+    provider: options.provider,
+    codexBin: options.codexBin,
+    codexTransport: options.codexTransport,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    serviceTier: options.serviceTier,
+    imageQuality: options.imageQuality,
+    imageModeration: options.imageModeration,
+    autonomyLevel: options.autonomyLevel,
+    antigravityBin: options.antigravityBin,
+    antigravityModel: options.antigravityModel,
+    antigravityApprovalMode: options.antigravityApprovalMode,
+    customBin: options.customBin,
+    editChecksLevel: options.editChecksLevel,
+    fillAspectRatio: options.fillAspectRatio ?? null,
+  };
+}
+
 export function parseSettingsJson(raw: string | null): PaintNodeSettings {
   if (!raw) return defaultSettings();
   try {

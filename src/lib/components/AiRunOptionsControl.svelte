@@ -97,6 +97,7 @@
   const imageQualityShort = $derived(
     imageQualities.find((item) => item.value === options.imageQuality)?.short ?? 'AutoQ',
   );
+  const imageModerationShort = $derived(options.imageModeration === 'low' ? 'LowM' : 'DefaultM');
   const antigravityModelOptions = $derived(
     antigravityModelScope === 'image' ? ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS : ANTIGRAVITY_MODEL_OPTIONS,
   );
@@ -105,7 +106,7 @@
     antigravityModelOptions.find((item) => item.id === options.antigravityModel)?.label ?? 'Auto',
   );
   const summary = $derived.by(() => {
-    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${transportShort}`;
+    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort} ${transportShort}`;
     if (options.provider === 'antigravity') return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
     return 'Custom CLI';
   });

@@ -12,7 +12,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
-  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
+  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings, cloneAiRunOptions } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
   import { Add, Copy, Dismiss } from '../icons';
 
@@ -98,8 +98,11 @@
       return;
     }
     const userPrompt = prompt.trim();
-    runOptions.fillAspectRatio =
-      runOptions.provider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null;
+    const capturedRunOptions = cloneAiRunOptions({
+      ...runOptions,
+      fillAspectRatio:
+        runOptions.provider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null,
+    });
     busy = true;
     const task = aiTasks.create({
       kind: 'generate',
@@ -117,7 +120,7 @@
         providerLabel: providerLabel(runOptions.provider),
         prompt: userPrompt || defaultFillPrompt(),
         fillMode: hasSelection,
-        runOptions: $state.snapshot(runOptions),
+        runOptions: capturedRunOptions,
         customArgs: argsText,
         references: references.map((reference) => ({ name: reference.name, bytes: reference.bytes })),
         referenceNames: references.map((reference) => reference.name),

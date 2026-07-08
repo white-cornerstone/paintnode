@@ -1,5 +1,6 @@
 //! Codex CLI provider: prompts, command building, cached-PNG discovery, commands.
 
+use std::error::Error as StdError;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,8 +13,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -922,6 +923,43 @@ fn image_edit_url(image_base_url: &str) -> String {
     format!("{}/images/edits", image_base_url.trim_end_matches('/'))
 }
 
+fn format_codex_image_request_error(context: &str, error: &reqwest::Error) -> String {
+    let mut message = format!("{context}: {error}");
+    let mut causes = Vec::new();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    if !causes.is_empty() {
+        message.push_str("\n\nCause: ");
+        message.push_str(&causes.join(": "));
+    }
+    if error.is_timeout() {
+        message.push_str("\n\nThe request timed out while contacting ChatGPT. Check the network connection, VPN/proxy, and access to chatgpt.com, then retry.");
+    } else if error.is_connect() {
+        message.push_str("\n\nPaintNode could not connect to ChatGPT. Check the network connection, VPN/proxy, firewall, and access to chatgpt.com, then retry.");
+    } else if error.is_request() || error.is_body() {
+        message.push_str("\n\nThe image upload failed before ChatGPT returned a response. Retry once; if it repeats, try a smaller selected area or reference image.");
+    }
+    message
+}
+
+fn codex_image_http_client() -> Result<Client, String> {
+    Client::builder()
+        .http1_only()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .user_agent("PaintNode Codex image generation")
+        .build()
+        .map_err(|e| {
+            format_codex_image_request_error(
+                "Failed to create Codex image generation HTTP client",
+                &e,
+            )
+        })
+}
+
 fn codex_image_moderation_request_value(options: &CodexCommandOptions) -> &'static str {
     match options.image_moderation.as_deref() {
         Some("low") => "low",
@@ -950,10 +988,7 @@ fn codex_image_edit_request_json(
 }
 
 fn png_data_url_from_bytes(bytes: &[u8]) -> String {
-    format!(
-        "data:image/png;base64,{}",
-        BASE64_STANDARD.encode(bytes)
-    )
+    format!("data:image/png;base64,{}", BASE64_STANDARD.encode(bytes))
 }
 
 fn decode_generated_image_response(response: CodexImageResponse) -> Result<Vec<u8>, String> {
@@ -991,7 +1026,7 @@ fn run_codex_subscription_image_edit(
     }
 
     let request_body = codex_image_edit_request_json(prompt, image_data_urls, size, options);
-    let client = Client::new();
+    let client = codex_image_http_client()?;
     let mut request = client
         .post(image_edit_url(&codex_image_backend_base_url()))
         .bearer_auth(auth.access_token)
@@ -999,9 +1034,9 @@ fn run_codex_subscription_image_edit(
     if let Some(account_id) = auth.account_id {
         request = request.header("ChatGPT-Account-ID", account_id);
     }
-    let response = request
-        .send()
-        .map_err(|e| format!("Codex image generation request failed: {e}"))?;
+    let response = request.send().map_err(|e| {
+        format_codex_image_request_error("Codex image generation request failed", &e)
+    })?;
     let status = response.status();
     let text = response
         .text()
@@ -2339,8 +2374,12 @@ fn run_paintnode_owned_fill_imagegen(
             working.original_dimensions.0, working.original_dimensions.1
         ),
     );
-    let result_png =
-        run_codex_subscription_image_edit(&prompt, &[base_path], working.original_dimensions, options)?;
+    let result_png = run_codex_subscription_image_edit(
+        &prompt,
+        &[base_path],
+        working.original_dimensions,
+        options,
+    )?;
     let requested_result_path = part_path.join("result.png");
     fs::write(&requested_result_path, &result_png).map_err(|e| {
         format!(
