@@ -1358,11 +1358,6 @@
       error = 'Enter a composition prompt.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'Workflow composition is currently available with Local Codex or Antigravity account.';
-      return;
-    }
-
     busy = true;
     progress = 'Preparing workflow assets...';
     const runId = createRunId();
@@ -1375,7 +1370,7 @@
         }
       });
     } catch {
-      progress = runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...';
+      progress = runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...';
     }
 
     try {

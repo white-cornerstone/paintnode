@@ -227,6 +227,26 @@ describe('settings normalization', () => {
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
   });
 
+  it('migrates retired custom provider settings back to Codex', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        provider: 'custom',
+        profiles: [
+          {
+            id: 'old-custom',
+            name: 'Old Custom',
+            options: { provider: 'custom' },
+          },
+        ],
+        defaultProfileId: 'old-custom',
+      },
+    });
+
+    expect(normalized.ai.provider).toBe('codex');
+    expect(normalized.ai.profiles[0].options.provider).toBe('codex');
+    expect(aiRunOptionsFromSettings(normalized).provider).toBe('codex');
+  });
+
   it('creates per-run AI options from settings without mutating defaults', () => {
     const value = normalizeSettings({
       ai: {

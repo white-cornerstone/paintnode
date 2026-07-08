@@ -175,11 +175,6 @@
       error = 'Open a project folder, or enable placing extracted assets on the canvas.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'Asset extraction is currently available with Local Codex or Antigravity CLI.';
-      return;
-    }
-
     busy = true;
     const targetDocumentId = editor.activeDocumentId;
     const taskProjectPath = project.path;
@@ -212,7 +207,7 @@
         () =>
           aiTasks.setProgress(
             task.id,
-            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
+            runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
           ),
       );
 

@@ -118,10 +118,6 @@ Use these annotations as direct user instructions for the regions they point to.
       error = 'Enter a retouch prompt.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'AI Retouch is currently available with Local Codex or Antigravity account.';
-      return;
-    }
     busy = true;
     const targetDocumentId = editor.activeDocumentId;
     const taskProjectPath = project.path;
@@ -169,13 +165,13 @@ Use these annotations as direct user instructions for the regions they point to.
           if (payload.partIndex && payload.partCount) {
             aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
           }
-        },
-        () =>
-          aiTasks.setProgress(
-            task.id,
-            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
-          ),
-      );
+          },
+          () =>
+            aiTasks.setProgress(
+              task.id,
+              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+            ),
+        );
 
       try {
         const bytes = await editor.prepareAiRetouchInput(active);
@@ -372,7 +368,7 @@ Use these annotations as direct user instructions for the regions they point to.
       {/if}
     </label>
 
-    {#if !taskDetail && runOptions.provider !== 'custom'}
+    {#if !taskDetail}
       <div class="dlg-field">
         <span>Result checks</span>
         <div class="checks-tabs" role="group" aria-label="Result checks level">

@@ -73,9 +73,8 @@
     { value: 'unmanaged', label: 'Unmanaged', short: 'Unmanaged' },
   ];
   const providers: { value: AiProvider; label: string }[] = [
-    { value: 'codex', label: 'Local Codex' },
+    { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity account' },
-    { value: 'custom', label: 'Custom CLI' },
   ];
 
   let open = $state(false);
@@ -148,13 +147,12 @@
   const summary = $derived.by(() => {
     if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort}`;
     if (options.provider === 'antigravity' && antigravityUsesAgent) return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
-    if (options.provider === 'antigravity') return `Antigravity ${antigravityImageModelLabel} ${antigravityImageSizeLabel}`;
-    return 'Custom CLI';
+    return `Antigravity ${antigravityImageModelLabel} ${antigravityImageSizeLabel}`;
   });
 
   function setProvider(provider: AiProvider): void {
     options = { ...options, provider };
-    submenu = provider === 'codex' ? 'reasoning' : provider === 'antigravity' ? 'antigravityImageModel' : null;
+    submenu = provider === 'codex' ? 'reasoning' : 'antigravityImageModel';
   }
 
   function applyProfile(profileId: string): void {

@@ -116,11 +116,6 @@
       error = 'Enter an adjustment prompt.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'AI Auto adjustments are currently available with Local Codex or Antigravity account.';
-      return;
-    }
-
     busy = true;
     const adjustment = kind;
     const taskProjectPath = project.path;
@@ -158,13 +153,13 @@
           if (payload.partIndex && payload.partCount) {
             aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
           }
-        },
-        () =>
-          aiTasks.setProgress(
-            task.id,
-            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
-          ),
-      );
+          },
+          () =>
+            aiTasks.setProgress(
+              task.id,
+              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+            ),
+        );
 
       try {
         const sourcePng = await canvasToPngBytes(source);

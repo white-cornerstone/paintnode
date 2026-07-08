@@ -18,8 +18,6 @@ export interface GenerateTaskDetail {
    * by older versions; the executor falls back to current settings.
    */
   runOptions?: AiRunOptions;
-  /** Newline-separated custom generator args (custom provider only). */
-  customArgs?: string;
   /** Reference PNGs captured for the active in-session run. Stripped before persistence. */
   references?: WorkflowSourceImage[];
   referenceNames?: string[];

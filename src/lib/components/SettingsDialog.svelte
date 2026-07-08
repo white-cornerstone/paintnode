@@ -5,11 +5,6 @@
   import {
     AUTOSAVE_INTERVAL_OPTIONS,
     CODEX_MODEL_OPTIONS,
-    DEFAULT_CUSTOM_GENERATOR_ARGS,
-    DEFAULT_CUSTOM_EXTRACT_ARGS,
-    DEFAULT_CUSTOM_FILL_ARGS,
-    DEFAULT_CUSTOM_RETOUCH_ARGS,
-    DEFAULT_CUSTOM_WORKFLOW_ARGS,
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
@@ -98,9 +93,8 @@
   }
 
   function profileLabel(provider: AiProvider): string {
-    if (provider === 'codex') return 'Local Codex';
-    if (provider === 'antigravity') return 'Antigravity';
-    return 'Custom CLI';
+    if (provider === 'codex') return 'Codex';
+    return 'Antigravity';
   }
 
   function createProfileFromDefaults(): void {
@@ -245,19 +239,6 @@
     }
   }
 
-  function resetCustomArgs(): void {
-    settings.update({
-      ai: {
-        customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
-        customGenerateArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
-        customFillArgsText: DEFAULT_CUSTOM_FILL_ARGS,
-        customRetouchArgsText: DEFAULT_CUSTOM_RETOUCH_ARGS,
-        customExtractArgsText: DEFAULT_CUSTOM_EXTRACT_ARGS,
-        customWorkflowArgsText: DEFAULT_CUSTOM_WORKFLOW_ARGS,
-      },
-    });
-  }
-
   $effect(() => {
     if (settings.value.ai.profiles.some((profile) => profile.id === selectedProfileId)) return;
     selectedProfileId = settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '';
@@ -353,9 +334,8 @@
               aiDefaultsProvider = provider;
             }}
           >
-            <option value="codex">Local Codex</option>
+            <option value="codex">Codex</option>
             <option value="antigravity">Antigravity account / image generation</option>
-            <option value="custom">Custom CLI</option>
           </select>
         </label>
 
@@ -371,7 +351,7 @@
               aria-selected={aiDefaultsProvider === 'codex'}
               onclick={() => (aiDefaultsProvider = 'codex')}
             >
-              Local Codex
+              Codex
             </button>
             <button
               class:active={aiDefaultsProvider === 'antigravity'}
@@ -380,14 +360,6 @@
               onclick={() => (aiDefaultsProvider = 'antigravity')}
             >
               Antigravity
-            </button>
-            <button
-              class:active={aiDefaultsProvider === 'custom'}
-              role="tab"
-              aria-selected={aiDefaultsProvider === 'custom'}
-              onclick={() => (aiDefaultsProvider = 'custom')}
-            >
-              Custom CLI
             </button>
           </div>
         </div>
@@ -493,18 +465,18 @@
           <div class="detect-row">
             <label class="field">
               <span>Advanced Antigravity CLI auth helper</span>
-	              <input
-	                type="text"
-	                value={settings.value.ai.antigravityBin}
-	                placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
-	                spellcheck="false"
-	                oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
-	              />
-              <small>Used to refresh Antigravity account authentication when needed.</small>
+              <input
+                type="text"
+                value={settings.value.ai.antigravityBin}
+                placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
+                spellcheck="false"
+                oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
+              />
             </label>
             <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
               {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
             </button>
+            <small class="detect-help">Used to refresh Antigravity account authentication when needed.</small>
           </div>
 
           {#if antigravityDetection}
@@ -627,76 +599,6 @@
             ></textarea>
             <small>Only confirmed image options are accepted; auth and transport fields are ignored by the app.</small>
           </label>
-        {:else}
-          <div class="subsection">
-            <h3>Custom CLI</h3>
-            <label class="field">
-              <span>Command</span>
-              <input
-                type="text"
-                value={settings.value.ai.customBin}
-                placeholder="Full path to your image-gen CLI"
-                spellcheck="false"
-                oninput={(event) => settings.update({ ai: { customBin: textValue(event) } })}
-              />
-            </label>
-            <label class="field">
-              <span>Generate arguments</span>
-              <textarea
-                rows="4"
-                spellcheck="false"
-                value={settings.value.ai.customGenerateArgsText}
-                oninput={(event) =>
-                  settings.update({ ai: { customArgsText: textValue(event), customGenerateArgsText: textValue(event) } })}
-              ></textarea>
-            </label>
-            <div class="grid-2">
-              <label class="field">
-                <span>Fill arguments</span>
-                <textarea
-                  rows="3"
-                  spellcheck="false"
-                  value={settings.value.ai.customFillArgsText}
-                  oninput={(event) => settings.update({ ai: { customFillArgsText: textValue(event) } })}
-                ></textarea>
-              </label>
-              <label class="field">
-                <span>Retouch arguments</span>
-                <textarea
-                  rows="3"
-                  spellcheck="false"
-                  value={settings.value.ai.customRetouchArgsText}
-                  oninput={(event) => settings.update({ ai: { customRetouchArgsText: textValue(event) } })}
-                ></textarea>
-              </label>
-            </div>
-            <div class="grid-2">
-              <label class="field">
-                <span>Extract arguments</span>
-                <textarea
-                  rows="3"
-                  spellcheck="false"
-                  value={settings.value.ai.customExtractArgsText}
-                  oninput={(event) => settings.update({ ai: { customExtractArgsText: textValue(event) } })}
-                ></textarea>
-              </label>
-              <label class="field">
-                <span>Workflow arguments</span>
-                <textarea
-                  rows="3"
-                  spellcheck="false"
-                  value={settings.value.ai.customWorkflowArgsText}
-                  oninput={(event) => settings.update({ ai: { customWorkflowArgsText: textValue(event) } })}
-                ></textarea>
-              </label>
-            </div>
-            <small class="custom-help">
-              Rich jobs run in a PaintNode job folder. Templates can use {`{prompt}`}, {`{promptFile}`},
-              {`{jobDir}`}, {`{output}`}, {`{manifest}`}, {`{source}`}, {`{editTarget}`}, {`{mask}`},
-              {`{annotatedSource}`}, {`{reference}`}, and {`{inputsDir}`}.
-            </small>
-            <button type="button" class="secondary" onclick={resetCustomArgs}>Reset arguments</button>
-          </div>
         {/if}
 
         <div class="subsection profile-manager">
@@ -941,6 +843,13 @@
   }
   .detect-row {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .detect-help {
+    grid-column: 1 / -1;
+    margin-top: -8px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
   }
   .subsection {
     display: flex;

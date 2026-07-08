@@ -7,10 +7,9 @@ describe('ai setup wizard gating', () => {
     expect(hasConfiguredAiCli(defaultSettings())).toBe(false);
   });
 
-  it('treats any saved CLI path as configured', () => {
+  it('treats supported saved CLI paths as configured', () => {
     expect(hasConfiguredAiCli(normalizeSettings({ ai: { codexBin: '/opt/homebrew/bin/codex' } }))).toBe(true);
     expect(hasConfiguredAiCli(normalizeSettings({ ai: { antigravityBin: '~/.local/bin/agy' } }))).toBe(true);
-    expect(hasConfiguredAiCli(normalizeSettings({ ai: { customBin: '/usr/local/bin/imagegen' } }))).toBe(true);
   });
 
   it('ignores whitespace-only CLI paths', () => {

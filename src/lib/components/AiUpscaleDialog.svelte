@@ -88,10 +88,6 @@
       error = 'AI Upscale is available only in the desktop app.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'AI Upscale is currently available with Local Codex or Antigravity account.';
-      return;
-    }
     const scale = clampedScale;
     busy = true;
     const taskProjectPath = project.path;
@@ -125,13 +121,13 @@
           if (payload.partIndex && payload.partCount) {
             aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
           }
-        },
-        () =>
-          aiTasks.setProgress(
-            task.id,
-            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
-          ),
-      );
+          },
+          () =>
+            aiTasks.setProgress(
+              task.id,
+              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+            ),
+        );
 
       try {
         const sourcePng = await canvasToPngBytes(source);

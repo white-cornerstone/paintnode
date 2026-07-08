@@ -1,9 +1,4 @@
 export const SETTINGS_STORAGE_KEY = 'paintnode.settings';
-export const DEFAULT_CUSTOM_GENERATOR_ARGS = '{prompt}\n--output\n{output}';
-export const DEFAULT_CUSTOM_FILL_ARGS = '-p\n{promptFile}';
-export const DEFAULT_CUSTOM_RETOUCH_ARGS = '-p\n{promptFile}';
-export const DEFAULT_CUSTOM_EXTRACT_ARGS = '-p\n{promptFile}';
-export const DEFAULT_CUSTOM_WORKFLOW_ARGS = '-p\n{promptFile}';
 
 export const CODEX_MODEL_OPTIONS = [
   { id: 'gpt-5.5', label: 'GPT-5.5' },
@@ -85,7 +80,7 @@ export type CodexImageQuality = 'auto' | 'low' | 'medium' | 'high';
 export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
-export type AiProvider = 'codex' | 'antigravity' | 'custom';
+export type AiProvider = 'codex' | 'antigravity';
 export type CanvasBackground = 'white' | 'transparent';
 /**
  * How strictly PaintNode validates fill/retouch candidates before pasting
@@ -117,12 +112,11 @@ export interface AiRunOptions {
   antigravitySafetyHateSpeech: AntigravitySafetyThreshold;
   antigravitySafetySexuallyExplicit: AntigravitySafetyThreshold;
   antigravitySafetyDangerousContent: AntigravitySafetyThreshold;
-  customBin: string;
   editChecksLevel: AiEditChecksLevel;
   fillAspectRatio?: string | null;
 }
 
-export type AiProfileOptions = Omit<AiRunOptions, 'codexBin' | 'antigravityBin' | 'customBin' | 'fillAspectRatio'>;
+export type AiProfileOptions = Omit<AiRunOptions, 'codexBin' | 'antigravityBin' | 'fillAspectRatio'>;
 
 export interface AiSettingsProfile {
   id: string;
@@ -161,13 +155,6 @@ export interface PaintNodeSettings {
     antigravitySafetySexuallyExplicit: AntigravitySafetyThreshold;
     antigravitySafetyDangerousContent: AntigravitySafetyThreshold;
     editChecksLevel: AiEditChecksLevel;
-    customBin: string;
-    customArgsText: string;
-    customGenerateArgsText: string;
-    customFillArgsText: string;
-    customRetouchArgsText: string;
-    customExtractArgsText: string;
-    customWorkflowArgsText: string;
     profiles: AiSettingsProfile[];
     defaultProfileId: string | null;
   };
@@ -254,13 +241,6 @@ export function defaultSettings(): PaintNodeSettings {
       antigravitySafetySexuallyExplicit: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
       antigravitySafetyDangerousContent: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
       editChecksLevel: 1,
-      customBin: '',
-      customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
-      customGenerateArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
-      customFillArgsText: DEFAULT_CUSTOM_FILL_ARGS,
-      customRetouchArgsText: DEFAULT_CUSTOM_RETOUCH_ARGS,
-      customExtractArgsText: DEFAULT_CUSTOM_EXTRACT_ARGS,
-      customWorkflowArgsText: DEFAULT_CUSTOM_WORKFLOW_ARGS,
       profiles: [],
       defaultProfileId: null,
     },
@@ -307,10 +287,10 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
   const savedReasoningEffort = value.reasoningEffort === 'minimal' ? 'low' : value.reasoningEffort;
   return {
     provider:
-      savedProvider === 'custom'
-        ? 'custom'
-        : savedProvider === 'antigravity' || savedProvider === 'gemini'
-          ? 'antigravity'
+      savedProvider === 'antigravity' || savedProvider === 'gemini'
+        ? 'antigravity'
+        : savedProvider === 'codex'
+          ? 'codex'
           : fallback.provider,
     model: MODEL_IDS.has(String(value.model)) ? (value.model as CodexModelId) : fallback.model,
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
@@ -404,7 +384,7 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
 
   const savedProvider = String(ai.provider);
   const provider: AiProvider =
-    savedProvider === 'custom' ? 'custom' : savedProvider === 'antigravity' || savedProvider === 'gemini' ? 'antigravity' : 'codex';
+    savedProvider === 'antigravity' || savedProvider === 'gemini' ? 'antigravity' : 'codex';
   // Codex CLI retired the "minimal" reasoning effort; map old saves to the closest level.
   const savedReasoningEffort = ai.reasoningEffort === 'minimal' ? 'low' : ai.reasoningEffort;
   const savedAntigravityBin = ai.antigravityBin ?? ai.geminiBin;
@@ -471,16 +451,6 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
       defaults.ai.antigravitySafetyDangerousContent,
     ),
     editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
-    customBin: stringOrDefault(ai.customBin, defaults.ai.customBin),
-    customArgsText: stringOrDefault(ai.customArgsText, defaults.ai.customArgsText),
-    customGenerateArgsText: stringOrDefault(
-      ai.customGenerateArgsText ?? ai.customArgsText,
-      defaults.ai.customGenerateArgsText,
-    ),
-    customFillArgsText: stringOrDefault(ai.customFillArgsText, defaults.ai.customFillArgsText),
-    customRetouchArgsText: stringOrDefault(ai.customRetouchArgsText, defaults.ai.customRetouchArgsText),
-    customExtractArgsText: stringOrDefault(ai.customExtractArgsText, defaults.ai.customExtractArgsText),
-    customWorkflowArgsText: stringOrDefault(ai.customWorkflowArgsText, defaults.ai.customWorkflowArgsText),
   };
   const profileFallback = { ...normalizedAiBase, profiles: [], defaultProfileId: null };
   const profiles = normalizeAiProfiles(ai.profiles, profileFallback);
@@ -561,7 +531,6 @@ export function defaultAiRunOptions(): AiRunOptions {
     antigravitySafetyHateSpeech: ai.antigravitySafetyHateSpeech,
     antigravitySafetySexuallyExplicit: ai.antigravitySafetySexuallyExplicit,
     antigravitySafetyDangerousContent: ai.antigravitySafetyDangerousContent,
-    customBin: ai.customBin,
     editChecksLevel: ai.editChecksLevel,
     fillAspectRatio: null,
   };
@@ -591,7 +560,6 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
     antigravitySafetyHateSpeech: value.ai.antigravitySafetyHateSpeech,
     antigravitySafetySexuallyExplicit: value.ai.antigravitySafetySexuallyExplicit,
     antigravitySafetyDangerousContent: value.ai.antigravitySafetyDangerousContent,
-    customBin: value.ai.customBin,
     editChecksLevel: value.ai.editChecksLevel,
     fillAspectRatio: null,
   };
@@ -601,7 +569,6 @@ export function aiProfileOptionsFromRunOptions(options: AiRunOptions): AiProfile
   const {
     codexBin: _codexBin,
     antigravityBin: _antigravityBin,
-    customBin: _customBin,
     fillAspectRatio: _fillAspectRatio,
     ...profileOptions
   } = options;
@@ -617,7 +584,6 @@ export function aiProfileRunOptionsFromSettings(value: PaintNodeSettings, profil
     ...profile.options,
     codexBin: value.ai.codexBin,
     antigravityBin: value.ai.antigravityBin,
-    customBin: value.ai.customBin,
     fillAspectRatio: null,
   };
 }
@@ -650,7 +616,6 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
     antigravitySafetyHateSpeech: options.antigravitySafetyHateSpeech,
     antigravitySafetySexuallyExplicit: options.antigravitySafetySexuallyExplicit,
     antigravitySafetyDangerousContent: options.antigravitySafetyDangerousContent,
-    customBin: options.customBin,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };

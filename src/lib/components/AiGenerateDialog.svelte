@@ -12,7 +12,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
-  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings, cloneAiRunOptions } from '../state/settings';
+  import { aiRunOptionsFromSettings, cloneAiRunOptions } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
   import { Add, Copy, Dismiss } from '../icons';
 
@@ -21,7 +21,6 @@
   const desktop = isDesktop();
 
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
-  let argsText = $state(settings.value.ai.customGenerateArgsText || settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   // A prompt handed off by the AI setup wizard pre-fills the dialog once.
   let prompt = $state(ui.consumeAiGeneratePrefill() ?? '');
   let busy = $state(false);
@@ -37,7 +36,7 @@
   const fillFrame = $derived.by(() => {
     const doc = editor.doc;
     const selection = editor.selection;
-    if (!doc || !selection || runOptions.provider === 'custom') return null;
+    if (!doc || !selection) return null;
     return fillFrameSummary(
       runOptions.provider,
       doc.width,
@@ -80,21 +79,9 @@
       error = 'Available only in the desktop app.';
       return;
     }
-    if (runOptions.provider === 'custom' && !runOptions.customBin.trim()) {
-      error = 'Enter the generator command.';
-      return;
-    }
     const hasSelection = !!editor.selection;
     if (!prompt.trim() && !hasSelection) {
       error = 'Enter a prompt.';
-      return;
-    }
-    if (runOptions.provider === 'custom' && hasSelection) {
-      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity account.';
-      return;
-    }
-    if (runOptions.provider === 'custom' && references.length) {
-      error = 'Reference images are currently available with Local Codex or Antigravity account.';
       return;
     }
     const userPrompt = prompt.trim();
@@ -121,7 +108,6 @@
         prompt: userPrompt || defaultFillPrompt(),
         fillMode: hasSelection,
         runOptions: capturedRunOptions,
-        customArgs: argsText,
         references: references.map((reference) => ({ name: reference.name, bytes: reference.bytes })),
         referenceNames: references.map((reference) => reference.name),
         referencePreviews: references.map((reference) => reference.previewDataUrl),
@@ -137,7 +123,7 @@
     <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">
-        This runs a <strong>local command</strong> and only works in the desktop app. Launch it
+        This runs a <strong>local AI provider</strong> and only works in the desktop app. Launch it
         with <code>npm run tauri:dev</code> (requires Rust). In the browser it stays disabled.
       </p>
     {/if}
@@ -242,22 +228,6 @@
           </label>
         {/if}
       {/if}
-    {/if}
-
-    {#if !taskDetail && runOptions.provider === 'custom'}
-      <label class="dlg-field">
-        <span>Command (local CLI)</span>
-        <input type="text" bind:value={runOptions.customBin} placeholder="Full path to your image-gen CLI" spellcheck="false" />
-      </label>
-
-      <label class="dlg-field">
-        <span>Arguments, one per line; <code>{'{prompt}'}</code> and <code>{'{output}'}</code> are substituted</span>
-        <textarea bind:value={argsText} rows="4" spellcheck="false"></textarea>
-      </label>
-
-      <p class="hint">
-        Your CLI must write a PNG to the <code>{'{output}'}</code> path. The result is added as a new layer.
-      </p>
     {/if}
 
     {#if currentBusy}
@@ -385,18 +355,11 @@
     color: var(--text-dim);
     font-size: 11px;
   }
-  .warn code,
-  .dlg-field code,
-  .hint code {
+  .warn code {
     color: var(--text-bright);
     background: var(--bg-input);
     padding: 0 3px;
     border-radius: 3px;
-  }
-  .hint {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 11px;
   }
   .dlg-field {
     display: flex;
@@ -406,7 +369,6 @@
     color: var(--text-dim);
   }
   .dlg-field textarea,
-  .dlg-field input,
   .dlg-field select {
     width: 100%;
     box-sizing: border-box;
