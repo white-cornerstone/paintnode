@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   CODEX_MODEL_OPTIONS,
-  ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS,
+  ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
+  ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
   ANTIGRAVITY_MODEL_OPTIONS,
+  ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
+  ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
   aiRunOptionsFromSettings,
   defaultSettings,
   normalizeSettings,
@@ -48,6 +51,17 @@ describe('settings normalization', () => {
         imageModeration: 'low',
         antigravityModel: 'Gemini 3.5 Flash (High)',
         antigravityApprovalMode: 'default',
+        antigravityImageModel: 'auto',
+        antigravityImageSize: '2K',
+        antigravityPersonGeneration: 'ALLOW_NONE',
+        antigravityProminentPeople: 'BLOCK_PROMINENT_PEOPLE',
+        antigravityCompressionQuality: 88,
+        antigravityAdvancedOptionsJson: '{"imageOutputOptions":{"mimeType":"IMAGE_JPEG"}}',
+        antigravitySafetyFiltering: 'custom',
+        antigravitySafetyHarassment: 'BLOCK_NONE',
+        antigravitySafetyHateSpeech: 'BLOCK_ONLY_HIGH',
+        antigravitySafetySexuallyExplicit: 'BLOCK_MEDIUM_AND_ABOVE',
+        antigravitySafetyDangerousContent: 'BLOCK_LOW_AND_ABOVE',
       },
       workspace: {
         defaultCanvasWidth: 20_000,
@@ -68,6 +82,17 @@ describe('settings normalization', () => {
     expect(normalized.ai.autonomyLevel).toBe('unmanaged');
     expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (High)');
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
+    expect(normalized.ai.antigravityImageModel).toBe('auto');
+    expect(normalized.ai.antigravityImageSize).toBe('2K');
+    expect(normalized.ai.antigravityPersonGeneration).toBe('ALLOW_NONE');
+    expect(normalized.ai.antigravityProminentPeople).toBe('BLOCK_PROMINENT_PEOPLE');
+    expect(normalized.ai.antigravityCompressionQuality).toBe(88);
+    expect(normalized.ai.antigravityAdvancedOptionsJson).toBe('{"imageOutputOptions":{"mimeType":"IMAGE_JPEG"}}');
+    expect(normalized.ai.antigravitySafetyFiltering).toBe('custom');
+    expect(normalized.ai.antigravitySafetyHarassment).toBe('BLOCK_NONE');
+    expect(normalized.ai.antigravitySafetyHateSpeech).toBe('BLOCK_ONLY_HIGH');
+    expect(normalized.ai.antigravitySafetySexuallyExplicit).toBe('BLOCK_MEDIUM_AND_ABOVE');
+    expect(normalized.ai.antigravitySafetyDangerousContent).toBe('BLOCK_LOW_AND_ABOVE');
     expect(normalized.workspace.defaultCanvasWidth).toBe(8192);
     expect(normalized.workspace.defaultCanvasHeight).toBe(1);
     expect(normalized.workspace.defaultBackground).toBe('white');
@@ -98,13 +123,40 @@ describe('settings normalization', () => {
     expect(defaults.ai.autonomyLevel).toBe('low');
     expect(defaults.ai.antigravityModel).toBe('auto');
     expect(defaults.ai.antigravityApprovalMode).toBe('skipPermissions');
+    expect(defaults.ai.antigravityImageModel).toBe('gemini-3.1-flash-image');
+    expect(defaults.ai.antigravityImageSize).toBe('auto');
+    expect(defaults.ai.antigravityPersonGeneration).toBe('auto');
+    expect(defaults.ai.antigravityProminentPeople).toBe('auto');
+    expect(defaults.ai.antigravityCompressionQuality).toBeNull();
+    expect(defaults.ai.antigravityAdvancedOptionsJson).toBe('{}');
+    expect(defaults.ai.antigravitySafetyFiltering).toBe('default');
+    expect(defaults.ai.antigravitySafetyHarassment).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
+    expect(defaults.ai.antigravitySafetyHateSpeech).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
+    expect(defaults.ai.antigravitySafetySexuallyExplicit).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
+    expect(defaults.ai.antigravitySafetyDangerousContent).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
     expect(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id)).toContain('Gemini 3.5 Flash (High)');
   });
 
-  it('keeps all Antigravity agent models available for image runs', () => {
-    expect(ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS.map((option) => option.id)).toEqual(
-      ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id),
-    );
+  it('exposes direct Antigravity image controls separately from agent models', () => {
+    expect(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id)).toEqual([
+      'gemini-3.1-flash-image',
+      'auto',
+    ]);
+    expect(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id)).toEqual(['auto', '1K', '2K', '4K']);
+    expect(ANTIGRAVITY_SAFETY_FILTERING_OPTIONS.map((option) => option.id)).toEqual([
+      'default',
+      'lessRestrictive',
+      'moreRestrictive',
+      'custom',
+    ]);
+    expect(ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.map((option) => option.id)).toEqual([
+      'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+      'OFF',
+      'BLOCK_NONE',
+      'BLOCK_ONLY_HIGH',
+      'BLOCK_MEDIUM_AND_ABOVE',
+      'BLOCK_LOW_AND_ABOVE',
+    ]);
   });
 
   it('falls back to safe Antigravity defaults for unknown saved Antigravity settings', () => {
@@ -114,6 +166,16 @@ describe('settings normalization', () => {
         autonomyLevel: 'agentic',
         antigravityModel: 'antigravity-1-old',
         antigravityApprovalMode: 'wild',
+        antigravityImageModel: 'old-image-model',
+        antigravityImageSize: '8K',
+        antigravityPersonGeneration: 'BLOCK_ALL',
+        antigravityProminentPeople: 'ALLOW_PROMINENT_PEOPLE',
+        antigravityCompressionQuality: 140,
+        antigravitySafetyFiltering: 'none',
+        antigravitySafetyHarassment: 'ALLOW_ALL',
+        antigravitySafetyHateSpeech: 'BLOCK_NONE',
+        antigravitySafetySexuallyExplicit: 'BLOCK_MORE',
+        antigravitySafetyDangerousContent: 'OFF',
       },
     });
 
@@ -121,6 +183,16 @@ describe('settings normalization', () => {
     expect(normalized.ai.autonomyLevel).toBe('low');
     expect(normalized.ai.antigravityModel).toBe('auto');
     expect(normalized.ai.antigravityApprovalMode).toBe('skipPermissions');
+    expect(normalized.ai.antigravityImageModel).toBe('gemini-3.1-flash-image');
+    expect(normalized.ai.antigravityImageSize).toBe('auto');
+    expect(normalized.ai.antigravityPersonGeneration).toBe('auto');
+    expect(normalized.ai.antigravityProminentPeople).toBe('auto');
+    expect(normalized.ai.antigravityCompressionQuality).toBe(100);
+    expect(normalized.ai.antigravitySafetyFiltering).toBe('default');
+    expect(normalized.ai.antigravitySafetyHarassment).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
+    expect(normalized.ai.antigravitySafetyHateSpeech).toBe('BLOCK_NONE');
+    expect(normalized.ai.antigravitySafetySexuallyExplicit).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
+    expect(normalized.ai.antigravitySafetyDangerousContent).toBe('OFF');
   });
 
   it('falls back to safe Codex image-generation controls for unknown saved values', () => {
@@ -169,6 +241,10 @@ describe('settings normalization', () => {
     expect(runOptions.autonomyLevel).toBe('guided');
     expect(runOptions.imageQuality).toBe('auto');
     expect(runOptions.imageModeration).toBe('auto');
+    expect(runOptions.antigravityImageModel).toBe('gemini-3.1-flash-image');
+    expect(runOptions.antigravityImageSize).toBe('auto');
+    expect(runOptions.antigravitySafetyFiltering).toBe('default');
+    expect(runOptions.antigravitySafetyHarassment).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
     expect(runOptions.fillAspectRatio).toBeNull();
     expect(value.ai.provider).toBe('antigravity');
   });

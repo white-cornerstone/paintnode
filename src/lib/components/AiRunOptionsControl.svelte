@@ -4,8 +4,14 @@
   import { tooltip } from '../actions/tooltip';
   import {
     CODEX_MODEL_OPTIONS,
-    ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     ANTIGRAVITY_MODEL_OPTIONS,
+    ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
+    ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS,
+    ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
+    ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
     type AiProvider,
     type AiRunOptions,
     type AiAutonomyLevel,
@@ -13,7 +19,14 @@
     type CodexImageQuality,
     type CodexModelId,
     type AntigravityApprovalMode,
+    type AntigravityImageModelId,
+    type AntigravityImageSize,
     type AntigravityModelId,
+    type AntigravityPersonGeneration,
+    type AntigravityProminentPeople,
+    type AntigravitySafetyCategorySetting,
+    type AntigravitySafetyFiltering,
+    type AntigravitySafetyThreshold,
     type ReasoningEffort,
     type ServiceTier,
   } from '../state/settings';
@@ -24,7 +37,7 @@
   let {
     options = $bindable<AiRunOptions>(),
     disabled = false,
-    antigravityModelScope = 'all',
+    antigravityModelScope = 'image',
   }: { options: AiRunOptions; disabled?: boolean; antigravityModelScope?: AntigravityModelScope } = $props();
 
   const reasoningEfforts: { value: ReasoningEffort; label: string; short: string }[] = [
@@ -59,7 +72,7 @@
   ];
   const providers: { value: AiProvider; label: string }[] = [
     { value: 'codex', label: 'Local Codex' },
-    { value: 'antigravity', label: 'Local Antigravity CLI' },
+    { value: 'antigravity', label: 'Antigravity account' },
     { value: 'custom', label: 'Custom CLI' },
   ];
 
@@ -73,6 +86,12 @@
     | 'moderation'
     | 'antigravityModel'
     | 'antigravityApproval'
+    | 'antigravityImageModel'
+    | 'antigravityImageSize'
+    | 'antigravityPersonGeneration'
+    | 'antigravityProminentPeople'
+    | 'antigravitySafetyFiltering'
+    | AntigravitySafetyCategorySetting
     | null
   >(null);
   let pillElement = $state<HTMLButtonElement | null>(null);
@@ -91,22 +110,49 @@
     imageQualities.find((item) => item.value === options.imageQuality)?.short ?? 'AutoQ',
   );
   const imageModerationShort = $derived(options.imageModeration === 'low' ? 'LowM' : 'DefaultM');
-  const antigravityModelOptions = $derived(
-    antigravityModelScope === 'image' ? ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS : ANTIGRAVITY_MODEL_OPTIONS,
-  );
-  const antigravityModelTitle = $derived(antigravityModelScope === 'image' ? 'Agent model' : 'Model');
+  const antigravityUsesAgent = $derived(antigravityModelScope === 'all');
+  const antigravityModelOptions = $derived(ANTIGRAVITY_MODEL_OPTIONS);
+  const antigravityModelTitle = $derived('Agent model');
   const antigravityModelLabel = $derived(
     antigravityModelOptions.find((item) => item.id === options.antigravityModel)?.label ?? 'Auto',
   );
+  const antigravityImageModelLabel = $derived(
+    ANTIGRAVITY_IMAGE_MODEL_OPTIONS.find((item) => item.id === options.antigravityImageModel)?.label ?? 'Gemini 3.1 Flash Image',
+  );
+  const antigravityImageSizeLabel = $derived(
+    ANTIGRAVITY_IMAGE_SIZE_OPTIONS.find((item) => item.id === options.antigravityImageSize)?.label ?? 'Auto',
+  );
+  const antigravityPersonGenerationLabel = $derived(
+    ANTIGRAVITY_PERSON_GENERATION_OPTIONS.find((item) => item.id === options.antigravityPersonGeneration)?.label ?? 'Auto',
+  );
+  const antigravityProminentPeopleLabel = $derived(
+    ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS.find((item) => item.id === options.antigravityProminentPeople)?.label ?? 'Auto',
+  );
+  const antigravitySafetyFilteringLabel = $derived(
+    ANTIGRAVITY_SAFETY_FILTERING_OPTIONS.find((item) => item.id === options.antigravitySafetyFiltering)?.label ?? 'Default',
+  );
+  const antigravitySafetyHarassmentLabel = $derived(
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetyHarassment)?.label ?? 'API default',
+  );
+  const antigravitySafetyHateSpeechLabel = $derived(
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetyHateSpeech)?.label ?? 'API default',
+  );
+  const antigravitySafetySexuallyExplicitLabel = $derived(
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetySexuallyExplicit)?.label ?? 'API default',
+  );
+  const antigravitySafetyDangerousContentLabel = $derived(
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetyDangerousContent)?.label ?? 'API default',
+  );
   const summary = $derived.by(() => {
     if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort}`;
-    if (options.provider === 'antigravity') return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
+    if (options.provider === 'antigravity' && antigravityUsesAgent) return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
+    if (options.provider === 'antigravity') return `Antigravity ${antigravityImageModelLabel} ${antigravityImageSizeLabel}`;
     return 'Custom CLI';
   });
 
   function setProvider(provider: AiProvider): void {
     options = { ...options, provider };
-    submenu = provider === 'codex' ? 'reasoning' : provider === 'antigravity' ? 'antigravityModel' : null;
+    submenu = provider === 'codex' ? 'reasoning' : provider === 'antigravity' ? 'antigravityImageModel' : null;
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {
@@ -139,6 +185,50 @@
 
   function setAntigravityApproval(antigravityApprovalMode: AntigravityApprovalMode): void {
     options = { ...options, antigravityApprovalMode };
+  }
+
+  function setAntigravityImageModel(antigravityImageModel: AntigravityImageModelId): void {
+    options = { ...options, antigravityImageModel };
+  }
+
+  function setAntigravityImageSize(antigravityImageSize: AntigravityImageSize): void {
+    options = { ...options, antigravityImageSize };
+  }
+
+  function setAntigravityPersonGeneration(antigravityPersonGeneration: AntigravityPersonGeneration): void {
+    options = { ...options, antigravityPersonGeneration };
+  }
+
+  function setAntigravityProminentPeople(antigravityProminentPeople: AntigravityProminentPeople): void {
+    options = { ...options, antigravityProminentPeople };
+  }
+
+  function setAntigravitySafetyFiltering(antigravitySafetyFiltering: AntigravitySafetyFiltering): void {
+    options = { ...options, antigravitySafetyFiltering };
+  }
+
+  function setAntigravitySafetyThreshold(
+    setting: AntigravitySafetyCategorySetting,
+    value: AntigravitySafetyThreshold,
+  ): void {
+    options = { ...options, [setting]: value };
+  }
+
+  function antigravitySafetyCategoryValue(setting: AntigravitySafetyCategorySetting): AntigravitySafetyThreshold {
+    return options[setting];
+  }
+
+  function antigravitySafetyCategoryLabel(setting: AntigravitySafetyCategorySetting): string {
+    switch (setting) {
+      case 'antigravitySafetyHarassment':
+        return antigravitySafetyHarassmentLabel;
+      case 'antigravitySafetyHateSpeech':
+        return antigravitySafetyHateSpeechLabel;
+      case 'antigravitySafetySexuallyExplicit':
+        return antigravitySafetySexuallyExplicitLabel;
+      case 'antigravitySafetyDangerousContent':
+        return antigravitySafetyDangerousContentLabel;
+    }
   }
 
   function close(): void {
@@ -220,13 +310,20 @@
     if (!open) return;
     submenu;
     options.provider;
+    options.antigravitySafetyFiltering;
     void updateMenuPosition();
   });
 
   $effect(() => {
-    if (options.provider !== 'antigravity') return;
+    if (options.provider !== 'antigravity' || !antigravityUsesAgent) return;
     if (antigravityModelOptions.some((item) => item.id === options.antigravityModel)) return;
     options = { ...options, antigravityModel: 'auto' };
+  });
+
+  $effect(() => {
+    if (options.provider !== 'antigravity' || antigravityUsesAgent) return;
+    if (ANTIGRAVITY_IMAGE_MODEL_OPTIONS.some((item) => item.id === options.antigravityImageModel)) return;
+    options = { ...options, antigravityImageModel: 'gemini-3.1-flash-image' };
   });
 
   $effect(() => () => cleanupFloatingMenus());
@@ -343,50 +440,151 @@
         {/if}
       {:else if options.provider === 'antigravity'}
         <div class="separator"></div>
-        <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
-          <span>Autonomy</span>
-          <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'autonomy'}
-          <div class="subitems">
-            {#each autonomyLevels as item (item.value)}
-              <button type="button" class:active={options.autonomyLevel === item.value} onclick={() => setAutonomy(item.value)}>
-                <span>{item.label}</span>
-                {#if options.autonomyLevel === item.value}<Icon svg={Checkmark} size={15} />{/if}
+        {#if antigravityUsesAgent}
+          <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
+            <span>Autonomy</span>
+            <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'autonomy'}
+            <div class="subitems">
+              {#each autonomyLevels as item (item.value)}
+                <button type="button" class:active={options.autonomyLevel === item.value} onclick={() => setAutonomy(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.autonomyLevel === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravityModel' ? null : 'antigravityModel')}>
+            <span>{antigravityModelTitle}</span>
+            <span class="value">{antigravityModelLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravityModel'}
+            <div class="subitems">
+              {#each antigravityModelOptions as item (item.id)}
+                <button type="button" class:active={options.antigravityModel === item.id} onclick={() => setAntigravityModel(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravityModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravityApproval' ? null : 'antigravityApproval')}>
+            <span>Automation</span>
+            <span class="value">{options.antigravityApprovalMode === 'skipPermissions' ? 'Skip' : 'Default'}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravityApproval'}
+            <div class="subitems">
+              {#each approvalModes as item (item.value)}
+                <button type="button" class:active={options.antigravityApprovalMode === item.value} onclick={() => setAntigravityApproval(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravityApprovalMode === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {:else}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravityImageModel' ? null : 'antigravityImageModel')}>
+            <span>Image model</span>
+            <span class="value">{antigravityImageModelLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravityImageModel'}
+            <div class="subitems">
+              {#each ANTIGRAVITY_IMAGE_MODEL_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.antigravityImageModel === item.id} onclick={() => setAntigravityImageModel(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravityImageModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravityImageSize' ? null : 'antigravityImageSize')}>
+            <span>Image size</span>
+            <span class="value">{antigravityImageSizeLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravityImageSize'}
+            <div class="subitems">
+              {#each ANTIGRAVITY_IMAGE_SIZE_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.antigravityImageSize === item.id} onclick={() => setAntigravityImageSize(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravityImageSize === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravityPersonGeneration' ? null : 'antigravityPersonGeneration')}>
+            <span>Person generation</span>
+            <span class="value">{antigravityPersonGenerationLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravityPersonGeneration'}
+            <div class="subitems">
+              {#each ANTIGRAVITY_PERSON_GENERATION_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.antigravityPersonGeneration === item.id} onclick={() => setAntigravityPersonGeneration(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravityPersonGeneration === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravityProminentPeople' ? null : 'antigravityProminentPeople')}>
+            <span>Prominent people</span>
+            <span class="value">{antigravityProminentPeopleLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravityProminentPeople'}
+            <div class="subitems">
+              {#each ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.antigravityProminentPeople === item.id} onclick={() => setAntigravityProminentPeople(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravityProminentPeople === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'antigravitySafetyFiltering' ? null : 'antigravitySafetyFiltering')}>
+            <span>Safety filtering</span>
+            <span class="value">{antigravitySafetyFilteringLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'antigravitySafetyFiltering'}
+            <div class="subitems">
+              {#each ANTIGRAVITY_SAFETY_FILTERING_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.antigravitySafetyFiltering === item.id} onclick={() => setAntigravitySafetyFiltering(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.antigravitySafetyFiltering === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          {#if options.antigravitySafetyFiltering === 'custom'}
+            {#each ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS as category (category.id)}
+              <button type="button" onclick={() => (submenu = submenu === category.id ? null : category.id)}>
+                <span>{category.label}</span>
+                <span class="value">{antigravitySafetyCategoryLabel(category.id)}</span>
+                <Icon svg={ChevronRight} size={14} />
               </button>
+              {#if submenu === category.id}
+                <div class="subitems">
+                  {#each ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS as item (item.id)}
+                    <button
+                      type="button"
+                      class:active={antigravitySafetyCategoryValue(category.id) === item.id}
+                      onclick={() => setAntigravitySafetyThreshold(category.id, item.id)}
+                    >
+                      <span>{item.label}</span>
+                      {#if antigravitySafetyCategoryValue(category.id) === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
             {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'antigravityModel' ? null : 'antigravityModel')}>
-          <span>{antigravityModelTitle}</span>
-          <span class="value">{antigravityModelLabel}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'antigravityModel'}
-          <div class="subitems">
-            {#each antigravityModelOptions as item (item.id)}
-              <button type="button" class:active={options.antigravityModel === item.id} onclick={() => setAntigravityModel(item.id)}>
-                <span>{item.label}</span>
-                {#if options.antigravityModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'antigravityApproval' ? null : 'antigravityApproval')}>
-          <span>Automation</span>
-          <span class="value">{options.antigravityApprovalMode === 'skipPermissions' ? 'Skip' : 'Default'}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'antigravityApproval'}
-          <div class="subitems">
-            {#each approvalModes as item (item.value)}
-              <button type="button" class:active={options.antigravityApprovalMode === item.value} onclick={() => setAntigravityApproval(item.value)}>
-                <span>{item.label}</span>
-                {#if options.antigravityApprovalMode === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
+          {/if}
         {/if}
       {/if}
     </div>

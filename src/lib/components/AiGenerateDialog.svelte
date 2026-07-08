@@ -90,11 +90,11 @@
       return;
     }
     if (runOptions.provider === 'custom' && hasSelection) {
-      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity CLI.';
+      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity account.';
       return;
     }
     if (runOptions.provider === 'custom' && references.length) {
-      error = 'Reference images are currently available with Local Codex or Antigravity CLI.';
+      error = 'Reference images are currently available with Local Codex or Antigravity account.';
       return;
     }
     const userPrompt = prompt.trim();
@@ -177,7 +177,7 @@
           Local Codex
         </button>
         <button class:active={runOptions.provider === 'antigravity'} onclick={() => (runOptions.provider = 'antigravity')}>
-          Local Antigravity CLI
+          Antigravity account
         </button>
         <button class:active={runOptions.provider === 'custom'} onclick={() => (runOptions.provider = 'custom')}>
           Custom CLI
@@ -262,13 +262,13 @@
       </p>
     {:else if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
-        <span>Antigravity command (optional)</span>
+        <span>Antigravity CLI auth helper (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
       </label>
 
       <p class="hint">
-        Uses your local Antigravity CLI login. If this fails, run <code>agy</code> in Terminal and sign in.
-        PaintNode asks Antigravity to write a validated <code>result.png</code> in an isolated job folder.
+        Uses your Antigravity sign-in. If this fails, run <code>agy</code> in Terminal and sign in.
+        PaintNode refreshes auth with <code>agy models</code> before calling the image backend directly.
       </p>
     {:else if !taskDetail}
       <label class="dlg-field">

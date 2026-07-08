@@ -88,13 +88,13 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     // Re-apply the dialog's provider guards: tasks saved without runOptions
     // fall back to current settings, which the dialog never vetted.
     if (fillMode && runOptions.provider === 'custom') {
-      throw new Error('Mask-guided generative fill is currently available with Local Codex or Antigravity CLI.');
+      throw new Error('Mask-guided generative fill is currently available with Local Codex or Antigravity account.');
     }
     if (runOptions.provider === 'custom' && !runOptions.customBin.trim()) {
       throw new Error('Enter the generator command in AI settings.');
     }
     if (runOptions.provider === 'custom' && references.length) {
-      throw new Error('Reference images are currently available with Local Codex or Antigravity CLI.');
+      throw new Error('Reference images are currently available with Local Codex or Antigravity account.');
     }
     // On retry another document may be active; the fill input must come from
     // the document the task was started in (null means the active document).

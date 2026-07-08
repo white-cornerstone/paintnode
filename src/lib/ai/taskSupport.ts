@@ -13,7 +13,7 @@ export type CodexProgressPayload = {
 };
 
 export function providerLabel(provider: AiProvider): string {
-  if (provider === 'antigravity') return 'Local Antigravity CLI';
+  if (provider === 'antigravity') return 'Antigravity account';
   if (provider === 'custom') return 'Custom CLI';
   return 'Local Codex';
 }
