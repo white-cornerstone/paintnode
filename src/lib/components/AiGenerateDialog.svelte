@@ -256,11 +256,6 @@
     {/if}
 
     {#if !taskDetail && runOptions.provider === 'codex'}
-      <label class="dlg-field">
-        <span>Codex command (optional)</span>
-        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-      </label>
-
       <p class="hint">
         Uses your local Codex login. If this fails, run <code>codex login</code> in Terminal and try again.
         PaintNode copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.

@@ -14,8 +14,7 @@ describe('settings normalization', () => {
     expect(defaultSettings().ai.model).toBe('gpt-5.5');
   });
 
-  it('uses SDK transport and automatic image settings by default', () => {
-    expect(defaultSettings().ai.codexTransport).toBe('sdk');
+  it('uses automatic Codex image settings by default', () => {
     expect(defaultSettings().ai.imageQuality).toBe('auto');
     expect(defaultSettings().ai.imageModeration).toBe('auto');
   });
@@ -43,7 +42,6 @@ describe('settings normalization', () => {
         provider: 'antigravity',
         autonomyLevel: 'unmanaged',
         model: 'gpt-5.4-mini',
-        codexTransport: 'cli',
         reasoningEffort: 'high',
         serviceTier: 'fast',
         imageQuality: 'high',
@@ -63,7 +61,6 @@ describe('settings normalization', () => {
     expect(normalized.general.autosaveIntervalMs).toBe(120_000);
     expect(normalized.ai.provider).toBe('antigravity');
     expect(normalized.ai.model).toBe('gpt-5.4-mini');
-    expect(normalized.ai.codexTransport).toBe('cli');
     expect(normalized.ai.reasoningEffort).toBe('high');
     expect(normalized.ai.serviceTier).toBe('fast');
     expect(normalized.ai.imageQuality).toBe('high');
@@ -129,13 +126,11 @@ describe('settings normalization', () => {
   it('falls back to safe Codex image-generation controls for unknown saved values', () => {
     const normalized = normalizeSettings({
       ai: {
-        codexTransport: 'socket',
         imageQuality: 'ultra',
         imageModeration: 'off',
       },
     });
 
-    expect(normalized.ai.codexTransport).toBe('sdk');
     expect(normalized.ai.imageQuality).toBe('auto');
     expect(normalized.ai.imageModeration).toBe('auto');
   });
@@ -172,7 +167,6 @@ describe('settings normalization', () => {
 
     expect(runOptions.antigravityBin).toBe('/bin/agy');
     expect(runOptions.autonomyLevel).toBe('guided');
-    expect(runOptions.codexTransport).toBe('sdk');
     expect(runOptions.imageQuality).toBe('auto');
     expect(runOptions.imageModeration).toBe('auto');
     expect(runOptions.fillAspectRatio).toBeNull();

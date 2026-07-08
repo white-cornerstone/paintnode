@@ -362,12 +362,7 @@ Use these annotations as direct user instructions for the regions they point to.
       </div>
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'codex'}
-      <label class="dlg-field">
-        <span>Codex command (optional)</span>
-        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-      </label>
-    {:else if !taskDetail && runOptions.provider === 'antigravity'}
+    {#if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
         <span>Antigravity command (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />

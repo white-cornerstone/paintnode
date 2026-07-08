@@ -4,7 +4,6 @@ import type {
   AiRunOptions,
   AiAutonomyLevel,
   CodexModelId,
-  CodexTransport,
   CodexImageModeration,
   CodexImageQuality,
   AntigravityApprovalMode,
@@ -89,10 +88,8 @@ export interface GeneratorConfig {
 }
 
 export interface CodexGeneratorConfig {
-  /** Optional path to the local Codex binary. Empty uses the Rust-side defaults. */
+  /** Optional Codex binary override passed through the SDK runner. Empty uses the SDK package's bundled CLI. */
   bin?: string;
-  /** Whether PaintNode invokes Codex directly or through the Codex SDK runner. */
-  transport?: CodexTransport | null;
   /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
   /** Keep the actual provider job folder for inspecting the exact inputs sent to the CLI. */
@@ -265,7 +262,6 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     (config.reasoningEffort as string) === 'minimal' ? 'low' : (config.reasoningEffort ?? null);
   return {
     bin: config.bin?.trim() ? config.bin.trim() : null,
-    codexTransport: config.transport === 'cli' ? 'cli' : 'sdk',
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
     keepJobDir: config.keepJobDir ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
@@ -302,7 +298,6 @@ export function codexConfigFromRunOptions(
 ): CodexGeneratorConfig {
   return {
     bin: options.codexBin,
-    transport: options.codexTransport,
     projectPath,
     keepJobDir,
     runId,

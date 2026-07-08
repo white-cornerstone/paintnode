@@ -31,7 +31,6 @@ export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
 export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type ServiceTier = 'default' | 'fast';
-export type CodexTransport = 'sdk' | 'cli';
 export type CodexImageQuality = 'auto' | 'low' | 'medium' | 'high';
 export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
@@ -48,7 +47,6 @@ export type AiEditChecksLevel = 0 | 1 | 2 | 3;
 export interface AiRunOptions {
   provider: AiProvider;
   codexBin: string;
-  codexTransport: CodexTransport;
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
   serviceTier: ServiceTier;
@@ -73,7 +71,6 @@ export interface PaintNodeSettings {
   ai: {
     provider: AiProvider;
     codexBin: string;
-    codexTransport: CodexTransport;
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
     serviceTier: ServiceTier;
@@ -128,7 +125,6 @@ export function defaultSettings(): PaintNodeSettings {
     ai: {
       provider: 'codex',
       codexBin: '',
-      codexTransport: 'sdk',
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
       serviceTier: 'default',
@@ -211,7 +207,6 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
     ai: {
       provider,
       codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
-      codexTransport: ai.codexTransport === 'cli' ? 'cli' : defaults.ai.codexTransport,
       model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
       reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
         ? (savedReasoningEffort as ReasoningEffort)
@@ -279,7 +274,6 @@ export function defaultAiRunOptions(): AiRunOptions {
   return {
     provider: ai.provider,
     codexBin: ai.codexBin,
-    codexTransport: ai.codexTransport,
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
     serviceTier: ai.serviceTier,
@@ -299,7 +293,6 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
   return {
     provider: value.ai.provider,
     codexBin: value.ai.codexBin,
-    codexTransport: value.ai.codexTransport,
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
     serviceTier: value.ai.serviceTier,
@@ -319,7 +312,6 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
   return {
     provider: options.provider,
     codexBin: options.codexBin,
-    codexTransport: options.codexTransport,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,

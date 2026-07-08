@@ -1798,12 +1798,7 @@ Human anatomy quality gate: if the final image contains a person, the arms, wris
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if runOptions.provider === 'codex'}
-            <label>
-              <span>Codex command</span>
-              <input bind:value={runOptions.codexBin} placeholder="codex or full path" />
-            </label>
-          {:else if runOptions.provider === 'antigravity'}
+          {#if runOptions.provider === 'antigravity'}
             <label>
               <span>Antigravity command</span>
               <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />

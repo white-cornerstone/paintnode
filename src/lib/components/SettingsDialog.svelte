@@ -12,7 +12,6 @@
     ANTIGRAVITY_MODEL_OPTIONS,
     type AiProvider,
     type CanvasBackground,
-    type CodexTransport,
     type CodexImageModeration,
     type CodexImageQuality,
     type CodexModelId,
@@ -38,10 +37,6 @@
   const serviceTiers: { value: ServiceTier; label: string; hint: string }[] = [
     { value: 'default', label: 'Default', hint: 'Use normal Codex speed.' },
     { value: 'fast', label: 'Fast', hint: 'Ask Codex to use fast mode for AI runs.' },
-  ];
-  const codexTransports: { value: CodexTransport; label: string; hint: string }[] = [
-    { value: 'sdk', label: 'Codex SDK', hint: 'Use the SDK runner wrapper for streamed Codex runs.' },
-    { value: 'cli', label: 'Direct CLI', hint: 'Use PaintNode’s original direct codex exec runner.' },
   ];
   const imageQualities: { value: CodexImageQuality; label: string; hint: string }[] = [
     { value: 'auto', label: 'Auto', hint: 'Let the image-generation tool choose quality.' },
@@ -230,11 +225,11 @@
         {#if settings.value.ai.provider === 'codex'}
           <div class="detect-row">
             <label class="field">
-              <span>Codex command</span>
+              <span>Advanced Codex binary override</span>
               <input
                 type="text"
                 value={settings.value.ai.codexBin}
-                placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex"
+                placeholder="Leave blank to use the bundled Codex SDK CLI"
                 spellcheck="false"
                 oninput={(event) => settings.update({ ai: { codexBin: textValue(event) } })}
               />
@@ -293,19 +288,6 @@
                 {/each}
               </select>
               <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
-            </label>
-
-            <label class="field">
-              <span>Codex transport</span>
-              <select
-                value={settings.value.ai.codexTransport}
-                onchange={(event) => settings.update({ ai: { codexTransport: textValue(event) as CodexTransport } })}
-              >
-                {#each codexTransports as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-              <small>{codexTransports.find((option) => option.value === settings.value.ai.codexTransport)?.hint}</small>
             </label>
           </div>
 

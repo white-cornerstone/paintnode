@@ -9,7 +9,6 @@
     type AiProvider,
     type AiRunOptions,
     type AiAutonomyLevel,
-    type CodexTransport,
     type CodexImageModeration,
     type CodexImageQuality,
     type CodexModelId,
@@ -37,10 +36,6 @@
   const serviceTiers: { value: ServiceTier; label: string }[] = [
     { value: 'default', label: 'Default speed' },
     { value: 'fast', label: 'Fast' },
-  ];
-  const codexTransports: { value: CodexTransport; label: string; short: string }[] = [
-    { value: 'sdk', label: 'Codex SDK', short: 'SDK' },
-    { value: 'cli', label: 'Direct CLI', short: 'CLI' },
   ];
   const imageQualities: { value: CodexImageQuality; label: string; short: string }[] = [
     { value: 'auto', label: 'Auto quality', short: 'AutoQ' },
@@ -74,7 +69,6 @@
     | 'reasoning'
     | 'model'
     | 'speed'
-    | 'transport'
     | 'quality'
     | 'moderation'
     | 'antigravityModel'
@@ -93,7 +87,6 @@
   const codexModelLabel = $derived(CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label.replace('GPT-', '') ?? options.model);
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
-  const transportShort = $derived(codexTransports.find((item) => item.value === options.codexTransport)?.short ?? 'SDK');
   const imageQualityShort = $derived(
     imageQualities.find((item) => item.value === options.imageQuality)?.short ?? 'AutoQ',
   );
@@ -106,7 +99,7 @@
     antigravityModelOptions.find((item) => item.id === options.antigravityModel)?.label ?? 'Auto',
   );
   const summary = $derived.by(() => {
-    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort} ${transportShort}`;
+    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort}`;
     if (options.provider === 'antigravity') return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
     return 'Custom CLI';
   });
@@ -126,10 +119,6 @@
 
   function setServiceTier(serviceTier: ServiceTier): void {
     options = { ...options, serviceTier };
-  }
-
-  function setCodexTransport(codexTransport: CodexTransport): void {
-    options = { ...options, codexTransport };
   }
 
   function setImageQuality(imageQuality: CodexImageQuality): void {
@@ -348,21 +337,6 @@
               <button type="button" class:active={options.imageModeration === item.value} onclick={() => setImageModeration(item.value)}>
                 <span>{item.label}</span>
                 {#if options.imageModeration === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'transport' ? null : 'transport')}>
-          <span>Transport</span>
-          <span class="value">{codexTransports.find((item) => item.value === options.codexTransport)?.label}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'transport'}
-          <div class="subitems">
-            {#each codexTransports as item (item.value)}
-              <button type="button" class:active={options.codexTransport === item.value} onclick={() => setCodexTransport(item.value)}>
-                <span>{item.label}</span>
-                {#if options.codexTransport === item.value}<Icon svg={Checkmark} size={15} />{/if}
               </button>
             {/each}
           </div>

@@ -73,15 +73,8 @@ const CODEX_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate reje
 - If the requested change cannot be honored inside the mask, make the closest faithful change rather than re-imagining the scene."#;
 const PAINTNODE_IMAGE_REQUEST_FILE: &str = "paintnode-image-request.json";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CodexTransport {
-    Sdk,
-    Cli,
-}
-
 #[derive(Debug)]
 struct CodexCommandOptions {
-    transport: CodexTransport,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -92,7 +85,6 @@ struct CodexCommandOptions {
 impl Default for CodexCommandOptions {
     fn default() -> Self {
         Self {
-            transport: CodexTransport::Sdk,
             model: None,
             reasoning_effort: None,
             service_tier: None,
@@ -683,17 +675,8 @@ fn configured_codex_bin(bin: Option<String>) -> Option<String> {
     bin.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-fn configured_or_default_codex_bin_for_options(
-    bin: Option<String>,
-    options: &CodexCommandOptions,
-) -> Result<String, String> {
-    if let Some(bin) = configured_codex_bin(bin) {
-        return Ok(bin);
-    }
-    if options.transport == CodexTransport::Sdk {
-        return Ok(String::new());
-    }
-    configured_or_default_codex_bin(None)
+fn configured_codex_bin_or_sdk_default(bin: Option<String>) -> String {
+    configured_codex_bin(bin).unwrap_or_default()
 }
 
 fn codex_command_label(codex_bin: &str) -> &str {
@@ -705,7 +688,6 @@ fn codex_command_label(codex_bin: &str) -> &str {
 }
 
 fn codex_command_options(
-    transport: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -713,19 +695,11 @@ fn codex_command_options(
     image_moderation: Option<String>,
 ) -> CodexCommandOptions {
     CodexCommandOptions {
-        transport: codex_transport(transport),
         model: clean_option(model),
         reasoning_effort: clean_option(reasoning_effort),
         service_tier: clean_option(service_tier),
         image_quality: codex_image_quality(image_quality),
         image_moderation: codex_image_moderation(image_moderation),
-    }
-}
-
-fn codex_transport(value: Option<String>) -> CodexTransport {
-    match clean_option(value).as_deref() {
-        Some("cli") => CodexTransport::Cli,
-        _ => CodexTransport::Sdk,
     }
 }
 
@@ -741,24 +715,6 @@ fn codex_image_moderation(value: Option<String>) -> Option<String> {
         "auto" | "low" => Some(value),
         _ => None,
     })
-}
-
-fn apply_codex_command_options(command: &mut Command, options: &CodexCommandOptions) {
-    if let Some(model) = options.model.as_deref() {
-        command.arg("-m").arg(model);
-    }
-    if let Some(reasoning_effort) = options.reasoning_effort.as_deref() {
-        command
-            .arg("-c")
-            .arg(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-    }
-    if matches!(options.service_tier.as_deref(), Some("fast")) {
-        command
-            .arg("-c")
-            .arg("service_tier=\"fast\"")
-            .arg("-c")
-            .arg("features.fast_mode=true");
-    }
 }
 
 fn codex_sdk_runner_script() -> PathBuf {
@@ -1099,48 +1055,10 @@ fn build_codex_command(
     reference_names: &[String],
     options: &CodexCommandOptions,
     autonomy: AiAutonomyLevel,
-    json_progress: bool,
+    _json_progress: bool,
 ) -> Command {
     let prompt_text = codex_prompt(prompt.trim(), autonomy, reference_names);
-    if options.transport == CodexTransport::Sdk {
-        return build_codex_sdk_command(
-            codex_bin,
-            job_path,
-            &prompt_text,
-            reference_paths,
-            options,
-        );
-    }
-    let mut command = Command::new(codex_bin);
-    apply_ai_cli_environment(&mut command)
-        .current_dir(job_path)
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-a")
-        .arg("never")
-        .arg("-C")
-        .arg(job_path);
-    apply_codex_command_options(&mut command, options);
-    command
-        .arg("exec")
-        .arg("--ephemeral")
-        .arg("--skip-git-repo-check");
-    if json_progress {
-        command.arg("--json");
-    }
-    if reference_paths.is_empty() {
-        command.arg(prompt_text);
-    } else {
-        command.arg("-i");
-        for path in reference_paths {
-            command.arg(path);
-        }
-        command.arg("--").arg(prompt_text);
-    }
-    command
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY");
-    command
+    build_codex_sdk_command(codex_bin, job_path, &prompt_text, reference_paths, options)
 }
 
 fn decouple_codex_prompt(user_prompt: &str) -> String {
@@ -1215,35 +1133,11 @@ fn build_decouple_codex_command(
     job_path: &Path,
     prompt: &str,
     options: &CodexCommandOptions,
-    json_progress: bool,
+    _json_progress: bool,
 ) -> Command {
     let prompt_text = decouple_codex_prompt(prompt.trim());
-    if options.transport == CodexTransport::Sdk {
-        let image_paths = vec![job_path.join("source.png")];
-        return build_codex_sdk_command(codex_bin, job_path, &prompt_text, &image_paths, options);
-    }
-    let mut command = Command::new(codex_bin);
-    apply_ai_cli_environment(&mut command)
-        .current_dir(job_path)
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-a")
-        .arg("never")
-        .arg("-C")
-        .arg(job_path);
-    apply_codex_command_options(&mut command, options);
-    command.arg("exec").arg("--skip-git-repo-check");
-    if json_progress {
-        command.arg("--json");
-    }
-    command
-        .arg("-i")
-        .arg(job_path.join("source.png"))
-        .arg("--")
-        .arg(prompt_text)
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY");
-    command
+    let image_paths = vec![job_path.join("source.png")];
+    build_codex_sdk_command(codex_bin, job_path, &prompt_text, &image_paths, options)
 }
 
 fn workflow_compose_prompt(
@@ -1494,47 +1388,15 @@ fn build_generative_fill_codex_command(
     storyboard_draft_paths: &[PathBuf],
     reference_paths: &[PathBuf],
     options: &CodexCommandOptions,
-    json_progress: bool,
+    _json_progress: bool,
 ) -> Command {
-    if options.transport == CodexTransport::Sdk {
-        let mut image_paths = vec![job_path.join("source.png")];
-        if has_overview {
-            image_paths.push(job_path.join("overview.png"));
-        }
-        image_paths.extend(storyboard_draft_paths.iter().cloned());
-        image_paths.extend(reference_paths.iter().cloned());
-        return build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options);
-    }
-    let mut command = Command::new(codex_bin);
-    apply_ai_cli_environment(&mut command)
-        .current_dir(job_path)
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-a")
-        .arg("never")
-        .arg("-C")
-        .arg(job_path);
-    apply_codex_command_options(&mut command, options);
-    command.arg("exec").arg("--skip-git-repo-check");
-    if json_progress {
-        command.arg("--json");
-    }
-    command.arg("-i").arg(job_path.join("source.png"));
+    let mut image_paths = vec![job_path.join("source.png")];
     if has_overview {
-        command.arg(job_path.join("overview.png"));
+        image_paths.push(job_path.join("overview.png"));
     }
-    for path in storyboard_draft_paths {
-        command.arg(path);
-    }
-    for path in reference_paths {
-        command.arg(path);
-    }
-    command
-        .arg("--")
-        .arg(prompt_text)
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY");
-    command
+    image_paths.extend(storyboard_draft_paths.iter().cloned());
+    image_paths.extend(reference_paths.iter().cloned());
+    build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options)
 }
 
 fn build_fill_storyboard_codex_command(
@@ -1544,49 +1406,14 @@ fn build_fill_storyboard_codex_command(
     has_overview: bool,
     reference_paths: &[PathBuf],
     options: &CodexCommandOptions,
-    json_progress: bool,
+    _json_progress: bool,
 ) -> Command {
-    if options.transport == CodexTransport::Sdk {
-        let mut image_paths = Vec::new();
-        if has_overview {
-            image_paths.push(job_path.join(FILL_STORYBOARD_OVERVIEW_FILE));
-        }
-        image_paths.extend(reference_paths.iter().cloned());
-        return build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options);
-    }
-    let mut command = Command::new(codex_bin);
-    apply_ai_cli_environment(&mut command)
-        .current_dir(job_path)
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-a")
-        .arg("never")
-        .arg("-C")
-        .arg(job_path);
-    apply_codex_command_options(&mut command, options);
-    command.arg("exec").arg("--skip-git-repo-check");
-    if json_progress {
-        command.arg("--json");
-    }
+    let mut image_paths = Vec::new();
     if has_overview {
-        command
-            .arg("-i")
-            .arg(job_path.join(FILL_STORYBOARD_OVERVIEW_FILE));
-        for path in reference_paths {
-            command.arg(path);
-        }
-    } else if !reference_paths.is_empty() {
-        command.arg("-i");
-        for path in reference_paths {
-            command.arg(path);
-        }
+        image_paths.push(job_path.join(FILL_STORYBOARD_OVERVIEW_FILE));
     }
-    command
-        .arg("--")
-        .arg(prompt_text)
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY");
-    command
+    image_paths.extend(reference_paths.iter().cloned());
+    build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options)
 }
 
 fn ai_retouch_attached_image_notes(
@@ -1712,63 +1539,24 @@ fn build_ai_retouch_codex_command(
     has_overview: bool,
     reference_paths: &[PathBuf],
     options: &CodexCommandOptions,
-    json_progress: bool,
+    _json_progress: bool,
 ) -> Command {
-    if options.transport == CodexTransport::Sdk {
-        let mut image_paths = vec![
-            job_path.join("source.png"),
-            job_path.join("edit_target.png"),
-            job_path.join("mask.png"),
-        ];
-        if has_annotated_source {
-            image_paths.push(job_path.join("annotated_source.png"));
-        }
-        if has_reference {
-            image_paths.push(job_path.join("reference.png"));
-        }
-        if has_overview {
-            image_paths.push(job_path.join("overview.png"));
-        }
-        image_paths.extend(reference_paths.iter().cloned());
-        return build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options);
-    }
-    let mut command = Command::new(codex_bin);
-    apply_ai_cli_environment(&mut command)
-        .current_dir(job_path)
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-a")
-        .arg("never")
-        .arg("-C")
-        .arg(job_path);
-    apply_codex_command_options(&mut command, options);
-    command.arg("exec").arg("--skip-git-repo-check");
-    if json_progress {
-        command.arg("--json");
-    }
-    command
-        .arg("-i")
-        .arg(job_path.join("source.png"))
-        .arg(job_path.join("edit_target.png"))
-        .arg(job_path.join("mask.png"));
+    let mut image_paths = vec![
+        job_path.join("source.png"),
+        job_path.join("edit_target.png"),
+        job_path.join("mask.png"),
+    ];
     if has_annotated_source {
-        command.arg(job_path.join("annotated_source.png"));
+        image_paths.push(job_path.join("annotated_source.png"));
     }
     if has_reference {
-        command.arg(job_path.join("reference.png"));
+        image_paths.push(job_path.join("reference.png"));
     }
     if has_overview {
-        command.arg(job_path.join("overview.png"));
+        image_paths.push(job_path.join("overview.png"));
     }
-    for path in reference_paths {
-        command.arg(path);
-    }
-    command
-        .arg("--")
-        .arg(prompt_text)
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY");
-    command
+    image_paths.extend(reference_paths.iter().cloned());
+    build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options)
 }
 
 fn build_workflow_compose_codex_command(
@@ -1779,38 +1567,10 @@ fn build_workflow_compose_codex_command(
     source_names: &[String],
     options: &CodexCommandOptions,
     autonomy: AiAutonomyLevel,
-    json_progress: bool,
+    _json_progress: bool,
 ) -> Command {
     let prompt_text = workflow_compose_prompt(prompt.trim(), source_names, autonomy);
-    if options.transport == CodexTransport::Sdk {
-        return build_codex_sdk_command(codex_bin, job_path, &prompt_text, image_paths, options);
-    }
-    let mut command = Command::new(codex_bin);
-    apply_ai_cli_environment(&mut command)
-        .current_dir(job_path)
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-a")
-        .arg("never")
-        .arg("-C")
-        .arg(job_path);
-    apply_codex_command_options(&mut command, options);
-    command.arg("exec").arg("--skip-git-repo-check");
-    if json_progress {
-        command.arg("--json");
-    }
-    if !image_paths.is_empty() {
-        command.arg("-i");
-        for path in image_paths {
-            command.arg(path);
-        }
-    }
-    command
-        .arg("--")
-        .arg(prompt_text)
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("CODEX_API_KEY");
-    command
+    build_codex_sdk_command(codex_bin, job_path, &prompt_text, image_paths, options)
 }
 
 fn output_mentions_unsupported_json(output: &Output) -> bool {
@@ -1903,7 +1663,6 @@ pub(crate) async fn generate_codex_image(
     keep_job_dir: Option<bool>,
     reference_pngs: Vec<WorkflowSourceImage>,
     run_id: String,
-    codex_transport: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -1921,14 +1680,13 @@ pub(crate) async fn generate_codex_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_options = codex_command_options(
-            codex_transport,
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_or_default_codex_bin_for_options(bin, &codex_options)?;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
@@ -2807,7 +2565,6 @@ pub(crate) async fn generate_codex_fill_image(
     mask_png: Vec<u8>,
     reference_pngs: Vec<WorkflowSourceImage>,
     run_id: String,
-    codex_transport: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -2850,14 +2607,13 @@ pub(crate) async fn generate_codex_fill_image(
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_options = codex_command_options(
-            codex_transport,
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_or_default_codex_bin_for_options(bin, &codex_options)?;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let autonomy = ai_autonomy_level(autonomy_level);
         let _checks_level = ai_edit_checks_level(edit_checks_level);
         let fill_aspect_ratio = fill_aspect_ratio
@@ -3278,7 +3034,6 @@ pub(crate) async fn generate_codex_retouch_image(
     reference_png: Option<Vec<u8>>,
     reference_pngs: Vec<WorkflowSourceImage>,
     run_id: String,
-    codex_transport: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -3348,14 +3103,13 @@ pub(crate) async fn generate_codex_retouch_image(
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_options = codex_command_options(
-            codex_transport,
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_or_default_codex_bin_for_options(bin, &codex_options)?;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let autonomy = ai_autonomy_level(autonomy_level);
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
@@ -3625,7 +3379,6 @@ pub(crate) async fn upscale_codex_image(
     source_png: Vec<u8>,
     scale_percent: u32,
     run_id: String,
-    codex_transport: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -3644,14 +3397,13 @@ pub(crate) async fn upscale_codex_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_options = codex_command_options(
-            codex_transport,
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_or_default_codex_bin_for_options(bin, &codex_options)?;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("upscale-{}", now_id())
@@ -3751,7 +3503,6 @@ pub(crate) async fn decouple_codex_image(
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
-    codex_transport: Option<String>,
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
@@ -3762,14 +3513,13 @@ pub(crate) async fn decouple_codex_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
         let codex_options = codex_command_options(
-            codex_transport,
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_or_default_codex_bin_for_options(bin, &codex_options)?;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let _autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("decouple-{}", now_id())
@@ -4002,7 +3752,6 @@ pub(crate) async fn compose_codex_workflow(
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
-    codex_transport: Option<String>,
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
@@ -4016,14 +3765,13 @@ pub(crate) async fn compose_codex_workflow(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let codex_options = codex_command_options(
-            codex_transport,
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_or_default_codex_bin_for_options(bin, &codex_options)?;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("workflow-{}", now_id())
@@ -4204,7 +3952,6 @@ mod tests {
         let job = TempJobDir::new("paintnode-codex-options-test").expect("temp dir");
         for model in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] {
             let options = codex_command_options(
-                Some("cli".to_string()),
                 Some(model.to_string()),
                 Some("high".to_string()),
                 Some("fast".to_string()),
@@ -4228,12 +3975,19 @@ mod tests {
 
             let model_idx = args
                 .iter()
-                .position(|arg| arg == "-m")
+                .position(|arg| arg == "--model")
                 .expect("model flag should be present");
             assert_eq!(args[model_idx + 1], model);
-            assert!(args.contains(&"model_reasoning_effort=\"high\"".to_string()));
-            assert!(args.contains(&"service_tier=\"fast\"".to_string()));
-            assert!(args.contains(&"features.fast_mode=true".to_string()));
+            let reasoning_idx = args
+                .iter()
+                .position(|arg| arg == "--reasoning")
+                .expect("reasoning flag should be present");
+            assert_eq!(args[reasoning_idx + 1], "high");
+            let service_tier_idx = args
+                .iter()
+                .position(|arg| arg == "--service-tier")
+                .expect("service tier flag should be present");
+            assert_eq!(args[service_tier_idx + 1], "fast");
         }
     }
 
@@ -4344,7 +4098,7 @@ mod tests {
         assert!(
             args.iter()
                 .any(|arg| arg.ends_with("scripts/codex-sdk-runner.mjs")),
-            "default Codex transport should use the SDK runner"
+            "Codex commands should use the SDK runner"
         );
         assert_eq!(
             sdk_image_args(&args),
@@ -4386,11 +4140,10 @@ mod tests {
     }
 
     #[test]
-    fn sdk_transport_without_user_bin_uses_sdk_bundled_codex() {
+    fn codex_without_user_bin_uses_sdk_bundled_codex() {
         let job = TempJobDir::new("paintnode-codex-sdk-bundled-test").expect("temp dir");
         let options = CodexCommandOptions::default();
-        let codex_bin =
-            configured_or_default_codex_bin_for_options(None, &options).expect("sdk codex bin");
+        let codex_bin = configured_codex_bin_or_sdk_default(None);
         assert_eq!(codex_bin, "");
 
         let command = build_codex_command(
@@ -4408,12 +4161,12 @@ mod tests {
         assert_eq!(command.get_program().to_string_lossy(), "node");
         assert!(
             !args.iter().any(|arg| arg == "--codex-path"),
-            "SDK transport should use the SDK package's paired Codex CLI unless the user explicitly chooses a binary"
+            "Codex should use the SDK package's paired CLI unless the user explicitly chooses a binary"
         );
         assert!(
             args.iter()
                 .any(|arg| arg.ends_with("scripts/codex-sdk-runner.mjs")),
-            "SDK transport should use the SDK runner"
+            "Codex should use the SDK runner"
         );
     }
 
