@@ -307,12 +307,7 @@
       </div>
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'codex'}
-      <label class="dlg-field">
-        <span>Codex command (optional)</span>
-        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-      </label>
-    {:else if !taskDetail && runOptions.provider === 'antigravity'}
+    {#if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
         <span>Antigravity command (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
@@ -397,7 +392,7 @@
 
     <div class="dlg-actions">
       {#if !task}
-        <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+        <AiRunOptionsControl bind:options={runOptions} disabled={busy} antigravityModelScope="all" />
       {/if}
       <span class="dlg-action-spacer"></span>
       <button onclick={onClose}>{task ? 'Close' : 'Cancel'}</button>

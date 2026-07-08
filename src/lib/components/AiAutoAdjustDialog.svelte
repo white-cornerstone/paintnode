@@ -117,7 +117,7 @@
       return;
     }
     if (runOptions.provider === 'custom') {
-      error = 'AI Auto adjustments are currently available with Local Codex or Antigravity CLI.';
+      error = 'AI Auto adjustments are currently available with Local Codex or Antigravity account.';
       return;
     }
 

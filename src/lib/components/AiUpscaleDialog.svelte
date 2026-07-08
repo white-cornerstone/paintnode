@@ -89,7 +89,7 @@
       return;
     }
     if (runOptions.provider === 'custom') {
-      error = 'AI Upscale is currently available with Local Codex or Antigravity CLI.';
+      error = 'AI Upscale is currently available with Local Codex or Antigravity account.';
       return;
     }
     const scale = clampedScale;

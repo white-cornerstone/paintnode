@@ -15,7 +15,7 @@
     </section>
 
     <section class="summary">
-      <p>Use Codex CLI and Antigravity to generate and edit image layers.</p>
+      <p>Use Codex and Antigravity to generate and edit image layers.</p>
       <p>
         PaintNode keeps AI results in the editor as layers, masks, project assets, and OpenRaster documents
         instead of leaving you with loose output files.

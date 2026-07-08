@@ -9,12 +9,25 @@
     DEFAULT_CUSTOM_FILL_ARGS,
     DEFAULT_CUSTOM_RETOUCH_ARGS,
     DEFAULT_CUSTOM_WORKFLOW_ARGS,
-    ANTIGRAVITY_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
+    ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
+    ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS,
+    ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
+    ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
     type AiProvider,
     type CanvasBackground,
+    type CodexImageModeration,
+    type CodexImageQuality,
     type CodexModelId,
-    type AntigravityApprovalMode,
-    type AntigravityModelId,
+    type AntigravityImageModelId,
+    type AntigravityImageSize,
+    type AntigravityPersonGeneration,
+    type AntigravityProminentPeople,
+    type AntigravitySafetyCategorySetting,
+    type AntigravitySafetyFiltering,
+    type AntigravitySafetyThreshold,
     type ReasoningEffort,
     type ServiceTier,
   } from '../state/settings';
@@ -36,6 +49,16 @@
     { value: 'default', label: 'Default', hint: 'Use normal Codex speed.' },
     { value: 'fast', label: 'Fast', hint: 'Ask Codex to use fast mode for AI runs.' },
   ];
+  const imageQualities: { value: CodexImageQuality; label: string; hint: string }[] = [
+    { value: 'auto', label: 'Auto', hint: 'Let the image-generation tool choose quality.' },
+    { value: 'low', label: 'Low', hint: 'Prefer faster draft generations.' },
+    { value: 'medium', label: 'Medium', hint: 'Balance latency and output detail.' },
+    { value: 'high', label: 'High', hint: 'Prefer final-quality output when the image tool supports it.' },
+  ];
+  const imageModerations: { value: CodexImageModeration; label: string; hint: string }[] = [
+    { value: 'auto', label: 'Default', hint: 'Use normal image-generation moderation.' },
+    { value: 'low', label: 'Low', hint: 'Use the image API low moderation mode when the owned runner supports it.' },
+  ];
   let tab = $state<Tab>('general');
   let detectBusy = $state(false);
   let antigravityDetectBusy = $state(false);
@@ -52,6 +75,37 @@
 
   function numberValue(event: Event): number {
     return Number((event.currentTarget as HTMLInputElement | HTMLSelectElement).value);
+  }
+
+  function optionalNumberValue(event: Event): number | null {
+    const value = textValue(event).trim();
+    if (!value) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function antigravitySafetyCategoryValue(setting: AntigravitySafetyCategorySetting): AntigravitySafetyThreshold {
+    return settings.value.ai[setting];
+  }
+
+  function updateAntigravitySafetyCategory(
+    setting: AntigravitySafetyCategorySetting,
+    value: AntigravitySafetyThreshold,
+  ): void {
+    switch (setting) {
+      case 'antigravitySafetyHarassment':
+        settings.update({ ai: { antigravitySafetyHarassment: value } });
+        break;
+      case 'antigravitySafetyHateSpeech':
+        settings.update({ ai: { antigravitySafetyHateSpeech: value } });
+        break;
+      case 'antigravitySafetySexuallyExplicit':
+        settings.update({ ai: { antigravitySafetySexuallyExplicit: value } });
+        break;
+      case 'antigravitySafetyDangerousContent':
+        settings.update({ ai: { antigravitySafetyDangerousContent: value } });
+        break;
+    }
   }
 
   async function runCodexDetection(): Promise<void> {
@@ -204,8 +258,8 @@
             value={settings.value.ai.provider}
             onchange={(event) => settings.update({ ai: { provider: textValue(event) as AiProvider } })}
           >
-            <option value="codex">Local Codex CLI</option>
-            <option value="antigravity">Local Antigravity CLI</option>
+            <option value="codex">Local Codex</option>
+            <option value="antigravity">Antigravity account / image generation</option>
             <option value="custom">Custom CLI</option>
           </select>
         </label>
@@ -213,11 +267,11 @@
         {#if settings.value.ai.provider === 'codex'}
           <div class="detect-row">
             <label class="field">
-              <span>Codex command</span>
+              <span>Advanced Codex binary override</span>
               <input
                 type="text"
                 value={settings.value.ai.codexBin}
-                placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex"
+                placeholder="Leave blank to use the bundled Codex SDK CLI"
                 spellcheck="false"
                 oninput={(event) => settings.update({ ai: { codexBin: textValue(event) } })}
               />
@@ -264,22 +318,53 @@
             </label>
           </div>
 
-          <label class="field">
-            <span>Codex speed</span>
-            <select
-              value={settings.value.ai.serviceTier}
-              onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
-            >
-              {#each serviceTiers as option (option.value)}
-                <option value={option.value}>{option.label}</option>
-              {/each}
-            </select>
-            <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
-          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span>Codex speed</span>
+              <select
+                value={settings.value.ai.serviceTier}
+                onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
+              >
+                {#each serviceTiers as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
+            </label>
+          </div>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>Image quality</span>
+              <select
+                value={settings.value.ai.imageQuality}
+                onchange={(event) => settings.update({ ai: { imageQuality: textValue(event) as CodexImageQuality } })}
+              >
+                {#each imageQualities as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{imageQualities.find((option) => option.value === settings.value.ai.imageQuality)?.hint}</small>
+            </label>
+
+            <label class="field">
+              <span>Image moderation</span>
+              <select
+                value={settings.value.ai.imageModeration}
+                onchange={(event) =>
+                  settings.update({ ai: { imageModeration: textValue(event) as CodexImageModeration } })}
+              >
+                {#each imageModerations as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{imageModerations.find((option) => option.value === settings.value.ai.imageModeration)?.hint}</small>
+            </label>
+          </div>
         {:else if settings.value.ai.provider === 'antigravity'}
           <div class="detect-row">
             <label class="field">
-              <span>Antigravity command</span>
+              <span>Advanced Antigravity CLI auth helper</span>
 	              <input
 	                type="text"
 	                value={settings.value.ai.antigravityBin}
@@ -287,6 +372,7 @@
 	                spellcheck="false"
 	                oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
 	              />
+              <small>Used for <code>agy models</code> auth refresh before direct image requests.</small>
             </label>
             <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
               {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
@@ -303,31 +389,116 @@
             </p>
           {/if}
 
+          <div class="grid-2">
+            <label class="field">
+              <span>Image model</span>
+              <select
+                value={settings.value.ai.antigravityImageModel}
+                onchange={(event) =>
+                  settings.update({ ai: { antigravityImageModel: textValue(event) as AntigravityImageModelId } })}
+              >
+                {#each ANTIGRAVITY_IMAGE_MODEL_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Image size</span>
+              <select
+                value={settings.value.ai.antigravityImageSize}
+                onchange={(event) =>
+                  settings.update({ ai: { antigravityImageSize: textValue(event) as AntigravityImageSize } })}
+              >
+                {#each ANTIGRAVITY_IMAGE_SIZE_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>Person generation</span>
+              <select
+                value={settings.value.ai.antigravityPersonGeneration}
+                onchange={(event) =>
+                  settings.update({ ai: { antigravityPersonGeneration: textValue(event) as AntigravityPersonGeneration } })}
+              >
+                {#each ANTIGRAVITY_PERSON_GENERATION_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Prominent people</span>
+              <select
+                value={settings.value.ai.antigravityProminentPeople}
+                onchange={(event) =>
+                  settings.update({ ai: { antigravityProminentPeople: textValue(event) as AntigravityProminentPeople } })}
+              >
+                {#each ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+
           <label class="field">
-            <span>Antigravity model</span>
+            <span>Safety filtering</span>
             <select
-              value={settings.value.ai.antigravityModel}
-              onchange={(event) => settings.update({ ai: { antigravityModel: textValue(event) as AntigravityModelId } })}
+              value={settings.value.ai.antigravitySafetyFiltering}
+              onchange={(event) =>
+                settings.update({ ai: { antigravitySafetyFiltering: textValue(event) as AntigravitySafetyFiltering } })}
             >
-              {#each ANTIGRAVITY_MODEL_OPTIONS as option (option.id)}
+              {#each ANTIGRAVITY_SAFETY_FILTERING_OPTIONS as option (option.id)}
                 <option value={option.id}>{option.label}</option>
               {/each}
             </select>
-            <small>Auto lets Antigravity CLI choose its configured/default model.</small>
+          </label>
+
+          {#if settings.value.ai.antigravitySafetyFiltering === 'custom'}
+            <div class="grid-2">
+              {#each ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS as category (category.id)}
+                <label class="field">
+                  <span>{category.label}</span>
+                  <select
+                    value={antigravitySafetyCategoryValue(category.id)}
+                    onchange={(event) =>
+                      updateAntigravitySafetyCategory(category.id, textValue(event) as AntigravitySafetyThreshold)}
+                  >
+                    {#each ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS as option (option.id)}
+                      <option value={option.id}>{option.label}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/each}
+            </div>
+          {/if}
+
+          <label class="field">
+            <span>Compression quality</span>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={settings.value.ai.antigravityCompressionQuality ?? ''}
+              placeholder="Auto"
+              oninput={(event) => settings.update({ ai: { antigravityCompressionQuality: optionalNumberValue(event) } })}
+            />
           </label>
 
           <label class="field">
-            <span>Antigravity automation</span>
-	            <select
-	              value={settings.value.ai.antigravityApprovalMode}
-	              onchange={(event) =>
-	                settings.update({ ai: { antigravityApprovalMode: textValue(event) as AntigravityApprovalMode } })}
-	            >
-	              <option value="skipPermissions">Skip permissions inside PaintNode job folders</option>
-	              <option value="default">Use Antigravity CLI default permissions</option>
-	            </select>
-	            <small>Install with Google's script, then run <code>agy</code> once to sign in. PaintNode validates generated files before import.</small>
-	          </label>
+            <span>Advanced image options JSON</span>
+            <textarea
+              rows="3"
+              spellcheck="false"
+              value={settings.value.ai.antigravityAdvancedOptionsJson}
+              oninput={(event) => settings.update({ ai: { antigravityAdvancedOptionsJson: textValue(event) } })}
+            ></textarea>
+            <small>Only confirmed image options are accepted; auth and transport fields are ignored by the app.</small>
+          </label>
         {:else}
           <div class="subsection">
             <h3>Custom CLI</h3>

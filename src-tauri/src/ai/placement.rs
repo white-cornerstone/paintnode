@@ -93,6 +93,7 @@ pub(crate) enum AiFillMethod {
     Auto,
     ExactInPlace,
     WideCover,
+    #[allow(dead_code)]
     WideStarterContinue,
     BalancedStrips,
 }

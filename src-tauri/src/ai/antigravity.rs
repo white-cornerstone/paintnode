@@ -1,4 +1,4 @@
-//! Antigravity CLI provider: prompts, command building, transcript progress, commands.
+//! Antigravity provider: direct image backend executor plus agent-backed asset extraction.
 
 use std::fs;
 use std::io::{Read, Seek};
@@ -14,22 +14,26 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use reqwest::blocking::Client;
+use serde::Deserialize;
+use serde_json::json;
 use tauri::AppHandle;
 
 use crate::ai::canvas::{
-    ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
-    antigravity_output_target, read_png_bytes_cropped_to_ai_working_canvas,
-    remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
-    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
-    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
+    ai_antigravity_image_capability, ai_candidate_rejection, ai_edit_checks_level,
+    ai_retouch_editable_mask_png, antigravity_output_target,
+    read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
+    validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
+    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::fill_storyboard::{
     fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
-    fill_storyboard_master_prompt, fill_storyboard_part_is_anchor, fill_storyboard_part_prompt,
-    preserve_invalid_fill_storyboard_file, read_fill_storyboard_file,
-    record_fill_storyboard_failure, should_storyboard_fill, write_fill_storyboard_file,
-    FillStoryboard, FILL_STORYBOARD_DRAFT_CANVAS_FILE, FILL_STORYBOARD_DRAFT_FILE,
-    FILL_STORYBOARD_DRAFT_MASK_FILE, FILL_STORYBOARD_FILE, FILL_STORYBOARD_OVERVIEW_FILE,
+    fill_storyboard_part_is_anchor, fill_storyboard_part_prompt, read_fill_storyboard_file,
+    should_storyboard_fill, write_fill_storyboard_file, FillStoryboard,
+    FILL_STORYBOARD_DRAFT_CANVAS_FILE, FILL_STORYBOARD_DRAFT_FILE, FILL_STORYBOARD_DRAFT_MASK_FILE,
+    FILL_STORYBOARD_OVERVIEW_FILE,
 };
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
@@ -44,7 +48,7 @@ use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
     clean_option, cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
     command_failure_with_required_output, emit_codex_part_progress, emit_codex_progress,
-    emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id,
+    emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id, output_tail,
     project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
     required_png_output_is_ready, safe_job_child_path, sanitize_progress_line, should_keep_job_dir,
     spawn_output_reader, synthesize_decouple_asset_manifest, validate_reference_pngs,
@@ -53,7 +57,7 @@ use crate::ai::{
     GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
     POLL_INTERVAL,
 };
-use crate::png::{is_png, png_data_url, png_dimensions_from_bytes, read_png_data_url};
+use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
     add_asset, safe_stem, store_generated_png_asset, write_asset_file, ProjectAsset,
 };
@@ -62,6 +66,1096 @@ use crate::project::{
 struct AntigravityCommandOptions {
     model: Option<String>,
     approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
+}
+
+const DEFAULT_ANTIGRAVITY_IMAGE_MODEL: &str = "gemini-3.1-flash-image";
+const PAINTNODE_ANTIGRAVITY_IMAGE_REQUEST_FILE: &str = "paintnode-antigravity-image-request.json";
+const PAINTNODE_ANTIGRAVITY_IMAGE_RESPONSE_FILE: &str = "paintnode-antigravity-image-response.json";
+const ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD: &str = "HARM_BLOCK_THRESHOLD_UNSPECIFIED";
+const ANTIGRAVITY_SAFETY_CATEGORIES: [(&str, &str); 4] = [
+    ("HARM_CATEGORY_HARASSMENT", "harassment"),
+    ("HARM_CATEGORY_HATE_SPEECH", "hateSpeech"),
+    ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "sexuallyExplicit"),
+    ("HARM_CATEGORY_DANGEROUS_CONTENT", "dangerousContent"),
+];
+
+#[derive(Debug, Deserialize)]
+struct AntigravityKeychainEnvelope {
+    token: Option<AntigravityStoredToken>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AntigravityStoredToken {
+    access_token: String,
+    token_type: Option<String>,
+    expiry: Option<String>,
+}
+
+#[derive(Debug)]
+struct AntigravityAuthToken {
+    access_token: String,
+    token_type: Option<String>,
+    expiry: Option<String>,
+}
+
+#[derive(Debug)]
+struct AntigravityImageRequestSpec {
+    prompt: String,
+    image_paths: Vec<PathBuf>,
+    aspect_ratio: Option<String>,
+    image_size: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AntigravityGenerateContentEnvelope {
+    response: Option<AntigravityGenerateContentResponse>,
+    trace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AntigravityGenerateContentResponse {
+    candidates: Vec<AntigravityCandidate>,
+    model_version: Option<String>,
+    response_id: Option<String>,
+}
+
+impl Default for AntigravityGenerateContentResponse {
+    fn default() -> Self {
+        Self {
+            candidates: Vec::new(),
+            model_version: None,
+            response_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AntigravityCandidate {
+    content: Option<AntigravityContent>,
+    finish_reason: Option<String>,
+    finish_message: Option<String>,
+}
+
+impl Default for AntigravityCandidate {
+    fn default() -> Self {
+        Self {
+            content: None,
+            finish_reason: None,
+            finish_message: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AntigravityContent {
+    parts: Vec<AntigravityPart>,
+}
+
+impl Default for AntigravityContent {
+    fn default() -> Self {
+        Self { parts: Vec::new() }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AntigravityPart {
+    inline_data: Option<AntigravityInlineData>,
+    text: Option<String>,
+}
+
+impl Default for AntigravityPart {
+    fn default() -> Self {
+        Self {
+            inline_data: None,
+            text: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AntigravityInlineData {
+    mime_type: Option<String>,
+    data: String,
+}
+
+fn antigravity_image_backend_base_url() -> String {
+    std::env::var("PAINTNODE_ANTIGRAVITY_IMAGE_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://daily-cloudcode-pa.googleapis.com".into())
+}
+
+fn antigravity_generate_content_url(image_base_url: &str) -> String {
+    format!(
+        "{}/v1internal:generateContent",
+        image_base_url.trim_end_matches('/')
+    )
+}
+
+fn antigravity_image_http_client(user_agent: &str) -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .user_agent(user_agent.to_string())
+        .build()
+        .map_err(|e| {
+            format_antigravity_image_request_error(
+                "Failed to create Antigravity image HTTP client",
+                &e,
+            )
+        })
+}
+
+fn format_antigravity_image_request_error(context: &str, error: &reqwest::Error) -> String {
+    let mut message = format!("{context}: {error}");
+    if error.is_timeout() {
+        message.push_str("\n\nThe request timed out while contacting Antigravity. Check the network connection, VPN/proxy, and Google service access, then retry.");
+    } else if error.is_connect() {
+        message.push_str("\n\nPaintNode could not connect to Antigravity. Check the network connection, VPN/proxy, firewall, and Google service access, then retry.");
+    } else if error.is_request() || error.is_body() {
+        message.push_str("\n\nThe image upload failed before Antigravity returned a response. Retry once; if it repeats, try a smaller selected area or fewer reference images.");
+    }
+    message
+}
+
+fn antigravity_command_failure(prefix: &str, output: &Output) -> String {
+    let stderr = output_tail(&output.stderr);
+    let stdout = output_tail(&output.stdout);
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "No output was captured.".into()
+    };
+    let lower = detail.to_ascii_lowercase();
+    let auth_hint = if lower.contains("not authenticated")
+        || lower.contains("not logged in")
+        || lower.contains("login")
+        || lower.contains("unauthorized")
+    {
+        "\n\nRun `agy` in Terminal and sign in to Antigravity, then try again."
+    } else {
+        ""
+    };
+    format!("{prefix} failed.{auth_hint}\n\n{detail}")
+}
+
+fn antigravity_version_from_output(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.trim().trim_start_matches('v');
+        let start = token.find(|ch: char| ch.is_ascii_digit())?;
+        let version = token[start..]
+            .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-'));
+        version
+            .chars()
+            .any(|ch| ch.is_ascii_digit())
+            .then(|| version.to_string())
+    })
+}
+
+fn antigravity_cli_version(antigravity_bin: &str) -> String {
+    let mut command = Command::new(antigravity_bin);
+    apply_ai_cli_environment(&mut command).arg("--version");
+    let text = command
+        .output()
+        .ok()
+        .map(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            format!("{stdout}\n{stderr}")
+        })
+        .unwrap_or_default();
+    antigravity_version_from_output(&text).unwrap_or_else(|| "1.0.16".into())
+}
+
+fn antigravity_image_user_agent(antigravity_bin: &str) -> String {
+    format!("antigravity/{}", antigravity_cli_version(antigravity_bin))
+}
+
+fn wake_antigravity_auth(antigravity_bin: &str, job_path: &Path) -> Result<(), String> {
+    fs::create_dir_all(job_path)
+        .map_err(|e| format!("Failed to create Antigravity auth job folder: {e}"))?;
+    let mut command = Command::new(antigravity_bin);
+    apply_ai_cli_environment(&mut command);
+    command
+        .arg("--log-file")
+        .arg(job_path.join("agy-auth.log"))
+        .arg("models");
+    let output = command.output().map_err(|e| {
+        format!("Failed to launch Antigravity auth helper at '{antigravity_bin}': {e}")
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(antigravity_command_failure(
+            "Antigravity auth helper (`agy models`)",
+            &output,
+        ))
+    }
+}
+
+fn parse_antigravity_keychain_token(raw: &str) -> Result<AntigravityAuthToken, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Antigravity Keychain token is empty.".into());
+    }
+    let encoded = trimmed
+        .rsplit_once(':')
+        .map(|(_, encoded)| encoded)
+        .unwrap_or(trimmed)
+        .trim();
+    let decoded = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|e| format!("Antigravity Keychain token envelope is not valid base64: {e}"))?;
+    let envelope: AntigravityKeychainEnvelope = serde_json::from_slice(&decoded)
+        .map_err(|e| format!("Antigravity Keychain token envelope is invalid JSON: {e}"))?;
+    let token = envelope.token.ok_or_else(|| {
+        "Antigravity Keychain token envelope did not contain a token.".to_string()
+    })?;
+    if token.access_token.trim().is_empty() {
+        return Err("Antigravity Keychain token envelope had no access token.".into());
+    }
+    Ok(AntigravityAuthToken {
+        access_token: token.access_token,
+        token_type: token.token_type,
+        expiry: token.expiry,
+    })
+}
+
+fn load_antigravity_keychain_token() -> Result<AntigravityAuthToken, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err("Antigravity direct image generation is currently macOS-only because PaintNode reads the authenticated Antigravity token from macOS Keychain.".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("security")
+            .arg("find-generic-password")
+            .arg("-w")
+            .arg("-s")
+            .arg("gemini")
+            .arg("-a")
+            .arg("antigravity")
+            .output()
+            .map_err(|e| format!("Failed to read Antigravity token from macOS Keychain: {e}"))?;
+        if !output.status.success() {
+            let detail = output_tail(&output.stderr);
+            let suffix = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{detail}")
+            };
+            return Err(format!(
+                "Antigravity login was not found in macOS Keychain at service `gemini`, account `antigravity`. Run `agy` in Terminal and sign in, then try again.{suffix}"
+            ));
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        parse_antigravity_keychain_token(&raw)
+    }
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i64::from(era * 146097 + doe - 719468)
+}
+
+fn parse_antigravity_expiry_unix_seconds(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let split = value.find('T').or_else(|| value.find(' '))?;
+    let (date, time_and_offset) = value.split_at(split);
+    let time_and_offset = time_and_offset.get(1..)?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    let (time, offset_seconds) = if let Some(time) = time_and_offset.strip_suffix('Z') {
+        (time, 0_i64)
+    } else {
+        let offset_index = time_and_offset
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, ch)| (ch == '+' || ch == '-').then_some(index))?;
+        let (time, offset) = time_and_offset.split_at(offset_index);
+        let sign = if offset.starts_with('-') {
+            -1_i64
+        } else {
+            1_i64
+        };
+        let offset = offset.get(1..)?;
+        let mut offset_parts = offset.split(':');
+        let hours = offset_parts.next()?.parse::<i64>().ok()?;
+        let minutes = offset_parts.next().unwrap_or("0").parse::<i64>().ok()?;
+        (time, sign * (hours * 3600 + minutes * 60))
+    };
+    let time = time.split('.').next().unwrap_or(time);
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<i64>().ok()?;
+    let minute = time_parts.next()?.parse::<i64>().ok()?;
+    let second = time_parts.next()?.parse::<i64>().ok()?;
+    let local_seconds =
+        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(local_seconds - offset_seconds)
+}
+
+fn antigravity_token_needs_refresh(
+    token: Option<&AntigravityAuthToken>,
+    now_unix_seconds: i64,
+    margin_seconds: i64,
+) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
+    if token.access_token.trim().is_empty() {
+        return true;
+    }
+    let Some(expiry) = token.expiry.as_deref() else {
+        return true;
+    };
+    parse_antigravity_expiry_unix_seconds(expiry)
+        .map(|expiry_seconds| expiry_seconds <= now_unix_seconds + margin_seconds)
+        .unwrap_or(true)
+}
+
+fn antigravity_image_request_prompt(prompt: &str, image_paths: &[PathBuf]) -> String {
+    let labels = image_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image.png");
+            format!("{}. `{name}`", index + 1)
+        })
+        .collect::<Vec<_>>();
+    let image_note = if labels.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nAttached images are provided in this order:\n{}\nUse those labels to interpret the task, but return only the final image pixels.",
+            labels.join("\n")
+        )
+    };
+    format!(
+        "You are PaintNode's direct Antigravity image executor. Generate exactly one raster image for the task below. Do not answer with prose, code, file names, or process notes; return image pixels only.{image_note}\n\nTask:\n{prompt}"
+    )
+}
+
+fn antigravity_inline_image_part(path: &Path) -> Result<serde_json::Value, String> {
+    let bytes = fs::read(path).map_err(|e| {
+        format!(
+            "Failed to read Antigravity image input at {}: {e}",
+            path.display()
+        )
+    })?;
+    if !is_png(&bytes) {
+        return Err(format!(
+            "Antigravity image input at {} is not a PNG.",
+            path.display()
+        ));
+    }
+    Ok(json!({
+        "inlineData": {
+            "mimeType": "image/png",
+            "data": BASE64_STANDARD.encode(bytes),
+        }
+    }))
+}
+
+fn apply_antigravity_advanced_image_options(
+    image_config: &mut serde_json::Map<String, serde_json::Value>,
+    advanced_json: Option<&str>,
+) -> Result<(), String> {
+    let Some(advanced_json) = advanced_json
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(advanced_json)
+        .map_err(|e| format!("Antigravity advanced image options must be valid JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Antigravity advanced image options must be a JSON object.".to_string())?;
+    for (key, value) in object {
+        match key.as_str() {
+            "aspectRatio" | "imageSize" | "personGeneration" | "prominentPeople" => {
+                if !value.is_string() {
+                    return Err(format!(
+                        "Antigravity advanced option `{key}` must be a string."
+                    ));
+                }
+                image_config.insert(key.clone(), value.clone());
+            }
+            "compressionQuality" => {
+                let quality = value.as_u64().ok_or_else(|| {
+                    "Antigravity advanced option `compressionQuality` must be a number.".to_string()
+                })?;
+                if quality > 100 {
+                    return Err(
+                        "Antigravity advanced option `compressionQuality` must be between 0 and 100."
+                            .into(),
+                    );
+                }
+                let output_options = image_config
+                    .entry("imageOutputOptions")
+                    .or_insert_with(|| json!({}));
+                let object = output_options.as_object_mut().ok_or_else(|| {
+                    "Antigravity advanced option `imageOutputOptions` must be an object."
+                        .to_string()
+                })?;
+                object.insert("compressionQuality".into(), json!(quality));
+            }
+            "imageOutputOptions" => {
+                let options = value.as_object().ok_or_else(|| {
+                    "Antigravity advanced option `imageOutputOptions` must be an object."
+                        .to_string()
+                })?;
+                for (option_key, option_value) in options {
+                    match option_key.as_str() {
+                        "compressionQuality" => {
+                            let quality = option_value.as_u64().ok_or_else(|| {
+                                "Antigravity advanced option `imageOutputOptions.compressionQuality` must be a number.".to_string()
+                            })?;
+                            if quality > 100 {
+                                return Err("Antigravity advanced option `imageOutputOptions.compressionQuality` must be between 0 and 100.".into());
+                            }
+                        }
+                        "mimeType" => {
+                            if option_value.as_str() != Some("IMAGE_JPEG") {
+                                return Err("Antigravity advanced option `imageOutputOptions.mimeType` currently only supports confirmed value `IMAGE_JPEG`.".into());
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Antigravity advanced image option `imageOutputOptions.{option_key}` is not supported."
+                            ));
+                        }
+                    }
+                }
+                let output_options = image_config
+                    .entry("imageOutputOptions")
+                    .or_insert_with(|| json!({}));
+                let object = output_options.as_object_mut().ok_or_else(|| {
+                    "Antigravity advanced option `imageOutputOptions` must be an object."
+                        .to_string()
+                })?;
+                for (option_key, option_value) in options {
+                    object.insert(option_key.clone(), option_value.clone());
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Antigravity advanced image option `{key}` is not supported."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn antigravity_safety_threshold_for_category<'a>(
+    options: &'a AntigravityCommandOptions,
+    category_key: &str,
+) -> Option<&'a str> {
+    match category_key {
+        "harassment" => options.safety_harassment.as_deref(),
+        "hateSpeech" => options.safety_hate_speech.as_deref(),
+        "sexuallyExplicit" => options.safety_sexually_explicit.as_deref(),
+        "dangerousContent" => options.safety_dangerous_content.as_deref(),
+        _ => None,
+    }
+}
+
+fn antigravity_safety_settings_json(options: &AntigravityCommandOptions) -> Vec<serde_json::Value> {
+    let preset_threshold = match options.safety_filtering.as_deref() {
+        Some("lessRestrictive") => Some("BLOCK_ONLY_HIGH"),
+        Some("moreRestrictive") => Some("BLOCK_LOW_AND_ABOVE"),
+        Some("custom") | None => None,
+        _ => None,
+    };
+
+    ANTIGRAVITY_SAFETY_CATEGORIES
+        .iter()
+        .filter_map(|(category, category_key)| {
+            let threshold = preset_threshold
+                .or_else(|| {
+                    if options.safety_filtering.as_deref() == Some("custom") {
+                        antigravity_safety_threshold_for_category(options, category_key)
+                    } else {
+                        None
+                    }
+                })
+                .map(str::trim)
+                .filter(|value| {
+                    !value.is_empty() && *value != ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD
+                })?;
+
+            Some(json!({
+                "category": category,
+                "threshold": threshold,
+            }))
+        })
+        .collect()
+}
+
+fn antigravity_image_request_json(
+    spec: &AntigravityImageRequestSpec,
+    options: &AntigravityCommandOptions,
+) -> Result<serde_json::Value, String> {
+    let mut parts = vec![json!({
+        "text": antigravity_image_request_prompt(&spec.prompt, &spec.image_paths),
+    })];
+    for path in &spec.image_paths {
+        parts.push(antigravity_inline_image_part(path)?);
+    }
+
+    let mut image_config = serde_json::Map::new();
+    if let Some(aspect_ratio) = spec
+        .aspect_ratio
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        image_config.insert("aspectRatio".into(), json!(aspect_ratio));
+    }
+    let image_size = options
+        .image_size
+        .as_deref()
+        .or(spec.image_size.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "auto");
+    if let Some(image_size) = image_size {
+        image_config.insert("imageSize".into(), json!(image_size));
+    }
+    if let Some(person_generation) = options.person_generation.as_deref() {
+        image_config.insert("personGeneration".into(), json!(person_generation));
+    }
+    if let Some(prominent_people) = options.prominent_people.as_deref() {
+        image_config.insert("prominentPeople".into(), json!(prominent_people));
+    }
+    if let Some(quality) = options.compression_quality {
+        image_config.insert(
+            "imageOutputOptions".into(),
+            json!({ "compressionQuality": quality }),
+        );
+    }
+    apply_antigravity_advanced_image_options(&mut image_config, options.advanced_json.as_deref())?;
+
+    let mut generation_config = serde_json::Map::new();
+    generation_config.insert("responseModalities".into(), json!(["IMAGE"]));
+    if !image_config.is_empty() {
+        generation_config.insert(
+            "imageConfig".into(),
+            serde_json::Value::Object(image_config),
+        );
+    }
+
+    let mut request = serde_json::Map::new();
+    request.insert(
+        "contents".into(),
+        json!([{
+            "role": "user",
+            "parts": parts,
+        }]),
+    );
+    request.insert(
+        "generationConfig".into(),
+        serde_json::Value::Object(generation_config),
+    );
+    let safety_settings = antigravity_safety_settings_json(options);
+    if !safety_settings.is_empty() {
+        request.insert(
+            "safetySettings".into(),
+            serde_json::Value::Array(safety_settings),
+        );
+    }
+
+    Ok(json!({
+        "model": options
+            .image_model
+            .as_deref()
+            .unwrap_or(DEFAULT_ANTIGRAVITY_IMAGE_MODEL),
+        "request": serde_json::Value::Object(request),
+    }))
+}
+
+fn antigravity_image_bytes_to_png(
+    bytes: &[u8],
+    mime_type: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    if is_png(bytes) {
+        return Ok(bytes.to_vec());
+    }
+    let image = image::load_from_memory(bytes)
+        .map_err(|e| {
+            let mime = mime_type.unwrap_or("unknown");
+            format!("Antigravity image generation returned unsupported image data ({mime}): {e}")
+        })?
+        .to_rgba8();
+    encode_rgba_png(image, "Antigravity generated image")
+}
+
+fn push_unique_diagnostic(diagnostics: &mut Vec<String>, message: impl Into<String>) {
+    let message = message.into();
+    let message = message.trim();
+    if message.is_empty() || diagnostics.iter().any(|item| item == message) {
+        return;
+    }
+    diagnostics.push(message.to_string());
+}
+
+fn json_string_field<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn collect_antigravity_safety_ratings(value: &serde_json::Value, diagnostics: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(ratings) = object
+                .get("safetyRatings")
+                .or_else(|| object.get("safety_ratings"))
+                .and_then(|value| value.as_array())
+            {
+                for rating in ratings {
+                    let Some(rating_object) = rating.as_object() else {
+                        continue;
+                    };
+                    let category = json_string_field(rating_object, &["category"])
+                        .unwrap_or("unknown category");
+                    let probability = json_string_field(rating_object, &["probability"])
+                        .or_else(|| json_string_field(rating_object, &["probabilityScore"]))
+                        .unwrap_or("unknown probability");
+                    let blocked = rating_object
+                        .get("blocked")
+                        .and_then(|value| value.as_bool())
+                        .map(|blocked| format!(", blocked={blocked}"))
+                        .unwrap_or_default();
+                    push_unique_diagnostic(
+                        diagnostics,
+                        format!("Safety rating: {category} ({probability}{blocked})"),
+                    );
+                }
+            }
+            for child in object.values() {
+                collect_antigravity_safety_ratings(child, diagnostics);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_antigravity_safety_ratings(child, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_antigravity_named_diagnostics(value: &serde_json::Value, diagnostics: &mut Vec<String>) {
+    const INTERESTING_KEYS: &[&str] = &[
+        "blockReason",
+        "blockReasonMessage",
+        "blockedReason",
+        "blocked",
+        "categories",
+        "code",
+        "description",
+        "details",
+        "errorDescription",
+        "error_description",
+        "errorMessage",
+        "error_message",
+        "filtered",
+        "finishMessage",
+        "finishReason",
+        "message",
+        "moderationDetails",
+        "moderation_details",
+        "reason",
+        "refusal",
+        "refusalReason",
+        "refusal_reason",
+        "safetyViolations",
+        "safety_violations",
+        "status",
+        "violations",
+    ];
+    const SKIP_KEYS: &[&str] = &[
+        "data",
+        "inlineData",
+        "inline_data",
+        "thoughtSignature",
+        "thought_signature",
+        "mimeType",
+        "role",
+    ];
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if SKIP_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
+                if INTERESTING_KEYS.contains(&key.as_str()) {
+                    if let Some(summary) = antigravity_diagnostic_value_summary(child) {
+                        push_unique_diagnostic(diagnostics, format!("{key}: {summary}"));
+                    }
+                }
+                collect_antigravity_named_diagnostics(child, diagnostics);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_antigravity_named_diagnostics(child, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn antigravity_diagnostic_value_summary(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.chars().take(500).collect())
+        }
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        serde_json::Value::Array(items) => {
+            let parts = items
+                .iter()
+                .take(12)
+                .filter_map(antigravity_diagnostic_value_summary)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(", "))
+        }
+        serde_json::Value::Object(object) => {
+            let mut compact = serde_json::Map::new();
+            for (key, value) in object.iter().take(12) {
+                if let Some(summary) = antigravity_diagnostic_value_summary(value) {
+                    compact.insert(key.clone(), serde_json::Value::String(summary));
+                }
+            }
+            (!compact.is_empty()).then(|| serde_json::Value::Object(compact).to_string())
+        }
+        serde_json::Value::Null => None,
+    }
+}
+
+fn antigravity_response_diagnostics(value: &serde_json::Value) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    collect_antigravity_named_diagnostics(value, &mut diagnostics);
+    collect_antigravity_safety_ratings(value, &mut diagnostics);
+    diagnostics
+}
+
+fn sanitized_antigravity_response_excerpt(value: &serde_json::Value) -> String {
+    fn sanitize(key: Option<&str>, value: &serde_json::Value) -> serde_json::Value {
+        let should_redact = key.is_some_and(|key| {
+            matches!(
+                key,
+                "data"
+                    | "b64_json"
+                    | "inlineData"
+                    | "inline_data"
+                    | "thoughtSignature"
+                    | "thought_signature"
+            )
+        });
+        if should_redact {
+            return serde_json::Value::String("<redacted>".into());
+        }
+        match value {
+            serde_json::Value::String(text) => {
+                if text.chars().count() > 500 {
+                    serde_json::Value::String(format!(
+                        "{}...[truncated]",
+                        text.chars().take(500).collect::<String>()
+                    ))
+                } else {
+                    serde_json::Value::String(text.clone())
+                }
+            }
+            serde_json::Value::Array(items) => serde_json::Value::Array(
+                items
+                    .iter()
+                    .take(20)
+                    .map(|item| sanitize(None, item))
+                    .collect(),
+            ),
+            serde_json::Value::Object(object) => serde_json::Value::Object(
+                object
+                    .iter()
+                    .map(|(child_key, child)| (child_key.clone(), sanitize(Some(child_key), child)))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+    let sanitized = sanitize(None, value);
+    let text = serde_json::to_string_pretty(&sanitized).unwrap_or_else(|_| sanitized.to_string());
+    output_tail(text.as_bytes())
+}
+
+fn decode_antigravity_generate_content_response_text(text: &str) -> Result<Vec<u8>, String> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| format!("Antigravity image generation response was invalid JSON: {e}"))?;
+    let envelope: AntigravityGenerateContentEnvelope = serde_json::from_value(value.clone())
+        .map_err(|e| format!("Antigravity image generation response was invalid JSON: {e}"))?;
+    let mut diagnostics = antigravity_response_diagnostics(&value);
+    let Some(response) = envelope.response else {
+        let trace = envelope
+            .trace_id
+            .map(|trace_id| format!(" Trace id: {trace_id}."))
+            .unwrap_or_default();
+        let detail = diagnostics.join("\n");
+        if detail.is_empty() {
+            return Err(format!(
+                "Antigravity image generation returned no response object.{trace}"
+            ));
+        }
+        return Err(format!(
+            "Antigravity image generation returned no response object.{trace}\n\n{detail}"
+        ));
+    };
+    for candidate in response.candidates {
+        if let Some(finish_message) = candidate
+            .finish_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            push_unique_diagnostic(&mut diagnostics, finish_message);
+        }
+        if let Some(finish_reason) = candidate
+            .finish_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            push_unique_diagnostic(&mut diagnostics, format!("finishReason={finish_reason}"));
+        }
+        let Some(content) = candidate.content else {
+            continue;
+        };
+        for part in content.parts {
+            if let Some(text) = part
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                push_unique_diagnostic(&mut diagnostics, text);
+            }
+            let Some(inline_data) = part.inline_data else {
+                continue;
+            };
+            let bytes = BASE64_STANDARD
+                .decode(inline_data.data.trim().as_bytes())
+                .map_err(|e| {
+                    format!("Antigravity image generation returned invalid base64 image data: {e}")
+                })?;
+            return antigravity_image_bytes_to_png(&bytes, inline_data.mime_type.as_deref());
+        }
+    }
+    let detail = diagnostics
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if detail.is_empty() {
+        let excerpt = sanitized_antigravity_response_excerpt(&value);
+        if excerpt.is_empty() {
+            Err("Antigravity image generation returned no image data.".into())
+        } else {
+            Err(format!(
+                "Antigravity image generation returned no image data.\n\nRaw response excerpt:\n{excerpt}"
+            ))
+        }
+    } else {
+        Err(format!(
+            "Antigravity image generation returned no image data.\n\n{detail}"
+        ))
+    }
+}
+
+fn antigravity_http_error_message(status: reqwest::StatusCode, body: &str) -> String {
+    let detail = output_tail(body.as_bytes());
+    let mut message = format!("Antigravity image generation failed with HTTP {status}.");
+    match status.as_u16() {
+        400 => message.push_str(
+            " The direct request schema was rejected or the image model refused the request.",
+        ),
+        401 | 403 => message.push_str(
+            " Antigravity account authentication was rejected. PaintNode retried after `agy models`; run `agy` in Terminal and sign in if this repeats.",
+        ),
+        503 => message.push_str(" The Antigravity image model is currently at capacity."),
+        _ => {}
+    }
+    if detail.contains("MODEL_CAPACITY_EXHAUSTED") {
+        message.push_str(" The response reported MODEL_CAPACITY_EXHAUSTED.");
+    }
+    if detail.is_empty() {
+        message
+    } else {
+        format!("{message}\n\n{detail}")
+    }
+}
+
+fn post_antigravity_image_request(
+    client: &Client,
+    token: &AntigravityAuthToken,
+    request_body: &serde_json::Value,
+) -> Result<(reqwest::StatusCode, String), String> {
+    let bearer = if token
+        .token_type
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("bearer"))
+    {
+        token.access_token.trim().to_string()
+    } else {
+        token.access_token.trim().to_string()
+    };
+    let response = client
+        .post(antigravity_generate_content_url(
+            &antigravity_image_backend_base_url(),
+        ))
+        .bearer_auth(bearer)
+        .json(request_body)
+        .send()
+        .map_err(|e| {
+            format_antigravity_image_request_error(
+                "Antigravity image generation request failed",
+                &e,
+            )
+        })?;
+    let status = response.status();
+    let text = response
+        .text()
+        .map_err(|e| format!("Antigravity image generation response could not be read: {e}"))?;
+    Ok((status, text))
+}
+
+fn run_antigravity_direct_image(
+    app: &AppHandle,
+    run_id: &str,
+    antigravity_bin: &str,
+    job_path: &Path,
+    spec: AntigravityImageRequestSpec,
+    options: &AntigravityCommandOptions,
+) -> Result<Vec<u8>, String> {
+    if ai_run_cancelled(run_id) {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
+    }
+    emit_codex_progress(app, run_id, "Authenticating Antigravity account");
+    wake_antigravity_auth(antigravity_bin, job_path)?;
+    let mut token = load_antigravity_keychain_token()?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    if antigravity_token_needs_refresh(Some(&token), now, 120) {
+        wake_antigravity_auth(antigravity_bin, job_path)?;
+        token = load_antigravity_keychain_token()?;
+    }
+    let request_body = antigravity_image_request_json(&spec, options)?;
+    let request_path = job_path.join(PAINTNODE_ANTIGRAVITY_IMAGE_REQUEST_FILE);
+    if let Ok(pretty) = serde_json::to_vec_pretty(&request_body) {
+        let _ = fs::write(request_path, pretty);
+    }
+    if ai_run_cancelled(run_id) {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
+    }
+    let user_agent = antigravity_image_user_agent(antigravity_bin);
+    let client = antigravity_image_http_client(&user_agent)?;
+    emit_codex_progress(app, run_id, "Calling Antigravity image backend");
+    let (mut status, mut text) = post_antigravity_image_request(&client, &token, &request_body)?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        emit_codex_progress(
+            app,
+            run_id,
+            "Refreshing Antigravity auth after backend rejection",
+        );
+        wake_antigravity_auth(antigravity_bin, job_path)?;
+        token = load_antigravity_keychain_token()?;
+        let retry = post_antigravity_image_request(&client, &token, &request_body)?;
+        status = retry.0;
+        text = retry.1;
+    }
+    let _ = fs::write(
+        job_path.join(PAINTNODE_ANTIGRAVITY_IMAGE_RESPONSE_FILE),
+        &text,
+    );
+    if ai_run_cancelled(run_id) {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
+    }
+    if !status.is_success() {
+        return Err(antigravity_http_error_message(status, &text));
+    }
+    decode_antigravity_generate_content_response_text(&text)
+}
+
+fn antigravity_closest_aspect_label(dimensions: (u32, u32)) -> Option<String> {
+    let target_ratio = dimensions.0 as f64 / dimensions.1 as f64;
+    ai_antigravity_image_capability()
+        .aspect_ratios
+        .iter()
+        .min_by(|a, b| {
+            let a_error = ((a.width as f64 / a.height as f64) / target_ratio)
+                .ln()
+                .abs();
+            let b_error = ((b.width as f64 / b.height as f64) / target_ratio)
+                .ln()
+                .abs();
+            a_error
+                .partial_cmp(&b_error)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|ratio| ratio.label.clone())
+}
+
+fn antigravity_direct_spec_for_working(
+    prompt: String,
+    image_paths: Vec<PathBuf>,
+    working: &AiWorkingCanvas,
+) -> AntigravityImageRequestSpec {
+    let image_size = antigravity_output_target(&working.aspect_label, working.original_dimensions)
+        .map(|(tier, _)| tier.to_string());
+    AntigravityImageRequestSpec {
+        prompt,
+        image_paths,
+        aspect_ratio: Some(working.aspect_label.clone()),
+        image_size,
+    }
 }
 
 fn antigravity_brain_dir() -> Option<PathBuf> {
@@ -362,11 +1456,96 @@ fn antigravity_command_options(
     model: Option<String>,
     approval_mode: Option<String>,
 ) -> AntigravityCommandOptions {
+    antigravity_command_options_with_image(
+        model,
+        approval_mode,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn antigravity_command_options_with_image(
+    model: Option<String>,
+    approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
+) -> AntigravityCommandOptions {
     let model = clean_option(model).filter(|value| value != "auto");
     let approval_mode = clean_option(approval_mode);
+    let image_model = clean_option(image_model).filter(|value| value != "auto");
+    let image_size = clean_option(image_size).filter(|value| value != "auto");
+    let person_generation = clean_option(person_generation)
+        .filter(|value| value != "auto")
+        .filter(|value| matches!(value.as_str(), "ALLOW_ALL" | "ALLOW_ADULT" | "ALLOW_NONE"));
+    let prominent_people = clean_option(prominent_people)
+        .filter(|value| value != "auto")
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "ALLOW_PROMINENT_PEOPLE" | "BLOCK_PROMINENT_PEOPLE"
+            )
+        });
+    let compression_quality = compression_quality.map(|quality| quality.min(100));
+    let advanced_json =
+        clean_option(advanced_json).filter(|value| value.trim() != "{}" && value.trim() != "null");
+    let safety_filtering = clean_option(safety_filtering)
+        .filter(|value| value != "default")
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "lessRestrictive" | "moreRestrictive" | "custom"
+            )
+        });
+    let clean_safety_threshold = |value: Option<String>| {
+        clean_option(value).filter(|value| {
+            matches!(
+                value.as_str(),
+                "OFF"
+                    | "BLOCK_NONE"
+                    | "BLOCK_ONLY_HIGH"
+                    | "BLOCK_MEDIUM_AND_ABOVE"
+                    | "BLOCK_LOW_AND_ABOVE"
+                    | ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD
+            )
+        })
+    };
+    let safety_harassment = clean_safety_threshold(safety_harassment);
+    let safety_hate_speech = clean_safety_threshold(safety_hate_speech);
+    let safety_sexually_explicit = clean_safety_threshold(safety_sexually_explicit);
+    let safety_dangerous_content = clean_safety_threshold(safety_dangerous_content);
     AntigravityCommandOptions {
         model,
         approval_mode,
+        image_model,
+        image_size,
+        person_generation,
+        prominent_people,
+        compression_quality,
+        advanced_json,
+        safety_filtering,
+        safety_harassment,
+        safety_hate_speech,
+        safety_sexually_explicit,
+        safety_dangerous_content,
     }
 }
 
@@ -1102,14 +2281,14 @@ fn remove_legacy_storyboard_part_guides(part_path: &Path) {
 fn prepare_antigravity_fill_storyboard(
     app: &AppHandle,
     run_id: &str,
-    antigravity_bin: &str,
-    workspace_path: &Path,
+    _antigravity_bin: &str,
+    _workspace_path: &Path,
     job_path: &Path,
     placement: &crate::ai::placement::AiEditPlacement,
     composer: &AiEditComposer,
-    prompt: &str,
-    reference_pngs: &[WorkflowSourceImage],
-    options: &AntigravityCommandOptions,
+    _prompt: &str,
+    _reference_pngs: &[WorkflowSourceImage],
+    _options: &AntigravityCommandOptions,
 ) -> Result<Option<FillStoryboard>, String> {
     if !should_storyboard_fill(placement) {
         return Ok(None);
@@ -1127,65 +2306,14 @@ fn prepare_antigravity_fill_storyboard(
     )
     .map_err(|e| format!("Failed to write generative fill storyboard overview: {e}"))?;
     write_antigravity_storyboard_draft_guides(job_path, placement, &storyboard_overview)?;
-    let (_reference_paths, reference_names) =
-        write_reference_pngs(job_path, reference_pngs, "Generative fill storyboard")?;
-    let job_dir = antigravity_job_dir_label(workspace_path, job_path);
-    let prompt_text = fill_storyboard_master_prompt(
-        prompt.trim(),
-        "Antigravity",
-        &job_dir,
-        placement,
-        &reference_names,
-    );
-    write_ai_job_prompt(job_path, &prompt_text, "Antigravity fill storyboard")?;
     emit_codex_progress(
         app,
         run_id,
-        "Planning split fill storyboard with Antigravity",
+        "Using PaintNode deterministic storyboard for split Antigravity fill",
     );
-
-    let run_result = run_antigravity(
-        antigravity_bin,
-        workspace_path,
-        job_path,
-        &prompt_text,
-        options,
-        false,
-        app.clone(),
-        run_id.to_string(),
-        None,
-    );
-    let mut failure = match run_result {
-        Ok(run) if run.output.status.success() || job_path.join(FILL_STORYBOARD_FILE).exists() => {
-            None
-        }
-        Ok(run) => Some(command_failure("Antigravity fill storyboard", &run.output)),
-        Err(error) => Some(error),
-    };
-    normalize_storyboard_draft_result(job_path, placement)?;
-
-    match read_fill_storyboard_file(job_path, placement.parts.len()) {
-        Ok(storyboard) => Ok(Some(storyboard)),
-        Err(error) => {
-            if let Some(previous) = failure.take() {
-                failure = Some(format!("{previous}\n\n{error}"));
-            } else {
-                failure = Some(error);
-            }
-            let failure =
-                failure.unwrap_or_else(|| "Antigravity did not write storyboard.json.".into());
-            preserve_invalid_fill_storyboard_file(job_path);
-            record_fill_storyboard_failure(job_path, &failure);
-            emit_codex_progress(
-                app,
-                run_id,
-                "Using PaintNode fallback storyboard after Antigravity planning failed",
-            );
-            let fallback = fallback_fill_storyboard(placement);
-            write_fill_storyboard_file(job_path, &fallback)?;
-            Ok(Some(fallback))
-        }
-    }
+    let fallback = fallback_fill_storyboard(placement);
+    write_fill_storyboard_file(job_path, &fallback)?;
+    Ok(Some(fallback))
 }
 
 fn antigravity_restore_prompt(
@@ -1247,7 +2375,7 @@ fn antigravity_restore_image_details(
     autonomy: AiAutonomyLevel,
     workspace_path: &Path,
     restore_root: &Path,
-    allow_new_project: bool,
+    _allow_new_project: bool,
     enlarged_png: &[u8],
     label: &str,
 ) -> Result<Vec<u8>, String> {
@@ -1315,31 +2443,31 @@ fn antigravity_restore_image_details(
                 "Restoring image detail with Antigravity",
             ),
         );
-        let run = run_antigravity(
+        let result_path = part_path.join("result.png");
+        let mut image_paths = vec![
+            part_path.join("edit_target.png"),
+            part_path.join("mask.png"),
+            part_path.join("source.png"),
+        ];
+        if has_overview {
+            image_paths.push(part_path.join("overview.png"));
+        }
+        let bytes = run_antigravity_direct_image(
+            app,
+            run_id,
             antigravity_bin,
-            workspace_path,
             &part_path,
-            &prompt_text,
+            antigravity_direct_spec_for_working(prompt_text.clone(), image_paths, &part.working),
             options,
-            allow_new_project && part_index == 0,
-            app.clone(),
-            run_id.to_string(),
-            Some("result.png"),
         )
         .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        if !run.output.status.success() && !run.satisfied_required_output {
-            return Err(ai_part_progress_message(
+        fs::write(&result_path, &bytes).map_err(|e| {
+            ai_part_progress_message(
                 &placement,
                 part_index,
-                &command_failure_with_required_output(
-                    "Antigravity detail restoration",
-                    &run.output,
-                    &part_path,
-                    "result.png",
-                ),
-            ));
-        }
-        let result_path = part_path.join("result.png");
+                &format!("Failed to write Antigravity detail restoration result: {e}"),
+            )
+        })?;
         let (bytes, _result_dimensions, _normalized) =
             read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
@@ -1361,6 +2489,17 @@ pub(crate) async fn generate_antigravity_image(
     run_id: String,
     model: Option<String>,
     approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
@@ -1373,7 +2512,21 @@ pub(crate) async fn generate_antigravity_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
-        let options = antigravity_command_options(model, approval_mode);
+        let options = antigravity_command_options_with_image(
+            model,
+            approval_mode,
+            image_model,
+            image_size,
+            person_generation,
+            prominent_people,
+            compression_quality,
+            advanced_json,
+            safety_filtering,
+            safety_harassment,
+            safety_hate_speech,
+            safety_sexually_explicit,
+            safety_dangerous_content,
+        );
         let autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
@@ -1390,9 +2543,8 @@ pub(crate) async fn generate_antigravity_image(
             .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
             .unwrap_or(job_path.as_path())
             .to_path_buf();
-        let new_antigravity_project = job_project_dir.is_none();
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
-        let (_reference_paths, reference_names) =
+        let (reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
         let prompt_text =
             antigravity_generate_prompt(prompt.trim(), &job_dir, autonomy, &reference_names);
@@ -1410,29 +2562,32 @@ pub(crate) async fn generate_antigravity_image(
             bytes
         } else {
             let _ = fs::remove_file(&result_path);
-            emit_codex_progress(&app, &run_id, "Starting local Antigravity");
-            let run = run_antigravity(
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Generating through Antigravity image backend",
+            );
+            let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
+            let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
+                target_dimensions
+                    .and_then(|target| antigravity_output_target(aspect, target))
+                    .map(|(tier, _)| tier.to_string())
+            });
+            let bytes = run_antigravity_direct_image(
+                &app,
+                &run_id,
                 &antigravity_bin,
-                &workspace_path,
                 &job_path,
-                &prompt_text,
+                AntigravityImageRequestSpec {
+                    prompt: prompt_text.clone(),
+                    image_paths: reference_paths,
+                    aspect_ratio,
+                    image_size: provider_size,
+                },
                 &options,
-                new_antigravity_project,
-                app.clone(),
-                run_id.clone(),
-                Some("result.png"),
             )?;
-            if !run.output.status.success() && !run.satisfied_required_output {
-                return Err(command_failure_with_required_output(
-                    "Antigravity",
-                    &run.output,
-                    &job_path,
-                    "result.png",
-                ));
-            }
-            emit_codex_progress(&app, &run_id, "Reading Antigravity result");
-            let bytes = fs::read(&result_path)
-                .map_err(|e| format!("Failed to read Antigravity image: {e}"))?;
+            fs::write(&result_path, &bytes)
+                .map_err(|e| format!("Failed to write Antigravity image result: {e}"))?;
             png_dimensions_from_bytes(&bytes)
                 .ok_or_else(|| "Antigravity image PNG dimensions are invalid.".to_string())?;
             bytes
@@ -1525,6 +2680,17 @@ pub(crate) async fn generate_antigravity_fill_image(
     run_id: String,
     model: Option<String>,
     approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
     fill_aspect_ratio: Option<String>,
@@ -1549,7 +2715,21 @@ pub(crate) async fn generate_antigravity_fill_image(
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
-        let options = antigravity_command_options(model, approval_mode);
+        let options = antigravity_command_options_with_image(
+            model,
+            approval_mode,
+            image_model,
+            image_size,
+            person_generation,
+            prominent_people,
+            compression_quality,
+            advanced_json,
+            safety_filtering,
+            safety_harassment,
+            safety_hate_speech,
+            safety_sexually_explicit,
+            safety_dangerous_content,
+        );
         let autonomy = ai_autonomy_level(autonomy_level);
         let _checks_level = ai_edit_checks_level(edit_checks_level);
         let fill_aspect_ratio = fill_aspect_ratio
@@ -1578,7 +2758,6 @@ pub(crate) async fn generate_antigravity_fill_image(
             .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
             .unwrap_or(job_path.as_path())
             .to_path_buf();
-        let new_antigravity_project = job_project_dir.is_none();
 
         let placement = plan_ai_fill_placement(
             AiEditProvider::Antigravity,
@@ -1792,35 +2971,40 @@ pub(crate) async fn generate_antigravity_fill_image(
                 ai_part_progress_message(
                     &placement,
                     part_index,
-                    "Starting local Antigravity generative fill",
+                    "Generating through Antigravity image backend",
                 ),
             );
             let result_path = part_path.join("result.png");
             write_ai_job_prompt(&part_path, &base_prompt_text, "Antigravity generative fill")?;
-            let run = run_antigravity(
+            let mut image_paths = vec![part_path.join("source.png")];
+            if has_overview {
+                image_paths.push(part_path.join("overview.png"));
+            }
+            if !has_storyboard_draft {
+                let (reference_paths, _reference_names) =
+                    write_reference_pngs(&part_path, &reference_pngs, "Generative fill")?;
+                image_paths.extend(reference_paths);
+            }
+            let generated = run_antigravity_direct_image(
+                &app,
+                &run_id,
                 &antigravity_bin,
-                &workspace_path,
                 &part_path,
-                &base_prompt_text,
+                antigravity_direct_spec_for_working(
+                    base_prompt_text.clone(),
+                    image_paths,
+                    &part.working,
+                ),
                 &options,
-                new_antigravity_project && part_index == 0,
-                app.clone(),
-                run_id.clone(),
-                Some("result.png"),
             )
             .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            if !run.output.status.success() && !run.satisfied_required_output {
-                return Err(ai_part_progress_message(
+            fs::write(&result_path, &generated).map_err(|e| {
+                ai_part_progress_message(
                     &placement,
                     part_index,
-                    &command_failure_with_required_output(
-                        "Antigravity generative fill",
-                        &run.output,
-                        &part_path,
-                        "result.png",
-                    ),
-                ));
-            }
+                    &format!("Failed to write Antigravity generative fill result: {e}"),
+                )
+            })?;
             let (generated_bytes, result_dimensions, normalized_result) =
                 read_png_bytes_cropped_to_ai_working_canvas(
                     &result_path,
@@ -1984,6 +3168,17 @@ pub(crate) async fn generate_antigravity_retouch_image(
     run_id: String,
     model: Option<String>,
     approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
 ) -> Result<GeneratedImageResult, String> {
@@ -2007,7 +3202,21 @@ pub(crate) async fn generate_antigravity_retouch_image(
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
-        let options = antigravity_command_options(model, approval_mode);
+        let options = antigravity_command_options_with_image(
+            model,
+            approval_mode,
+            image_model,
+            image_size,
+            person_generation,
+            prominent_people,
+            compression_quality,
+            advanced_json,
+            safety_filtering,
+            safety_harassment,
+            safety_hate_speech,
+            safety_sexually_explicit,
+            safety_dangerous_content,
+        );
         let autonomy = ai_autonomy_level(autonomy_level);
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
@@ -2031,7 +3240,6 @@ pub(crate) async fn generate_antigravity_retouch_image(
             .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
             .unwrap_or(job_path.as_path())
             .to_path_buf();
-        let new_antigravity_project = job_project_dir.is_none();
 
         let placement = plan_ai_edit_placement(
             AiEditProvider::Antigravity,
@@ -2112,7 +3320,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
                 antigravity_retouch_contract_text(&job_dir, autonomy, &geometry_note),
             )
             .map_err(|e| format!("Failed to write AI retouch PaintNode contract: {e}"))?;
-            let (_reference_paths, reference_names) =
+            let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
             let base_prompt_text = antigravity_retouch_prompt(
                 prompt.trim(),
@@ -2135,7 +3343,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
                 ai_part_progress_message(
                     &placement,
                     part_index,
-                    "Starting local Antigravity AI retouch",
+                    "Generating through Antigravity image backend",
                 ),
             );
             let result_path = part_path.join("result.png");
@@ -2148,30 +3356,41 @@ pub(crate) async fn generate_antigravity_retouch_image(
                     format!("{base_prompt_text}\n\n{retry_note}")
                 };
                 write_ai_job_prompt(&part_path, &prompt_text, "Antigravity AI retouch")?;
-                let run = run_antigravity(
+                let mut image_paths = vec![
+                    part_path.join("edit_target.png"),
+                    part_path.join("mask.png"),
+                    part_path.join("source.png"),
+                ];
+                if has_overview {
+                    image_paths.push(part_path.join("overview.png"));
+                }
+                if has_annotated_source {
+                    image_paths.push(part_path.join("annotated_source.png"));
+                }
+                if has_reference {
+                    image_paths.push(part_path.join("reference.png"));
+                }
+                image_paths.extend(reference_paths.clone());
+                let generated = run_antigravity_direct_image(
+                    &app,
+                    &run_id,
                     &antigravity_bin,
-                    &workspace_path,
                     &part_path,
-                    &prompt_text,
+                    antigravity_direct_spec_for_working(
+                        prompt_text.clone(),
+                        image_paths,
+                        &part.working,
+                    ),
                     &options,
-                    new_antigravity_project && part_index == 0 && attempt == 0,
-                    app.clone(),
-                    run_id.clone(),
-                    Some("result.png"),
                 )
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                if !run.output.status.success() && !run.satisfied_required_output {
-                    return Err(ai_part_progress_message(
+                fs::write(&result_path, &generated).map_err(|e| {
+                    ai_part_progress_message(
                         &placement,
                         part_index,
-                        &command_failure_with_required_output(
-                            "Antigravity AI retouch",
-                            &run.output,
-                            &part_path,
-                            "result.png",
-                        ),
-                    ));
-                }
+                        &format!("Failed to write Antigravity AI retouch result: {e}"),
+                    )
+                })?;
                 emit_codex_progress(
                     &app,
                     &run_id,
@@ -2312,6 +3531,17 @@ pub(crate) async fn upscale_antigravity_image(
     run_id: String,
     model: Option<String>,
     approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
@@ -2325,7 +3555,21 @@ pub(crate) async fn upscale_antigravity_image(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
-        let options = antigravity_command_options(model, approval_mode);
+        let options = antigravity_command_options_with_image(
+            model,
+            approval_mode,
+            image_model,
+            image_size,
+            person_generation,
+            prominent_people,
+            compression_quality,
+            advanced_json,
+            safety_filtering,
+            safety_harassment,
+            safety_hate_speech,
+            safety_sexually_explicit,
+            safety_dangerous_content,
+        );
         let autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-upscale-{}", now_id())
@@ -2640,6 +3884,17 @@ pub(crate) async fn compose_antigravity_workflow(
     keep_job_dir: Option<bool>,
     model: Option<String>,
     approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
@@ -2651,7 +3906,21 @@ pub(crate) async fn compose_antigravity_workflow(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
-        let options = antigravity_command_options(model, approval_mode);
+        let options = antigravity_command_options_with_image(
+            model,
+            approval_mode,
+            image_model,
+            image_size,
+            person_generation,
+            prominent_people,
+            compression_quality,
+            advanced_json,
+            safety_filtering,
+            safety_harassment,
+            safety_hate_speech,
+            safety_sexually_explicit,
+            safety_dangerous_content,
+        );
         let autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-workflow-{}", now_id())
@@ -2674,12 +3943,12 @@ pub(crate) async fn compose_antigravity_workflow(
             .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
             .unwrap_or(job_path.as_path())
             .to_path_buf();
-        let new_antigravity_project = job_project_dir.is_none();
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
         let input_dir = job_path.join("inputs");
         fs::create_dir_all(&input_dir)
             .map_err(|e| format!("Failed to create workflow input folder: {e}"))?;
         let mut source_names = Vec::new();
+        let mut source_paths = Vec::new();
         for (index, source) in sources.into_iter().enumerate() {
             if !is_png(&source.bytes) {
                 return Err(format!(
@@ -2696,6 +3965,7 @@ pub(crate) async fn compose_antigravity_workflow(
             fs::write(&path, &source.bytes)
                 .map_err(|e| format!("Failed to write workflow source image: {e}"))?;
             source_names.push(name);
+            source_paths.push(path);
         }
         let prompt_text =
             antigravity_workflow_prompt(prompt.trim(), &source_names, &job_dir, autonomy);
@@ -2705,33 +3975,26 @@ pub(crate) async fn compose_antigravity_workflow(
         emit_codex_progress(
             &app,
             &run_id,
-            "Starting local Antigravity workflow composition",
+            "Generating workflow composition through Antigravity image backend",
         );
-        let run = run_antigravity(
-            &antigravity_bin,
-            &workspace_path,
-            &job_path,
-            &prompt_text,
-            &options,
-            new_antigravity_project,
-            app.clone(),
-            run_id.clone(),
-            Some("result.png"),
-        )?;
-        if !run.output.status.success() && !run.satisfied_required_output {
-            return Err(command_failure_with_required_output(
-                "Antigravity workflow composition",
-                &run.output,
-                &job_path,
-                "result.png",
-            ));
-        }
         let result_path = job_path.join("result.png");
-        let data_url = read_png_data_url(&result_path)?;
+        let bytes = run_antigravity_direct_image(
+            &app,
+            &run_id,
+            &antigravity_bin,
+            &job_path,
+            AntigravityImageRequestSpec {
+                prompt: prompt_text.clone(),
+                image_paths: source_paths,
+                aspect_ratio: None,
+                image_size: None,
+            },
+            &options,
+        )?;
+        fs::write(&result_path, &bytes)
+            .map_err(|e| format!("Failed to write Antigravity workflow result: {e}"))?;
+        let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
-            let bytes = fs::read(&result_path).map_err(|e| {
-                format!("Failed to read Antigravity composed image for project storage: {e}")
-            })?;
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
             Some(add_asset(
@@ -2773,6 +4036,485 @@ mod tests {
     use crate::ai::canvas::ai_exact_working_canvas;
     use crate::ai::ANTIGRAVITY_RUNS_DIR;
     use crate::ai::{TempJobDir, PAINTNODE_WORK_DIR};
+    use crate::test_util::test_rgba_png;
+
+    #[test]
+    fn parses_antigravity_keychain_token_envelope() {
+        let envelope = json!({
+            "auth_method": "consumer",
+            "token": {
+                "access_token": "access-redacted",
+                "refresh_token": "refresh-redacted",
+                "token_type": "Bearer",
+                "expiry": "2026-07-08T13:21:59.513345+09:30"
+            }
+        });
+        let encoded = BASE64_STANDARD.encode(envelope.to_string());
+        let parsed =
+            parse_antigravity_keychain_token(&format!("consumer:{encoded}")).expect("parsed token");
+
+        assert_eq!(parsed.access_token, "access-redacted");
+        assert_eq!(parsed.token_type.as_deref(), Some("Bearer"));
+        assert_eq!(
+            parsed.expiry.as_deref(),
+            Some("2026-07-08T13:21:59.513345+09:30")
+        );
+    }
+
+    #[test]
+    fn antigravity_token_refreshes_when_missing_or_near_expiry() {
+        assert!(antigravity_token_needs_refresh(None, 100, 60));
+        let token = AntigravityAuthToken {
+            access_token: "access-redacted".into(),
+            token_type: Some("Bearer".into()),
+            expiry: Some("1970-01-01T00:03:00Z".into()),
+        };
+
+        assert_eq!(
+            parse_antigravity_expiry_unix_seconds("1970-01-01T00:03:00Z"),
+            Some(180)
+        );
+        assert!(!antigravity_token_needs_refresh(Some(&token), 100, 60));
+        assert!(antigravity_token_needs_refresh(Some(&token), 130, 60));
+    }
+
+    #[test]
+    fn builds_generate_content_request_with_image_config_and_inline_png() {
+        let job = TempJobDir::new("paintnode-antigravity-direct-request-test").expect("temp dir");
+        let source = job.path().join("source.png");
+        fs::write(&source, test_rgba_png(1, 1, &[[255, 0, 0, 255]])).expect("write source");
+        let options = antigravity_command_options_with_image(
+            None,
+            None,
+            Some("gemini-3.1-flash-image".into()),
+            None,
+            Some("ALLOW_NONE".into()),
+            Some("BLOCK_PROMINENT_PEOPLE".into()),
+            Some(82),
+            Some(r#"{"imageOutputOptions":{"mimeType":"IMAGE_JPEG"}}"#.into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let request = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Paint a red square.".into(),
+                image_paths: vec![source],
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &options,
+        )
+        .expect("request");
+
+        assert_eq!(request["model"], "gemini-3.1-flash-image");
+        assert_eq!(request["request"]["contents"][0]["role"], "user");
+        assert!(request["request"]["contents"][0]["parts"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("Paint a red square."));
+        assert_eq!(
+            request["request"]["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+            "image/png"
+        );
+        let image_config = &request["request"]["generationConfig"]["imageConfig"];
+        assert_eq!(image_config["aspectRatio"], "1:1");
+        assert_eq!(image_config["imageSize"], "1K");
+        assert_eq!(image_config["personGeneration"], "ALLOW_NONE");
+        assert_eq!(image_config["prominentPeople"], "BLOCK_PROMINENT_PEOPLE");
+        assert_eq!(image_config["imageOutputOptions"]["compressionQuality"], 82);
+        assert_eq!(image_config["imageOutputOptions"]["mimeType"], "IMAGE_JPEG");
+        assert!(request["request"].get("safetySettings").is_none());
+    }
+
+    #[test]
+    fn omits_generate_content_safety_settings_for_default_filtering() {
+        let options = antigravity_command_options_with_image(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("default".into()),
+            Some("BLOCK_NONE".into()),
+            Some("BLOCK_NONE".into()),
+            Some("BLOCK_NONE".into()),
+            Some("BLOCK_NONE".into()),
+        );
+        let request = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Paint a red square.".into(),
+                image_paths: Vec::new(),
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &options,
+        )
+        .expect("request");
+
+        assert!(request["request"].get("safetySettings").is_none());
+    }
+
+    #[test]
+    fn builds_generate_content_safety_settings_for_presets() {
+        let options = antigravity_command_options_with_image(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("lessRestrictive".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let request = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Paint a red square.".into(),
+                image_paths: Vec::new(),
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &options,
+        )
+        .expect("request");
+        let settings = request["request"]["safetySettings"]
+            .as_array()
+            .expect("safety settings");
+        assert_eq!(settings.len(), 4);
+        assert!(settings
+            .iter()
+            .all(|setting| setting["threshold"] == "BLOCK_ONLY_HIGH"));
+
+        let options = antigravity_command_options_with_image(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("moreRestrictive".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let request = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Paint a red square.".into(),
+                image_paths: Vec::new(),
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &options,
+        )
+        .expect("request");
+        let settings = request["request"]["safetySettings"]
+            .as_array()
+            .expect("safety settings");
+        assert_eq!(settings.len(), 4);
+        assert!(settings
+            .iter()
+            .all(|setting| setting["threshold"] == "BLOCK_LOW_AND_ABOVE"));
+    }
+
+    #[test]
+    fn builds_generate_content_safety_settings_for_custom_categories() {
+        let options = antigravity_command_options_with_image(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("custom".into()),
+            Some("BLOCK_NONE".into()),
+            Some(ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD.into()),
+            Some("BLOCK_MEDIUM_AND_ABOVE".into()),
+            Some("BLOCK_LOW_AND_ABOVE".into()),
+        );
+        let request = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Paint a red square.".into(),
+                image_paths: Vec::new(),
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &options,
+        )
+        .expect("request");
+        let settings = request["request"]["safetySettings"]
+            .as_array()
+            .expect("safety settings");
+
+        assert_eq!(settings.len(), 3);
+        assert!(settings.iter().any(|setting| {
+            setting["category"] == "HARM_CATEGORY_HARASSMENT"
+                && setting["threshold"] == "BLOCK_NONE"
+        }));
+        assert!(!settings
+            .iter()
+            .any(|setting| setting["category"] == "HARM_CATEGORY_HATE_SPEECH"));
+        assert!(settings.iter().any(|setting| {
+            setting["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT"
+                && setting["threshold"] == "BLOCK_MEDIUM_AND_ABOVE"
+        }));
+        assert!(settings.iter().any(|setting| {
+            setting["category"] == "HARM_CATEGORY_DANGEROUS_CONTENT"
+                && setting["threshold"] == "BLOCK_LOW_AND_ABOVE"
+        }));
+    }
+
+    #[test]
+    fn decodes_inline_png_generate_content_response() {
+        let png = test_rgba_png(1, 1, &[[0, 128, 255, 255]]);
+        let body = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": BASE64_STANDARD.encode(&png)
+                            }
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }
+        })
+        .to_string();
+        let decoded =
+            decode_antigravity_generate_content_response_text(&body).expect("decoded image");
+
+        assert_eq!(png_dimensions_from_bytes(&decoded), Some((1, 1)));
+    }
+
+    #[test]
+    fn converts_inline_jpeg_generate_content_response_to_png() {
+        let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([240, 40, 20, 255]));
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .expect("jpeg");
+        let body = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
+                                "data": BASE64_STANDARD.encode(jpeg.into_inner())
+                            }
+                        }]
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let decoded =
+            decode_antigravity_generate_content_response_text(&body).expect("decoded image");
+
+        assert!(is_png(&decoded));
+        assert_eq!(png_dimensions_from_bytes(&decoded), Some((2, 1)));
+    }
+
+    #[test]
+    fn surfaces_no_image_finish_message() {
+        let body = json!({
+            "response": {
+                "candidates": [{
+                    "finishReason": "STOP",
+                    "finishMessage": "Unable to show the generated image."
+                }]
+            }
+        })
+        .to_string();
+        let error = decode_antigravity_generate_content_response_text(&body)
+            .expect_err("should reject no-image response");
+
+        assert!(error.contains("returned no image data"));
+        assert!(error.contains("Unable to show the generated image."));
+    }
+
+    #[test]
+    fn surfaces_prompt_feedback_and_safety_ratings_when_no_image_is_returned() {
+        let body = json!({
+            "response": {
+                "promptFeedback": {
+                    "blockReason": "PROHIBITED_CONTENT",
+                    "blockReasonMessage": "The prompt was blocked by the image safety system.",
+                    "safetyRatings": [{
+                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        "probability": "HIGH",
+                        "blocked": true
+                    }]
+                },
+                "candidates": [{
+                    "finishReason": "SAFETY",
+                    "safetyRatings": [{
+                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        "probability": "HIGH",
+                        "blocked": true
+                    }]
+                }]
+            }
+        })
+        .to_string();
+        let error = decode_antigravity_generate_content_response_text(&body)
+            .expect_err("should surface safety diagnostics");
+
+        assert!(error.contains("returned no image data"));
+        assert!(error.contains("blockReason: PROHIBITED_CONTENT"));
+        assert!(error
+            .contains("blockReasonMessage: The prompt was blocked by the image safety system."));
+        assert!(error.contains("finishReason: SAFETY"));
+        assert!(
+            error.contains("Safety rating: HARM_CATEGORY_SEXUALLY_EXPLICIT (HIGH, blocked=true)")
+        );
+    }
+
+    #[test]
+    fn surfaces_sanitized_raw_excerpt_when_no_structured_diagnostics_exist() {
+        let body = json!({
+            "response": {
+                "candidates": [],
+                "metadata": {
+                    "opaque": "backend returned no candidate details"
+                }
+            },
+            "traceId": "trace-redacted"
+        })
+        .to_string();
+        let error = decode_antigravity_generate_content_response_text(&body)
+            .expect_err("should surface raw excerpt");
+
+        assert!(error.contains("returned no image data"));
+        assert!(error.contains("Raw response excerpt"));
+        assert!(error.contains("backend returned no candidate details"));
+        assert!(error.contains("trace-redacted"));
+    }
+
+    #[test]
+    fn formats_antigravity_http_auth_and_capacity_errors() {
+        let auth = antigravity_http_error_message(reqwest::StatusCode::FORBIDDEN, "{}");
+        assert!(auth.contains("HTTP 403"));
+        assert!(auth.contains("authentication was rejected"));
+
+        let capacity = antigravity_http_error_message(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":{"status":"MODEL_CAPACITY_EXHAUSTED"}}"#,
+        );
+        assert!(capacity.contains("HTTP 503"));
+        assert!(capacity.contains("currently at capacity"));
+        assert!(capacity.contains("MODEL_CAPACITY_EXHAUSTED"));
+    }
+
+    #[test]
+    fn rejects_unsupported_advanced_image_options() {
+        let job = TempJobDir::new("paintnode-antigravity-advanced-options-test").expect("temp dir");
+        let source = job.path().join("source.png");
+        fs::write(&source, test_rgba_png(1, 1, &[[255, 0, 0, 255]])).expect("write source");
+        let options = antigravity_command_options_with_image(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(r#"{"endpointUrl":"https://example.test"}"#.into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let error = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Paint a red square.".into(),
+                image_paths: vec![source],
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &options,
+        )
+        .expect_err("unsupported option should fail");
+
+        assert!(error.contains("endpointUrl"));
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    #[ignore = "manual schema probe; set PAINTNODE_ANTIGRAVITY_LIVE_SCHEMA_PROBE=1 and run explicitly"]
+    fn live_antigravity_generate_content_schema_probe() {
+        assert_eq!(
+            std::env::var("PAINTNODE_ANTIGRAVITY_LIVE_SCHEMA_PROBE").as_deref(),
+            Ok("1"),
+            "set PAINTNODE_ANTIGRAVITY_LIVE_SCHEMA_PROBE=1 to run this live probe"
+        );
+        let job = TempJobDir::new("paintnode-antigravity-live-schema-probe").expect("temp dir");
+        let antigravity_bin =
+            configured_or_default_antigravity_bin(None).expect("Antigravity CLI auth helper");
+        wake_antigravity_auth(&antigravity_bin, job.path()).expect("auth wake");
+        let token = load_antigravity_keychain_token().expect("keychain token");
+        let client = antigravity_image_http_client(&antigravity_image_user_agent(&antigravity_bin))
+            .expect("client");
+        let request = antigravity_image_request_json(
+            &AntigravityImageRequestSpec {
+                prompt: "Generate a simple centered red square icon on a plain white background."
+                    .into(),
+                image_paths: Vec::new(),
+                aspect_ratio: Some("1:1".into()),
+                image_size: Some("1K".into()),
+            },
+            &antigravity_command_options_with_image(
+                None,
+                None,
+                Some(DEFAULT_ANTIGRAVITY_IMAGE_MODEL.into()),
+                None,
+                Some("ALLOW_NONE".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        )
+        .expect("request");
+        fs::write(
+            job.path().join(PAINTNODE_ANTIGRAVITY_IMAGE_REQUEST_FILE),
+            serde_json::to_vec_pretty(&request).expect("request json"),
+        )
+        .expect("write request");
+        let (status, text) =
+            post_antigravity_image_request(&client, &token, &request).expect("post");
+        fs::write(job.path().join("response.json"), &text).expect("write response");
+        assert!(
+            status.is_success(),
+            "{}",
+            antigravity_http_error_message(status, &text)
+        );
+        let png = decode_antigravity_generate_content_response_text(&text).expect("image");
+        fs::write(job.path().join("result.png"), png).expect("write result");
+    }
 
     #[test]
     fn antigravity_command_applies_model_and_skip_permission_options() {

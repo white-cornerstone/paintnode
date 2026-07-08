@@ -4,8 +4,16 @@ import type {
   AiRunOptions,
   AiAutonomyLevel,
   CodexModelId,
+  CodexImageModeration,
+  CodexImageQuality,
   AntigravityApprovalMode,
+  AntigravityImageModelId,
+  AntigravityImageSize,
   AntigravityModelId,
+  AntigravityPersonGeneration,
+  AntigravityProminentPeople,
+  AntigravitySafetyFiltering,
+  AntigravitySafetyThreshold,
   ReasoningEffort,
   ServiceTier,
 } from '../state/settings';
@@ -86,7 +94,7 @@ export interface GeneratorConfig {
 }
 
 export interface CodexGeneratorConfig {
-  /** Optional path to the local Codex binary. Empty uses the Rust-side defaults. */
+  /** Optional Codex binary override passed through the SDK runner. Empty uses the SDK package's bundled CLI. */
   bin?: string;
   /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
@@ -100,6 +108,10 @@ export interface CodexGeneratorConfig {
   reasoningEffort?: ReasoningEffort | null;
   /** Speed tier selected in PaintNode settings. */
   serviceTier?: ServiceTier | null;
+  /** Image-generation quality forwarded to the owned imagegen runner when available. */
+  imageQuality?: CodexImageQuality | null;
+  /** Image-generation moderation mode forwarded to the owned imagegen runner when available. */
+  imageModeration?: CodexImageModeration | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
@@ -109,7 +121,7 @@ export interface CodexGeneratorConfig {
 }
 
 export interface AntigravityGeneratorConfig {
-  /** Optional path to the local Antigravity CLI binary. Empty uses the Rust-side defaults. */
+  /** Optional path to the local Antigravity CLI auth helper. Empty uses the Rust-side defaults. */
   bin?: string;
   /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
@@ -117,10 +129,32 @@ export interface AntigravityGeneratorConfig {
   keepJobDir?: boolean;
   /** Per-request id used to filter progress events. */
   runId?: string;
-  /** Antigravity model selected in PaintNode settings. "auto" lets Antigravity CLI choose. */
+  /** Antigravity agent model used only by agent-backed asset extraction. */
   model: AntigravityModelId;
   /** Whether to skip Antigravity permission prompts inside PaintNode's temporary job folder. */
   approvalMode?: AntigravityApprovalMode | null;
+  /** Direct Antigravity image model used by PaintNode's owned image executor. */
+  imageModel?: AntigravityImageModelId | null;
+  /** Optional direct image size tier. Auto lets placement choose the tier. */
+  imageSize?: AntigravityImageSize | null;
+  /** Optional person-generation policy accepted by Antigravity image generation. */
+  personGeneration?: AntigravityPersonGeneration | null;
+  /** Optional prominent-people policy accepted by Antigravity image generation. */
+  prominentPeople?: AntigravityProminentPeople | null;
+  /** Optional compression quality for confirmed Antigravity output options. */
+  compressionQuality?: number | null;
+  /** Advanced confirmed non-internal image options as JSON. */
+  advancedJson?: string | null;
+  /** Antigravity safety filtering preset for direct image generation. */
+  safetyFiltering?: AntigravitySafetyFiltering | null;
+  /** Custom harassment safety threshold for direct image generation. */
+  safetyHarassment?: AntigravitySafetyThreshold | null;
+  /** Custom hate-speech safety threshold for direct image generation. */
+  safetyHateSpeech?: AntigravitySafetyThreshold | null;
+  /** Custom sexually-explicit safety threshold for direct image generation. */
+  safetySexuallyExplicit?: AntigravitySafetyThreshold | null;
+  /** Custom dangerous-content safety threshold for direct image generation. */
+  safetyDangerousContent?: AntigravitySafetyThreshold | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
@@ -262,14 +296,16 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     model: config.model,
     reasoningEffort,
     serviceTier: config.serviceTier ?? 'default',
+    imageQuality: config.imageQuality ?? 'auto',
+    imageModeration: config.imageModeration ?? 'auto',
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
 }
 
-function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
-  return {
+function antigravityInvokeConfig(config: AntigravityGeneratorConfig, includeImageOptions = true) {
+  const base = {
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
     keepJobDir: config.keepJobDir ?? false,
@@ -279,6 +315,21 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig) {
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
+  };
+  if (!includeImageOptions) return base;
+  return {
+    ...base,
+    imageModel: config.imageModel ?? 'gemini-3.1-flash-image',
+    imageSize: config.imageSize ?? 'auto',
+    personGeneration: config.personGeneration ?? 'auto',
+    prominentPeople: config.prominentPeople ?? 'auto',
+    compressionQuality: config.compressionQuality ?? null,
+    advancedJson: config.advancedJson?.trim() ? config.advancedJson.trim() : null,
+    safetyFiltering: config.safetyFiltering ?? 'default',
+    safetyHarassment: config.safetyHarassment ?? 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+    safetyHateSpeech: config.safetyHateSpeech ?? 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+    safetySexuallyExplicit: config.safetySexuallyExplicit ?? 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+    safetyDangerousContent: config.safetyDangerousContent ?? 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
   };
 }
 
@@ -296,6 +347,8 @@ export function codexConfigFromRunOptions(
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,
+    imageQuality: options.imageQuality,
+    imageModeration: options.imageModeration,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
@@ -315,6 +368,17 @@ export function antigravityConfigFromRunOptions(
     runId,
     model: options.antigravityModel,
     approvalMode: options.antigravityApprovalMode,
+    imageModel: options.antigravityImageModel,
+    imageSize: options.antigravityImageSize,
+    personGeneration: options.antigravityPersonGeneration,
+    prominentPeople: options.antigravityProminentPeople,
+    compressionQuality: options.antigravityCompressionQuality,
+    advancedJson: options.antigravityAdvancedOptionsJson,
+    safetyFiltering: options.antigravitySafetyFiltering,
+    safetyHarassment: options.antigravitySafetyHarassment,
+    safetyHateSpeech: options.antigravitySafetyHateSpeech,
+    safetySexuallyExplicit: options.antigravitySafetySexuallyExplicit,
+    safetyDangerousContent: options.antigravitySafetyDangerousContent,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
@@ -623,7 +687,7 @@ export async function decoupleAntigravityImage(
   }
   const runId = config.runId?.trim() ? config.runId.trim() : `antigravity-decouple-${Date.now()}`;
   return invoke<DecoupleImageResult>('decouple_antigravity_image', {
-    ...antigravityInvokeConfig({ ...config, runId }),
+    ...antigravityInvokeConfig({ ...config, runId }, false),
     prompt,
     sourcePng: Array.from(sourcePng),
     runId,

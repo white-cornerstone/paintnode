@@ -12,7 +12,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
-  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
+  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings, cloneAiRunOptions } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
   import { Add, Copy, Dismiss } from '../icons';
 
@@ -90,16 +90,19 @@
       return;
     }
     if (runOptions.provider === 'custom' && hasSelection) {
-      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity CLI.';
+      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity account.';
       return;
     }
     if (runOptions.provider === 'custom' && references.length) {
-      error = 'Reference images are currently available with Local Codex or Antigravity CLI.';
+      error = 'Reference images are currently available with Local Codex or Antigravity account.';
       return;
     }
     const userPrompt = prompt.trim();
-    runOptions.fillAspectRatio =
-      runOptions.provider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null;
+    const capturedRunOptions = cloneAiRunOptions({
+      ...runOptions,
+      fillAspectRatio:
+        runOptions.provider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null,
+    });
     busy = true;
     const task = aiTasks.create({
       kind: 'generate',
@@ -117,7 +120,7 @@
         providerLabel: providerLabel(runOptions.provider),
         prompt: userPrompt || defaultFillPrompt(),
         fillMode: hasSelection,
-        runOptions: $state.snapshot(runOptions),
+        runOptions: capturedRunOptions,
         customArgs: argsText,
         references: references.map((reference) => ({ name: reference.name, bytes: reference.bytes })),
         referenceNames: references.map((reference) => reference.name),
@@ -171,10 +174,10 @@
     {:else}
       <div class="provider-tabs" role="group" aria-label="Image generator">
         <button class:active={runOptions.provider === 'codex'} onclick={() => (runOptions.provider = 'codex')}>
-          Local Codex CLI
+          Local Codex
         </button>
         <button class:active={runOptions.provider === 'antigravity'} onclick={() => (runOptions.provider = 'antigravity')}>
-          Local Antigravity CLI
+          Antigravity account
         </button>
         <button class:active={runOptions.provider === 'custom'} onclick={() => (runOptions.provider = 'custom')}>
           Custom CLI
@@ -253,24 +256,19 @@
     {/if}
 
     {#if !taskDetail && runOptions.provider === 'codex'}
-      <label class="dlg-field">
-        <span>Codex command (optional)</span>
-        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-      </label>
-
       <p class="hint">
         Uses your local Codex login. If this fails, run <code>codex login</code> in Terminal and try again.
         PaintNode copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.
       </p>
     {:else if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
-        <span>Antigravity command (optional)</span>
+        <span>Antigravity CLI auth helper (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
       </label>
 
       <p class="hint">
-        Uses your local Antigravity CLI login. If this fails, run <code>agy</code> in Terminal and sign in.
-        PaintNode asks Antigravity to write a validated <code>result.png</code> in an isolated job folder.
+        Uses your Antigravity sign-in. If this fails, run <code>agy</code> in Terminal and sign in.
+        PaintNode refreshes auth with <code>agy models</code> before calling the image backend directly.
       </p>
     {:else if !taskDetail}
       <label class="dlg-field">

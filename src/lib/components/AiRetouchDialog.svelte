@@ -119,7 +119,7 @@ Use these annotations as direct user instructions for the regions they point to.
       return;
     }
     if (runOptions.provider === 'custom') {
-      error = 'AI Retouch is currently available with Local Codex or Antigravity CLI.';
+      error = 'AI Retouch is currently available with Local Codex or Antigravity account.';
       return;
     }
     busy = true;
@@ -362,14 +362,9 @@ Use these annotations as direct user instructions for the regions they point to.
       </div>
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'codex'}
+    {#if !taskDetail && runOptions.provider === 'antigravity'}
       <label class="dlg-field">
-        <span>Codex command (optional)</span>
-        <input type="text" bind:value={runOptions.codexBin} placeholder="codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex" spellcheck="false" />
-      </label>
-    {:else if !taskDetail && runOptions.provider === 'antigravity'}
-      <label class="dlg-field">
-        <span>Antigravity command (optional)</span>
+        <span>Antigravity CLI auth helper (optional)</span>
         <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
       </label>
     {/if}

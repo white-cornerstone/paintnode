@@ -4,10 +4,12 @@
   import { detectAntigravity, detectCodex, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
   import { markAiSetupSeen } from '../state/aiSetup';
   import {
-    ANTIGRAVITY_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
+    ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     CODEX_MODEL_OPTIONS,
     type AiAutonomyLevel,
-    type AntigravityModelId,
+    type AntigravityImageModelId,
+    type AntigravityImageSize,
     type CodexModelId,
     type ReasoningEffort,
   } from '../state/settings';
@@ -34,16 +36,16 @@
     {
       id: 'codex',
       icon: Code,
-      title: 'OpenAI Codex CLI',
+      title: 'OpenAI Codex',
       command: 'codex',
       description: 'Uses your local Codex sign-in to generate images with GPT models.',
     },
     {
       id: 'antigravity',
       icon: Rocket,
-      title: 'Google Antigravity CLI',
+      title: 'Antigravity account',
       command: 'agy',
-      description: 'Uses your local Antigravity sign-in to generate images with Gemini models.',
+      description: 'Uses your Antigravity sign-in for PaintNode-owned image generation.',
     },
   ];
   const reasoningEfforts: { value: ReasoningEffort; label: string }[] = [
@@ -295,32 +297,48 @@
             </label>
           </div>
         {:else}
-          <label class="field">
-            <span>Model</span>
-            <select
-              value={settings.value.ai.antigravityModel}
-              onchange={(event) => settings.update({ ai: { antigravityModel: textValue(event) as AntigravityModelId } })}
-            >
-              {#each ANTIGRAVITY_MODEL_OPTIONS as option (option.id)}
-                <option value={option.id}>{option.label}</option>
-              {/each}
-            </select>
-            <small>Auto lets Antigravity choose its configured default model.</small>
-          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span>Image model</span>
+              <select
+                value={settings.value.ai.antigravityImageModel}
+                onchange={(event) =>
+                  settings.update({ ai: { antigravityImageModel: textValue(event) as AntigravityImageModelId } })}
+              >
+                {#each ANTIGRAVITY_IMAGE_MODEL_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="field">
+              <span>Image size</span>
+              <select
+                value={settings.value.ai.antigravityImageSize}
+                onchange={(event) =>
+                  settings.update({ ai: { antigravityImageSize: textValue(event) as AntigravityImageSize } })}
+              >
+                {#each ANTIGRAVITY_IMAGE_SIZE_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
         {/if}
 
-        <label class="field">
-          <span>Autonomy</span>
-          <select
-            value={settings.value.ai.autonomyLevel}
-            onchange={(event) => settings.update({ ai: { autonomyLevel: textValue(event) as AiAutonomyLevel } })}
-          >
-            {#each autonomyLevels as option (option.value)}
-              <option value={option.value}>{option.label}</option>
-            {/each}
-          </select>
-          <small>How much room the local agent gets to build tools during a run. Low is the safest start.</small>
-        </label>
+        {#if provider === 'codex'}
+          <label class="field">
+            <span>Autonomy</span>
+            <select
+              value={settings.value.ai.autonomyLevel}
+              onchange={(event) => settings.update({ ai: { autonomyLevel: textValue(event) as AiAutonomyLevel } })}
+            >
+              {#each autonomyLevels as option (option.value)}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+            <small>How much room the local agent gets to build tools during a run. Low is the safest start.</small>
+          </label>
+        {/if}
       {:else}
         <div class="result miss">
           <span class="result-icon"><Icon svg={ErrorCircle} size={20} /></span>

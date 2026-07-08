@@ -1359,7 +1359,7 @@
       return;
     }
     if (runOptions.provider === 'custom') {
-      error = 'Workflow composition is currently available with Local Codex or Antigravity CLI.';
+      error = 'Workflow composition is currently available with Local Codex or Antigravity account.';
       return;
     }
 
@@ -1798,14 +1798,9 @@ Human anatomy quality gate: if the final image contains a person, the arms, wris
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if runOptions.provider === 'codex'}
+          {#if runOptions.provider === 'antigravity'}
             <label>
-              <span>Codex command</span>
-              <input bind:value={runOptions.codexBin} placeholder="codex or full path" />
-            </label>
-          {:else if runOptions.provider === 'antigravity'}
-            <label>
-              <span>Antigravity command</span>
+              <span>Antigravity auth helper</span>
               <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
             </label>
           {/if}

@@ -23,14 +23,66 @@ export const ANTIGRAVITY_MODEL_OPTIONS = [
   { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B Medium' },
 ] as const;
 
-// Antigravity image generation is a tool the selected agent can invoke. The
-// agy model list therefore remains the agent model list for image runs.
-export const ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS = ANTIGRAVITY_MODEL_OPTIONS;
+export const ANTIGRAVITY_IMAGE_MODEL_OPTIONS = [
+  { id: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' },
+  { id: 'auto', label: 'Auto' },
+] as const;
+
+export const ANTIGRAVITY_IMAGE_SIZE_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: '1K', label: '1K' },
+  { id: '2K', label: '2K' },
+  { id: '4K', label: '4K' },
+] as const;
+
+export const ANTIGRAVITY_PERSON_GENERATION_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'ALLOW_NONE', label: 'No people' },
+  { id: 'ALLOW_ADULT', label: 'Adults only' },
+  { id: 'ALLOW_ALL', label: 'Allow people' },
+] as const;
+
+export const ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'BLOCK_PROMINENT_PEOPLE', label: 'Block prominent people' },
+] as const;
+
+export const ANTIGRAVITY_SAFETY_FILTERING_OPTIONS = [
+  { id: 'default', label: 'Default' },
+  { id: 'lessRestrictive', label: 'Less restrictive' },
+  { id: 'moreRestrictive', label: 'More restrictive' },
+  { id: 'custom', label: 'Custom' },
+] as const;
+
+export const ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS = [
+  { id: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED', label: 'API default' },
+  { id: 'OFF', label: 'Off' },
+  { id: 'BLOCK_NONE', label: 'Block none' },
+  { id: 'BLOCK_ONLY_HIGH', label: 'Block high' },
+  { id: 'BLOCK_MEDIUM_AND_ABOVE', label: 'Block medium+' },
+  { id: 'BLOCK_LOW_AND_ABOVE', label: 'Block low+' },
+] as const;
+
+export const ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS = [
+  { id: 'antigravitySafetyHarassment', label: 'Harassment' },
+  { id: 'antigravitySafetyHateSpeech', label: 'Hate speech' },
+  { id: 'antigravitySafetySexuallyExplicit', label: 'Sexually explicit' },
+  { id: 'antigravitySafetyDangerousContent', label: 'Dangerous content' },
+] as const;
 
 export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
 export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
+export type AntigravityImageModelId = (typeof ANTIGRAVITY_IMAGE_MODEL_OPTIONS)[number]['id'];
+export type AntigravityImageSize = (typeof ANTIGRAVITY_IMAGE_SIZE_OPTIONS)[number]['id'];
+export type AntigravityPersonGeneration = (typeof ANTIGRAVITY_PERSON_GENERATION_OPTIONS)[number]['id'];
+export type AntigravityProminentPeople = (typeof ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS)[number]['id'];
+export type AntigravitySafetyFiltering = (typeof ANTIGRAVITY_SAFETY_FILTERING_OPTIONS)[number]['id'];
+export type AntigravitySafetyThreshold = (typeof ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS)[number]['id'];
+export type AntigravitySafetyCategorySetting = (typeof ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS)[number]['id'];
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type ServiceTier = 'default' | 'fast';
+export type CodexImageQuality = 'auto' | 'low' | 'medium' | 'high';
+export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity' | 'custom';
@@ -48,10 +100,23 @@ export interface AiRunOptions {
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
   serviceTier: ServiceTier;
+  imageQuality: CodexImageQuality;
+  imageModeration: CodexImageModeration;
   autonomyLevel: AiAutonomyLevel;
   antigravityBin: string;
   antigravityModel: AntigravityModelId;
   antigravityApprovalMode: AntigravityApprovalMode;
+  antigravityImageModel: AntigravityImageModelId;
+  antigravityImageSize: AntigravityImageSize;
+  antigravityPersonGeneration: AntigravityPersonGeneration;
+  antigravityProminentPeople: AntigravityProminentPeople;
+  antigravityCompressionQuality: number | null;
+  antigravityAdvancedOptionsJson: string;
+  antigravitySafetyFiltering: AntigravitySafetyFiltering;
+  antigravitySafetyHarassment: AntigravitySafetyThreshold;
+  antigravitySafetyHateSpeech: AntigravitySafetyThreshold;
+  antigravitySafetySexuallyExplicit: AntigravitySafetyThreshold;
+  antigravitySafetyDangerousContent: AntigravitySafetyThreshold;
   customBin: string;
   editChecksLevel: AiEditChecksLevel;
   fillAspectRatio?: string | null;
@@ -70,10 +135,23 @@ export interface PaintNodeSettings {
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
     serviceTier: ServiceTier;
+    imageQuality: CodexImageQuality;
+    imageModeration: CodexImageModeration;
     autonomyLevel: AiAutonomyLevel;
     antigravityBin: string;
     antigravityModel: AntigravityModelId;
     antigravityApprovalMode: AntigravityApprovalMode;
+    antigravityImageModel: AntigravityImageModelId;
+    antigravityImageSize: AntigravityImageSize;
+    antigravityPersonGeneration: AntigravityPersonGeneration;
+    antigravityProminentPeople: AntigravityProminentPeople;
+    antigravityCompressionQuality: number | null;
+    antigravityAdvancedOptionsJson: string;
+    antigravitySafetyFiltering: AntigravitySafetyFiltering;
+    antigravitySafetyHarassment: AntigravitySafetyThreshold;
+    antigravitySafetyHateSpeech: AntigravitySafetyThreshold;
+    antigravitySafetySexuallyExplicit: AntigravitySafetyThreshold;
+    antigravitySafetyDangerousContent: AntigravitySafetyThreshold;
     editChecksLevel: AiEditChecksLevel;
     customBin: string;
     customArgsText: string;
@@ -102,9 +180,37 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
 
 const MODEL_IDS = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id));
+const ANTIGRAVITY_IMAGE_MODEL_IDS = new Set<string>(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id));
+const ANTIGRAVITY_IMAGE_SIZE_IDS = new Set<string>(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id));
+const ANTIGRAVITY_PERSON_GENERATION_IDS = new Set<string>(
+  ANTIGRAVITY_PERSON_GENERATION_OPTIONS.map((option) => option.id),
+);
+const ANTIGRAVITY_PROMINENT_PEOPLE_IDS = new Set<string>(
+  ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS.map((option) => option.id),
+);
+const ANTIGRAVITY_SAFETY_FILTERING_IDS = new Set<string>(
+  ANTIGRAVITY_SAFETY_FILTERING_OPTIONS.map((option) => option.id),
+);
+const ANTIGRAVITY_SAFETY_THRESHOLD_IDS = new Set<string>(
+  ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.map((option) => option.id),
+);
 const AUTOSAVE_INTERVALS = new Set<number>(AUTOSAVE_INTERVAL_OPTIONS.map((option) => option.value));
 const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
+const IMAGE_QUALITIES = new Set<string>(['auto', 'low', 'medium', 'high']);
+const IMAGE_MODERATIONS = new Set<string>(['auto', 'low']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
+
+function normalizeAntigravitySafetyFiltering(value: unknown, fallback: AntigravitySafetyFiltering): AntigravitySafetyFiltering {
+  return ANTIGRAVITY_SAFETY_FILTERING_IDS.has(String(value))
+    ? (value as AntigravitySafetyFiltering)
+    : fallback;
+}
+
+function normalizeAntigravitySafetyThreshold(value: unknown, fallback: AntigravitySafetyThreshold): AntigravitySafetyThreshold {
+  return ANTIGRAVITY_SAFETY_THRESHOLD_IDS.has(String(value))
+    ? (value as AntigravitySafetyThreshold)
+    : fallback;
+}
 
 export function defaultSettings(): PaintNodeSettings {
   return {
@@ -120,10 +226,23 @@ export function defaultSettings(): PaintNodeSettings {
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
       serviceTier: 'default',
+      imageQuality: 'auto',
+      imageModeration: 'auto',
       autonomyLevel: 'low',
       antigravityBin: '',
       antigravityModel: 'auto',
       antigravityApprovalMode: 'skipPermissions',
+      antigravityImageModel: 'gemini-3.1-flash-image',
+      antigravityImageSize: 'auto',
+      antigravityPersonGeneration: 'auto',
+      antigravityProminentPeople: 'auto',
+      antigravityCompressionQuality: null,
+      antigravityAdvancedOptionsJson: '{}',
+      antigravitySafetyFiltering: 'default',
+      antigravitySafetyHarassment: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+      antigravitySafetyHateSpeech: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+      antigravitySafetySexuallyExplicit: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+      antigravitySafetyDangerousContent: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
       editChecksLevel: 1,
       customBin: '',
       customArgsText: DEFAULT_CUSTOM_GENERATOR_ARGS,
@@ -164,6 +283,12 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   return Math.max(min, Math.min(max, Math.round(numberOrDefault(value, fallback))));
 }
 
+function nullableClampedInt(value: unknown, min: number, max: number): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
 export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const defaults = defaultSettings();
   if (!isRecord(raw)) return defaults;
@@ -202,6 +327,12 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
         ? (savedReasoningEffort as ReasoningEffort)
         : defaults.ai.reasoningEffort,
       serviceTier: ai.serviceTier === 'fast' ? 'fast' : 'default',
+      imageQuality: IMAGE_QUALITIES.has(String(ai.imageQuality))
+        ? (ai.imageQuality as CodexImageQuality)
+        : defaults.ai.imageQuality,
+      imageModeration: IMAGE_MODERATIONS.has(String(ai.imageModeration))
+        ? (ai.imageModeration as CodexImageModeration)
+        : defaults.ai.imageModeration,
       autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))
         ? (ai.autonomyLevel as AiAutonomyLevel)
         : defaults.ai.autonomyLevel,
@@ -211,6 +342,43 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
         : defaults.ai.antigravityModel,
       antigravityApprovalMode:
         savedAntigravityApprovalMode === 'default' ? 'default' : defaults.ai.antigravityApprovalMode,
+      antigravityImageModel: ANTIGRAVITY_IMAGE_MODEL_IDS.has(String(ai.antigravityImageModel))
+        ? (ai.antigravityImageModel as AntigravityImageModelId)
+        : defaults.ai.antigravityImageModel,
+      antigravityImageSize: ANTIGRAVITY_IMAGE_SIZE_IDS.has(String(ai.antigravityImageSize))
+        ? (ai.antigravityImageSize as AntigravityImageSize)
+        : defaults.ai.antigravityImageSize,
+      antigravityPersonGeneration: ANTIGRAVITY_PERSON_GENERATION_IDS.has(String(ai.antigravityPersonGeneration))
+        ? (ai.antigravityPersonGeneration as AntigravityPersonGeneration)
+        : defaults.ai.antigravityPersonGeneration,
+      antigravityProminentPeople: ANTIGRAVITY_PROMINENT_PEOPLE_IDS.has(String(ai.antigravityProminentPeople))
+        ? (ai.antigravityProminentPeople as AntigravityProminentPeople)
+        : defaults.ai.antigravityProminentPeople,
+      antigravityCompressionQuality: nullableClampedInt(ai.antigravityCompressionQuality, 0, 100),
+      antigravityAdvancedOptionsJson: stringOrDefault(
+        ai.antigravityAdvancedOptionsJson,
+        defaults.ai.antigravityAdvancedOptionsJson,
+      ),
+      antigravitySafetyFiltering: normalizeAntigravitySafetyFiltering(
+        ai.antigravitySafetyFiltering,
+        defaults.ai.antigravitySafetyFiltering,
+      ),
+      antigravitySafetyHarassment: normalizeAntigravitySafetyThreshold(
+        ai.antigravitySafetyHarassment,
+        defaults.ai.antigravitySafetyHarassment,
+      ),
+      antigravitySafetyHateSpeech: normalizeAntigravitySafetyThreshold(
+        ai.antigravitySafetyHateSpeech,
+        defaults.ai.antigravitySafetyHateSpeech,
+      ),
+      antigravitySafetySexuallyExplicit: normalizeAntigravitySafetyThreshold(
+        ai.antigravitySafetySexuallyExplicit,
+        defaults.ai.antigravitySafetySexuallyExplicit,
+      ),
+      antigravitySafetyDangerousContent: normalizeAntigravitySafetyThreshold(
+        ai.antigravitySafetyDangerousContent,
+        defaults.ai.antigravitySafetyDangerousContent,
+      ),
       editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
       customBin: stringOrDefault(ai.customBin, defaults.ai.customBin),
       customArgsText: stringOrDefault(ai.customArgsText, defaults.ai.customArgsText),
@@ -261,10 +429,23 @@ export function defaultAiRunOptions(): AiRunOptions {
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
     serviceTier: ai.serviceTier,
+    imageQuality: ai.imageQuality,
+    imageModeration: ai.imageModeration,
     autonomyLevel: ai.autonomyLevel,
     antigravityBin: ai.antigravityBin,
     antigravityModel: ai.antigravityModel,
     antigravityApprovalMode: ai.antigravityApprovalMode,
+    antigravityImageModel: ai.antigravityImageModel,
+    antigravityImageSize: ai.antigravityImageSize,
+    antigravityPersonGeneration: ai.antigravityPersonGeneration,
+    antigravityProminentPeople: ai.antigravityProminentPeople,
+    antigravityCompressionQuality: ai.antigravityCompressionQuality,
+    antigravityAdvancedOptionsJson: ai.antigravityAdvancedOptionsJson,
+    antigravitySafetyFiltering: ai.antigravitySafetyFiltering,
+    antigravitySafetyHarassment: ai.antigravitySafetyHarassment,
+    antigravitySafetyHateSpeech: ai.antigravitySafetyHateSpeech,
+    antigravitySafetySexuallyExplicit: ai.antigravitySafetySexuallyExplicit,
+    antigravitySafetyDangerousContent: ai.antigravitySafetyDangerousContent,
     customBin: ai.customBin,
     editChecksLevel: ai.editChecksLevel,
     fillAspectRatio: null,
@@ -278,13 +459,56 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
     serviceTier: value.ai.serviceTier,
+    imageQuality: value.ai.imageQuality,
+    imageModeration: value.ai.imageModeration,
     autonomyLevel: value.ai.autonomyLevel,
     antigravityBin: value.ai.antigravityBin,
     antigravityModel: value.ai.antigravityModel,
     antigravityApprovalMode: value.ai.antigravityApprovalMode,
+    antigravityImageModel: value.ai.antigravityImageModel,
+    antigravityImageSize: value.ai.antigravityImageSize,
+    antigravityPersonGeneration: value.ai.antigravityPersonGeneration,
+    antigravityProminentPeople: value.ai.antigravityProminentPeople,
+    antigravityCompressionQuality: value.ai.antigravityCompressionQuality,
+    antigravityAdvancedOptionsJson: value.ai.antigravityAdvancedOptionsJson,
+    antigravitySafetyFiltering: value.ai.antigravitySafetyFiltering,
+    antigravitySafetyHarassment: value.ai.antigravitySafetyHarassment,
+    antigravitySafetyHateSpeech: value.ai.antigravitySafetyHateSpeech,
+    antigravitySafetySexuallyExplicit: value.ai.antigravitySafetySexuallyExplicit,
+    antigravitySafetyDangerousContent: value.ai.antigravitySafetyDangerousContent,
     customBin: value.ai.customBin,
     editChecksLevel: value.ai.editChecksLevel,
     fillAspectRatio: null,
+  };
+}
+
+export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
+  return {
+    provider: options.provider,
+    codexBin: options.codexBin,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    serviceTier: options.serviceTier,
+    imageQuality: options.imageQuality,
+    imageModeration: options.imageModeration,
+    autonomyLevel: options.autonomyLevel,
+    antigravityBin: options.antigravityBin,
+    antigravityModel: options.antigravityModel,
+    antigravityApprovalMode: options.antigravityApprovalMode,
+    antigravityImageModel: options.antigravityImageModel,
+    antigravityImageSize: options.antigravityImageSize,
+    antigravityPersonGeneration: options.antigravityPersonGeneration,
+    antigravityProminentPeople: options.antigravityProminentPeople,
+    antigravityCompressionQuality: options.antigravityCompressionQuality,
+    antigravityAdvancedOptionsJson: options.antigravityAdvancedOptionsJson,
+    antigravitySafetyFiltering: options.antigravitySafetyFiltering,
+    antigravitySafetyHarassment: options.antigravitySafetyHarassment,
+    antigravitySafetyHateSpeech: options.antigravitySafetyHateSpeech,
+    antigravitySafetySexuallyExplicit: options.antigravitySafetySexuallyExplicit,
+    antigravitySafetyDangerousContent: options.antigravitySafetyDangerousContent,
+    customBin: options.customBin,
+    editChecksLevel: options.editChecksLevel,
+    fillAspectRatio: options.fillAspectRatio ?? null,
   };
 }
 
