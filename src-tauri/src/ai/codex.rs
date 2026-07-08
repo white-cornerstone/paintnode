@@ -39,9 +39,9 @@ use crate::ai::placement::{
     ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
     cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
     normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    plan_ai_restore_placement, plan_ai_upscale_placement, prepare_ai_job_dir_for_placement,
+    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider,
+    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
@@ -81,6 +81,7 @@ struct CodexCommandOptions {
     service_tier: Option<String>,
     image_quality: Option<String>,
     image_moderation: Option<String>,
+    keep_debug_artifacts: bool,
 }
 
 impl Default for CodexCommandOptions {
@@ -91,6 +92,7 @@ impl Default for CodexCommandOptions {
             service_tier: None,
             image_quality: None,
             image_moderation: None,
+            keep_debug_artifacts: false,
         }
     }
 }
@@ -118,6 +120,7 @@ impl PaintNodeImageProvider {
 #[derive(Clone, Debug)]
 struct PaintNodeImageProviderOptions {
     provider: PaintNodeImageProvider,
+    keep_debug_artifacts: bool,
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
@@ -514,6 +517,16 @@ fn codex_command_options(
         service_tier: clean_option(service_tier),
         image_quality: codex_image_quality(image_quality),
         image_moderation: codex_image_moderation(image_moderation),
+        keep_debug_artifacts: false,
+    }
+}
+
+fn remove_codex_debug_artifacts(job_path: &Path) {
+    for file_name in [
+        PAINTNODE_CODEX_IMAGE_REQUEST_FILE,
+        PAINTNODE_CODEX_IMAGE_RESPONSE_FILE,
+    ] {
+        let _ = fs::remove_file(job_path.join(file_name));
     }
 }
 
@@ -800,15 +813,6 @@ fn decode_generated_image_response(response: CodexImageResponse) -> Result<Vec<u
         .map_err(|e| format!("Codex image generation returned invalid PNG data: {e}"))
 }
 
-fn run_codex_subscription_image_edit(
-    prompt: &str,
-    image_paths: &[PathBuf],
-    size: (u32, u32),
-    options: &CodexCommandOptions,
-) -> Result<Vec<u8>, String> {
-    run_codex_direct_image_request(prompt, image_paths, size, options, None)
-}
-
 fn run_codex_direct_image_request(
     prompt: &str,
     image_paths: &[PathBuf],
@@ -842,6 +846,11 @@ fn run_codex_direct_image_request(
         )
     };
     if let Some(job_path) = job_path {
+        if !options.keep_debug_artifacts {
+            remove_codex_debug_artifacts(job_path);
+        }
+    }
+    if let Some(job_path) = job_path.filter(|_| options.keep_debug_artifacts) {
         let request_text = serde_json::to_vec_pretty(&request_body)
             .map_err(|e| format!("Failed to encode Codex image request for inspection: {e}"))?;
         fs::write(
@@ -865,7 +874,7 @@ fn run_codex_direct_image_request(
     let text = response
         .text()
         .map_err(|e| format!("Codex image generation response could not be read: {e}"))?;
-    if let Some(job_path) = job_path {
+    if let Some(job_path) = job_path.filter(|_| options.keep_debug_artifacts) {
         let _ = fs::write(job_path.join(PAINTNODE_CODEX_IMAGE_RESPONSE_FILE), &text);
     }
     if !status.is_success() {
@@ -1402,6 +1411,7 @@ pub(crate) async fn generate_codex_image(
     prompt: String,
     project_path: Option<String>,
     keep_job_dir: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
     reference_pngs: Vec<WorkflowSourceImage>,
     run_id: String,
     model: Option<String>,
@@ -1420,13 +1430,14 @@ pub(crate) async fn generate_codex_image(
     let target_dimensions = validate_optional_target_dimensions(target_width, target_height)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
-        let codex_options = codex_command_options(
+        let mut codex_options = codex_command_options(
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
+        codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _ = bin;
         let _ = autonomy_level;
         let run_id = if run_id.trim().is_empty() {
@@ -1506,14 +1517,19 @@ pub(crate) async fn generate_codex_image(
                     &run_id,
                     &format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
                 );
-                bytes = codex_restore_image_details(
+                let (restored, _) = codex_restore_image_details(
                     &app,
                     &run_id,
                     &codex_options,
                     &job_path.join("restore"),
                     &bytes,
                     "Generated image restoration",
+                    false,
+                    true,
                 )?;
+                bytes = restored.ok_or_else(|| {
+                    "Generated image restoration did not return a composed result.".to_string()
+                })?;
                 fs::write(job_path.join("restore").join("result.png"), &bytes)
                     .map_err(|e| format!("Failed to write restored generated image: {e}"))?;
             }
@@ -1841,6 +1857,7 @@ fn run_paintnode_owned_fill_imagegen(
                 image_options.antigravity_safety_hate_speech.clone(),
                 image_options.antigravity_safety_sexually_explicit.clone(),
                 image_options.antigravity_safety_dangerous_content.clone(),
+                image_options.keep_debug_artifacts,
             )?
         }
         PaintNodeImageProvider::Codex => {
@@ -1852,11 +1869,12 @@ fn run_paintnode_owned_fill_imagegen(
                     working.original_dimensions.0, working.original_dimensions.1
                 ),
             );
-            run_codex_subscription_image_edit(
+            run_codex_direct_image_request(
                 &prompt,
                 &[base_path],
                 working.original_dimensions,
                 options,
+                Some(part_path),
             )?
         }
     };
@@ -2060,8 +2078,7 @@ This is a fixed-canvas image refinement task, not a new image generation task.
 
 Attached images:
 1. `source.png` is the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
-2. `edit_target.png` is the same image to re-render in place.
-3. `mask.png` marks the editable area. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.
+2. `mask.png` marks the editable area. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.
 
 {geometry_note}
 
@@ -2075,10 +2092,10 @@ Restoration goal:
 
 Critical registration rule:
 Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
-The output must stay registered to `edit_target.png`.
+The output must stay registered to `source.png`.
 
 Output requirements:
-- Return one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.
+- Return one full-canvas PNG candidate with the same dimensions and framing as `source.png`.
 - Do not include PaintNode UI, borders, labels, watermarks, or mask visualization.
 - If a safety or quality adjustment is needed, make the smallest compliant adjustment while preserving the existing image content."#
     )
@@ -2093,11 +2110,18 @@ fn codex_restore_image_details(
     restore_root: &Path,
     enlarged_png: &[u8],
     label: &str,
-) -> Result<Vec<u8>, String> {
+    upscale_layers: bool,
+    return_composed: bool,
+) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
     let dimensions = png_dimensions_from_bytes(enlarged_png)
         .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
-    let placement = plan_ai_restore_placement(AiEditProvider::Codex, dimensions, label)?;
+    let placement = if upscale_layers {
+        plan_ai_upscale_placement(AiEditProvider::Codex, dimensions, label)?
+    } else {
+        plan_ai_restore_placement(AiEditProvider::Codex, dimensions, label)?
+    };
     let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
+    let mut layer_results = Vec::new();
     fs::create_dir_all(restore_root)
         .map_err(|e| format!("Failed to create {label} restoration folder: {e}"))?;
     let resumable = prepare_ai_job_dir_for_placement(restore_root, &placement, label)?;
@@ -2108,6 +2132,9 @@ fn codex_restore_image_details(
         };
         fs::create_dir_all(&part_path)
             .map_err(|e| format!("Failed to create {label} restoration part folder: {e}"))?;
+        if !options.keep_debug_artifacts {
+            let _ = fs::remove_file(part_path.join("part_result-unaligned.png"));
+        }
         if resumable {
             if let Some(bytes) = reuse_part_result(&part_path, part) {
                 emit_codex_part_progress(
@@ -2121,6 +2148,16 @@ fn codex_restore_image_details(
                         "Reusing this part's previous result",
                     ),
                 );
+                if upscale_layers {
+                    let layer_png = composer.part_result_layer_png(part, &bytes, label)?;
+                    let mask_png = composer.part_result_mask_png(part, label)?;
+                    layer_results.push(GeneratedImageLayerResult {
+                        name: format!("AI Upscale part {}", part_index + 1),
+                        data_url: png_data_url(&layer_png)?,
+                        asset: None,
+                        mask_data_url: Some(png_data_url(&mask_png)?),
+                    });
+                }
                 composer.apply_part_result(part, &bytes, label)?;
                 continue;
             }
@@ -2130,8 +2167,6 @@ fn codex_restore_image_details(
         let inputs = composer.part_inputs(part, label)?;
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
-        fs::write(part_path.join("edit_target.png"), &inputs.edit_target_png)
-            .map_err(|e| format!("Failed to write {label} edit target image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
         let has_overview = placement.is_split();
@@ -2157,11 +2192,7 @@ fn codex_restore_image_details(
                 "Restoring image detail with Codex image generation",
             ),
         );
-        let mut image_paths = vec![
-            part_path.join("source.png"),
-            part_path.join("edit_target.png"),
-            part_path.join("mask.png"),
-        ];
+        let mut image_paths = vec![part_path.join("source.png"), part_path.join("mask.png")];
         if has_overview {
             image_paths.push(part_path.join("overview.png"));
         }
@@ -2176,11 +2207,50 @@ fn codex_restore_image_details(
             label,
         )
         .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
+        let _ = fs::remove_file(&part_run.recovered_source_path);
+        let unaligned_bytes = part_run.normalized_png.clone();
+        let (part_result_png, drift_correction) =
+            correct_part_result_drift(&inputs.source_png, &part_run.normalized_png, label)?;
+        if let Some(correction) = drift_correction {
+            if options.keep_debug_artifacts {
+                let _ = fs::write(
+                    part_path.join("part_result-unaligned.png"),
+                    &unaligned_bytes,
+                );
+            }
+            emit_codex_progress(
+                app,
+                run_id,
+                ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    &format!(
+                        "Corrected upscale drift by ({}, {}) px (confidence {:.3})",
+                        correction.dx, correction.dy, correction.confidence
+                    ),
+                ),
+            );
+        }
+        fs::write(part_path.join("part_result.png"), &part_result_png)
             .map_err(|e| format!("Failed to record {label} part result: {e}"))?;
-        composer.apply_part_result(part, &part_run.normalized_png, label)?;
+        if upscale_layers {
+            let layer_png = composer.part_result_layer_png(part, &part_result_png, label)?;
+            let mask_png = composer.part_result_mask_png(part, label)?;
+            layer_results.push(GeneratedImageLayerResult {
+                name: format!("AI Upscale part {}", part_index + 1),
+                data_url: png_data_url(&layer_png)?,
+                asset: None,
+                mask_data_url: Some(png_data_url(&mask_png)?),
+            });
+        }
+        composer.apply_part_result(part, &part_result_png, label)?;
     }
-    composer.composed_png(label)
+    let composed_png = if return_composed {
+        Some(composer.composed_png(label)?)
+    } else {
+        None
+    };
+    Ok((composed_png, layer_results))
 }
 
 /// Run local Codex headlessly for a mask-guided generative fill.
@@ -2191,6 +2261,7 @@ pub(crate) async fn generate_codex_fill_image(
     prompt: String,
     project_path: Option<String>,
     keep_job_dir: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
     store_asset: Option<bool>,
     source_png: Vec<u8>,
     edit_target_png: Vec<u8>,
@@ -2253,15 +2324,17 @@ pub(crate) async fn generate_codex_fill_image(
         ));
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
-        let codex_options = codex_command_options(
+        let mut codex_options = codex_command_options(
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
+        codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let image_options = PaintNodeImageProviderOptions {
             provider: PaintNodeImageProvider::from_option(image_provider),
+            keep_debug_artifacts: codex_options.keep_debug_artifacts,
             antigravity_bin,
             antigravity_model,
             antigravity_approval_mode,
@@ -2704,6 +2777,7 @@ pub(crate) async fn generate_codex_retouch_image(
     prompt: String,
     project_path: Option<String>,
     keep_job_dir: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
     source_png: Vec<u8>,
     edit_target_png: Vec<u8>,
     mask_png: Vec<u8>,
@@ -2779,13 +2853,14 @@ pub(crate) async fn generate_codex_retouch_image(
         }
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
-        let codex_options = codex_command_options(
+        let mut codex_options = codex_command_options(
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
+        codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _ = bin;
         let _ = autonomy_level;
         let checks_level = ai_edit_checks_level(edit_checks_level);
@@ -3068,6 +3143,8 @@ pub(crate) async fn upscale_codex_image(
     bin: Option<String>,
     project_path: Option<String>,
     keep_job_dir: Option<bool>,
+    keep_composed_result: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
     source_png: Vec<u8>,
     scale_percent: u32,
     run_id: String,
@@ -3085,16 +3162,17 @@ pub(crate) async fn upscale_codex_image(
         .ok_or_else(|| "AI upscale source PNG dimensions are invalid.".to_string())?;
     let target_dimensions = ai_upscale_target_dimensions(source_dimensions, scale_percent)?;
     // Reject over-large jobs before allocating the enlarged image.
-    plan_ai_restore_placement(AiEditProvider::Codex, target_dimensions, "AI upscale")?;
+    plan_ai_upscale_placement(AiEditProvider::Codex, target_dimensions, "AI upscale")?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
-        let codex_options = codex_command_options(
+        let mut codex_options = codex_command_options(
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
+        codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _ = bin;
         let _ = autonomy_level;
         let run_id = if run_id.trim().is_empty() {
@@ -3105,6 +3183,7 @@ pub(crate) async fn upscale_codex_image(
         clear_ai_run_cancelled(&run_id);
         let project_dir = optional_project_dir(&project_path);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
+        let keep_composed_result = keep_composed_result.unwrap_or(false);
         let job_project_dir = ai_job_project_dir(&app, &project_dir, keep_job_dir)?;
         let cleanup_project_job = cleanup_project_job_enabled(&job_project_dir, keep_job_dir);
         let temp_job;
@@ -3133,32 +3212,39 @@ pub(crate) async fn upscale_codex_image(
         };
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
-        let bytes = codex_restore_image_details(
+        let (composed_bytes, layer_results) = codex_restore_image_details(
             &app,
             &run_id,
             &codex_options,
             &job_path,
             &enlarged_png,
             "AI upscale",
+            true,
+            keep_composed_result,
         )?;
-        fs::write(job_path.join("result.png"), &bytes)
-            .map_err(|e| format!("Failed to write AI upscale result: {e}"))?;
-        let data_url = png_data_url(&bytes)?;
+        let data_url = png_data_url(composed_bytes.as_deref().unwrap_or(&enlarged_png))?;
         let mut assets = Vec::new();
-        let asset = if let Some(project_dir) = project_dir {
-            emit_codex_progress(&app, &run_id, "Saving upscaled image to the project");
-            let primary_asset = store_generated_png_asset(
-                &project_dir,
-                &bytes,
-                format!("AI Upscale {scale_percent}%"),
-                Some(format!("AI upscale to {scale_percent}%")),
-                None,
-            )?;
-            assets.push(primary_asset.clone());
-            Some(primary_asset)
-        } else {
-            None
-        };
+        let asset =
+            if let (Some(project_dir), Some(bytes)) = (project_dir, composed_bytes.as_deref()) {
+                fs::write(job_path.join("result.png"), bytes)
+                    .map_err(|e| format!("Failed to write AI upscale result: {e}"))?;
+                emit_codex_progress(&app, &run_id, "Saving upscaled image to the project");
+                let primary_asset = store_generated_png_asset(
+                    &project_dir,
+                    bytes,
+                    format!("AI Upscale {scale_percent}%"),
+                    Some(format!("AI upscale to {scale_percent}%")),
+                    None,
+                )?;
+                assets.push(primary_asset.clone());
+                Some(primary_asset)
+            } else if let Some(bytes) = composed_bytes.as_deref() {
+                fs::write(job_path.join("result.png"), bytes)
+                    .map_err(|e| format!("Failed to write AI upscale result: {e}"))?;
+                None
+            } else {
+                None
+            };
 
         if cleanup_project_job {
             cleanup_project_agent_job(&job_path);
@@ -3170,7 +3256,7 @@ pub(crate) async fn upscale_codex_image(
             asset,
             assets,
             mask_data_url: None,
-            layers: Vec::new(),
+            layers: layer_results,
         })
     })
     .await
@@ -3190,6 +3276,7 @@ pub(crate) async fn decouple_codex_image(
     run_id: String,
     store_assets: Option<bool>,
     keep_job_dir: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -3202,13 +3289,14 @@ pub(crate) async fn decouple_codex_image(
     }
 
     tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
-        let codex_options = codex_command_options(
+        let mut codex_options = codex_command_options(
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
+        codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let _autonomy = ai_autonomy_level(autonomy_level);
         let run_id = if run_id.trim().is_empty() {
@@ -3439,6 +3527,7 @@ pub(crate) async fn compose_codex_workflow(
     sources: Vec<WorkflowSourceImage>,
     run_id: String,
     keep_job_dir: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -3454,13 +3543,14 @@ pub(crate) async fn compose_codex_workflow(
     }
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
-        let codex_options = codex_command_options(
+        let mut codex_options = codex_command_options(
             model,
             reasoning_effort,
             service_tier,
             image_quality,
             image_moderation,
         );
+        codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _ = bin;
         let _ = autonomy_level;
         let run_id = if run_id.trim().is_empty() {
@@ -3639,6 +3729,26 @@ mod tests {
         assert_eq!(value["quality"], "high");
         assert_eq!(value["moderation"], "low");
         assert_eq!(gpt_image2_size_for_dimensions((3000, 800)), None);
+    }
+
+    #[test]
+    fn removes_codex_debug_artifacts_when_debug_mode_is_off() {
+        let job = TempJobDir::new("paintnode-codex-debug-cleanup-test").expect("temp dir");
+        for file_name in [
+            PAINTNODE_CODEX_IMAGE_REQUEST_FILE,
+            PAINTNODE_CODEX_IMAGE_RESPONSE_FILE,
+        ] {
+            fs::write(job.path().join(file_name), b"debug").expect("write debug artifact");
+        }
+
+        remove_codex_debug_artifacts(job.path());
+
+        for file_name in [
+            PAINTNODE_CODEX_IMAGE_REQUEST_FILE,
+            PAINTNODE_CODEX_IMAGE_RESPONSE_FILE,
+        ] {
+            assert!(!job.path().join(file_name).exists());
+        }
     }
 
     #[test]
@@ -4115,6 +4225,8 @@ mod tests {
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
         assert!(prompt.contains("the full PaintNode document"));
         assert!(prompt.contains("Critical registration rule"));
+        assert!(prompt.contains("registered to `source.png`"));
+        assert!(!prompt.contains("edit_target.png"));
         assert!(!prompt.contains("chroma"));
         assert!(!prompt.contains("User retouch prompt"));
         assert!(!prompt.contains("$imagegen"));

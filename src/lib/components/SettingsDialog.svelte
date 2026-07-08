@@ -757,6 +757,32 @@
             <small>Save source, mask, and prompt files for fill and retouch troubleshooting.</small>
           </span>
         </label>
+
+        <label class="check-row">
+          <input
+            type="checkbox"
+            checked={settings.value.workspace.keepAiUpscaleComposedResult}
+            onchange={(event) =>
+              settings.update({ workspace: { keepAiUpscaleComposedResult: checkedValue(event) } })}
+          />
+          <span>
+            <strong>Keep composed AI upscale result</strong>
+            <small>Also save the merged upscale PNG in the run folder and project assets.</small>
+          </span>
+        </label>
+
+        <label class="check-row">
+          <input
+            type="checkbox"
+            checked={settings.value.workspace.keepAiDebugArtifacts}
+            onchange={(event) =>
+              settings.update({ workspace: { keepAiDebugArtifacts: checkedValue(event) } })}
+          />
+          <span>
+            <strong>Keep AI debug artifacts</strong>
+            <small>Preserve raw auth logs and image request/response JSON for troubleshooting.</small>
+          </span>
+        </label>
       {/if}
       </div>
 

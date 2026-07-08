@@ -698,6 +698,79 @@ fn split_part_rects(
     }
 }
 
+fn rects_for_tile(
+    document: (u32, u32),
+    target: PixelRect,
+    tile_width: u32,
+    tile_height: u32,
+    label: String,
+) -> Vec<(PixelRect, String)> {
+    let xs = tile_axis_origins(document.0, target.x, target.width, tile_width);
+    let ys = tile_axis_origins(document.1, target.y, target.height, tile_height);
+    let mut rects = Vec::with_capacity(xs.len() * ys.len());
+    for y in ys {
+        for x in &xs {
+            rects.push((
+                PixelRect {
+                    x: *x,
+                    y,
+                    width: tile_width,
+                    height: tile_height,
+                },
+                label.clone(),
+            ));
+        }
+    }
+    rects
+}
+
+fn upscale_part_rects(
+    provider: AiEditProvider,
+    document: (u32, u32),
+    target: PixelRect,
+) -> Result<Vec<(PixelRect, String)>, String> {
+    let candidates = split_tile_candidates(provider, document);
+    let split_horizontally = document.0 >= document.1;
+    let short_extent = if split_horizontally {
+        document.1
+    } else {
+        document.0
+    };
+    if let Some((tile_width, tile_height, label)) = candidates
+        .iter()
+        .filter(|(tile_width, tile_height, _)| {
+            if split_horizontally {
+                *tile_height == short_extent
+            } else {
+                *tile_width == short_extent
+            }
+        })
+        .max_by_key(|(tile_width, tile_height, _)| {
+            if split_horizontally {
+                *tile_width
+            } else {
+                *tile_height
+            }
+        })
+    {
+        return Ok(rects_for_tile(
+            document,
+            target,
+            *tile_width,
+            *tile_height,
+            label.clone(),
+        ));
+    }
+
+    candidates
+        .into_iter()
+        .max_by_key(|(tile_width, tile_height, _)| u64::from(*tile_width) * u64::from(*tile_height))
+        .map(|(tile_width, tile_height, label)| {
+            rects_for_tile(document, target, tile_width, tile_height, label)
+        })
+        .ok_or_else(|| "No supported AI upscale crop shape fits this document.".into())
+}
+
 /// Total pixel area a tiling submits to the model (sum of tile areas). Overlaps
 /// count twice, so this is the quantity the provider is billed for.
 fn submitted_area(tiling: &[(PixelRect, String)]) -> u64 {
@@ -922,6 +995,45 @@ pub(crate) fn plan_ai_restore_placement(
     if tiling.len() > MAX_AI_EDIT_PARTS {
         return Err(format!(
             "{label} would need {} AI restoration parts for a {width}x{height} image. Use a smaller scale.",
+            tiling.len()
+        ));
+    }
+    Ok(AiEditPlacement {
+        provider,
+        method: AiFillMethod::ExactInPlace,
+        redundancy: AiFillRedundancy::Medium,
+        document_dimensions,
+        mask_bounds: full,
+        parts: tiling
+            .into_iter()
+            .map(|(rect, aspect_label)| ai_edit_part(rect, &aspect_label))
+            .collect(),
+    })
+}
+
+/// Plan an AI upscale restoration pass using the largest provider-supported
+/// source frames. Unlike generic detail restoration, upscale starts from the
+/// app's deterministic enlarged base image, so each AI part should be as large
+/// as the provider can natively regenerate before PaintNode masks it back.
+pub(crate) fn plan_ai_upscale_placement(
+    provider: AiEditProvider,
+    document_dimensions: (u32, u32),
+    label: &str,
+) -> Result<AiEditPlacement, String> {
+    let (width, height) = document_dimensions;
+    if width == 0 || height == 0 {
+        return Err(format!("{label} image dimensions are invalid."));
+    }
+    let full = PixelRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let tiling = upscale_part_rects(provider, document_dimensions, full)?;
+    if tiling.len() > MAX_AI_EDIT_PARTS {
+        return Err(format!(
+            "{label} would need {} AI upscale parts for a {width}x{height} image. Use a smaller scale.",
             tiling.len()
         ));
     }
@@ -3978,6 +4090,24 @@ mod tests {
         let error = plan_ai_restore_placement(AiEditProvider::Codex, (20000, 20000), "AI upscale")
             .expect_err("oversized restore must fail");
         assert!(error.contains("Use a smaller scale"));
+    }
+
+    #[test]
+    fn upscale_placement_uses_largest_antigravity_provider_frames() {
+        let placement =
+            plan_ai_upscale_placement(AiEditProvider::Antigravity, (5120, 3200), "AI upscale")
+                .expect("antigravity upscale placement");
+        assert_eq!(placement.parts.len(), 2);
+        let mut covered = CoverageGrid::full(5120, 3200);
+        for part in &placement.parts {
+            assert_eq!(part.working.aspect_label, "1:1");
+            assert_eq!((part.crop.width, part.crop.height), (3200, 3200));
+            assert!(part.crop.width.max(part.crop.height) > 1344);
+            assert!(part.crop.x + part.crop.width <= 5120);
+            assert!(part.crop.y + part.crop.height <= 3200);
+            covered.clear_rect(part.crop);
+        }
+        assert!(covered.bounds().is_none());
     }
 
     #[test]

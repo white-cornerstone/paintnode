@@ -162,6 +162,7 @@ Use these annotations as direct user instructions for the regions they point to.
       aiTasks.setProgress(task.id, 'Preparing AI retouch inputs...');
       editor.flash('Preparing AI retouch...');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
+      const keepDebugArtifacts = settings.value.workspace.keepAiDebugArtifacts;
       progressListener.start(
         runId,
         (message, payload) => {
@@ -184,7 +185,7 @@ Use these annotations as direct user instructions for the regions they point to.
         const generated =
           imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 bytes.sourcePng,
                 bytes.editTargetPng,
                 bytes.maskPng,
@@ -194,7 +195,7 @@ Use these annotations as direct user instructions for the regions they point to.
                 references,
               )
             : await generateCodexRetouchImage(
-                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 bytes.sourcePng,
                 bytes.editTargetPng,
                 bytes.maskPng,

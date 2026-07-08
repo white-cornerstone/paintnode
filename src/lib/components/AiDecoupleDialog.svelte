@@ -226,13 +226,25 @@
         const result =
           decoupleProvider === 'antigravity'
             ? await decoupleAntigravityImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                antigravityConfigFromRunOptions(
+                  runOptions,
+                  taskProjectPath,
+                  runId,
+                  false,
+                  settings.value.workspace.keepAiDebugArtifacts,
+                ),
                 sourcePng,
                 prompt.trim() || DEFAULT_PROMPT,
                 false,
               )
             : await decoupleCodexImage(
-                codexConfigFromRunOptions(runOptions, taskProjectPath, runId),
+                codexConfigFromRunOptions(
+                  runOptions,
+                  taskProjectPath,
+                  runId,
+                  false,
+                  settings.value.workspace.keepAiDebugArtifacts,
+                ),
                 sourcePng,
                 prompt.trim() || DEFAULT_PROMPT,
                 false,

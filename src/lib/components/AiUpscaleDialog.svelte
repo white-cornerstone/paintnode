@@ -80,6 +80,22 @@
     return new Uint8Array(await blob.arrayBuffer());
   }
 
+  async function dataUrlToBitmap(dataUrl: string): Promise<ImageBitmap> {
+    return createImageBitmap(await (await fetch(dataUrl)).blob());
+  }
+
+  function resizedBaseCanvas(source: HTMLCanvasElement, width: number, height: number): HTMLCanvasElement {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Unable to create the AI upscale base layer.');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, width, height);
+    return canvas;
+  }
+
   async function run() {
     error = '';
     copied = false;
@@ -118,6 +134,8 @@
       aiTasks.setProgress(task.id, 'Preparing AI upscale input...');
       editor.flash('Preparing AI upscale...');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
+      const keepComposedResult = settings.value.workspace.keepAiUpscaleComposedResult;
+      const keepDebugArtifacts = settings.value.workspace.keepAiDebugArtifacts;
       progressListener.start(
         runId,
         (message, payload) => {
@@ -138,29 +156,66 @@
         const generated =
           imageProvider === 'antigravity'
             ? await upscaleAntigravityImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 sourcePng,
                 scale,
+                keepComposedResult,
               )
             : await upscaleCodexImage(
-                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 sourcePng,
                 scale,
+                keepComposedResult,
               );
-        if (generated.asset) await project.refresh(taskProjectPath);
-        const blob = await (await fetch(generated.dataUrl)).blob();
-        const bmp = await createImageBitmap(blob);
-        const upscaledDoc = new PaintDocument(bmp.width, bmp.height, `${docName} ${scale}%`);
-        const layer = new Layer(bmp.width, bmp.height, 'Layer 1');
-        layer.sourceAssetId = generated.asset?.id ?? null;
-        layer.sourcePath = generated.asset?.relativePath ?? null;
-        layer.ctx.drawImage(bmp, 0, 0);
-        layer.touch();
-        bmp.close();
-        upscaledDoc.layers = [layer];
-        upscaledDoc.activeLayerId = layer.id;
+        if (generated.asset || (generated.assets?.length ?? 0) > 0) await project.refresh(taskProjectPath);
+        const layerResults = generated.layers ?? [];
+        let upscaledDoc: PaintDocument;
+        if (layerResults.length) {
+          const targetWidth = Math.round((activeDoc.width * scale) / 100);
+          const targetHeight = Math.round((activeDoc.height * scale) / 100);
+          const base = resizedBaseCanvas(source, targetWidth, targetHeight);
+          upscaledDoc = new PaintDocument(targetWidth, targetHeight, `${docName} ${scale}%`);
+          const baseLayer = new Layer(targetWidth, targetHeight, 'Upscaled base');
+          baseLayer.ctx.drawImage(base, 0, 0);
+          baseLayer.touch();
+          const layers = [baseLayer];
+          for (const [index, resultLayer] of layerResults.entries()) {
+            const layerBmp = await dataUrlToBitmap(resultLayer.dataUrl);
+            const maskBmp = resultLayer.maskDataUrl ? await dataUrlToBitmap(resultLayer.maskDataUrl) : null;
+            const maskLayer = new Layer(targetWidth, targetHeight, `${resultLayer.name || `AI Upscale part ${index + 1}`} mask`);
+            maskLayer.kind = 'ai-retouch-mask';
+            maskLayer.visible = false;
+            if (maskBmp) {
+              maskLayer.ctx.drawImage(maskBmp, 0, 0, maskBmp.width, maskBmp.height, 0, 0, targetWidth, targetHeight);
+              maskLayer.touch();
+            }
+            const layer = new Layer(targetWidth, targetHeight, resultLayer.name || `AI Upscale part ${index + 1}`);
+            layer.sourceAssetId = resultLayer.asset?.id ?? null;
+            layer.sourcePath = resultLayer.asset?.relativePath ?? null;
+            layer.maskLayerId = maskBmp ? maskLayer.id : null;
+            layer.ctx.drawImage(layerBmp, 0, 0, layerBmp.width, layerBmp.height, 0, 0, targetWidth, targetHeight);
+            layer.touch();
+            layerBmp.close();
+            maskBmp?.close();
+            if (maskBmp) layers.push(maskLayer);
+            layers.push(layer);
+          }
+          upscaledDoc.layers = layers;
+          upscaledDoc.activeLayerId = layers.at(-1)?.id ?? baseLayer.id;
+        } else {
+          const bmp = await dataUrlToBitmap(generated.dataUrl);
+          upscaledDoc = new PaintDocument(bmp.width, bmp.height, `${docName} ${scale}%`);
+          const layer = new Layer(bmp.width, bmp.height, 'Layer 1');
+          layer.sourceAssetId = generated.asset?.id ?? null;
+          layer.sourcePath = generated.asset?.relativePath ?? null;
+          layer.ctx.drawImage(bmp, 0, 0);
+          layer.touch();
+          bmp.close();
+          upscaledDoc.layers = [layer];
+          upscaledDoc.activeLayerId = layer.id;
+        }
         editor.openDocument(upscaledDoc);
-        editor.flash('AI upscale added as a new document');
+        editor.flash(layerResults.length ? 'AI upscale added as masked layers' : 'AI upscale added as a new document');
         aiTasks.complete(task.id, 'AI upscale completed');
       } catch (e) {
         const message = (e as Error)?.message ?? String(e);
@@ -229,9 +284,9 @@
 
       <p class="hint">
         PaintNode enlarges the flattened document, splits it into parts the provider can regenerate
-        at native detail, and asks the AI to restore crisp detail part by part. 100% keeps the size
-        and only re-renders detail. The result opens as a new document. Large scales run one AI job
-        per part and can take several minutes.
+        at native detail, and asks the AI to restore crisp detail part by part. The result opens as a
+        new document with the enlarged base plus masked restored part layers. 100% keeps the size and
+        only re-renders detail. Large scales run one AI job per part and can take several minutes.
       </p>
     {/if}
 

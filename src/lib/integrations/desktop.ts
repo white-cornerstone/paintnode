@@ -94,6 +94,8 @@ export interface CodexGeneratorConfig {
   projectPath?: string | null;
   /** Keep the actual provider job folder for inspecting the exact inputs sent to the CLI. */
   keepJobDir?: boolean;
+  /** Preserve large provider request/response debug artifacts in job folders. */
+  keepDebugArtifacts?: boolean;
   /** Per-request id used to filter Codex progress events. */
   runId?: string;
   /** Codex model selected in PaintNode settings. */
@@ -121,6 +123,8 @@ export interface AntigravityGeneratorConfig {
   projectPath?: string | null;
   /** Keep the actual provider job folder for inspecting the exact inputs sent to the CLI. */
   keepJobDir?: boolean;
+  /** Preserve large provider auth/request/response debug artifacts in job folders. */
+  keepDebugArtifacts?: boolean;
   /** Per-request id used to filter progress events. */
   runId?: string;
   /** Antigravity agent model used only by agent-backed asset extraction. */
@@ -280,6 +284,7 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
     keepJobDir: config.keepJobDir ?? false,
+    keepDebugArtifacts: config.keepDebugArtifacts ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
     reasoningEffort,
@@ -297,6 +302,7 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig, includeImag
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
     keepJobDir: config.keepJobDir ?? false,
+    keepDebugArtifacts: config.keepDebugArtifacts ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
     approvalMode: config.approvalMode ?? 'skipPermissions',
@@ -326,11 +332,13 @@ export function codexConfigFromRunOptions(
   projectPath?: string | null,
   runId?: string,
   keepJobDir = false,
+  keepDebugArtifacts = false,
 ): CodexGeneratorConfig {
   return {
     bin: options.codexBin,
     projectPath,
     keepJobDir,
+    keepDebugArtifacts,
     runId,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
@@ -348,11 +356,13 @@ export function antigravityConfigFromRunOptions(
   projectPath?: string | null,
   runId?: string,
   keepJobDir = false,
+  keepDebugArtifacts = false,
 ): AntigravityGeneratorConfig {
   return {
     bin: options.antigravityBin,
     projectPath,
     keepJobDir,
+    keepDebugArtifacts,
     runId,
     model: options.antigravityModel,
     approvalMode: options.antigravityApprovalMode,
@@ -515,6 +525,7 @@ export async function upscaleCodexImage(
   config: CodexGeneratorConfig,
   sourcePng: Uint8Array,
   scalePercent: number,
+  keepComposedResult = false,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex AI upscale is only available in the desktop app.');
@@ -528,6 +539,7 @@ export async function upscaleCodexImage(
     projectPath,
     sourcePng: Array.from(sourcePng),
     scalePercent: Math.round(scalePercent),
+    keepComposedResult,
     runId,
   });
 }
@@ -664,6 +676,7 @@ export async function upscaleAntigravityImage(
   config: AntigravityGeneratorConfig,
   sourcePng: Uint8Array,
   scalePercent: number,
+  keepComposedResult = false,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity AI upscale is only available in the desktop app.');
@@ -677,6 +690,7 @@ export async function upscaleAntigravityImage(
     projectPath,
     sourcePng: Array.from(sourcePng),
     scalePercent: Math.round(scalePercent),
+    keepComposedResult,
     runId,
   });
 }

@@ -69,6 +69,8 @@ describe('settings normalization', () => {
         defaultCanvasWidth: 20_000,
         defaultCanvasHeight: -5,
         defaultBackground: 'white',
+        keepAiUpscaleComposedResult: true,
+        keepAiDebugArtifacts: true,
         layerAnnotationsExpanded: false,
       },
     });
@@ -98,11 +100,29 @@ describe('settings normalization', () => {
     expect(normalized.workspace.defaultCanvasWidth).toBe(8192);
     expect(normalized.workspace.defaultCanvasHeight).toBe(1);
     expect(normalized.workspace.defaultBackground).toBe('white');
+    expect(normalized.workspace.keepAiUpscaleComposedResult).toBe(true);
+    expect(normalized.workspace.keepAiDebugArtifacts).toBe(true);
     expect(normalized.workspace.layerAnnotationsExpanded).toBe(false);
   });
 
   it('defaults the annotation layer group to expanded for older settings', () => {
     expect(normalizeSettings({ workspace: {} }).workspace.layerAnnotationsExpanded).toBe(true);
+  });
+
+  it('does not keep composed AI upscale results by default', () => {
+    expect(defaultSettings().workspace.keepAiUpscaleComposedResult).toBe(false);
+    expect(normalizeSettings({ workspace: {} }).workspace.keepAiUpscaleComposedResult).toBe(false);
+  });
+
+  it('does not keep AI debug artifacts by default', () => {
+    expect(defaultSettings().workspace.keepAiDebugArtifacts).toBe(false);
+    expect(normalizeSettings({ workspace: {} }).workspace.keepAiDebugArtifacts).toBe(false);
+  });
+
+  it('accepts the older provider-specific debug artifact setting name', () => {
+    expect(
+      normalizeSettings({ workspace: { keepAntigravityDebugArtifacts: true } }).workspace.keepAiDebugArtifacts,
+    ).toBe(true);
   });
 
   it('defaults and clamps the AI result-checks level', () => {
