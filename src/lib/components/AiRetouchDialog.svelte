@@ -9,7 +9,9 @@
     copyTextToClipboard,
     createRunId,
     focusTaskDocument,
-    providerLabel,
+    aiRoleSummary,
+    aiRunningLabel,
+    imageProviderFromRunOptions,
   } from '../ai/taskSupport';
   import { loadAiReferenceImages, type AiReferenceImage } from '../ai/references';
   import { tooltip } from '../actions/tooltip';
@@ -56,6 +58,8 @@
   const maskPreview = $derived(taskDetail?.maskPreview ?? (request ? canvasPreviewDataUrl(request.mask) : ''));
   const annotatedSourcePreview = $derived(taskDetail?.annotatedSourcePreview ?? (request?.annotatedSource ? canvasPreviewDataUrl(request.annotatedSource) : ''));
   const referencePreview = $derived(taskDetail?.referencePreview ?? (request?.reference ? canvasPreviewDataUrl(request.reference) : ''));
+  const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  const roleSummary = $derived(aiRoleSummary(runOptions));
 
   function promptWithAnnotationNotes(requestPrompt: string, annotationNotes: string[] | undefined): string {
     const notes = annotationNotes?.map((note) => note.trim()).filter(Boolean) ?? [];
@@ -126,11 +130,11 @@ Use these annotations as direct user instructions for the regions they point to.
       kind: 'retouch',
       runId,
       title: 'AI Retouch',
-      subtitle: `${active.toolName} · ${providerLabel(runOptions.provider)}`,
+      subtitle: `${active.toolName} · ${roleSummary}`,
       progress: 'Preparing AI retouch inputs...',
       detail: {
         kind: 'retouch',
-        providerLabel: providerLabel(runOptions.provider),
+        providerLabel: roleSummary,
         prompt: prompt.trim(),
         toolName: active.toolName,
         gestureKind: active.gesture.kind,
@@ -169,7 +173,7 @@ Use these annotations as direct user instructions for the regions they point to.
           () =>
             aiTasks.setProgress(
               task.id,
-              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+              aiRunningLabel(imageProvider),
             ),
         );
 
@@ -178,7 +182,7 @@ Use these annotations as direct user instructions for the regions they point to.
         if (!bytes) throw new Error('Unable to prepare AI retouch input.');
         const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
         const generated =
-          runOptions.provider === 'antigravity'
+          imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 bytes.sourcePng,

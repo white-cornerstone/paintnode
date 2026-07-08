@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { editor } from '../state/editor.svelte';
-import type { AiProvider } from '../state/settings';
+import type { AiPlannerMode, AiProvider, AiRunOptions } from '../state/settings';
 
 /** Shared support for the background AI tasks and their dialogs (Generate, Retouch, Extract Assets). */
 
@@ -13,13 +13,47 @@ export type CodexProgressPayload = {
 };
 
 export function providerLabel(provider: AiProvider): string {
-  if (provider === 'antigravity') return 'Antigravity account';
+  if (provider === 'antigravity') return 'Antigravity';
   return 'Codex';
 }
 
 export function providerRunDir(provider: AiProvider): string {
   if (provider === 'antigravity') return 'antigravity-runs';
   return 'codex-runs';
+}
+
+export function imageProviderFromRunOptions(options: Pick<AiRunOptions, 'imageProvider' | 'provider'>): AiProvider {
+  return options.imageProvider ?? options.provider ?? 'codex';
+}
+
+export function plannerProviderFromRunOptions(options: Pick<AiRunOptions, 'plannerProvider'>): AiProvider {
+  return options.plannerProvider ?? 'codex';
+}
+
+export function plannerModeFromRunOptions(options: Pick<AiRunOptions, 'plannerMode'>): AiPlannerMode {
+  return options.plannerMode ?? 'auto';
+}
+
+export function plannerModeLabel(mode: AiPlannerMode): string {
+  if (mode === 'skip') return 'Skip planner';
+  if (mode === 'force') return 'Always plan';
+  return 'Auto plan';
+}
+
+export function aiRoleSummary(options: Pick<AiRunOptions, 'plannerMode' | 'plannerProvider' | 'imageProvider' | 'provider'>): string {
+  const imageProvider = imageProviderFromRunOptions(options);
+  const plannerMode = plannerModeFromRunOptions(options);
+  if (plannerMode === 'skip') return `Planner: Off · Image: ${providerLabel(imageProvider)}`;
+  const plannerLabel = plannerMode === 'force' ? 'Always' : 'Auto';
+  const plannerProvider = plannerProviderFromRunOptions(options);
+  if (plannerProvider === imageProvider) {
+    return `Planner: ${plannerLabel} · Image: ${providerLabel(imageProvider)}`;
+  }
+  return `Planner: ${plannerLabel} ${providerLabel(plannerProvider)} · Image: ${providerLabel(imageProvider)}`;
+}
+
+export function aiRunningLabel(provider: AiProvider): string {
+  return provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...';
 }
 
 export function createRunId(prefix: string): string {

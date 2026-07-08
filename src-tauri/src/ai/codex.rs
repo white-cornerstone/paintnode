@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tauri::AppHandle;
 
+use crate::ai::antigravity::run_antigravity_owned_image_edit;
 use crate::ai::canvas::{
     ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
     read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
@@ -92,6 +93,45 @@ impl Default for CodexCommandOptions {
             image_moderation: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PaintNodeImageProvider {
+    Codex,
+    Antigravity,
+}
+
+impl PaintNodeImageProvider {
+    fn from_option(value: Option<String>) -> Self {
+        match value
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("antigravity") | Some("agy") | Some("gemini") => Self::Antigravity,
+            _ => Self::Codex,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PaintNodeImageProviderOptions {
+    provider: PaintNodeImageProvider,
+    antigravity_bin: Option<String>,
+    antigravity_model: Option<String>,
+    antigravity_approval_mode: Option<String>,
+    antigravity_image_model: Option<String>,
+    antigravity_image_size: Option<String>,
+    antigravity_person_generation: Option<String>,
+    antigravity_prominent_people: Option<String>,
+    antigravity_compression_quality: Option<u8>,
+    antigravity_advanced_json: Option<String>,
+    antigravity_safety_filtering: Option<String>,
+    antigravity_safety_harassment: Option<String>,
+    antigravity_safety_hate_speech: Option<String>,
+    antigravity_safety_sexually_explicit: Option<String>,
+    antigravity_safety_dangerous_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1741,6 +1781,7 @@ fn run_paintnode_owned_fill_imagegen(
     run_id: &str,
     part_path: &Path,
     options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
     request_path: &Path,
     working: &AiWorkingCanvas,
 ) -> Result<CodexPartRun, String> {
@@ -1769,20 +1810,56 @@ fn run_paintnode_owned_fill_imagegen(
         ));
     }
 
-    emit_codex_progress(
-        app,
-        run_id,
-        format!(
-            "Requesting PaintNode Codex image fill at {}x{}",
-            working.original_dimensions.0, working.original_dimensions.1
-        ),
-    );
-    let result_png = run_codex_subscription_image_edit(
-        &prompt,
-        &[base_path],
-        working.original_dimensions,
-        options,
-    )?;
+    let result_png = match image_options.provider {
+        PaintNodeImageProvider::Antigravity => {
+            emit_codex_progress(
+                app,
+                run_id,
+                format!(
+                    "Requesting PaintNode Antigravity image fill at {}x{}",
+                    working.original_dimensions.0, working.original_dimensions.1
+                ),
+            );
+            run_antigravity_owned_image_edit(
+                app,
+                run_id,
+                image_options.antigravity_bin.clone(),
+                part_path,
+                prompt.clone(),
+                vec![base_path],
+                working,
+                image_options.antigravity_model.clone(),
+                image_options.antigravity_approval_mode.clone(),
+                image_options.antigravity_image_model.clone(),
+                image_options.antigravity_image_size.clone(),
+                image_options.antigravity_person_generation.clone(),
+                image_options.antigravity_prominent_people.clone(),
+                image_options.antigravity_compression_quality,
+                image_options.antigravity_advanced_json.clone(),
+                image_options.antigravity_safety_filtering.clone(),
+                image_options.antigravity_safety_harassment.clone(),
+                image_options.antigravity_safety_hate_speech.clone(),
+                image_options.antigravity_safety_sexually_explicit.clone(),
+                image_options.antigravity_safety_dangerous_content.clone(),
+            )?
+        }
+        PaintNodeImageProvider::Codex => {
+            emit_codex_progress(
+                app,
+                run_id,
+                format!(
+                    "Requesting PaintNode Codex image fill at {}x{}",
+                    working.original_dimensions.0, working.original_dimensions.1
+                ),
+            );
+            run_codex_subscription_image_edit(
+                &prompt,
+                &[base_path],
+                working.original_dimensions,
+                options,
+            )?
+        }
+    };
     let requested_result_path = part_path.join("result.png");
     fs::write(&requested_result_path, &result_png).map_err(|e| {
         format!(
@@ -1844,6 +1921,7 @@ fn run_codex_fill_part(
     run_id: &str,
     codex_bin: &str,
     options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
     part_path: &Path,
     prompt_text: &str,
     has_overview: bool,
@@ -1913,6 +1991,7 @@ fn run_codex_fill_part(
             run_id,
             part_path,
             options,
+            image_options,
             &owned_request_path,
             working,
         );
@@ -2126,6 +2205,21 @@ pub(crate) async fn generate_codex_fill_image(
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
     fill_aspect_ratio: Option<String>,
+    image_provider: Option<String>,
+    antigravity_bin: Option<String>,
+    antigravity_model: Option<String>,
+    antigravity_approval_mode: Option<String>,
+    antigravity_image_model: Option<String>,
+    antigravity_image_size: Option<String>,
+    antigravity_person_generation: Option<String>,
+    antigravity_prominent_people: Option<String>,
+    antigravity_compression_quality: Option<u8>,
+    antigravity_advanced_json: Option<String>,
+    antigravity_safety_filtering: Option<String>,
+    antigravity_safety_harassment: Option<String>,
+    antigravity_safety_hate_speech: Option<String>,
+    antigravity_safety_sexually_explicit: Option<String>,
+    antigravity_safety_dangerous_content: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a generative fill prompt.".into());
@@ -2166,6 +2260,23 @@ pub(crate) async fn generate_codex_fill_image(
             image_quality,
             image_moderation,
         );
+        let image_options = PaintNodeImageProviderOptions {
+            provider: PaintNodeImageProvider::from_option(image_provider),
+            antigravity_bin,
+            antigravity_model,
+            antigravity_approval_mode,
+            antigravity_image_model,
+            antigravity_image_size,
+            antigravity_person_generation,
+            antigravity_prominent_people,
+            antigravity_compression_quality,
+            antigravity_advanced_json,
+            antigravity_safety_filtering,
+            antigravity_safety_harassment,
+            antigravity_safety_hate_speech,
+            antigravity_safety_sexually_explicit,
+            antigravity_safety_dangerous_content,
+        };
         let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let autonomy = ai_autonomy_level(autonomy_level);
         let _checks_level = ai_edit_checks_level(edit_checks_level);
@@ -2193,7 +2304,10 @@ pub(crate) async fn generate_codex_fill_image(
         };
 
         let placement = plan_ai_fill_placement(
-            AiEditProvider::Codex,
+            match image_options.provider {
+                PaintNodeImageProvider::Antigravity => AiEditProvider::Antigravity,
+                PaintNodeImageProvider::Codex => AiEditProvider::Codex,
+            },
             AiFillMethod::Auto,
             AiFillRedundancy::Medium,
             source_dimensions,
@@ -2210,17 +2324,26 @@ pub(crate) async fn generate_codex_fill_image(
         )?;
         let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "Generative fill")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
-        let storyboard = prepare_codex_fill_storyboard(
-            &app,
-            &run_id,
-            &codex_bin,
-            &codex_options,
-            &job_path,
-            &placement,
-            &composer,
-            prompt.trim(),
-            &reference_pngs,
-        )?;
+        let storyboard = if image_options.provider == PaintNodeImageProvider::Codex {
+            prepare_codex_fill_storyboard(
+                &app,
+                &run_id,
+                &codex_bin,
+                &codex_options,
+                &job_path,
+                &placement,
+                &composer,
+                prompt.trim(),
+                &reference_pngs,
+            )?
+        } else {
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Skipping Codex storyboard draft; selected image generator owns fill pixels",
+            );
+            None
+        };
 
         let mut recovered_source_path: Option<PathBuf> = None;
         let return_part_layers = fill_placement_returns_layer_results(&placement);
@@ -2409,6 +2532,7 @@ pub(crate) async fn generate_codex_fill_image(
                 &run_id,
                 &codex_bin,
                 &codex_options,
+                &image_options,
                 &part_path,
                 &base_prompt_text,
                 has_overview,

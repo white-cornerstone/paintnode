@@ -122,6 +122,9 @@ describe('settings normalization', () => {
   it('keeps Codex as the default provider and exposes Antigravity model defaults', () => {
     const defaults = defaultSettings();
     expect(defaults.ai.provider).toBe('codex');
+    expect(defaults.ai.plannerMode).toBe('auto');
+    expect(defaults.ai.plannerProvider).toBe('codex');
+    expect(defaults.ai.imageProvider).toBe('codex');
     expect(defaults.ai.autonomyLevel).toBe('low');
     expect(defaults.ai.antigravityModel).toBe('auto');
     expect(defaults.ai.antigravityApprovalMode).toBe('skipPermissions');
@@ -184,6 +187,9 @@ describe('settings normalization', () => {
     });
 
     expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.plannerMode).toBe('skip');
+    expect(normalized.ai.plannerProvider).toBe('antigravity');
+    expect(normalized.ai.imageProvider).toBe('antigravity');
     expect(normalized.ai.autonomyLevel).toBe('low');
     expect(normalized.ai.antigravityModel).toBe('auto');
     expect(normalized.ai.antigravityApprovalMode).toBe('skipPermissions');
@@ -222,9 +228,31 @@ describe('settings normalization', () => {
     });
 
     expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.plannerMode).toBe('skip');
+    expect(normalized.ai.imageProvider).toBe('antigravity');
     expect(normalized.ai.antigravityBin).toBe('/bin/gemini');
     expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (Medium)');
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
+  });
+
+  it('normalizes split planner and image providers independently', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        provider: 'codex',
+        plannerMode: 'force',
+        plannerProvider: 'codex',
+        imageProvider: 'antigravity',
+      },
+    });
+
+    expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.plannerMode).toBe('force');
+    expect(normalized.ai.plannerProvider).toBe('codex');
+    expect(normalized.ai.imageProvider).toBe('antigravity');
+    const runOptions = aiRunOptionsFromSettings(normalized);
+    expect(runOptions.provider).toBe('antigravity');
+    expect(runOptions.plannerProvider).toBe('codex');
+    expect(runOptions.imageProvider).toBe('antigravity');
   });
 
   it('migrates retired custom provider settings back to Codex', () => {
@@ -285,6 +313,9 @@ describe('settings normalization', () => {
             name: ' Final pass ',
             options: {
               provider: 'antigravity',
+              plannerMode: 'force',
+              plannerProvider: 'codex',
+              imageProvider: 'antigravity',
               model: 'gpt-5.4-mini',
               reasoningEffort: 'high',
               imageQuality: 'ultra',
@@ -304,6 +335,9 @@ describe('settings normalization', () => {
     expect(value.ai.profiles[0].name).toBe('Final pass');
     expect(value.ai.defaultProfileId).toBe('final-pass');
     expect(runOptions.provider).toBe('antigravity');
+    expect(runOptions.plannerMode).toBe('force');
+    expect(runOptions.plannerProvider).toBe('codex');
+    expect(runOptions.imageProvider).toBe('antigravity');
     expect(runOptions.antigravityImageSize).toBe('2K');
     expect(runOptions.antigravitySafetyFiltering).toBe('custom');
     expect(runOptions.antigravitySafetyHarassment).toBe('BLOCK_NONE');

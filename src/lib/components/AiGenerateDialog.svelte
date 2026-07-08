@@ -2,7 +2,7 @@
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
-  import { copyTextToClipboard, providerLabel } from '../ai/taskSupport';
+  import { aiRoleSummary, copyTextToClipboard, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { defaultFillPrompt } from '../ai/generateExecutor';
   import { fillFrameSummary } from '../ai/imageModelCapabilities';
   import { loadAiReferenceImages, type AiReferenceImage } from '../ai/references';
@@ -33,17 +33,19 @@
   const currentError = $derived(task?.error ?? error);
   const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
+  const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  const roleSummary = $derived(aiRoleSummary(runOptions));
   const fillFrame = $derived.by(() => {
     const doc = editor.doc;
     const selection = editor.selection;
     if (!doc || !selection) return null;
     return fillFrameSummary(
-      runOptions.provider,
+      imageProvider,
       doc.width,
       doc.height,
       selection.bounds.w,
       selection.bounds.h,
-      runOptions.provider === 'antigravity' ? antigravityRatioOverride : null,
+      imageProvider === 'antigravity' ? antigravityRatioOverride : null,
     );
   });
 
@@ -88,23 +90,23 @@
     const capturedRunOptions = cloneAiRunOptions({
       ...runOptions,
       fillAspectRatio:
-        runOptions.provider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null,
+        imageProvider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null,
     });
     busy = true;
     const task = aiTasks.create({
       kind: 'generate',
       title: hasSelection ? 'Generative Fill' : 'Generate Image',
-      subtitle: providerLabel(runOptions.provider),
+      subtitle: roleSummary,
       progress:
-        runOptions.provider === 'codex'
+        imageProvider === 'codex'
           ? 'Preparing Codex request...'
-          : runOptions.provider === 'antigravity'
+          : imageProvider === 'antigravity'
             ? 'Preparing Antigravity request...'
             : 'Running local generator...',
       documentId: editor.activeDocumentId,
       detail: {
         kind: 'generate',
-        providerLabel: providerLabel(runOptions.provider),
+        providerLabel: roleSummary,
         prompt: userPrompt || defaultFillPrompt(),
         fillMode: hasSelection,
         runOptions: capturedRunOptions,
@@ -206,15 +208,15 @@
             <strong>{fillFrame.selectionLabel}</strong>
           </div>
           <div>
-            <span>{runOptions.provider === 'antigravity' ? 'Ratio' : 'Frame'}</span>
-            <strong>{runOptions.provider === 'antigravity' ? fillFrame.ratioLabel : fillFrame.frameLabel}</strong>
+            <span>{imageProvider === 'antigravity' ? 'Ratio' : 'Frame'}</span>
+            <strong>{imageProvider === 'antigravity' ? fillFrame.ratioLabel : fillFrame.frameLabel}</strong>
           </div>
           <div>
             <span>Scale</span>
             <strong>{fillFrame.needsRestoration ? `${fillFrame.scalePercent}% + restore` : '100%'}</strong>
           </div>
         </div>
-        {#if runOptions.provider === 'antigravity' && (fillFrame.needsRatioChoice || antigravityRatioOverride)}
+        {#if imageProvider === 'antigravity' && (fillFrame.needsRatioChoice || antigravityRatioOverride)}
           <label class="dlg-field">
             <span>Antigravity ratio</span>
             <select

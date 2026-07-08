@@ -5,10 +5,12 @@
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import {
     AiProgressListener,
+    aiRoleSummary,
+    aiRunningLabel,
     canvasPreviewDataUrl,
     copyTextToClipboard,
     createRunId,
-    providerLabel,
+    imageProviderFromRunOptions,
   } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -47,6 +49,8 @@
   const currentError = $derived(task?.error ?? error);
   const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
+  const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  const roleSummary = $derived(aiRoleSummary(runOptions));
   let prompt = $state(autoPrompt(ui.aiAutoAdjustKind));
 
   $effect(() => {
@@ -128,11 +132,11 @@
       kind: 'autoAdjust',
       runId,
       title: `AI Auto ${labelFor(adjustment)}`,
-      subtitle: providerLabel(runOptions.provider),
+      subtitle: roleSummary,
       progress: 'Preparing AI auto adjustment input...',
       detail: {
         kind: 'autoAdjust',
-        providerLabel: providerLabel(runOptions.provider),
+        providerLabel: roleSummary,
         adjustment,
         prompt: prompt.trim(),
         sourceName: docName,
@@ -157,7 +161,7 @@
           () =>
             aiTasks.setProgress(
               task.id,
-              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+              aiRunningLabel(imageProvider),
             ),
         );
 
@@ -165,7 +169,7 @@
         const sourcePng = await canvasToPngBytes(source);
         const maskPng = await canvasToPngBytes(mask);
         const generated =
-          runOptions.provider === 'antigravity'
+          imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 sourcePng,

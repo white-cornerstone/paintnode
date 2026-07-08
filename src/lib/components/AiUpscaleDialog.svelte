@@ -5,10 +5,12 @@
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import {
     AiProgressListener,
+    aiRoleSummary,
+    aiRunningLabel,
     canvasPreviewDataUrl,
     copyTextToClipboard,
     createRunId,
-    providerLabel,
+    imageProviderFromRunOptions,
   } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -54,6 +56,8 @@
         }
       : null,
   );
+  const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  const roleSummary = $derived(aiRoleSummary(runOptions));
 
   onDestroy(() => {
     if (!runningTaskId) progressListener.clear();
@@ -98,11 +102,11 @@
       kind: 'upscale',
       runId,
       title: 'AI Upscale',
-      subtitle: `${scale}% · ${providerLabel(runOptions.provider)}`,
+      subtitle: `${scale}% · ${roleSummary}`,
       progress: 'Preparing AI upscale input...',
       detail: {
         kind: 'upscale',
-        providerLabel: providerLabel(runOptions.provider),
+        providerLabel: roleSummary,
         scalePercent: scale,
         sourceName: docName,
         sourcePreview: canvasPreviewDataUrl(source),
@@ -125,14 +129,14 @@
           () =>
             aiTasks.setProgress(
               task.id,
-              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+              aiRunningLabel(imageProvider),
             ),
         );
 
       try {
         const sourcePng = await canvasToPngBytes(source);
         const generated =
-          runOptions.provider === 'antigravity'
+          imageProvider === 'antigravity'
             ? await upscaleAntigravityImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
                 sourcePng,
