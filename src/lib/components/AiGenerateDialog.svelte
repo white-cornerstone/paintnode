@@ -171,7 +171,7 @@
     {:else}
       <div class="provider-tabs" role="group" aria-label="Image generator">
         <button class:active={runOptions.provider === 'codex'} onclick={() => (runOptions.provider = 'codex')}>
-          Local Codex CLI
+          Local Codex
         </button>
         <button class:active={runOptions.provider === 'antigravity'} onclick={() => (runOptions.provider = 'antigravity')}>
           Local Antigravity CLI

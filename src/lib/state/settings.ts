@@ -31,6 +31,9 @@ export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
 export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type ServiceTier = 'default' | 'fast';
+export type CodexTransport = 'sdk' | 'cli';
+export type CodexImageQuality = 'auto' | 'low' | 'medium' | 'high';
+export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity' | 'custom';
@@ -45,9 +48,12 @@ export type AiEditChecksLevel = 0 | 1 | 2 | 3;
 export interface AiRunOptions {
   provider: AiProvider;
   codexBin: string;
+  codexTransport: CodexTransport;
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
   serviceTier: ServiceTier;
+  imageQuality: CodexImageQuality;
+  imageModeration: CodexImageModeration;
   autonomyLevel: AiAutonomyLevel;
   antigravityBin: string;
   antigravityModel: AntigravityModelId;
@@ -67,9 +73,12 @@ export interface PaintNodeSettings {
   ai: {
     provider: AiProvider;
     codexBin: string;
+    codexTransport: CodexTransport;
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
     serviceTier: ServiceTier;
+    imageQuality: CodexImageQuality;
+    imageModeration: CodexImageModeration;
     autonomyLevel: AiAutonomyLevel;
     antigravityBin: string;
     antigravityModel: AntigravityModelId;
@@ -104,6 +113,8 @@ const MODEL_IDS = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id)
 const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id));
 const AUTOSAVE_INTERVALS = new Set<number>(AUTOSAVE_INTERVAL_OPTIONS.map((option) => option.value));
 const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
+const IMAGE_QUALITIES = new Set<string>(['auto', 'low', 'medium', 'high']);
+const IMAGE_MODERATIONS = new Set<string>(['auto', 'low']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
 
 export function defaultSettings(): PaintNodeSettings {
@@ -117,9 +128,12 @@ export function defaultSettings(): PaintNodeSettings {
     ai: {
       provider: 'codex',
       codexBin: '',
+      codexTransport: 'sdk',
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
       serviceTier: 'default',
+      imageQuality: 'auto',
+      imageModeration: 'auto',
       autonomyLevel: 'low',
       antigravityBin: '',
       antigravityModel: 'auto',
@@ -197,11 +211,18 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
     ai: {
       provider,
       codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
+      codexTransport: ai.codexTransport === 'cli' ? 'cli' : defaults.ai.codexTransport,
       model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
       reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
         ? (savedReasoningEffort as ReasoningEffort)
         : defaults.ai.reasoningEffort,
       serviceTier: ai.serviceTier === 'fast' ? 'fast' : 'default',
+      imageQuality: IMAGE_QUALITIES.has(String(ai.imageQuality))
+        ? (ai.imageQuality as CodexImageQuality)
+        : defaults.ai.imageQuality,
+      imageModeration: IMAGE_MODERATIONS.has(String(ai.imageModeration))
+        ? (ai.imageModeration as CodexImageModeration)
+        : defaults.ai.imageModeration,
       autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))
         ? (ai.autonomyLevel as AiAutonomyLevel)
         : defaults.ai.autonomyLevel,
@@ -258,9 +279,12 @@ export function defaultAiRunOptions(): AiRunOptions {
   return {
     provider: ai.provider,
     codexBin: ai.codexBin,
+    codexTransport: ai.codexTransport,
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
     serviceTier: ai.serviceTier,
+    imageQuality: ai.imageQuality,
+    imageModeration: ai.imageModeration,
     autonomyLevel: ai.autonomyLevel,
     antigravityBin: ai.antigravityBin,
     antigravityModel: ai.antigravityModel,
@@ -275,9 +299,12 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
   return {
     provider: value.ai.provider,
     codexBin: value.ai.codexBin,
+    codexTransport: value.ai.codexTransport,
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
     serviceTier: value.ai.serviceTier,
+    imageQuality: value.ai.imageQuality,
+    imageModeration: value.ai.imageModeration,
     autonomyLevel: value.ai.autonomyLevel,
     antigravityBin: value.ai.antigravityBin,
     antigravityModel: value.ai.antigravityModel,

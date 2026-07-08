@@ -14,6 +14,12 @@ describe('settings normalization', () => {
     expect(defaultSettings().ai.model).toBe('gpt-5.5');
   });
 
+  it('uses SDK transport and automatic image settings by default', () => {
+    expect(defaultSettings().ai.codexTransport).toBe('sdk');
+    expect(defaultSettings().ai.imageQuality).toBe('auto');
+    expect(defaultSettings().ai.imageModeration).toBe('auto');
+  });
+
   it('keeps the model dropdown limited to supported image-capable models', () => {
     expect(CODEX_MODEL_OPTIONS.map((option) => option.label)).toEqual(['GPT-5.5', 'GPT-5.4', 'GPT-5.4-Mini']);
   });
@@ -37,8 +43,11 @@ describe('settings normalization', () => {
         provider: 'antigravity',
         autonomyLevel: 'unmanaged',
         model: 'gpt-5.4-mini',
+        codexTransport: 'cli',
         reasoningEffort: 'high',
         serviceTier: 'fast',
+        imageQuality: 'high',
+        imageModeration: 'low',
         antigravityModel: 'Gemini 3.5 Flash (High)',
         antigravityApprovalMode: 'default',
       },
@@ -54,8 +63,11 @@ describe('settings normalization', () => {
     expect(normalized.general.autosaveIntervalMs).toBe(120_000);
     expect(normalized.ai.provider).toBe('antigravity');
     expect(normalized.ai.model).toBe('gpt-5.4-mini');
+    expect(normalized.ai.codexTransport).toBe('cli');
     expect(normalized.ai.reasoningEffort).toBe('high');
     expect(normalized.ai.serviceTier).toBe('fast');
+    expect(normalized.ai.imageQuality).toBe('high');
+    expect(normalized.ai.imageModeration).toBe('low');
     expect(normalized.ai.autonomyLevel).toBe('unmanaged');
     expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (High)');
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
@@ -114,6 +126,20 @@ describe('settings normalization', () => {
     expect(normalized.ai.antigravityApprovalMode).toBe('skipPermissions');
   });
 
+  it('falls back to safe Codex image-generation controls for unknown saved values', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        codexTransport: 'socket',
+        imageQuality: 'ultra',
+        imageModeration: 'off',
+      },
+    });
+
+    expect(normalized.ai.codexTransport).toBe('sdk');
+    expect(normalized.ai.imageQuality).toBe('auto');
+    expect(normalized.ai.imageModeration).toBe('auto');
+  });
+
   it('migrates old Gemini provider settings to Antigravity settings', () => {
     const normalized = normalizeSettings({
       ai: {
@@ -146,6 +172,9 @@ describe('settings normalization', () => {
 
     expect(runOptions.antigravityBin).toBe('/bin/agy');
     expect(runOptions.autonomyLevel).toBe('guided');
+    expect(runOptions.codexTransport).toBe('sdk');
+    expect(runOptions.imageQuality).toBe('auto');
+    expect(runOptions.imageModeration).toBe('auto');
     expect(runOptions.fillAspectRatio).toBeNull();
     expect(value.ai.provider).toBe('antigravity');
   });

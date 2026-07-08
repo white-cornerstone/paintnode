@@ -12,6 +12,9 @@
     ANTIGRAVITY_MODEL_OPTIONS,
     type AiProvider,
     type CanvasBackground,
+    type CodexTransport,
+    type CodexImageModeration,
+    type CodexImageQuality,
     type CodexModelId,
     type AntigravityApprovalMode,
     type AntigravityModelId,
@@ -35,6 +38,20 @@
   const serviceTiers: { value: ServiceTier; label: string; hint: string }[] = [
     { value: 'default', label: 'Default', hint: 'Use normal Codex speed.' },
     { value: 'fast', label: 'Fast', hint: 'Ask Codex to use fast mode for AI runs.' },
+  ];
+  const codexTransports: { value: CodexTransport; label: string; hint: string }[] = [
+    { value: 'sdk', label: 'Codex SDK', hint: 'Use the SDK runner wrapper for streamed Codex runs.' },
+    { value: 'cli', label: 'Direct CLI', hint: 'Use PaintNode’s original direct codex exec runner.' },
+  ];
+  const imageQualities: { value: CodexImageQuality; label: string; hint: string }[] = [
+    { value: 'auto', label: 'Auto', hint: 'Let the image-generation tool choose quality.' },
+    { value: 'low', label: 'Low', hint: 'Prefer faster draft generations.' },
+    { value: 'medium', label: 'Medium', hint: 'Balance latency and output detail.' },
+    { value: 'high', label: 'High', hint: 'Prefer final-quality output when the image tool supports it.' },
+  ];
+  const imageModerations: { value: CodexImageModeration; label: string; hint: string }[] = [
+    { value: 'auto', label: 'Default', hint: 'Use normal image-generation moderation.' },
+    { value: 'low', label: 'Low', hint: 'Use the image API low moderation mode when the owned runner supports it.' },
   ];
   let tab = $state<Tab>('general');
   let detectBusy = $state(false);
@@ -204,7 +221,7 @@
             value={settings.value.ai.provider}
             onchange={(event) => settings.update({ ai: { provider: textValue(event) as AiProvider } })}
           >
-            <option value="codex">Local Codex CLI</option>
+            <option value="codex">Local Codex</option>
             <option value="antigravity">Local Antigravity CLI</option>
             <option value="custom">Custom CLI</option>
           </select>
@@ -264,18 +281,62 @@
             </label>
           </div>
 
-          <label class="field">
-            <span>Codex speed</span>
-            <select
-              value={settings.value.ai.serviceTier}
-              onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
-            >
-              {#each serviceTiers as option (option.value)}
-                <option value={option.value}>{option.label}</option>
-              {/each}
-            </select>
-            <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
-          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span>Codex speed</span>
+              <select
+                value={settings.value.ai.serviceTier}
+                onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
+              >
+                {#each serviceTiers as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
+            </label>
+
+            <label class="field">
+              <span>Codex transport</span>
+              <select
+                value={settings.value.ai.codexTransport}
+                onchange={(event) => settings.update({ ai: { codexTransport: textValue(event) as CodexTransport } })}
+              >
+                {#each codexTransports as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{codexTransports.find((option) => option.value === settings.value.ai.codexTransport)?.hint}</small>
+            </label>
+          </div>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>Image quality</span>
+              <select
+                value={settings.value.ai.imageQuality}
+                onchange={(event) => settings.update({ ai: { imageQuality: textValue(event) as CodexImageQuality } })}
+              >
+                {#each imageQualities as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{imageQualities.find((option) => option.value === settings.value.ai.imageQuality)?.hint}</small>
+            </label>
+
+            <label class="field">
+              <span>Image moderation</span>
+              <select
+                value={settings.value.ai.imageModeration}
+                onchange={(event) =>
+                  settings.update({ ai: { imageModeration: textValue(event) as CodexImageModeration } })}
+              >
+                {#each imageModerations as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <small>{imageModerations.find((option) => option.value === settings.value.ai.imageModeration)?.hint}</small>
+            </label>
+          </div>
         {:else if settings.value.ai.provider === 'antigravity'}
           <div class="detect-row">
             <label class="field">

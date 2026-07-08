@@ -34,11 +34,11 @@ use crate::ai::fill_storyboard::{
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
     ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
-    cover_crop_png_to_dimensions, normalize_storyboard_draft_png, plan_ai_edit_placement,
-    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, storyboard_draft_canvas_png,
-    storyboard_draft_mask_png, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
+    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
+    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
+    reuse_part_result, storyboard_draft_canvas_png, storyboard_draft_mask_png, AiEditComposer,
+    AiEditPlacement, AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
@@ -492,6 +492,7 @@ fn antigravity_fill_prompt(
     let tool_call_note = antigravity_fill_image_tool_call_note(
         job_dir,
         working,
+        has_overview,
         continuation,
         has_storyboard,
         storyboard_anchor,
@@ -774,6 +775,7 @@ fn antigravity_image_tool_call_note(
 fn antigravity_fill_image_tool_call_note(
     job_dir: &str,
     working: &AiWorkingCanvas,
+    has_overview: bool,
     continuation: bool,
     has_storyboard: bool,
     storyboard_anchor: bool,
@@ -794,6 +796,14 @@ fn antigravity_fill_image_tool_call_note(
     } else if continuation {
         format!(
             "\n- Also attach `{job_dir}/overview.png` as an additional continuity reference only. Its pixels, resolution, and red outline must never appear in the output."
+        )
+    } else if has_overview && has_storyboard_draft {
+        format!(
+            "\n- Also attach `{job_dir}/overview.png` as an additional composition reference only; it shows surrounding document content and the rough draft. Its pixels, resolution, and red outline must never appear in the output."
+        )
+    } else if has_overview {
+        format!(
+            "\n- Also attach `{job_dir}/overview.png` as an additional composition and continuity reference only. Its pixels, resolution, and red outline must never appear in the output."
         )
     } else {
         String::new()
@@ -1601,7 +1611,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             &options,
         )?;
 
-        let return_part_layers = placement.is_split();
+        let return_part_layers = fill_placement_returns_layer_results(&placement);
         let mut layer_results = Vec::new();
         let mut layer_assets = Vec::new();
         let mut raw_assets = Vec::new();
@@ -1717,7 +1727,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             };
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
-            let has_overview = placement.is_split();
+            let has_overview = fill_part_needs_overview(&placement, part_index);
             if has_overview {
                 let overview_png = if let Some(draft_png) = storyboard_draft_png.as_deref() {
                     composer.overview_png_with_storyboard_draft(
@@ -3060,6 +3070,8 @@ mod tests {
         assert!(storyboard_fill.contains("PaintNode draft enhancement"));
         assert!(storyboard_fill.contains("source.png`: PaintNode edit frame to enhance"));
         assert!(storyboard_fill.contains("`paintnode/antigravity-runs/job-4/part-1/overview.png`"));
+        assert!(storyboard_fill
+            .contains("Also attach `paintnode/antigravity-runs/job-4/part-1/overview.png`"));
         assert!(storyboard_fill.contains("never use `overview.png` as the source or base image"));
         assert!(storyboard_fill.contains("never reproduce the red outline"));
         assert!(storyboard_fill.contains("image enhancement/restoration pass at the same size"));

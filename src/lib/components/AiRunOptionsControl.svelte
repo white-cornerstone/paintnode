@@ -9,6 +9,9 @@
     type AiProvider,
     type AiRunOptions,
     type AiAutonomyLevel,
+    type CodexTransport,
+    type CodexImageModeration,
+    type CodexImageQuality,
     type CodexModelId,
     type AntigravityApprovalMode,
     type AntigravityModelId,
@@ -35,6 +38,20 @@
     { value: 'default', label: 'Default speed' },
     { value: 'fast', label: 'Fast' },
   ];
+  const codexTransports: { value: CodexTransport; label: string; short: string }[] = [
+    { value: 'sdk', label: 'Codex SDK', short: 'SDK' },
+    { value: 'cli', label: 'Direct CLI', short: 'CLI' },
+  ];
+  const imageQualities: { value: CodexImageQuality; label: string; short: string }[] = [
+    { value: 'auto', label: 'Auto quality', short: 'AutoQ' },
+    { value: 'low', label: 'Low quality', short: 'LowQ' },
+    { value: 'medium', label: 'Medium quality', short: 'MedQ' },
+    { value: 'high', label: 'High quality', short: 'HighQ' },
+  ];
+  const imageModerations: { value: CodexImageModeration; label: string }[] = [
+    { value: 'auto', label: 'Default moderation' },
+    { value: 'low', label: 'Low moderation' },
+  ];
   const approvalModes: { value: AntigravityApprovalMode; label: string }[] = [
     { value: 'skipPermissions', label: 'Skip job-folder permissions' },
     { value: 'default', label: 'Default permissions' },
@@ -46,13 +63,24 @@
     { value: 'unmanaged', label: 'Unmanaged', short: 'Unmanaged' },
   ];
   const providers: { value: AiProvider; label: string }[] = [
-    { value: 'codex', label: 'Local Codex CLI' },
+    { value: 'codex', label: 'Local Codex' },
     { value: 'antigravity', label: 'Local Antigravity CLI' },
     { value: 'custom', label: 'Custom CLI' },
   ];
 
   let open = $state(false);
-  let submenu = $state<'autonomy' | 'reasoning' | 'model' | 'speed' | 'antigravityModel' | 'antigravityApproval' | null>(null);
+  let submenu = $state<
+    | 'autonomy'
+    | 'reasoning'
+    | 'model'
+    | 'speed'
+    | 'transport'
+    | 'quality'
+    | 'moderation'
+    | 'antigravityModel'
+    | 'antigravityApproval'
+    | null
+  >(null);
   let pillElement = $state<HTMLButtonElement | null>(null);
   let menuElement = $state<HTMLDivElement | null>(null);
   let menuStyle = $state('visibility: hidden; left: 8px; top: 8px;');
@@ -65,6 +93,10 @@
   const codexModelLabel = $derived(CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label.replace('GPT-', '') ?? options.model);
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
+  const transportShort = $derived(codexTransports.find((item) => item.value === options.codexTransport)?.short ?? 'SDK');
+  const imageQualityShort = $derived(
+    imageQualities.find((item) => item.value === options.imageQuality)?.short ?? 'AutoQ',
+  );
   const antigravityModelOptions = $derived(
     antigravityModelScope === 'image' ? ANTIGRAVITY_IMAGE_AGENT_MODEL_OPTIONS : ANTIGRAVITY_MODEL_OPTIONS,
   );
@@ -73,7 +105,7 @@
     antigravityModelOptions.find((item) => item.id === options.antigravityModel)?.label ?? 'Auto',
   );
   const summary = $derived.by(() => {
-    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${autonomyShort}`;
+    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${transportShort}`;
     if (options.provider === 'antigravity') return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
     return 'Custom CLI';
   });
@@ -93,6 +125,18 @@
 
   function setServiceTier(serviceTier: ServiceTier): void {
     options = { ...options, serviceTier };
+  }
+
+  function setCodexTransport(codexTransport: CodexTransport): void {
+    options = { ...options, codexTransport };
+  }
+
+  function setImageQuality(imageQuality: CodexImageQuality): void {
+    options = { ...options, imageQuality };
+  }
+
+  function setImageModeration(imageModeration: CodexImageModeration): void {
+    options = { ...options, imageModeration };
   }
 
   function setAutonomy(autonomyLevel: AiAutonomyLevel): void {
@@ -273,6 +317,51 @@
               <button type="button" class:active={options.serviceTier === item.value} onclick={() => setServiceTier(item.value)}>
                 <span>{item.label}</span>
                 {#if options.serviceTier === item.value}<Icon svg={Checkmark} size={15} />{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <button type="button" onclick={() => (submenu = submenu === 'quality' ? null : 'quality')}>
+          <span>Quality</span>
+          <span class="value">{imageQualities.find((item) => item.value === options.imageQuality)?.label}</span>
+          <Icon svg={ChevronRight} size={14} />
+        </button>
+        {#if submenu === 'quality'}
+          <div class="subitems">
+            {#each imageQualities as item (item.value)}
+              <button type="button" class:active={options.imageQuality === item.value} onclick={() => setImageQuality(item.value)}>
+                <span>{item.label}</span>
+                {#if options.imageQuality === item.value}<Icon svg={Checkmark} size={15} />{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <button type="button" onclick={() => (submenu = submenu === 'moderation' ? null : 'moderation')}>
+          <span>Moderation</span>
+          <span class="value">{options.imageModeration === 'low' ? 'Low' : 'Default'}</span>
+          <Icon svg={ChevronRight} size={14} />
+        </button>
+        {#if submenu === 'moderation'}
+          <div class="subitems">
+            {#each imageModerations as item (item.value)}
+              <button type="button" class:active={options.imageModeration === item.value} onclick={() => setImageModeration(item.value)}>
+                <span>{item.label}</span>
+                {#if options.imageModeration === item.value}<Icon svg={Checkmark} size={15} />{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <button type="button" onclick={() => (submenu = submenu === 'transport' ? null : 'transport')}>
+          <span>Transport</span>
+          <span class="value">{codexTransports.find((item) => item.value === options.codexTransport)?.label}</span>
+          <Icon svg={ChevronRight} size={14} />
+        </button>
+        {#if submenu === 'transport'}
+          <div class="subitems">
+            {#each codexTransports as item (item.value)}
+              <button type="button" class:active={options.codexTransport === item.value} onclick={() => setCodexTransport(item.value)}>
+                <span>{item.label}</span>
+                {#if options.codexTransport === item.value}<Icon svg={Checkmark} size={15} />{/if}
               </button>
             {/each}
           </div>

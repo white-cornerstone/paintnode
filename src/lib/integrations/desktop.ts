@@ -4,6 +4,9 @@ import type {
   AiRunOptions,
   AiAutonomyLevel,
   CodexModelId,
+  CodexTransport,
+  CodexImageModeration,
+  CodexImageQuality,
   AntigravityApprovalMode,
   AntigravityModelId,
   ReasoningEffort,
@@ -88,6 +91,8 @@ export interface GeneratorConfig {
 export interface CodexGeneratorConfig {
   /** Optional path to the local Codex binary. Empty uses the Rust-side defaults. */
   bin?: string;
+  /** Whether PaintNode invokes Codex directly or through the Codex SDK runner. */
+  transport?: CodexTransport | null;
   /** Optional PaintNode project folder. Generated output is saved there when present. */
   projectPath?: string | null;
   /** Keep the actual provider job folder for inspecting the exact inputs sent to the CLI. */
@@ -100,6 +105,10 @@ export interface CodexGeneratorConfig {
   reasoningEffort?: ReasoningEffort | null;
   /** Speed tier selected in PaintNode settings. */
   serviceTier?: ServiceTier | null;
+  /** Image-generation quality forwarded to the owned imagegen runner when available. */
+  imageQuality?: CodexImageQuality | null;
+  /** Image-generation moderation mode forwarded to the owned imagegen runner when available. */
+  imageModeration?: CodexImageModeration | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
@@ -256,12 +265,15 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     (config.reasoningEffort as string) === 'minimal' ? 'low' : (config.reasoningEffort ?? null);
   return {
     bin: config.bin?.trim() ? config.bin.trim() : null,
+    codexTransport: config.transport === 'cli' ? 'cli' : 'sdk',
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
     keepJobDir: config.keepJobDir ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
     reasoningEffort,
     serviceTier: config.serviceTier ?? 'default',
+    imageQuality: config.imageQuality ?? 'auto',
+    imageModeration: config.imageModeration ?? 'auto',
     autonomyLevel: config.autonomyLevel ?? 'low',
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
@@ -290,12 +302,15 @@ export function codexConfigFromRunOptions(
 ): CodexGeneratorConfig {
   return {
     bin: options.codexBin,
+    transport: options.codexTransport,
     projectPath,
     keepJobDir,
     runId,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,
+    imageQuality: options.imageQuality,
+    imageModeration: options.imageModeration,
     autonomyLevel: options.autonomyLevel,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,

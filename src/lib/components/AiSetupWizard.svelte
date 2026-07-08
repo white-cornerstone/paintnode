@@ -34,7 +34,7 @@
     {
       id: 'codex',
       icon: Code,
-      title: 'OpenAI Codex CLI',
+      title: 'OpenAI Codex',
       command: 'codex',
       description: 'Uses your local Codex sign-in to generate images with GPT models.',
     },
