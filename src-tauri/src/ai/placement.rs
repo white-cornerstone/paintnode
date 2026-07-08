@@ -1,14 +1,12 @@
-//! Crop-based AI edit placement.
+//! Provider-aware AI edit placement.
 //!
-//! Instead of padding the document onto a larger chroma-key working canvas
-//! (which shifted composition and camera framing in generated results),
-//! PaintNode crops the submission to the largest provider-supported rectangle
-//! that stays inside the document and covers the edit mask. When no single
-//! supported crop can cover the mask (extreme documents such as 6000x480),
-//! the edit splits into sequential parts: every completed part becomes
-//! protected context for the next one, and all parts compose back into a
-//! full-document result. The chosen geometry is recorded as `placement.json`
-//! in the job folder so the crop-back/paste-back coordinates are auditable.
+//! PaintNode separates the provider input frame from the document paste rect.
+//! A provider may need a slightly wider or taller source frame than the edit
+//! area (for example to satisfy a supported ratio), while `placement.json`
+//! records exactly which document pixels are pasted back. When no single
+//! provider frame can cover the mask, the edit splits into sequential parts:
+//! every completed part becomes protected context for the next one, and all
+//! parts compose back into a full-document result.
 
 use std::fs;
 use std::path::Path;
@@ -60,6 +58,9 @@ fn axis_max_overlap(origins: &[u32], tile_len: u32) -> u32 {
 
 /// Preferred protected context ring kept around the mask inside a crop.
 const MASK_CONTEXT_MARGIN: u32 = 16;
+const FILL_CONTEXT_MIN_MARGIN: u32 = 48;
+const FILL_CONTEXT_MAX_MARGIN: u32 = 160;
+const FILL_CONTEXT_DIVISOR: u32 = 6;
 
 const OVERVIEW_MAX_SIDE: u32 = 768;
 const OVERVIEW_OUTLINE_THICKNESS: u32 = 3;
@@ -331,6 +332,10 @@ fn floor_to_multiple(value: u32, multiple: u32) -> u32 {
     value / multiple * multiple
 }
 
+fn ceil_to_multiple(value: u32, multiple: u32) -> u32 {
+    value.div_ceil(multiple) * multiple
+}
+
 fn aspect_clamped(mut width: u32, mut height: u32, max_aspect: u32) -> (u32, u32) {
     if width > height.saturating_mul(max_aspect) {
         width = height * max_aspect;
@@ -368,14 +373,12 @@ fn codex_crop_dimensions(
         .then(|| (free.0, free.1, "codex-crop".into()))
 }
 
-/// Split-tile shapes for Codex. Codex renders any dimensions (results resize
-/// back), so unlike Antigravity's fixed grids it offers a continuous ladder of
-/// full-short-extent tiles — from the portrait aspect limit up to the landscape
-/// limit, on the dimension grid, capped to the document's long extent. A ladder
-/// (rather than one shape) lets tiling pick a wide best-fit anchor and a smaller
-/// finisher: a 2600x600 fill becomes an 1800x600 (3:1) tile plus a snug
-/// finisher instead of three uniform strips. Every tile fills the short axis in
-/// one strip, so a wide document stays a single row.
+/// Split-tile shapes for Codex. Codex renders flexible dimensions (results
+/// resize back), so unlike Antigravity's fixed grids it offers a continuous
+/// ladder from the portrait aspect limit up to the landscape limit, capped by
+/// the model source-frame size limits. A ladder (rather than one shape) lets
+/// tiling pick a wide best-fit anchor and a smaller finisher when a document is
+/// too large for one source frame.
 fn codex_split_tile_candidates(document: (u32, u32)) -> Vec<(u32, u32, String)> {
     let codex = ai_codex_image_capability();
     let max_aspect = codex.max_aspect_ratio.max(1);
@@ -394,6 +397,8 @@ fn codex_split_tile_candidates(document: (u32, u32)) -> Vec<(u32, u32, String)> 
     if short == 0 || long == 0 {
         return Vec::new();
     }
+    let short = short.min(codex.max_short_side.max(1));
+    let long = long.min(codex.max_long_side.max(1));
     let min_long = (short / max_aspect).max(1);
     let max_long = short.saturating_mul(max_aspect).min(long);
     let shape = |long_dim: u32| {
@@ -468,6 +473,78 @@ fn ratio_crop_dimensions(
                 std::cmp::Reverse(aspect_error(document, (*width, *height))),
             )
         })
+}
+
+fn antigravity_fill_source_frame_dimensions(
+    min_dimensions: (u32, u32),
+    forced_label: Option<&str>,
+) -> Option<(u32, u32, String)> {
+    let capability = ai_antigravity_image_capability();
+    let candidate_for_ratio =
+        |ratio: &SupportedAspectRatio| antigravity_frame_for_ratio(ratio, min_dimensions);
+
+    if let Some(label) = forced_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
+        if let Some(candidate) = capability
+            .aspect_ratios
+            .iter()
+            .find(|ratio| ratio.label == label)
+            .and_then(candidate_for_ratio)
+        {
+            return Some(candidate);
+        }
+    }
+
+    capability
+        .aspect_ratios
+        .iter()
+        .filter_map(candidate_for_ratio)
+        .min_by_key(|(width, height, _)| {
+            (
+                u64::from(*width) * u64::from(*height),
+                aspect_error(min_dimensions, (*width, *height)),
+            )
+        })
+}
+
+fn codex_fill_source_frame_dimensions(min_dimensions: (u32, u32)) -> Option<(u32, u32, String)> {
+    let codex = ai_codex_image_capability();
+    let max_aspect = codex.max_aspect_ratio.max(1);
+    let multiple = codex.dimension_multiple.max(1);
+    let mut width = min_dimensions.0.max(1);
+    let mut height = min_dimensions.1.max(1);
+    if width > height.saturating_mul(max_aspect) {
+        height = width.div_ceil(max_aspect);
+    }
+    if height > width.saturating_mul(max_aspect) {
+        width = height.div_ceil(max_aspect);
+    }
+    width = ceil_to_multiple(width, multiple);
+    height = ceil_to_multiple(height, multiple);
+    if width > height.saturating_mul(max_aspect) || height > width.saturating_mul(max_aspect) {
+        return None;
+    }
+    let long = width.max(height);
+    let short = width.min(height);
+    if long > codex.max_long_side || short > codex.max_short_side {
+        return None;
+    }
+    Some((width, height, "codex-crop".into()))
+}
+
+fn fill_source_frame_dimensions(
+    provider: AiEditProvider,
+    min_dimensions: (u32, u32),
+    forced_label: Option<&str>,
+) -> Option<(u32, u32, String)> {
+    match provider {
+        AiEditProvider::Codex => codex_fill_source_frame_dimensions(min_dimensions),
+        AiEditProvider::Antigravity => {
+            antigravity_fill_source_frame_dimensions(min_dimensions, forced_label)
+        }
+    }
 }
 
 fn single_crop_dimensions(
@@ -1016,78 +1093,97 @@ pub(crate) fn plan_ai_edit_placement(
     })
 }
 
+fn fill_context_margin(mask_bounds: PixelRect) -> u32 {
+    let long = mask_bounds.width.max(mask_bounds.height);
+    (long / FILL_CONTEXT_DIVISOR).clamp(FILL_CONTEXT_MIN_MARGIN, FILL_CONTEXT_MAX_MARGIN)
+}
+
+fn plan_ai_fill_source_frame_placement(
+    provider: AiEditProvider,
+    method: AiFillMethod,
+    redundancy: AiFillRedundancy,
+    document_dimensions: (u32, u32),
+    mask_bounds: PixelRect,
+    target: PixelRect,
+    forced_aspect_label: Option<&str>,
+) -> Option<AiEditPlacement> {
+    let (input_width, input_height, aspect_label) =
+        fill_source_frame_dimensions(provider, (target.width, target.height), forced_aspect_label)?;
+    let crop_dimensions = (
+        input_width.min(document_dimensions.0),
+        input_height.min(document_dimensions.1),
+    );
+    if crop_dimensions.0 < target.width || crop_dimensions.1 < target.height {
+        return None;
+    }
+    let crop = position_crop(document_dimensions, target, crop_dimensions);
+    let input_dimensions = (input_width, input_height);
+    Some(AiEditPlacement {
+        provider,
+        method,
+        redundancy,
+        document_dimensions,
+        mask_bounds,
+        parts: vec![ai_edit_part_with_input(
+            crop,
+            input_dimensions,
+            centered_paste_rect(input_dimensions, crop),
+            &aspect_label,
+        )],
+    })
+}
+
+fn plan_ai_compact_fill_placement(
+    provider: AiEditProvider,
+    redundancy: AiFillRedundancy,
+    document_dimensions: (u32, u32),
+    mask_bounds: PixelRect,
+    forced_aspect_label: Option<&str>,
+) -> Option<AiEditPlacement> {
+    let target = expand_rect(
+        mask_bounds,
+        fill_context_margin(mask_bounds),
+        document_dimensions,
+    );
+    for candidate_target in [
+        target,
+        expand_rect(mask_bounds, MASK_CONTEXT_MARGIN, document_dimensions),
+        mask_bounds,
+    ] {
+        if let Some(placement) = plan_ai_fill_source_frame_placement(
+            provider,
+            AiFillMethod::ExactInPlace,
+            redundancy,
+            document_dimensions,
+            mask_bounds,
+            candidate_target,
+            forced_aspect_label,
+        ) {
+            return Some(placement);
+        }
+    }
+    None
+}
+
 fn mask_is_mostly_full(mask_bounds: PixelRect, document: (u32, u32)) -> bool {
     u64::from(mask_bounds.width) * 100 >= u64::from(document.0) * 80
         && u64::from(mask_bounds.height) * 100 >= u64::from(document.1) * 80
 }
 
-fn is_wide_or_tall(document: (u32, u32)) -> bool {
-    let long = document.0.max(document.1);
-    let short = document.0.min(document.1).max(1);
-    u64::from(long) * 100 >= u64::from(short) * 160
+pub(crate) fn fill_part_needs_overview(placement: &AiEditPlacement, part_index: usize) -> bool {
+    let part = &placement.parts[part_index];
+    placement.is_split()
+        || part.crop.x != 0
+        || part.crop.y != 0
+        || (part.crop.width, part.crop.height) != placement.document_dimensions
 }
 
-fn first_part_long_axis_coverage(placement: &AiEditPlacement) -> f64 {
-    let Some(first) = placement.parts.first() else {
-        return 0.0;
-    };
-    if placement.document_dimensions.0 >= placement.document_dimensions.1 {
-        f64::from(first.crop.width) / f64::from(placement.document_dimensions.0.max(1))
-    } else {
-        f64::from(first.crop.height) / f64::from(placement.document_dimensions.1.max(1))
-    }
-}
-
-fn antigravity_wide_cover_ratio(
-    document: (u32, u32),
-    forced_label: Option<&str>,
-) -> Option<SupportedAspectRatio> {
-    if let Some(label) = forced_label
-        .map(str::trim)
-        .filter(|label| !label.is_empty())
-    {
-        if let Some(ratio) = ai_antigravity_image_capability()
-            .aspect_ratios
-            .iter()
-            .find(|ratio| ratio.label == label)
-        {
-            return Some(ratio.clone());
-        }
-    }
-    let target = f64::from(document.0) / f64::from(document.1.max(1));
-    let landscape = document.0 >= document.1;
-    let capability = ai_antigravity_image_capability();
-    let mut directional: Vec<&SupportedAspectRatio> = capability
-        .aspect_ratios
+pub(crate) fn fill_placement_returns_layer_results(placement: &AiEditPlacement) -> bool {
+    placement
+        .parts
         .iter()
-        .filter(|ratio| {
-            let aspect = f64::from(ratio.width) / f64::from(ratio.height.max(1));
-            if landscape {
-                aspect <= target
-            } else {
-                aspect >= target
-            }
-        })
-        .collect();
-    directional.sort_by(|a, b| {
-        let a_aspect = f64::from(a.width) / f64::from(a.height.max(1));
-        let b_aspect = f64::from(b.width) / f64::from(b.height.max(1));
-        if landscape {
-            b_aspect.total_cmp(&a_aspect)
-        } else {
-            a_aspect.total_cmp(&b_aspect)
-        }
-    });
-    directional
-        .into_iter()
-        .next()
-        .or_else(|| {
-            capability
-                .aspect_ratios
-                .iter()
-                .min_by_key(|ratio| aspect_error(document, (ratio.width, ratio.height)))
-        })
-        .cloned()
+        .enumerate()
+        .any(|(index, _)| fill_part_needs_overview(placement, index))
 }
 
 fn cover_frame_for_ratio(target: (u32, u32), unit: (u32, u32)) -> (u32, u32) {
@@ -1115,100 +1211,22 @@ fn plan_ai_wide_cover_placement(
     mask_bounds: PixelRect,
     forced_aspect_label: Option<&str>,
 ) -> Result<AiEditPlacement, String> {
-    let crop = PixelRect {
+    let target = PixelRect {
         x: 0,
         y: 0,
         width: document_dimensions.0,
         height: document_dimensions.1,
     };
-    let (input_dimensions, aspect_label) = match provider {
-        AiEditProvider::Antigravity => {
-            let ratio = antigravity_wide_cover_ratio(document_dimensions, forced_aspect_label)
-                .ok_or_else(|| {
-                    "No Antigravity image ratio is available for wide-cover fill.".to_string()
-                })?;
-            let (unit, _) = ratio_unit(&ratio);
-            let dimensions = cover_frame_for_ratio(document_dimensions, unit);
-            let (_, output) =
-                antigravity_output_target(&ratio.label, dimensions).ok_or_else(|| {
-                    "No Antigravity output tier is available for wide-cover fill.".to_string()
-                })?;
-            if output.0 < dimensions.0 || output.1 < dimensions.1 {
-                return Err(format!(
-                    "Wide-cover fill would need a {}x{} provider frame, larger than Antigravity can return for {}.",
-                    dimensions.0, dimensions.1, ratio.label
-                ));
-            }
-            (dimensions, ratio.label)
-        }
-        AiEditProvider::Codex => {
-            let codex = ai_codex_image_capability();
-            let max_aspect = codex.max_aspect_ratio.max(1);
-            let dimensions = if document_dimensions.0 >= document_dimensions.1 {
-                (
-                    document_dimensions.0,
-                    document_dimensions
-                        .0
-                        .div_ceil(max_aspect)
-                        .max(document_dimensions.1),
-                )
-            } else {
-                (
-                    document_dimensions
-                        .1
-                        .div_ceil(max_aspect)
-                        .max(document_dimensions.0),
-                    document_dimensions.1,
-                )
-            };
-            (dimensions, "codex-crop".to_string())
-        }
-    };
-    Ok(AiEditPlacement {
+    plan_ai_fill_source_frame_placement(
         provider,
-        method: AiFillMethod::WideCover,
+        AiFillMethod::WideCover,
         redundancy,
         document_dimensions,
         mask_bounds,
-        parts: vec![ai_edit_part_with_input(
-            crop,
-            input_dimensions,
-            centered_paste_rect(input_dimensions, crop),
-            &aspect_label,
-        )],
-    })
-}
-
-fn ratio_aspect(ratio: &SupportedAspectRatio) -> f64 {
-    f64::from(ratio.width) / f64::from(ratio.height.max(1))
-}
-
-fn antigravity_directional_ratios(document: (u32, u32)) -> Vec<SupportedAspectRatio> {
-    let target = f64::from(document.0) / f64::from(document.1.max(1));
-    let landscape = document.0 >= document.1;
-    let mut ratios: Vec<SupportedAspectRatio> = ai_antigravity_image_capability()
-        .aspect_ratios
-        .iter()
-        .filter(|ratio| {
-            let aspect = ratio_aspect(ratio);
-            if landscape {
-                aspect >= 1.0 && aspect <= target
-            } else {
-                aspect <= 1.0 && aspect >= target
-            }
-        })
-        .cloned()
-        .collect();
-    ratios.sort_by(|a, b| {
-        let a_aspect = ratio_aspect(a);
-        let b_aspect = ratio_aspect(b);
-        if landscape {
-            b_aspect.total_cmp(&a_aspect)
-        } else {
-            a_aspect.total_cmp(&b_aspect)
-        }
-    });
-    ratios
+        target,
+        forced_aspect_label,
+    )
+    .ok_or_else(|| "No supported AI source frame fits this generative fill.".into())
 }
 
 fn antigravity_frame_for_ratio(
@@ -1222,286 +1240,6 @@ fn antigravity_frame_for_ratio(
         .then(|| (dimensions.0, dimensions.1, ratio.label.clone()))
 }
 
-fn antigravity_directional_frame_candidates(
-    document_dimensions: (u32, u32),
-    min_oriented: (u32, u32),
-    split_horizontally: bool,
-) -> Vec<(u32, u32, String)> {
-    let min_dimensions = if split_horizontally {
-        min_oriented
-    } else {
-        (min_oriented.1, min_oriented.0)
-    };
-    antigravity_directional_ratios(document_dimensions)
-        .iter()
-        .filter_map(|ratio| antigravity_frame_for_ratio(ratio, min_dimensions))
-        .collect()
-}
-
-fn oriented_part(
-    document_dimensions: (u32, u32),
-    split_horizontally: bool,
-    start: u32,
-    input_dimensions: (u32, u32),
-    aspect_label: &str,
-) -> AiEditPart {
-    let (doc_long, doc_short) = if split_horizontally {
-        (document_dimensions.0, document_dimensions.1)
-    } else {
-        (document_dimensions.1, document_dimensions.0)
-    };
-    let (input_long, _) = if split_horizontally {
-        input_dimensions
-    } else {
-        (input_dimensions.1, input_dimensions.0)
-    };
-    let crop_long = input_long.min(doc_long.saturating_sub(start));
-    let crop = if split_horizontally {
-        PixelRect {
-            x: start,
-            y: 0,
-            width: crop_long,
-            height: doc_short,
-        }
-    } else {
-        PixelRect {
-            x: 0,
-            y: start,
-            width: doc_short,
-            height: crop_long,
-        }
-    };
-    let input_paste_rect = PixelRect {
-        x: input_dimensions.0.saturating_sub(crop.width) / 2,
-        y: input_dimensions.1.saturating_sub(crop.height) / 2,
-        width: crop.width,
-        height: crop.height,
-    };
-    ai_edit_part_with_input(crop, input_dimensions, input_paste_rect, aspect_label)
-}
-
-fn part_oriented_input_long(part: &AiEditPart, split_horizontally: bool) -> u32 {
-    if split_horizontally {
-        part.working.original_dimensions.0
-    } else {
-        part.working.original_dimensions.1
-    }
-}
-
-fn part_oriented_crop_end(part: &AiEditPart, split_horizontally: bool) -> u32 {
-    if split_horizontally {
-        part.crop.x + part.crop.width
-    } else {
-        part.crop.y + part.crop.height
-    }
-}
-
-fn starter_continuation_overlap(
-    redundancy: AiFillRedundancy,
-    doc_long: u32,
-    previous_long: u32,
-) -> u32 {
-    let lean = (previous_long / 8)
-        .clamp(MIN_PART_OVERLAP, MAX_PART_OVERLAP)
-        .min(previous_long.saturating_sub(1));
-    let target = match redundancy {
-        AiFillRedundancy::Low => lean,
-        AiFillRedundancy::Medium => lean.max(doc_long / 8),
-        AiFillRedundancy::High => lean.max(doc_long / 4),
-    };
-    target.min(previous_long.saturating_sub(1))
-}
-
-fn plan_ai_wide_starter_continue_placement(
-    provider: AiEditProvider,
-    redundancy: AiFillRedundancy,
-    document_dimensions: (u32, u32),
-    mask_bounds: PixelRect,
-) -> Result<AiEditPlacement, String> {
-    if provider != AiEditProvider::Antigravity
-        || !mask_is_mostly_full(mask_bounds, document_dimensions)
-        || !is_wide_or_tall(document_dimensions)
-    {
-        return Err(
-            "Wide-starter fill is only available for full wide/tall Antigravity masks.".to_string(),
-        );
-    }
-
-    let split_horizontally = document_dimensions.0 >= document_dimensions.1;
-    let (doc_long, doc_short) = if split_horizontally {
-        (document_dimensions.0, document_dimensions.1)
-    } else {
-        (document_dimensions.1, document_dimensions.0)
-    };
-    let starter_ratio =
-        antigravity_wide_cover_ratio(document_dimensions, None).ok_or_else(|| {
-            "No Antigravity image ratio is available for wide-starter fill.".to_string()
-        })?;
-    let starter_min = if split_horizontally {
-        (1, doc_short)
-    } else {
-        (doc_short, 1)
-    };
-    let starter_dimensions = antigravity_frame_for_ratio(&starter_ratio, starter_min)
-        .map(|(width, height, _)| (width, height))
-        .ok_or_else(|| {
-            "No Antigravity output tier is available for wide-starter fill.".to_string()
-        })?;
-
-    let mut parts = vec![oriented_part(
-        document_dimensions,
-        split_horizontally,
-        0,
-        starter_dimensions,
-        &starter_ratio.label,
-    )];
-    let mut covered_to = part_oriented_crop_end(parts.last().unwrap(), split_horizontally);
-    while covered_to < doc_long {
-        if parts.len() >= MAX_AI_EDIT_PARTS {
-            return Err(format!(
-                "Generative fill would need more than {MAX_AI_EDIT_PARTS} Antigravity starter parts."
-            ));
-        }
-        let previous_long = part_oriented_input_long(parts.last().unwrap(), split_horizontally);
-        let overlap = starter_continuation_overlap(redundancy, doc_long, previous_long);
-        let needed_long = doc_long.saturating_sub(covered_to) + overlap;
-        let candidates = antigravity_directional_frame_candidates(
-            document_dimensions,
-            (needed_long, doc_short),
-            split_horizontally,
-        );
-        let chosen = candidates
-            .iter()
-            .filter(|(width, height, _)| {
-                let long = if split_horizontally { *width } else { *height };
-                long >= needed_long
-            })
-            .min_by_key(|(width, height, _)| u64::from(*width) * u64::from(*height))
-            .or_else(|| {
-                candidates.iter().max_by_key(
-                    |(width, height, _)| {
-                        if split_horizontally {
-                            *width
-                        } else {
-                            *height
-                        }
-                    },
-                )
-            })
-            .ok_or_else(|| {
-                "No Antigravity image ratio is available for wide-starter continuation.".to_string()
-            })?;
-        let input_long = if split_horizontally {
-            chosen.0
-        } else {
-            chosen.1
-        };
-        let start = if input_long >= doc_long.saturating_sub(covered_to) + overlap {
-            doc_long.saturating_sub(input_long)
-        } else {
-            covered_to.saturating_sub(overlap)
-        };
-        if start > covered_to {
-            return Err("Wide-starter continuation would leave a gap.".to_string());
-        }
-        parts.push(oriented_part(
-            document_dimensions,
-            split_horizontally,
-            start,
-            (chosen.0, chosen.1),
-            &chosen.2,
-        ));
-        let next_covered_to = part_oriented_crop_end(parts.last().unwrap(), split_horizontally);
-        if next_covered_to <= covered_to {
-            return Err("Wide-starter continuation made no progress.".to_string());
-        }
-        covered_to = next_covered_to;
-    }
-
-    Ok(AiEditPlacement {
-        provider,
-        method: AiFillMethod::WideStarterContinue,
-        redundancy,
-        document_dimensions,
-        mask_bounds,
-        parts,
-    })
-}
-
-fn plan_ai_codex_max_ratio_strips_placement(
-    redundancy: AiFillRedundancy,
-    document_dimensions: (u32, u32),
-    mask_bounds: PixelRect,
-) -> Result<AiEditPlacement, String> {
-    if !mask_is_mostly_full(mask_bounds, document_dimensions)
-        || !is_wide_or_tall(document_dimensions)
-    {
-        return Err("Codex max-ratio strips are only available for full wide/tall masks.".into());
-    }
-
-    let split_horizontally = document_dimensions.0 >= document_dimensions.1;
-    let (doc_long, doc_short) = if split_horizontally {
-        (document_dimensions.0, document_dimensions.1)
-    } else {
-        (document_dimensions.1, document_dimensions.0)
-    };
-    let codex = ai_codex_image_capability();
-    let input_long = doc_short
-        .saturating_mul(codex.max_aspect_ratio.max(1))
-        .min(doc_long);
-    if input_long == 0 || doc_short == 0 {
-        return Err("Codex max-ratio strip dimensions are invalid.".into());
-    }
-    let input_dimensions = if split_horizontally {
-        (input_long, doc_short)
-    } else {
-        (doc_short, input_long)
-    };
-
-    let mut parts = Vec::new();
-    let mut covered_to = 0_u32;
-    while covered_to < doc_long {
-        if parts.len() >= MAX_AI_EDIT_PARTS {
-            return Err(format!(
-                "Generative fill would need more than {MAX_AI_EDIT_PARTS} Codex parts."
-            ));
-        }
-        let start = if let Some(previous) = parts.last() {
-            let previous_long = part_oriented_input_long(previous, split_horizontally);
-            let overlap = starter_continuation_overlap(redundancy, doc_long, previous_long);
-            let remaining = doc_long.saturating_sub(covered_to);
-            if input_long >= remaining + overlap {
-                doc_long.saturating_sub(input_long)
-            } else {
-                covered_to.saturating_sub(overlap)
-            }
-        } else {
-            0
-        };
-        parts.push(oriented_part(
-            document_dimensions,
-            split_horizontally,
-            start,
-            input_dimensions,
-            "codex-crop",
-        ));
-        let next_covered_to = part_oriented_crop_end(parts.last().unwrap(), split_horizontally);
-        if next_covered_to <= covered_to {
-            return Err("Codex max-ratio strips made no progress.".into());
-        }
-        covered_to = next_covered_to;
-    }
-
-    Ok(AiEditPlacement {
-        provider: AiEditProvider::Codex,
-        method: AiFillMethod::BalancedStrips,
-        redundancy,
-        document_dimensions,
-        mask_bounds,
-        parts,
-    })
-}
-
 pub(crate) fn plan_ai_fill_placement(
     provider: AiEditProvider,
     requested_method: AiFillMethod,
@@ -1511,93 +1249,63 @@ pub(crate) fn plan_ai_fill_placement(
     forced_aspect_label: Option<&str>,
     label: &str,
 ) -> Result<AiEditPlacement, String> {
-    let mut exact = plan_ai_edit_placement(provider, document_dimensions, mask_png, label)?;
+    let base_exact = plan_ai_edit_placement(provider, document_dimensions, mask_png, label)?;
+    let mut exact = if !mask_is_mostly_full(base_exact.mask_bounds, document_dimensions) {
+        plan_ai_compact_fill_placement(
+            provider,
+            requested_redundancy,
+            document_dimensions,
+            base_exact.mask_bounds,
+            forced_aspect_label,
+        )
+        .unwrap_or(base_exact)
+    } else {
+        base_exact
+    };
     exact.redundancy = requested_redundancy;
+    let mostly_full = mask_is_mostly_full(exact.mask_bounds, document_dimensions);
     match requested_method {
         AiFillMethod::ExactInPlace => return Ok(exact),
-        AiFillMethod::WideCover => {
-            return plan_ai_wide_cover_placement(
-                provider,
-                requested_redundancy,
-                document_dimensions,
-                exact.mask_bounds,
-                forced_aspect_label,
-            )
-        }
-        AiFillMethod::WideStarterContinue => {
-            if provider == AiEditProvider::Antigravity
-                && mask_is_mostly_full(exact.mask_bounds, document_dimensions)
-                && is_wide_or_tall(document_dimensions)
-            {
-                return plan_ai_wide_starter_continue_placement(
+        AiFillMethod::WideCover
+        | AiFillMethod::WideStarterContinue
+        | AiFillMethod::BalancedStrips => {
+            if mostly_full {
+                if let Ok(wide_cover) = plan_ai_wide_cover_placement(
                     provider,
                     requested_redundancy,
                     document_dimensions,
                     exact.mask_bounds,
-                );
+                    forced_aspect_label,
+                ) {
+                    return Ok(wide_cover);
+                }
             }
-            exact.method = AiFillMethod::WideStarterContinue;
-            return Ok(exact);
-        }
-        AiFillMethod::BalancedStrips => {
-            if provider == AiEditProvider::Codex
-                && mask_is_mostly_full(exact.mask_bounds, document_dimensions)
-                && is_wide_or_tall(document_dimensions)
-            {
-                return plan_ai_codex_max_ratio_strips_placement(
-                    requested_redundancy,
-                    document_dimensions,
-                    exact.mask_bounds,
-                );
+            if exact.parts.len() > 1 {
+                exact.method = AiFillMethod::BalancedStrips;
             }
-            if provider == AiEditProvider::Antigravity
-                && mask_is_mostly_full(exact.mask_bounds, document_dimensions)
-                && is_wide_or_tall(document_dimensions)
-            {
-                return plan_ai_wide_starter_continue_placement(
-                    provider,
-                    requested_redundancy,
-                    document_dimensions,
-                    exact.mask_bounds,
-                );
-            }
-            exact.method = AiFillMethod::BalancedStrips;
             return Ok(exact);
         }
         AiFillMethod::Auto => {}
     }
 
-    if provider == AiEditProvider::Antigravity
-        && mask_is_mostly_full(exact.mask_bounds, document_dimensions)
-        && is_wide_or_tall(document_dimensions)
-        && first_part_long_axis_coverage(&exact) < 0.60
-    {
-        return plan_ai_wide_cover_placement(
+    if mostly_full {
+        if let Ok(wide_cover) = plan_ai_wide_cover_placement(
             provider,
             requested_redundancy,
             document_dimensions,
             exact.mask_bounds,
             forced_aspect_label,
-        );
-    }
-
-    if exact.parts.len() > 1 && mask_is_mostly_full(exact.mask_bounds, document_dimensions) {
-        if provider == AiEditProvider::Codex && is_wide_or_tall(document_dimensions) {
-            return plan_ai_codex_max_ratio_strips_placement(
-                requested_redundancy,
-                document_dimensions,
-                exact.mask_bounds,
-            );
+        ) {
+            return Ok(wide_cover);
         }
-        exact.method = match provider {
-            AiEditProvider::Codex => AiFillMethod::BalancedStrips,
-            AiEditProvider::Antigravity => AiFillMethod::WideStarterContinue,
-        };
+        if exact.parts.len() > 1 {
+            exact.method = AiFillMethod::BalancedStrips;
+        }
     }
     Ok(exact)
 }
 
-/// Per-part input PNGs cropped from the evolving document composites.
+/// Per-part input PNGs framed from the evolving document composites.
 pub(crate) struct AiEditPartInputs {
     pub(crate) source_png: Vec<u8>,
     pub(crate) edit_target_png: Vec<u8>,
@@ -3456,7 +3164,7 @@ mod tests {
         assert_eq!(placement.method, AiFillMethod::WideCover);
         assert_eq!(placement.parts.len(), 1);
         let part = &placement.parts[0];
-        assert_eq!(part.working.aspect_label, "21:9");
+        assert_eq!(part.working.aspect_label, "4:1");
         assert_eq!(
             part_output_tier(placement.provider, part).as_deref(),
             Some("2K")
@@ -3470,77 +3178,46 @@ mod tests {
                 height: 800
             }
         );
-        assert_eq!(part.working.original_dimensions, (3003, 1274));
+        assert_eq!(part.working.original_dimensions, (3225, 800));
         assert_eq!(
             part.input_paste_rect,
             PixelRect {
-                x: 1,
-                y: 237,
+                x: 112,
+                y: 0,
                 width: 3000,
                 height: 800
             }
         );
         assert_ne!(part.working.aspect_label, "1:1");
         assert_ne!(part.working.original_dimensions, (800, 800));
+        assert!(!fill_placement_returns_layer_results(&placement));
     }
 
     #[test]
-    fn antigravity_explicit_starter_uses_medium_context_for_three_thousand_by_eight_hundred_fill() {
+    fn legacy_explicit_fill_methods_use_the_same_single_source_frame_when_possible() {
         let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
-        let placement = plan_ai_fill_placement(
-            AiEditProvider::Antigravity,
+        for method in [
             AiFillMethod::WideStarterContinue,
-            AiFillRedundancy::Medium,
-            (3000, 800),
-            &mask,
-            None,
-            "Generative fill",
-        )
-        .expect("placement");
+            AiFillMethod::BalancedStrips,
+            AiFillMethod::WideCover,
+        ] {
+            let placement = plan_ai_fill_placement(
+                AiEditProvider::Antigravity,
+                method,
+                AiFillRedundancy::Medium,
+                (3000, 800),
+                &mask,
+                None,
+                "Generative fill",
+            )
+            .expect("placement");
 
-        assert_eq!(placement.method, AiFillMethod::WideStarterContinue);
-        assert_eq!(placement.parts.len(), 2);
-        let starter = &placement.parts[0];
-        assert_eq!(starter.working.aspect_label, "21:9");
-        assert_eq!(starter.working.original_dimensions, (1914, 812));
-        assert_eq!(
-            starter.crop,
-            PixelRect {
-                x: 0,
-                y: 0,
-                width: 1914,
-                height: 800
-            }
-        );
-        assert_eq!(
-            starter.input_paste_rect,
-            PixelRect {
-                x: 0,
-                y: 6,
-                width: 1914,
-                height: 800
-            }
-        );
-        let continuation = &placement.parts[1];
-        assert_eq!(continuation.working.aspect_label, "16:9");
-        assert_eq!(continuation.working.original_dimensions, (1462, 816));
-        assert_eq!(
-            continuation.crop,
-            PixelRect {
-                x: 1538,
-                y: 0,
-                width: 1462,
-                height: 800
-            }
-        );
-        assert!(placement
-            .parts
-            .iter()
-            .all(|part| part.working.original_dimensions != (800, 800)));
-        assert!(placement
-            .parts
-            .iter()
-            .all(|part| part.working.aspect_label != "1:1"));
+            assert_eq!(placement.method, AiFillMethod::WideCover);
+            assert_eq!(placement.parts.len(), 1);
+            assert_eq!(placement.parts[0].working.aspect_label, "4:1");
+            assert_eq!(placement.parts[0].working.original_dimensions, (3225, 800));
+            assert_eq!(placement.parts[0].input_paste_rect.x, 112);
+        }
     }
 
     #[test]
@@ -3563,21 +3240,21 @@ mod tests {
             .part_inputs_hiding_unpainted_editable(&placement.parts[0], "Generative fill", true)
             .expect("inputs");
         let mask = decode_png_rgba(&inputs.mask_png, "mask").expect("decode mask");
-        assert_eq!(mask.dimensions(), (1914, 812));
+        assert_eq!(mask.dimensions(), (3225, 800));
         assert_eq!(mask.get_pixel(0, 0).0, [0, 0, 0, 255]);
-        assert_eq!(mask.get_pixel(0, 5).0, [0, 0, 0, 255]);
-        assert_eq!(mask.get_pixel(0, 6).0, [255, 255, 255, 255]);
-        assert_eq!(mask.get_pixel(0, 805).0, [255, 255, 255, 255]);
-        assert_eq!(mask.get_pixel(0, 806).0, [0, 0, 0, 255]);
+        assert_eq!(mask.get_pixel(111, 0).0, [0, 0, 0, 255]);
+        assert_eq!(mask.get_pixel(112, 0).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(3111, 0).0, [255, 255, 255, 255]);
+        assert_eq!(mask.get_pixel(3112, 0).0, [0, 0, 0, 255]);
     }
 
     #[test]
-    fn antigravity_starter_context_redundancy_controls_continuation_overlap() {
+    fn fill_redundancy_does_not_change_single_source_frame() {
         let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
         let plan = |redundancy| {
             plan_ai_fill_placement(
                 AiEditProvider::Antigravity,
-                AiFillMethod::WideStarterContinue,
+                AiFillMethod::Auto,
                 redundancy,
                 (3000, 800),
                 &mask,
@@ -3591,41 +3268,15 @@ mod tests {
         let high = plan(AiFillRedundancy::High);
 
         assert_eq!(low.redundancy, AiFillRedundancy::Low);
-        assert_eq!(low.parts[1].working.aspect_label, "3:2");
-        assert_eq!(low.parts[1].working.original_dimensions, (1264, 848));
-        assert_eq!(low.parts[1].crop.x, 1736);
-
         assert_eq!(medium.redundancy, AiFillRedundancy::Medium);
-        assert_eq!(medium.parts[1].working.aspect_label, "16:9");
-        assert_eq!(medium.parts[1].working.original_dimensions, (1462, 816));
-        assert_eq!(medium.parts[1].crop.x, 1538);
-
         assert_eq!(high.redundancy, AiFillRedundancy::High);
-        assert_eq!(high.parts[1].working.aspect_label, "21:9");
-        assert_eq!(high.parts[1].working.original_dimensions, (1914, 812));
-        assert_eq!(high.parts[1].crop.x, 1086);
-    }
 
-    #[test]
-    fn antigravity_explicit_strips_for_wide_fill_falls_back_to_wide_starter() {
-        let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
-        let placement = plan_ai_fill_placement(
-            AiEditProvider::Antigravity,
-            AiFillMethod::BalancedStrips,
-            AiFillRedundancy::Medium,
-            (3000, 800),
-            &mask,
-            None,
-            "Generative fill",
-        )
-        .expect("placement");
-
-        assert_eq!(placement.method, AiFillMethod::WideStarterContinue);
-        assert_eq!(placement.parts[0].working.aspect_label, "21:9");
-        assert!(placement
-            .parts
-            .iter()
-            .all(|part| part.working.original_dimensions != (800, 800)));
+        for placement in [low, medium, high] {
+            assert_eq!(placement.method, AiFillMethod::WideCover);
+            assert_eq!(placement.parts.len(), 1);
+            assert_eq!(placement.parts[0].working.original_dimensions, (3225, 800));
+            assert_eq!(placement.parts[0].input_paste_rect.x, 112);
+        }
     }
 
     #[test]
@@ -3654,6 +3305,83 @@ mod tests {
             }
         );
         assert_eq!(placement.parts[0].working.aspect_label, "4:1");
+        assert_eq!(placement.parts[0].working.original_dimensions, (2709, 672));
+        assert_eq!(
+            placement.parts[0].input_paste_rect,
+            PixelRect {
+                x: 54,
+                y: 36,
+                width: 2600,
+                height: 600
+            }
+        );
+        assert!(!fill_placement_returns_layer_results(&placement));
+    }
+
+    #[test]
+    fn partial_antigravity_fill_uses_compact_forced_ratio_crop() {
+        let mask = mask_png_with_rects(1280, 800, &[(711, 115, 569, 571)]);
+        let placement = plan_ai_fill_placement(
+            AiEditProvider::Antigravity,
+            AiFillMethod::Auto,
+            AiFillRedundancy::Medium,
+            (1280, 800),
+            &mask,
+            Some("1:1"),
+            "Generative fill",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.method, AiFillMethod::ExactInPlace);
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
+        assert_eq!(part.working.aspect_label, "1:1");
+        assert_eq!(
+            part.crop,
+            PixelRect {
+                x: 519,
+                y: 20,
+                width: 761,
+                height: 761
+            }
+        );
+        assert!(rect_contains(part.crop, placement.mask_bounds));
+        assert!(fill_part_needs_overview(&placement, 0));
+        assert!(fill_placement_returns_layer_results(&placement));
+    }
+
+    #[test]
+    fn partial_codex_fill_uses_compact_crop_and_layer_results() {
+        let mask = mask_png_with_rects(1280, 800, &[(711, 115, 569, 571)]);
+        let placement = plan_ai_fill_placement(
+            AiEditProvider::Codex,
+            AiFillMethod::Auto,
+            AiFillRedundancy::Medium,
+            (1280, 800),
+            &mask,
+            None,
+            "Generative fill",
+        )
+        .expect("placement");
+
+        assert_eq!(placement.method, AiFillMethod::ExactInPlace);
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
+        assert_eq!(part.working.aspect_label, "codex-crop");
+        assert_eq!(
+            part.crop,
+            PixelRect {
+                x: 608,
+                y: 16,
+                width: 672,
+                height: 768
+            }
+        );
+        assert_eq!(part.working.original_dimensions.0 % 16, 0);
+        assert_eq!(part.working.original_dimensions.1 % 16, 0);
+        assert!(rect_contains(part.crop, placement.mask_bounds));
+        assert!(fill_part_needs_overview(&placement, 0));
+        assert!(fill_placement_returns_layer_results(&placement));
     }
 
     #[test]
@@ -3682,7 +3410,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_auto_uses_max_ratio_full_height_strips_for_wide_fill() {
+    fn codex_auto_uses_single_max_ratio_source_frame_for_wide_fill() {
         let mask = mask_png_with_rects(3000, 800, &[(0, 0, 3000, 800)]);
         let placement = plan_ai_fill_placement(
             AiEditProvider::Codex,
@@ -3695,30 +3423,32 @@ mod tests {
         )
         .expect("placement");
 
-        assert_eq!(placement.method, AiFillMethod::BalancedStrips);
-        assert_eq!(placement.parts.len(), 2);
+        assert_eq!(placement.method, AiFillMethod::WideCover);
+        assert_eq!(placement.parts.len(), 1);
+        let part = &placement.parts[0];
         assert_eq!(
-            placement.parts[0].crop,
+            part.crop,
             PixelRect {
                 x: 0,
                 y: 0,
-                width: 2400,
+                width: 3000,
                 height: 800
             }
         );
+        assert_eq!(part.working.original_dimensions, (3008, 1008));
         assert_eq!(
-            placement.parts[1].crop,
+            part.input_paste_rect,
             PixelRect {
-                x: 600,
-                y: 0,
-                width: 2400,
+                x: 4,
+                y: 104,
+                width: 3000,
                 height: 800
             }
         );
-        for part in &placement.parts {
-            assert_eq!(part.working.original_dimensions, (2400, 800));
-            assert_eq!(part.working.aspect_label, "codex-crop");
-        }
+        assert_eq!(part.working.aspect_label, "codex-crop");
+        assert_eq!(part.working.original_dimensions.0 % 16, 0);
+        assert_eq!(part.working.original_dimensions.1 % 16, 0);
+        assert!(!fill_placement_returns_layer_results(&placement));
     }
 
     #[test]
@@ -4405,12 +4135,13 @@ mod tests {
         assert_eq!(manifest["provider"], "antigravity");
         assert_eq!(manifest["method"], "wideCover");
         assert_eq!(manifest["redundancy"], "medium");
-        assert_eq!(manifest["parts"][0]["aspectLabel"], "21:9");
+        assert_eq!(manifest["parts"][0]["aspectLabel"], "4:1");
         assert_eq!(manifest["parts"][0]["outputTier"], "2K");
         assert_eq!(manifest["parts"][0]["pasteRect"]["width"], 3000);
-        assert_eq!(manifest["parts"][0]["inputFrame"]["width"], 3003);
-        assert_eq!(manifest["parts"][0]["inputFrame"]["height"], 1274);
-        assert_eq!(manifest["parts"][0]["inputPasteRect"]["y"], 237);
+        assert_eq!(manifest["parts"][0]["inputFrame"]["width"], 3225);
+        assert_eq!(manifest["parts"][0]["inputFrame"]["height"], 800);
+        assert_eq!(manifest["parts"][0]["inputPasteRect"]["x"], 112);
+        assert_eq!(manifest["parts"][0]["inputPasteRect"]["y"], 0);
     }
 
     #[test]

@@ -77,10 +77,6 @@ struct PlannedPart {
 
 pub(crate) fn should_storyboard_fill(placement: &AiEditPlacement) -> bool {
     placement.is_split()
-        && matches!(
-            placement.method,
-            AiFillMethod::WideStarterContinue | AiFillMethod::BalancedStrips
-        )
 }
 
 fn fill_method_label(method: AiFillMethod) -> &'static str {
@@ -743,20 +739,20 @@ mod tests {
 
     fn split_placement() -> AiEditPlacement {
         let mask = mask_png_with_rects(
-            3000,
-            800,
+            13000,
+            400,
             &[PixelRect {
                 x: 0,
                 y: 0,
-                width: 3000,
-                height: 800,
+                width: 13000,
+                height: 400,
             }],
         );
         plan_ai_fill_placement(
             AiEditProvider::Antigravity,
-            AiFillMethod::WideStarterContinue,
+            AiFillMethod::Auto,
             AiFillRedundancy::High,
-            (3000, 800),
+            (13000, 400),
             &mask,
             None,
             "Generative fill",

@@ -30,10 +30,11 @@ use crate::ai::fill_storyboard::{
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
     ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
-    cover_crop_png_to_dimensions, normalize_storyboard_draft_png, plan_ai_edit_placement,
-    plan_ai_fill_placement, plan_ai_restore_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider,
-    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
+    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
+    plan_ai_restore_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
+    reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
@@ -2242,9 +2243,10 @@ pub(crate) async fn generate_codex_fill_image(
         )?;
 
         let mut recovered_source_path: Option<PathBuf> = None;
-        let return_part_layers = placement.is_split();
+        let return_part_layers = fill_placement_returns_layer_results(&placement);
         let mut layer_results = Vec::new();
         let mut layer_assets = Vec::new();
+        let mut raw_assets = Vec::new();
         for (part_index, part) in placement.parts.iter().enumerate() {
             let part_path = match placement.part_dir_name(part_index) {
                 Some(dir) => job_path.join(dir),
@@ -2266,6 +2268,19 @@ pub(crate) async fn generate_codex_fill_image(
                             "Reusing this part's previous result",
                         ),
                     );
+                    if store_asset {
+                        if let Some(project_dir) = project_dir.as_ref() {
+                            let raw_name = format!("Generative fill raw part {}", part_index + 1);
+                            let raw_asset = store_generated_png_asset(
+                                project_dir,
+                                &bytes,
+                                raw_name,
+                                Some(prompt.trim().into()),
+                                Some("part_result.png".into()),
+                            )?;
+                            raw_assets.push(raw_asset);
+                        }
+                    }
                     if return_part_layers {
                         let layer_png =
                             composer.part_result_layer_png(part, &bytes, "Generative fill")?;
@@ -2343,7 +2358,7 @@ pub(crate) async fn generate_codex_fill_image(
             };
             fs::write(part_path.join("source.png"), &inputs.source_png)
                 .map_err(|e| format!("Failed to write generative fill source image: {e}"))?;
-            let has_overview = placement.is_split();
+            let has_overview = fill_part_needs_overview(&placement, part_index);
             if has_overview {
                 let overview_png = if let Some(draft_png) = storyboard_draft_png.as_deref() {
                     composer.overview_png_with_storyboard_draft(
@@ -2416,7 +2431,7 @@ pub(crate) async fn generate_codex_fill_image(
                 &codex_options,
                 &part_path,
                 &base_prompt_text,
-                has_overview && (!has_storyboard_draft || part_index > 0),
+                has_overview,
                 &storyboard_draft_paths,
                 &reference_paths,
                 &part.working,
@@ -2464,6 +2479,21 @@ pub(crate) async fn generate_codex_fill_image(
             }
             fs::write(part_path.join("part_result.png"), &part_result_png)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
+            if store_asset {
+                if let Some(project_dir) = project_dir.as_ref() {
+                    let raw_name = format!("Generative fill raw part {}", part_index + 1);
+                    let source_file_name =
+                        safe_png_source_file_name(&part_run.recovered_source_path);
+                    let raw_asset = store_generated_png_asset(
+                        project_dir,
+                        &part_run.normalized_png,
+                        raw_name,
+                        Some(prompt.trim().into()),
+                        source_file_name,
+                    )?;
+                    raw_assets.push(raw_asset);
+                }
+            }
             let _ = fs::remove_file(&result_path);
             if return_part_layers {
                 let layer_png =
@@ -2544,11 +2574,12 @@ pub(crate) async fn generate_codex_fill_image(
         }
 
         emit_codex_progress(&app, &run_id, "Done");
-        let assets = if return_part_layers {
+        let mut assets = if return_part_layers {
             layer_assets
         } else {
             asset.iter().cloned().collect()
         };
+        assets.extend(raw_assets);
         Ok(GeneratedImageResult {
             data_url,
             asset,

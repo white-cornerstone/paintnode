@@ -47,12 +47,11 @@ struct ImageProviderCapabilities {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodexImageCapability {
     pub(crate) dimension_multiple: u32,
-    max_long_side: u32,
-    max_short_side: u32,
+    pub(crate) max_long_side: u32,
+    pub(crate) max_short_side: u32,
     /// Widest aspect ratio the model reliably renders for one tile. Wider
-    /// documents crop to a sub-region or split into tiles; a full-canvas
-    /// ultrawide fill (which used to letterbox) now routes to the plain
-    /// generate path instead of a masked tile.
+    /// fill frames expand the short side up to this ratio, then split only
+    /// when the resulting source frame exceeds the model size caps.
     pub(crate) max_aspect_ratio: u32,
     /// Largest tile side for AI detail restoration: tiles at or below this
     /// size regenerate at the model's native output density.
@@ -95,9 +94,9 @@ pub(crate) fn antigravity_output_target(
     Some((tier, (ratio.width * scale, ratio.height * scale)))
 }
 
-/// Submission geometry for one AI image request. PaintNode crops (never pads)
-/// its submissions, so the working canvas equals the submitted image; providers
-/// may still answer with any same-ratio resolution.
+/// Submission geometry for one AI image request. The working canvas is the
+/// provider source frame; placement owns how that frame maps back to the
+/// document paste rect. Providers may answer with any same-ratio resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AiWorkingCanvas {
     pub(crate) original_dimensions: (u32, u32),
