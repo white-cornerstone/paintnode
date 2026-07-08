@@ -1,7 +1,9 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
+  import Icon from './Icon.svelte';
   import { detectCodex, detectAntigravity, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
+  import { ChevronDown, ChevronRight } from '../icons';
   import {
     AUTOSAVE_INTERVAL_OPTIONS,
     CODEX_MODEL_OPTIONS,
@@ -10,10 +12,10 @@
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
     ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS,
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
-      ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
-      ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
-      type AiPlannerMode,
-      type AiProvider,
+    ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
+    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
+    type AiPlannerMode,
+    type AiProvider,
     type CanvasBackground,
     type CodexImageModeration,
     type CodexImageQuality,
@@ -37,7 +39,93 @@
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type Tab = 'general' | 'ai' | 'workspace';
+  type SettingsGroupId = 'general' | 'workspace' | 'ai';
+  type SettingsSectionId =
+    | 'general-startup'
+    | 'workspace-canvas'
+    | 'workspace-view'
+    | 'ai-general'
+    | 'ai-provider-codex'
+    | 'ai-provider-antigravity'
+    | 'ai-profiles'
+    | 'ai-artifacts';
+
+  interface SettingsSection {
+    id: SettingsSectionId;
+    label: string;
+    description: string;
+  }
+
+  interface SettingsGroup {
+    id: SettingsGroupId;
+    label: string;
+    sections: SettingsSection[];
+  }
+
+  const SETTINGS_GROUPS: SettingsGroup[] = [
+    {
+      id: 'general',
+      label: 'General',
+      sections: [
+        {
+          id: 'general-startup',
+          label: 'Startup & Recovery',
+          description: 'Startup, recovery, and small editor behavior defaults.',
+        },
+      ],
+    },
+    {
+      id: 'workspace',
+      label: 'Workspace',
+      sections: [
+        {
+          id: 'workspace-canvas',
+          label: 'Canvas Defaults',
+          description: 'New document size and background defaults.',
+        },
+        {
+          id: 'workspace-view',
+          label: 'View',
+          description: 'Workspace display preferences.',
+        },
+      ],
+    },
+    {
+      id: 'ai',
+      label: 'AI',
+      sections: [
+        {
+          id: 'ai-general',
+          label: 'General',
+          description: 'Cross-provider defaults for local AI planning, generation, and workflows.',
+        },
+        {
+          id: 'ai-provider-codex',
+          label: 'Codex',
+          description: 'Codex provider defaults and advanced local CLI settings.',
+        },
+        {
+          id: 'ai-provider-antigravity',
+          label: 'Antigravity',
+          description: 'Antigravity provider defaults, safety controls, and advanced image options.',
+        },
+        {
+          id: 'ai-profiles',
+          label: 'Profiles',
+          description: 'Saved AI defaults for recurring generation and editing workflows.',
+        },
+        {
+          id: 'ai-artifacts',
+          label: 'Workflow Artifacts',
+          description: 'User-facing AI run files and optional debug artifact retention.',
+        },
+      ],
+    },
+  ];
+
+  const SECTION_BY_ID = new Map<SettingsSectionId, SettingsSection>(
+    SETTINGS_GROUPS.flatMap((group) => group.sections.map((section) => [section.id, section] as const)),
+  );
 
   const desktop = isDesktop();
   const reasoningEfforts: { value: ReasoningEffort; label: string }[] = [
@@ -60,15 +148,42 @@
     { value: 'auto', label: 'Default', hint: 'Use normal image-generation moderation.' },
     { value: 'low', label: 'Low', hint: 'Use the image API low moderation mode when the owned runner supports it.' },
   ];
-  let tab = $state<Tab>('general');
+  let selectedSection = $state<SettingsSectionId>('general-startup');
+  let expandedGroups = $state<Record<SettingsGroupId, boolean>>({
+    general: true,
+    workspace: true,
+    ai: true,
+  });
   let detectBusy = $state(false);
   let antigravityDetectBusy = $state(false);
   let codexDetection = $state<CodexDetectionResult | null>(null);
   let antigravityDetection = $state<CodexDetectionResult | null>(null);
-    let aiDefaultsProvider = $state<AiProvider>(settings.value.ai.imageProvider);
+  let profileSourceProvider = $state<AiProvider>(settings.value.ai.imageProvider);
   let profileName = $state('');
   let selectedProfileId = $state(settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '');
   let selectedProfileOptions = $state(cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value)));
+
+  function sectionMeta(id: SettingsSectionId): SettingsSection {
+    return SECTION_BY_ID.get(id) ?? SETTINGS_GROUPS[0].sections[0];
+  }
+
+  function sectionGroup(id: SettingsSectionId): SettingsGroup {
+    return SETTINGS_GROUPS.find((group) => group.sections.some((section) => section.id === id)) ?? SETTINGS_GROUPS[0];
+  }
+
+  function groupContainsSelected(group: SettingsGroup): boolean {
+    return group.sections.some((section) => section.id === selectedSection);
+  }
+
+  function selectSection(id: SettingsSectionId): void {
+    selectedSection = id;
+    const group = sectionGroup(id);
+    expandedGroups = { ...expandedGroups, [group.id]: true };
+  }
+
+  function toggleGroup(groupId: SettingsGroupId): void {
+    expandedGroups = { ...expandedGroups, [groupId]: !expandedGroups[groupId] };
+  }
 
   function textValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
@@ -98,12 +213,12 @@
     return 'Antigravity';
   }
 
-    function createProfileFromDefaults(): void {
-      const id = newProfileId();
-      const defaults = cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value));
-      defaults.provider = aiDefaultsProvider;
-      defaults.imageProvider = aiDefaultsProvider;
-      const name = profileName.trim() || `${profileLabel(aiDefaultsProvider)} Profile`;
+  function createProfileFromDefaults(): void {
+    const id = newProfileId();
+    const defaults = cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value));
+    defaults.provider = profileSourceProvider;
+    defaults.imageProvider = profileSourceProvider;
+    const name = profileName.trim() || `${profileLabel(profileSourceProvider)} Profile`;
     const profiles = [
       ...settings.value.ai.profiles,
       {
@@ -251,22 +366,48 @@
   });
 </script>
 
-<Modal title="Settings" {onClose} width={900} height={700} minWidth={680} minHeight={480} resizable>
+<Modal title="Settings" {onClose} width={960} height={700} minWidth={760} minHeight={520} resizable>
   <div class="settings-shell">
-    <nav class="settings-tabs" aria-label="Settings sections">
-      <button class:active={tab === 'general'} onclick={() => (tab = 'general')}>General</button>
-      <button class:active={tab === 'ai'} onclick={() => (tab = 'ai')}>AI</button>
-      <button class:active={tab === 'workspace'} onclick={() => (tab = 'workspace')}>Workspace</button>
+    <nav class="settings-tree" aria-label="Settings sections">
+      {#each SETTINGS_GROUPS as group (group.id)}
+        <div class="tree-group" class:selected={groupContainsSelected(group)}>
+          <button
+            type="button"
+            class="tree-group-button"
+            aria-expanded={expandedGroups[group.id]}
+            onclick={() => toggleGroup(group.id)}
+          >
+            <Icon svg={expandedGroups[group.id] ? ChevronDown : ChevronRight} size={14} />
+            <span>{group.label}</span>
+          </button>
+          {#if expandedGroups[group.id]}
+            <div class="tree-children">
+              {#each group.sections as section (section.id)}
+                <button
+                  type="button"
+                  class="tree-section-button"
+                  class:active={selectedSection === section.id}
+                  aria-current={selectedSection === section.id ? 'page' : undefined}
+                  onclick={() => selectSection(section.id)}
+                >
+                  {section.label}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/each}
     </nav>
 
     <section class="settings-body">
       <div class="settings-scroll">
-      {#if tab === 'general'}
         <div class="section-head">
-          <h2>General</h2>
-          <p>Startup, recovery, and small editor behavior defaults.</p>
+          <div class="breadcrumb">{sectionGroup(selectedSection).label} &gt; {sectionMeta(selectedSection).label}</div>
+          <h2>{sectionMeta(selectedSection).label}</h2>
+          <p>{sectionMeta(selectedSection).description}</p>
         </div>
 
+      {#if selectedSection === 'general-startup'}
         <label class="check-row">
           <input
             type="checkbox"
@@ -316,388 +457,368 @@
             <small>Start each app session with the floating contextual tools visible.</small>
           </span>
         </label>
-      {:else if tab === 'ai'}
-        <div class="section-head">
-          <h2>AI</h2>
-          <p>Defaults for local AI image generation, retouching, extraction, and workflows.</p>
-        </div>
-
+      {:else if selectedSection === 'ai-general'}
         <button type="button" class="secondary" onclick={() => ui.open('aiSetup')}>
           Open setup assistant…
         </button>
 
-          <div class="grid-3">
-            <label class="field">
-              <span>Planner mode</span>
-              <select
-                value={settings.value.ai.plannerMode}
-                onchange={(event) => settings.update({ ai: { plannerMode: textValue(event) as AiPlannerMode } })}
-              >
-                <option value="auto">Auto by task</option>
-                <option value="skip">Skip planner</option>
-                <option value="force">Always plan</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Planner provider</span>
-              <select
-                value={settings.value.ai.plannerProvider}
-                disabled={settings.value.ai.plannerMode === 'skip'}
-                onchange={(event) => settings.update({ ai: { plannerProvider: textValue(event) as AiProvider } })}
-              >
-                <option value="codex">Codex</option>
-                <option value="antigravity">Antigravity</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Image generator</span>
-              <select
-                value={settings.value.ai.imageProvider}
-                onchange={(event) => {
-                  const provider = textValue(event) as AiProvider;
-                  settings.update({ ai: { provider, imageProvider: provider } });
-                  aiDefaultsProvider = provider;
-                }}
-              >
-                <option value="codex">Codex image generator</option>
-                <option value="antigravity">Antigravity image generator</option>
-              </select>
-            </label>
-          </div>
-
-        <div class="provider-defaults">
-          <div class="subsection-title">
-            <h3>Provider Defaults</h3>
-            <span>{profileLabel(aiDefaultsProvider)}</span>
-          </div>
-          <div class="provider-tabs" role="tablist" aria-label="AI provider defaults">
-            <button
-              class:active={aiDefaultsProvider === 'codex'}
-              role="tab"
-              aria-selected={aiDefaultsProvider === 'codex'}
-              onclick={() => (aiDefaultsProvider = 'codex')}
+        <div class="grid-3">
+          <label class="field">
+            <span>Planner mode</span>
+            <select
+              value={settings.value.ai.plannerMode}
+              onchange={(event) => settings.update({ ai: { plannerMode: textValue(event) as AiPlannerMode } })}
             >
-              Codex
-            </button>
-            <button
-              class:active={aiDefaultsProvider === 'antigravity'}
-              role="tab"
-              aria-selected={aiDefaultsProvider === 'antigravity'}
-              onclick={() => (aiDefaultsProvider = 'antigravity')}
-            >
-              Antigravity
-            </button>
-          </div>
-        </div>
-
-        {#if aiDefaultsProvider === 'codex'}
-          <div class="detect-row">
-            <label class="field">
-              <span>Advanced Codex binary override</span>
-              <input
-                type="text"
-                value={settings.value.ai.codexBin}
-                placeholder="Leave blank to use the bundled Codex SDK CLI"
-                spellcheck="false"
-                oninput={(event) => settings.update({ ai: { codexBin: textValue(event) } })}
-              />
-            </label>
-            <button type="button" onclick={runCodexDetection} disabled={detectBusy}>
-              {detectBusy ? 'Detecting...' : 'Detect'}
-            </button>
-          </div>
-
-          {#if codexDetection}
-            <p class:ok={codexDetection.found} class:error={!codexDetection.found} class="status-line">
-              {#if codexDetection.found}
-                Found {codexDetection.version || 'Codex'} at {codexDetection.path}
-              {:else}
-                {codexDetection.error || 'Codex was not found.'}
-              {/if}
-            </p>
-          {/if}
-
-          <div class="grid-2">
-            <label class="field">
-              <span>Model</span>
-              <select
-                value={settings.value.ai.model}
-                onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
-              >
-                {#each CODEX_MODEL_OPTIONS as option (option.id)}
-                  <option value={option.id}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Reasoning effort</span>
-              <select
-                value={settings.value.ai.reasoningEffort}
-                onchange={(event) =>
-                  settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
-              >
-                {#each reasoningEfforts as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
-          </div>
-
-          <div class="grid-2">
-            <label class="field">
-              <span>Codex speed</span>
-              <select
-                value={settings.value.ai.serviceTier}
-                onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
-              >
-                {#each serviceTiers as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-              <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
-            </label>
-          </div>
-
-          <div class="grid-2">
-            <label class="field">
-              <span>Image quality</span>
-              <select
-                value={settings.value.ai.imageQuality}
-                onchange={(event) => settings.update({ ai: { imageQuality: textValue(event) as CodexImageQuality } })}
-              >
-                {#each imageQualities as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-              <small>{imageQualities.find((option) => option.value === settings.value.ai.imageQuality)?.hint}</small>
-            </label>
-
-            <label class="field">
-              <span>Image moderation</span>
-              <select
-                value={settings.value.ai.imageModeration}
-                onchange={(event) =>
-                  settings.update({ ai: { imageModeration: textValue(event) as CodexImageModeration } })}
-              >
-                {#each imageModerations as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-              <small>{imageModerations.find((option) => option.value === settings.value.ai.imageModeration)?.hint}</small>
-            </label>
-          </div>
-        {:else if aiDefaultsProvider === 'antigravity'}
-          <div class="detect-row">
-            <label class="field">
-              <span>Advanced Antigravity CLI auth helper</span>
-              <input
-                type="text"
-                value={settings.value.ai.antigravityBin}
-                placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
-                spellcheck="false"
-                oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
-              />
-            </label>
-            <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
-              {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
-            </button>
-            <small class="detect-help">Used to refresh Antigravity authentication when needed.</small>
-          </div>
-
-          {#if antigravityDetection}
-            <p class:ok={antigravityDetection.found} class:error={!antigravityDetection.found} class="status-line">
-              {#if antigravityDetection.found}
-                Found {antigravityDetection.version || 'Antigravity'} at {antigravityDetection.path}
-              {:else}
-                {antigravityDetection.error || 'Antigravity CLI was not found.'}
-              {/if}
-            </p>
-          {/if}
-
-          <div class="grid-2">
-            <label class="field">
-              <span>Image model</span>
-              <select
-                value={settings.value.ai.antigravityImageModel}
-                onchange={(event) =>
-                  settings.update({ ai: { antigravityImageModel: textValue(event) as AntigravityImageModelId } })}
-              >
-                {#each ANTIGRAVITY_IMAGE_MODEL_OPTIONS as option (option.id)}
-                  <option value={option.id}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Image size</span>
-              <select
-                value={settings.value.ai.antigravityImageSize}
-                onchange={(event) =>
-                  settings.update({ ai: { antigravityImageSize: textValue(event) as AntigravityImageSize } })}
-              >
-                {#each ANTIGRAVITY_IMAGE_SIZE_OPTIONS as option (option.id)}
-                  <option value={option.id}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
-          </div>
-
-          <div class="grid-2">
-            <label class="field">
-              <span>Person generation</span>
-              <select
-                value={settings.value.ai.antigravityPersonGeneration}
-                onchange={(event) =>
-                  settings.update({ ai: { antigravityPersonGeneration: textValue(event) as AntigravityPersonGeneration } })}
-              >
-                {#each ANTIGRAVITY_PERSON_GENERATION_OPTIONS as option (option.id)}
-                  <option value={option.id}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Prominent people</span>
-              <select
-                value={settings.value.ai.antigravityProminentPeople}
-                onchange={(event) =>
-                  settings.update({ ai: { antigravityProminentPeople: textValue(event) as AntigravityProminentPeople } })}
-              >
-                {#each ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS as option (option.id)}
-                  <option value={option.id}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
-          </div>
+              <option value="auto">Auto by task</option>
+              <option value="skip">Skip planner</option>
+              <option value="force">Always plan</option>
+            </select>
+          </label>
 
           <label class="field">
-            <span>Safety filtering</span>
+            <span>Planner provider</span>
             <select
-              value={settings.value.ai.antigravitySafetyFiltering}
-              onchange={(event) =>
-                settings.update({ ai: { antigravitySafetyFiltering: textValue(event) as AntigravitySafetyFiltering } })}
+              value={settings.value.ai.plannerProvider}
+              disabled={settings.value.ai.plannerMode === 'skip'}
+              onchange={(event) => settings.update({ ai: { plannerProvider: textValue(event) as AiProvider } })}
             >
-              {#each ANTIGRAVITY_SAFETY_FILTERING_OPTIONS as option (option.id)}
+              <option value="codex">Codex</option>
+              <option value="antigravity">Antigravity</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Image generator</span>
+            <select
+              value={settings.value.ai.imageProvider}
+              onchange={(event) => {
+                const provider = textValue(event) as AiProvider;
+                settings.update({ ai: { provider, imageProvider: provider } });
+                profileSourceProvider = provider;
+              }}
+            >
+              <option value="codex">Codex image generator</option>
+              <option value="antigravity">Antigravity image generator</option>
+            </select>
+          </label>
+        </div>
+
+      {:else if selectedSection === 'ai-provider-codex'}
+        <div class="detect-row">
+          <label class="field">
+            <span>Advanced Codex binary override</span>
+            <input
+              type="text"
+              value={settings.value.ai.codexBin}
+              placeholder="Leave blank to use the bundled Codex SDK CLI"
+              spellcheck="false"
+              oninput={(event) => settings.update({ ai: { codexBin: textValue(event) } })}
+            />
+          </label>
+          <button type="button" onclick={runCodexDetection} disabled={detectBusy}>
+            {detectBusy ? 'Detecting...' : 'Detect'}
+          </button>
+        </div>
+
+        {#if codexDetection}
+          <p class:ok={codexDetection.found} class:error={!codexDetection.found} class="status-line">
+            {#if codexDetection.found}
+              Found {codexDetection.version || 'Codex'} at {codexDetection.path}
+            {:else}
+              {codexDetection.error || 'Codex was not found.'}
+            {/if}
+          </p>
+        {/if}
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Model</span>
+            <select
+              value={settings.value.ai.model}
+              onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
+            >
+              {#each CODEX_MODEL_OPTIONS as option (option.id)}
                 <option value={option.id}>{option.label}</option>
               {/each}
             </select>
           </label>
 
-          {#if settings.value.ai.antigravitySafetyFiltering === 'custom'}
-            <div class="grid-2">
-              {#each ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS as category (category.id)}
-                <label class="field">
-                  <span>{category.label}</span>
-                  <select
-                    value={antigravitySafetyCategoryValue(category.id)}
-                    onchange={(event) =>
-                      updateAntigravitySafetyCategory(category.id, textValue(event) as AntigravitySafetyThreshold)}
-                  >
-                    {#each ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS as option (option.id)}
-                      <option value={option.id}>{option.label}</option>
-                    {/each}
-                  </select>
-                </label>
+          <label class="field">
+            <span>Reasoning effort</span>
+            <select
+              value={settings.value.ai.reasoningEffort}
+              onchange={(event) =>
+                settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
+            >
+              {#each reasoningEfforts as option (option.value)}
+                <option value={option.value}>{option.label}</option>
               {/each}
-            </div>
-          {/if}
+            </select>
+          </label>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Codex speed</span>
+            <select
+              value={settings.value.ai.serviceTier}
+              onchange={(event) => settings.update({ ai: { serviceTier: textValue(event) as ServiceTier } })}
+            >
+              {#each serviceTiers as option (option.value)}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+            <small>{serviceTiers.find((option) => option.value === settings.value.ai.serviceTier)?.hint}</small>
+          </label>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Image quality</span>
+            <select
+              value={settings.value.ai.imageQuality}
+              onchange={(event) => settings.update({ ai: { imageQuality: textValue(event) as CodexImageQuality } })}
+            >
+              {#each imageQualities as option (option.value)}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+            <small>{imageQualities.find((option) => option.value === settings.value.ai.imageQuality)?.hint}</small>
+          </label>
 
           <label class="field">
-            <span>Compression quality</span>
+            <span>Image moderation</span>
+            <select
+              value={settings.value.ai.imageModeration}
+              onchange={(event) =>
+                settings.update({ ai: { imageModeration: textValue(event) as CodexImageModeration } })}
+            >
+              {#each imageModerations as option (option.value)}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+            <small>{imageModerations.find((option) => option.value === settings.value.ai.imageModeration)?.hint}</small>
+          </label>
+        </div>
+
+      {:else if selectedSection === 'ai-provider-antigravity'}
+        <div class="detect-row">
+          <label class="field">
+            <span>Advanced Antigravity CLI auth helper</span>
             <input
-              type="number"
-              min="0"
-              max="100"
-              value={settings.value.ai.antigravityCompressionQuality ?? ''}
-              placeholder="Auto"
-              oninput={(event) => settings.update({ ai: { antigravityCompressionQuality: optionalNumberValue(event) } })}
+              type="text"
+              value={settings.value.ai.antigravityBin}
+              placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
+              spellcheck="false"
+              oninput={(event) => settings.update({ ai: { antigravityBin: textValue(event) } })}
+            />
+          </label>
+          <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
+            {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
+          </button>
+          <small class="detect-help">Used to refresh Antigravity authentication when needed.</small>
+        </div>
+
+        {#if antigravityDetection}
+          <p class:ok={antigravityDetection.found} class:error={!antigravityDetection.found} class="status-line">
+            {#if antigravityDetection.found}
+              Found {antigravityDetection.version || 'Antigravity'} at {antigravityDetection.path}
+            {:else}
+              {antigravityDetection.error || 'Antigravity CLI was not found.'}
+            {/if}
+          </p>
+        {/if}
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Image model</span>
+            <select
+              value={settings.value.ai.antigravityImageModel}
+              onchange={(event) =>
+                settings.update({ ai: { antigravityImageModel: textValue(event) as AntigravityImageModelId } })}
+            >
+              {#each ANTIGRAVITY_IMAGE_MODEL_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Image size</span>
+            <select
+              value={settings.value.ai.antigravityImageSize}
+              onchange={(event) =>
+                settings.update({ ai: { antigravityImageSize: textValue(event) as AntigravityImageSize } })}
+            >
+              {#each ANTIGRAVITY_IMAGE_SIZE_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Person generation</span>
+            <select
+              value={settings.value.ai.antigravityPersonGeneration}
+              onchange={(event) =>
+                settings.update({ ai: { antigravityPersonGeneration: textValue(event) as AntigravityPersonGeneration } })}
+            >
+              {#each ANTIGRAVITY_PERSON_GENERATION_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Prominent people</span>
+            <select
+              value={settings.value.ai.antigravityProminentPeople}
+              onchange={(event) =>
+                settings.update({ ai: { antigravityProminentPeople: textValue(event) as AntigravityProminentPeople } })}
+            >
+              {#each ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Safety filtering</span>
+          <select
+            value={settings.value.ai.antigravitySafetyFiltering}
+            onchange={(event) =>
+              settings.update({ ai: { antigravitySafetyFiltering: textValue(event) as AntigravitySafetyFiltering } })}
+          >
+            {#each ANTIGRAVITY_SAFETY_FILTERING_OPTIONS as option (option.id)}
+              <option value={option.id}>{option.label}</option>
+            {/each}
+          </select>
+        </label>
+
+        {#if settings.value.ai.antigravitySafetyFiltering === 'custom'}
+          <div class="grid-2">
+            {#each ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS as category (category.id)}
+              <label class="field">
+                <span>{category.label}</span>
+                <select
+                  value={antigravitySafetyCategoryValue(category.id)}
+                  onchange={(event) =>
+                    updateAntigravitySafetyCategory(category.id, textValue(event) as AntigravitySafetyThreshold)}
+                >
+                  {#each ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS as option (option.id)}
+                    <option value={option.id}>{option.label}</option>
+                  {/each}
+                </select>
+              </label>
+            {/each}
+          </div>
+        {/if}
+
+        <label class="field">
+          <span>Compression quality</span>
+          <input
+            type="number"
+            min="0"
+            max="100"
+            value={settings.value.ai.antigravityCompressionQuality ?? ''}
+            placeholder="Auto"
+            oninput={(event) => settings.update({ ai: { antigravityCompressionQuality: optionalNumberValue(event) } })}
+          />
+        </label>
+
+        <label class="field">
+          <span>Advanced image options JSON</span>
+          <textarea
+            rows="3"
+            spellcheck="false"
+            value={settings.value.ai.antigravityAdvancedOptionsJson}
+            oninput={(event) => settings.update({ ai: { antigravityAdvancedOptionsJson: textValue(event) } })}
+          ></textarea>
+          <small>Only confirmed image options are accepted; auth and transport fields are ignored by the app.</small>
+        </label>
+
+      {:else if selectedSection === 'ai-profiles'}
+        <div class="subsection-title">
+          <h3>Saved Profiles</h3>
+          <span>{settings.value.ai.profiles.length} saved</span>
+        </div>
+        <div class="profile-create">
+          <label class="field">
+            <span>New profile</span>
+            <input
+              type="text"
+              value={profileName}
+              placeholder={`${profileLabel(profileSourceProvider)} Profile`}
+              oninput={(event) => (profileName = textValue(event))}
             />
           </label>
 
           <label class="field">
-            <span>Advanced image options JSON</span>
-            <textarea
-              rows="3"
-              spellcheck="false"
-              value={settings.value.ai.antigravityAdvancedOptionsJson}
-              oninput={(event) => settings.update({ ai: { antigravityAdvancedOptionsJson: textValue(event) } })}
-            ></textarea>
-            <small>Only confirmed image options are accepted; auth and transport fields are ignored by the app.</small>
+            <span>Source defaults</span>
+            <select
+              value={profileSourceProvider}
+              onchange={(event) => (profileSourceProvider = textValue(event) as AiProvider)}
+            >
+              <option value="codex">Codex</option>
+              <option value="antigravity">Antigravity</option>
+            </select>
           </label>
-        {/if}
 
-        <div class="subsection profile-manager">
-          <div class="subsection-title">
-            <h3>Profiles</h3>
-            <span>{settings.value.ai.profiles.length} saved</span>
-          </div>
-          <div class="profile-create">
+          <button type="button" onclick={createProfileFromDefaults}>Save Current Defaults</button>
+        </div>
+
+        {#if settings.value.ai.profiles.length}
+          <div class="profile-editor">
             <label class="field">
-              <span>New profile</span>
+              <span>Saved profile</span>
+              <select
+                value={selectedProfileId}
+                onchange={(event) => (selectedProfileId = textValue(event))}
+              >
+                {#each settings.value.ai.profiles as profile (profile.id)}
+                  <option value={profile.id}>{profile.name}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Profile name</span>
               <input
                 type="text"
-                value={profileName}
-                placeholder={`${profileLabel(aiDefaultsProvider)} Profile`}
-                oninput={(event) => (profileName = textValue(event))}
+                value={settings.value.ai.profiles.find((profile) => profile.id === selectedProfileId)?.name ?? ''}
+                onchange={(event) => updateSelectedProfileName(textValue(event))}
               />
             </label>
-            <button type="button" onclick={createProfileFromDefaults}>Save Current Defaults</button>
-          </div>
 
-          {#if settings.value.ai.profiles.length}
-            <div class="profile-editor">
-              <label class="field">
-                <span>Saved profile</span>
-                <select
-                  value={selectedProfileId}
-                  onchange={(event) => (selectedProfileId = textValue(event))}
-                >
-                  {#each settings.value.ai.profiles as profile (profile.id)}
-                    <option value={profile.id}>{profile.name}</option>
-                  {/each}
-                </select>
-              </label>
-              <label class="field">
-                <span>Profile name</span>
-                <input
-                  type="text"
-                  value={settings.value.ai.profiles.find((profile) => profile.id === selectedProfileId)?.name ?? ''}
-                  onchange={(event) => updateSelectedProfileName(textValue(event))}
-                />
-              </label>
-              <div class="profile-options">
-                <AiRunOptionsControl bind:options={selectedProfileOptions} />
-                <button type="button" class="secondary" onclick={updateSelectedProfileOptions}>
-                  Save Profile Settings
-                </button>
-              </div>
-              <div class="profile-actions">
-                <button type="button" onclick={() => setDefaultProfile(selectedProfileId)}>
-                  {settings.value.ai.defaultProfileId === selectedProfileId ? 'Default Profile' : 'Use by Default'}
-                </button>
-                <button
-                  type="button"
-                  onclick={() => setDefaultProfile(null)}
-                  disabled={!settings.value.ai.defaultProfileId}
-                >
-                  Use Provider Defaults
-                </button>
-                <button type="button" onclick={deleteSelectedProfile}>Delete Profile</button>
-              </div>
+            <div class="profile-options">
+              <AiRunOptionsControl bind:options={selectedProfileOptions} />
+              <button type="button" class="secondary" onclick={updateSelectedProfileOptions}>
+                Save Profile Settings
+              </button>
             </div>
-          {:else}
-            <p class="status-line">Save a profile from the provider defaults above, then pick it inside AI dialogs.</p>
-          {/if}
-        </div>
-      {:else}
-        <div class="section-head">
-          <h2>Workspace</h2>
-          <p>Canvas defaults and project asset retention preferences.</p>
-        </div>
 
+            <div class="profile-actions">
+              <button type="button" onclick={() => setDefaultProfile(selectedProfileId)}>
+                {settings.value.ai.defaultProfileId === selectedProfileId ? 'Default Profile' : 'Use by Default'}
+              </button>
+              <button
+                type="button"
+                onclick={() => setDefaultProfile(null)}
+                disabled={!settings.value.ai.defaultProfileId}
+              >
+                Use Provider Defaults
+              </button>
+              <button type="button" onclick={deleteSelectedProfile}>Delete Profile</button>
+            </div>
+          </div>
+        {:else}
+          <p class="status-line">Save a profile from provider defaults, then pick it inside AI dialogs.</p>
+        {/if}
+
+      {:else if selectedSection === 'workspace-canvas'}
         <div class="grid-2">
           <label class="field">
             <span>Default width</span>
@@ -734,6 +855,7 @@
           </select>
         </label>
 
+      {:else if selectedSection === 'workspace-view'}
         <label class="check-row">
           <input
             type="checkbox"
@@ -746,6 +868,7 @@
           </span>
         </label>
 
+      {:else if selectedSection === 'ai-artifacts'}
         <label class="check-row">
           <input
             type="checkbox"
@@ -797,29 +920,69 @@
 <style>
   .settings-shell {
     display: grid;
-    grid-template-columns: 148px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
     height: 100%;
     min-height: 0;
   }
-  .settings-tabs {
+  .settings-tree {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 12px;
+    gap: 6px;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px 8px;
     border-right: 1px solid var(--border);
     background: var(--bg-panel-2);
   }
-  .settings-tabs button {
-    justify-content: flex-start;
-    text-align: left;
-    background: transparent;
-    border-color: transparent;
-    padding: 7px 8px;
+  .tree-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
-  .settings-tabs button.active {
+  .tree-group-button,
+  .tree-section-button {
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    height: 26px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+  }
+  .tree-group-button {
+    gap: 4px;
+    padding: 5px 6px;
+    font-weight: 600;
+  }
+  .tree-section-button {
+    padding: 5px 8px 5px 28px;
+  }
+  .tree-group.selected .tree-group-button {
+    color: var(--text-bright);
+  }
+  .tree-section-button.active {
+    background: var(--selection);
+    border-color: rgba(255, 255, 255, 0.08);
+    color: var(--text-bright);
+  }
+  .tree-children {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .breadcrumb {
+    margin-bottom: 4px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .settings-tree button:hover {
     background: var(--bg-elevated);
     border-color: var(--border-soft);
-    color: var(--text-bright);
+  }
+  .settings-tree button.active:hover {
+    background: var(--selection);
   }
   .settings-body {
     display: flex;
@@ -838,7 +1001,7 @@
     padding: 14px;
   }
   .section-head h2,
-  .subsection h3 {
+  .subsection-title h3 {
     margin: 0 0 4px;
     color: var(--text-bright);
     font-size: 12px;
@@ -909,18 +1072,6 @@
     font-size: 11px;
     line-height: 1.35;
   }
-  .subsection {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding-top: 4px;
-    border-top: 1px solid var(--border);
-  }
-  .provider-defaults {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-  }
   .subsection-title {
     display: flex;
     align-items: baseline;
@@ -934,30 +1085,10 @@
     color: var(--text-dim);
     font-size: 11px;
   }
-  .provider-tabs {
-    display: flex;
-    gap: 18px;
-    min-width: 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .provider-tabs button {
-    justify-content: center;
-    min-width: 0;
-    padding: 7px 2px 8px;
-    background: transparent;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    color: var(--text);
-  }
-  .provider-tabs button.active {
-    color: var(--text-bright);
-    border-bottom-color: var(--accent);
-  }
   .profile-create,
   .profile-editor {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) 160px auto;
     gap: 10px;
     align-items: end;
   }
