@@ -306,10 +306,7 @@ fn wake_antigravity_auth(antigravity_bin: &str, job_path: &Path) -> Result<(), S
     if output.status.success() {
         Ok(())
     } else {
-        Err(antigravity_command_failure(
-            "Antigravity auth helper (`agy models`)",
-            &output,
-        ))
+        Err(antigravity_command_failure("Antigravity auth helper", &output))
     }
 }
 
@@ -1016,7 +1013,7 @@ fn antigravity_http_error_message(status: reqwest::StatusCode, body: &str) -> St
             " The direct request schema was rejected or the image model refused the request.",
         ),
         401 | 403 => message.push_str(
-            " Antigravity account authentication was rejected. PaintNode retried after `agy models`; run `agy` in Terminal and sign in if this repeats.",
+            " Antigravity account authentication was rejected. Run `agy` in Terminal and sign in if this repeats.",
         ),
         503 => message.push_str(" The Antigravity image model is currently at capacity."),
         _ => {}

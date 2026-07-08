@@ -196,7 +196,7 @@
   }
 </script>
 
-<Modal title="Add Open-License Images" {onClose} width={1120}>
+<Modal title="Add Open-License Images" {onClose} width={1120} height={760} minWidth={760} minHeight={520} resizable>
   <div class="stock-dialog">
     <header class="intro">
       <div class="intro-title">
@@ -411,7 +411,8 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    height: min(650px, calc(100vh - 130px));
+    height: 100%;
+    min-height: 0;
   }
 
   .intro {
@@ -576,7 +577,6 @@
   .browser {
     flex: 1 1 auto;
     min-height: 0;
-    max-height: 500px;
     overflow: auto;
     padding: 12px;
     border: 1px solid var(--border-soft);
@@ -586,7 +586,6 @@
 
   .selection-drawer {
     min-height: 0;
-    max-height: 500px;
     overflow: auto;
     padding: 10px;
     border-left: 1px solid var(--border-soft);

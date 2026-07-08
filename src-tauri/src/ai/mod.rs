@@ -16,7 +16,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -30,14 +29,10 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Emitter;
 
-use crate::png::{
-    file_has_png_signature, is_png, png_dimensions_from_bytes, read_png_data_url, PNG_SIGNATURE,
-};
+use crate::png::{file_has_png_signature, is_png, png_dimensions_from_bytes, PNG_SIGNATURE};
 use crate::project::{
     default_documents_project_dir, ensure_project_dirs, safe_file_name, safe_stem, ProjectAssetView,
 };
-
-pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(crate) const AI_RUN_STOPPED_MESSAGE: &str = "The task was stopped.";
 
@@ -568,35 +563,6 @@ pub(crate) fn safe_job_child_path(job_path: &Path, file_name: &str) -> Result<Pa
         }
     }
     Ok(job_path.join(relative))
-}
-
-fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to launch command: {e}"))?;
-
-    let start = Instant::now();
-    loop {
-        if child
-            .try_wait()
-            .map_err(|e| format!("Failed to wait for command: {e}"))?
-            .is_some()
-        {
-            return child
-                .wait_with_output()
-                .map_err(|e| format!("Failed to collect command output: {e}"));
-        }
-
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Generation timed out. Codex may still be busy, or the local command may be waiting for input.".into());
-        }
-
-        thread::sleep(POLL_INTERVAL);
-    }
 }
 
 pub(crate) fn sanitize_progress_line(line: &str) -> Option<String> {
@@ -1130,56 +1096,6 @@ pub(crate) fn image_agent_autonomy_contract(
             "Autonomy level: Unmanaged. Use your available image-generation capability or provider tools to produce the requested image. PaintNode does not constrain the intermediate workflow beyond producing the required output."
         }
     }
-}
-
-/// Run a user-configured local command to generate an image, then return it as a PNG data URL.
-///
-/// Security model: the command + args come from the app's own settings (local, user-entered),
-/// and are executed via an **argv array — never a shell** (`std::process::Command`), so the
-/// prompt text cannot inject shell syntax. `{prompt}` and `{output}` placeholders in the args
-/// are substituted as single argv elements; `{output}` is a temp PNG path the tool must write.
-#[tauri::command]
-pub(crate) async fn generate_image(
-    bin: String,
-    args: Vec<String>,
-    prompt: String,
-) -> Result<String, String> {
-    if bin.trim().is_empty() {
-        return Err("No generator command configured.".into());
-    }
-
-    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        // Unique temp output path for the tool to write into.
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mut out_path = std::env::temp_dir();
-        out_path.push(format!("paintnode-gen-{ts}.png"));
-        let out_str = out_path.to_string_lossy().to_string();
-
-        let final_args: Vec<String> = args
-            .iter()
-            .map(|a| a.replace("{prompt}", &prompt).replace("{output}", &out_str))
-            .collect();
-
-        let mut command = Command::new(&bin);
-        apply_ai_cli_environment(&mut command);
-        command.args(&final_args);
-        let output = run_with_timeout(&mut command, GENERATION_TIMEOUT)
-            .map_err(|e| format!("Failed to launch '{bin}': {e}"))?;
-
-        if !output.status.success() {
-            return Err(command_failure("Generator", &output));
-        }
-
-        let data_url = read_png_data_url(&out_path)?;
-        let _ = fs::remove_file(&out_path);
-
-        Ok(data_url)
-    })
-    .await
-    .map_err(|e| format!("Task error: {e}"))?
 }
 
 pub(crate) fn project_or_temp_job_path(

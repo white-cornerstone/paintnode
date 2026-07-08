@@ -169,7 +169,7 @@
   }
 </script>
 
-<Modal title="AI Setup Assistant" onClose={dismiss} width={560}>
+<Modal title="AI Setup Assistant" onClose={dismiss} width={560} minWidth={520} minHeight={420} resizable>
   <div class="wizard">
     <ol class="steps" aria-label="Setup progress">
       {#each steps as item (item.number)}
@@ -768,7 +768,7 @@
     width: 100%;
   }
   .field textarea {
-    resize: vertical;
+    resize: none;
     min-height: 56px;
     color: var(--text);
     background: var(--bg-input);

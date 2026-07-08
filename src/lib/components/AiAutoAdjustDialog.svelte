@@ -116,11 +116,6 @@
       error = 'Enter an adjustment prompt.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'AI Auto adjustments are currently available with Local Codex or Antigravity account.';
-      return;
-    }
-
     busy = true;
     const adjustment = kind;
     const taskProjectPath = project.path;
@@ -158,13 +153,13 @@
           if (payload.partIndex && payload.partCount) {
             aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
           }
-        },
-        () =>
-          aiTasks.setProgress(
-            task.id,
-            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
-          ),
-      );
+          },
+          () =>
+            aiTasks.setProgress(
+              task.id,
+              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+            ),
+        );
 
       try {
         const sourcePng = await canvasToPngBytes(source);
@@ -220,8 +215,9 @@
   }
 </script>
 
-<Modal title={title} onClose={onClose} width={540}>
+<Modal title={title} onClose={onClose} width={540} height={560} minWidth={500} minHeight={420} resizable>
   <div class="dlg-form auto-adjust">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">AI Auto adjustments run a local AI provider and only work in the desktop app.</p>
     {/if}
@@ -237,12 +233,12 @@
           <figcaption>Source</figcaption>
         </figure>
       {/if}
-      <label class="dlg-field">
+      <label class="dlg-field prompt-field">
         <span>Prompt</span>
         <textarea value={taskDetail.prompt} rows="4" readonly></textarea>
       </label>
     {:else}
-      <label class="dlg-field">
+      <label class="dlg-field prompt-field">
         <span>Adjustment prompt</span>
         <textarea bind:value={prompt} rows="5" spellcheck="true"></textarea>
       </label>
@@ -280,6 +276,7 @@
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -301,7 +298,20 @@
 
 <style>
   .auto-adjust {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
     font-size: 12px;
+  }
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
   }
   .summary {
     display: flex;
@@ -321,7 +331,17 @@
     color: #ffd28a;
   }
   textarea {
-    resize: vertical;
+    resize: none;
+  }
+  .prompt-field {
+    display: flex;
+    flex: 1 1 180px;
+    flex-direction: column;
+    min-height: 140px;
+  }
+  .prompt-field textarea {
+    flex: 1 1 auto;
+    min-height: 100px;
   }
   figure {
     margin: 0;
@@ -383,7 +403,13 @@
     padding: 0;
   }
   .dlg-actions {
+    display: flex;
+    flex: 0 0 auto;
     align-items: center;
+    gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .dlg-action-spacer {
     flex: 1;

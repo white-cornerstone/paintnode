@@ -5,7 +5,6 @@ import {
   generateCodexImage,
   generateAntigravityFillImage,
   generateAntigravityImage,
-  generateImage,
   type ProjectAsset,
   type TargetDimensions,
 } from '../integrations/desktop';
@@ -13,7 +12,7 @@ import { aiTasks, type AiTask } from '../state/aiTasks.svelte';
 import { editor } from '../state/editor.svelte';
 import { project } from '../state/project.svelte';
 import { settings } from '../state/settings.svelte';
-import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings } from '../state/settings';
+import { aiRunOptionsFromSettings } from '../state/settings';
 import { AiProgressListener, createRunId, focusTaskDocument } from './taskSupport';
 
 /**
@@ -38,9 +37,6 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
   if (!detail) return;
   // Tasks saved before run options were recorded fall back to current settings.
   const runOptions = detail.runOptions ?? aiRunOptionsFromSettings(settings.value);
-  const customArgs =
-    detail.customArgs ??
-    (settings.value.ai.customGenerateArgsText || settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   const fillMode = detail.fillMode;
   const userPrompt = detail.prompt;
   const references = detail.references ?? [];
@@ -50,23 +46,16 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     task.id,
     runOptions.provider === 'codex'
       ? 'Preparing Codex request...'
-      : runOptions.provider === 'antigravity'
-        ? 'Preparing Antigravity request...'
-        : 'Running local generator...',
+      : 'Preparing Antigravity request...',
   );
   editor.flash(
     fillMode
       ? 'Preparing generative fill...'
       : runOptions.provider === 'codex'
         ? 'Generating with Codex...'
-        : runOptions.provider === 'antigravity'
-          ? 'Generating with Antigravity...'
-          : 'Generating image...',
+        : 'Generating with Antigravity...',
   );
-  const runId =
-    runOptions.provider === 'codex' || runOptions.provider === 'antigravity'
-      ? task.runId ?? createRunId('generate')
-      : '';
+  const runId = task.runId ?? createRunId('generate');
   if (runId && task.runId !== runId) aiTasks.setRunId(task.id, runId);
   if (runId) {
     progressListener.start(
@@ -80,22 +69,11 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
       () =>
         aiTasks.setProgress(
           task.id,
-          runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
+          runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
         ),
     );
   }
   try {
-    // Re-apply the dialog's provider guards: tasks saved without runOptions
-    // fall back to current settings, which the dialog never vetted.
-    if (fillMode && runOptions.provider === 'custom') {
-      throw new Error('Mask-guided generative fill is currently available with Local Codex or Antigravity account.');
-    }
-    if (runOptions.provider === 'custom' && !runOptions.customBin.trim()) {
-      throw new Error('Enter the generator command in AI settings.');
-    }
-    if (runOptions.provider === 'custom' && references.length) {
-      throw new Error('Reference images are currently available with Local Codex or Antigravity account.');
-    }
     // On retry another document may be active; the fill input must come from
     // the document the task was started in (null means the active document).
     focusTaskDocument(task.documentId);
@@ -133,24 +111,22 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
               generationTarget,
               references,
             )
-        : runOptions.provider === 'antigravity'
-          ? fillEdit
-            ? await generateAntigravityFillImage(
-                antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
-                fillEdit.sourcePng,
-                fillEdit.editTargetPng,
-                fillEdit.maskPng,
-                generationPrompt,
-                references,
-                false,
-              )
-            : await generateAntigravityImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
-                generationPrompt,
-                generationTarget,
-                references,
-              )
-          : null;
+        : fillEdit
+          ? await generateAntigravityFillImage(
+              antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
+              fillEdit.sourcePng,
+              fillEdit.editTargetPng,
+              fillEdit.maskPng,
+              generationPrompt,
+              references,
+              false,
+            )
+          : await generateAntigravityImage(
+              antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+              generationPrompt,
+              generationTarget,
+              references,
+            );
     const generatedAssetIds = new Set<string>();
     if (generated?.asset?.id) generatedAssetIds.add(generated.asset.id);
     for (const asset of generated?.assets ?? []) generatedAssetIds.add(asset.id);
@@ -159,22 +135,11 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     }
     const generatedAssetCount = generatedAssetIds.size;
     if (generated?.asset || generatedAssetCount > 0) await project.refresh(taskProjectPath);
-    const dataUrl =
-      generated?.dataUrl ??
-      (await generateImage(
-        {
-          bin: runOptions.customBin.trim(),
-          args: customArgs
-            .split('\n')
-            .map((s) => s.trim())
-            .filter(Boolean),
-        },
-        generationPrompt,
-      ));
+    const dataUrl = generated.dataUrl;
     const blob = await (await fetch(dataUrl)).blob();
     const bmp = await createImageBitmap(blob);
     let fillAsset: ProjectAsset | null = generated?.asset ?? null;
-    if (fillInput && !fillAsset && !generated && taskProjectPath) {
+    if (fillInput && !fillAsset && taskProjectPath) {
       fillAsset = await project.storeGeneratedBlobAt(
         taskProjectPath,
         blob,
@@ -184,13 +149,9 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         bmp.height,
       );
     }
-    const customAsset =
-      !fillInput && !generated && taskProjectPath
-        ? await project.storeGeneratedBlobAt(taskProjectPath, blob, `AI ${userPrompt.slice(0, 48) || 'generated'}.png`, generationPrompt, bmp.width, bmp.height)
-        : null;
     const sourceMeta = {
-      assetId: fillAsset?.id ?? customAsset?.id ?? null,
-      path: fillAsset?.relativePath ?? customAsset?.relativePath ?? null,
+      assetId: fillAsset?.id ?? null,
+      path: fillAsset?.relativePath ?? null,
     };
     focusTaskDocument(task.documentId);
     const oversized = fillInput

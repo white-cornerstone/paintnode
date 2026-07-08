@@ -29,7 +29,9 @@
     type AntigravitySafetyThreshold,
     type ReasoningEffort,
     type ServiceTier,
+    aiProfileRunOptionsFromSettings,
   } from '../state/settings';
+  import { settings } from '../state/settings.svelte';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
 
   type AntigravityModelScope = 'all' | 'image';
@@ -71,9 +73,8 @@
     { value: 'unmanaged', label: 'Unmanaged', short: 'Unmanaged' },
   ];
   const providers: { value: AiProvider; label: string }[] = [
-    { value: 'codex', label: 'Local Codex' },
+    { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity account' },
-    { value: 'custom', label: 'Custom CLI' },
   ];
 
   let open = $state(false);
@@ -146,13 +147,18 @@
   const summary = $derived.by(() => {
     if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort}`;
     if (options.provider === 'antigravity' && antigravityUsesAgent) return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
-    if (options.provider === 'antigravity') return `Antigravity ${antigravityImageModelLabel} ${antigravityImageSizeLabel}`;
-    return 'Custom CLI';
+    return `Antigravity ${antigravityImageModelLabel} ${antigravityImageSizeLabel}`;
   });
 
   function setProvider(provider: AiProvider): void {
     options = { ...options, provider };
-    submenu = provider === 'codex' ? 'reasoning' : provider === 'antigravity' ? 'antigravityImageModel' : null;
+    submenu = provider === 'codex' ? 'reasoning' : 'antigravityImageModel';
+  }
+
+  function applyProfile(profileId: string): void {
+    options = aiProfileRunOptionsFromSettings(settings.value, profileId);
+    submenu = null;
+    close();
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {
@@ -338,6 +344,17 @@
 <div class="ai-options">
   {#if open}
     <div bind:this={menuElement} use:portal class="menu" style={menuStyle} role="presentation" onpointerdown={stopPointer}>
+      {#if settings.value.ai.profiles.length}
+        <div class="menu-title">Profile</div>
+        {#each settings.value.ai.profiles as profile (profile.id)}
+          <button type="button" onclick={() => applyProfile(profile.id)}>
+            <span>{profile.name}</span>
+            {#if settings.value.ai.defaultProfileId === profile.id}<span class="value">Default</span>{/if}
+          </button>
+        {/each}
+        <div class="separator"></div>
+      {/if}
+
       <div class="menu-title">Provider</div>
       {#each providers as provider (provider.value)}
         <button type="button" class:active={options.provider === provider.value} onclick={() => setProvider(provider.value)}>

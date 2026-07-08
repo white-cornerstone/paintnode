@@ -12,7 +12,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { ui } from '../state/ui.svelte';
-  import { DEFAULT_CUSTOM_GENERATOR_ARGS, aiRunOptionsFromSettings, cloneAiRunOptions } from '../state/settings';
+  import { aiRunOptionsFromSettings, cloneAiRunOptions } from '../state/settings';
   import { isDesktop } from '../integrations/desktop';
   import { Add, Copy, Dismiss } from '../icons';
 
@@ -21,7 +21,6 @@
   const desktop = isDesktop();
 
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
-  let argsText = $state(settings.value.ai.customGenerateArgsText || settings.value.ai.customArgsText || DEFAULT_CUSTOM_GENERATOR_ARGS);
   // A prompt handed off by the AI setup wizard pre-fills the dialog once.
   let prompt = $state(ui.consumeAiGeneratePrefill() ?? '');
   let busy = $state(false);
@@ -37,7 +36,7 @@
   const fillFrame = $derived.by(() => {
     const doc = editor.doc;
     const selection = editor.selection;
-    if (!doc || !selection || runOptions.provider === 'custom') return null;
+    if (!doc || !selection) return null;
     return fillFrameSummary(
       runOptions.provider,
       doc.width,
@@ -80,21 +79,9 @@
       error = 'Available only in the desktop app.';
       return;
     }
-    if (runOptions.provider === 'custom' && !runOptions.customBin.trim()) {
-      error = 'Enter the generator command.';
-      return;
-    }
     const hasSelection = !!editor.selection;
     if (!prompt.trim() && !hasSelection) {
       error = 'Enter a prompt.';
-      return;
-    }
-    if (runOptions.provider === 'custom' && hasSelection) {
-      error = 'Mask-guided generative fill is currently available with Local Codex or Antigravity account.';
-      return;
-    }
-    if (runOptions.provider === 'custom' && references.length) {
-      error = 'Reference images are currently available with Local Codex or Antigravity account.';
       return;
     }
     const userPrompt = prompt.trim();
@@ -121,7 +108,6 @@
         prompt: userPrompt || defaultFillPrompt(),
         fillMode: hasSelection,
         runOptions: capturedRunOptions,
-        customArgs: argsText,
         references: references.map((reference) => ({ name: reference.name, bytes: reference.bytes })),
         referenceNames: references.map((reference) => reference.name),
         referencePreviews: references.map((reference) => reference.previewDataUrl),
@@ -132,11 +118,12 @@
   }
 </script>
 
-<Modal title="Generate Image (AI)" {onClose} width={560}>
+<Modal title="Generate Image (AI)" {onClose} width={560} height={560} minWidth={520} minHeight={420} resizable>
   <div class="dlg-form">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">
-        This runs a <strong>local command</strong> and only works in the desktop app. Launch it
+        This runs a <strong>local AI provider</strong> and only works in the desktop app. Launch it
         with <code>npm run tauri:dev</code> (requires Rust). In the browser it stays disabled.
       </p>
     {/if}
@@ -147,7 +134,7 @@
         <span>{taskDetail.providerLabel}</span>
       </div>
 
-      <label class="dlg-field">
+      <label class="dlg-field prompt-field">
         <span>Prompt</span>
         <textarea value={taskDetail.prompt} rows="3" readonly></textarea>
       </label>
@@ -172,19 +159,7 @@
         </div>
       {/if}
     {:else}
-      <div class="provider-tabs" role="group" aria-label="Image generator">
-        <button class:active={runOptions.provider === 'codex'} onclick={() => (runOptions.provider = 'codex')}>
-          Local Codex
-        </button>
-        <button class:active={runOptions.provider === 'antigravity'} onclick={() => (runOptions.provider = 'antigravity')}>
-          Antigravity account
-        </button>
-        <button class:active={runOptions.provider === 'custom'} onclick={() => (runOptions.provider = 'custom')}>
-          Custom CLI
-        </button>
-      </div>
-
-      <label class="dlg-field">
+      <label class="dlg-field prompt-field">
         <span>Prompt</span>
         <textarea bind:value={prompt} rows="3" placeholder="a serene mountain lake at sunset"></textarea>
       </label>
@@ -255,37 +230,6 @@
       {/if}
     {/if}
 
-    {#if !taskDetail && runOptions.provider === 'codex'}
-      <p class="hint">
-        Uses your local Codex login. If this fails, run <code>codex login</code> in Terminal and try again.
-        PaintNode copies the newest generated PNG from Codex's local image cache into the project and adds it as a new layer.
-      </p>
-    {:else if !taskDetail && runOptions.provider === 'antigravity'}
-      <label class="dlg-field">
-        <span>Antigravity CLI auth helper (optional)</span>
-        <input type="text" bind:value={runOptions.antigravityBin} placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy" spellcheck="false" />
-      </label>
-
-      <p class="hint">
-        Uses your Antigravity sign-in. If this fails, run <code>agy</code> in Terminal and sign in.
-        PaintNode refreshes auth with <code>agy models</code> before calling the image backend directly.
-      </p>
-    {:else if !taskDetail}
-      <label class="dlg-field">
-        <span>Command (local CLI)</span>
-        <input type="text" bind:value={runOptions.customBin} placeholder="Full path to your image-gen CLI" spellcheck="false" />
-      </label>
-
-      <label class="dlg-field">
-        <span>Arguments, one per line; <code>{'{prompt}'}</code> and <code>{'{output}'}</code> are substituted</span>
-        <textarea bind:value={argsText} rows="4" spellcheck="false"></textarea>
-      </label>
-
-      <p class="hint">
-        Your CLI must write a PNG to the <code>{'{output}'}</code> path. The result is added as a new layer.
-      </p>
-    {/if}
-
     {#if currentBusy}
       <div class="progress-line" role="status" aria-live="polite">
         <span class="progress-dot" aria-hidden="true"></span>
@@ -315,6 +259,7 @@
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -335,27 +280,20 @@
 </Modal>
 
 <style>
-  .provider-tabs {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 0;
-    border: 1px solid var(--border-soft);
-    border-radius: 4px;
-    overflow: hidden;
+  .dlg-form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
-  .provider-tabs button {
-    border: none;
-    border-radius: 0;
-    background: var(--bg-input);
-    color: var(--text-dim);
-    padding: 6px 8px;
-  }
-  .provider-tabs button + button {
-    border-left: 1px solid var(--border-soft);
-  }
-  .provider-tabs button.active {
-    background: var(--accent);
-    color: #fff;
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
   }
   .frame-summary {
     display: grid;
@@ -417,18 +355,31 @@
     color: var(--text-dim);
     font-size: 11px;
   }
-  .warn code,
-  .dlg-field code,
-  .hint code {
+  .warn code {
     color: var(--text-bright);
     background: var(--bg-input);
     padding: 0 3px;
     border-radius: 3px;
   }
-  .hint {
-    margin: 0;
+  .dlg-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-height: 0;
     color: var(--text-dim);
-    font-size: 11px;
+  }
+  .dlg-field textarea,
+  .dlg-field select {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .prompt-field {
+    flex: 1 1 180px;
+    min-height: 120px;
+  }
+  .prompt-field textarea {
+    flex: 1 1 auto;
+    min-height: 88px;
   }
   .reference-section {
     display: grid;
@@ -576,10 +527,19 @@
     -webkit-user-select: text;
   }
   textarea {
-    resize: vertical;
     font-family: inherit;
   }
   .dlg-action-spacer {
     flex: 1;
+  }
+  .dlg-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
 </style>

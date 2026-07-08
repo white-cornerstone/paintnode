@@ -88,10 +88,6 @@
       error = 'AI Upscale is available only in the desktop app.';
       return;
     }
-    if (runOptions.provider === 'custom') {
-      error = 'AI Upscale is currently available with Local Codex or Antigravity account.';
-      return;
-    }
     const scale = clampedScale;
     busy = true;
     const taskProjectPath = project.path;
@@ -125,13 +121,13 @@
           if (payload.partIndex && payload.partCount) {
             aiTasks.setPartProgress(task.id, payload.partIndex, payload.partCount);
           }
-        },
-        () =>
-          aiTasks.setProgress(
-            task.id,
-            runOptions.provider === 'antigravity' ? 'Local Antigravity is running...' : 'Local Codex is running...',
-          ),
-      );
+          },
+          () =>
+            aiTasks.setProgress(
+              task.id,
+              runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+            ),
+        );
 
       try {
         const sourcePng = await canvasToPngBytes(source);
@@ -178,8 +174,9 @@
   }
 </script>
 
-<Modal title="AI Upscale" onClose={onClose} width={480}>
+<Modal title="AI Upscale" onClose={onClose} width={480} height={520} minWidth={460} minHeight={420} resizable>
   <div class="dlg-form">
+    <div class="dlg-scroll">
     {#if !desktop}
       <p class="warn">AI Upscale runs a local AI provider and only works in the desktop app.</p>
     {/if}
@@ -263,6 +260,7 @@
         <pre>{currentError}</pre>
       </div>
     {/if}
+    </div>
 
     <div class="dlg-actions">
       {#if !task}
@@ -284,9 +282,20 @@
 
 <style>
   .dlg-form {
-    display: grid;
-    gap: 12px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
     font-size: 12px;
+  }
+  .dlg-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
   }
   .summary {
     display: flex;
@@ -398,8 +407,12 @@
   }
   .dlg-actions {
     display: flex;
+    flex: 0 0 auto;
     justify-content: flex-end;
     gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .dlg-action-spacer {
     flex: 1;

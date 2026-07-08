@@ -52,7 +52,6 @@ pub fn run() {
             app::clipboard_write_text,
             app::app_memory_info,
             app::set_app_menu_enabled,
-            ai::generate_image,
             ai::cancel_ai_run,
             ai::codex::detect_codex,
             ai::antigravity::detect_antigravity,

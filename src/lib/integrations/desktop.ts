@@ -86,13 +86,6 @@ function safeDocumentDialogName(name: string): string {
   return `${safeStem(stem || name)}.${ext}`;
 }
 
-export interface GeneratorConfig {
-  /** The local binary to run, e.g. "codex" or an absolute path. */
-  bin: string;
-  /** Argument template; "{prompt}" and "{output}" are substituted by the Rust bridge. */
-  args: string[];
-}
-
 export interface CodexGeneratorConfig {
   /** Optional Codex binary override passed through the SDK runner. Empty uses the SDK package's bundled CLI. */
   bin?: string;
@@ -270,17 +263,6 @@ export interface NativeDroppedFile {
   size: number;
   modifiedAt: number;
   mime?: string | null;
-}
-
-/**
- * Run the configured local image-generator via the Tauri Rust bridge and return a PNG data URL.
- * Only works in the desktop app; throws in the browser.
- */
-export async function generateImage(config: GeneratorConfig, prompt: string): Promise<string> {
-  if (!isDesktop()) {
-    throw new Error('Image generation is only available in the desktop app.');
-  }
-  return invoke<string>('generate_image', { bin: config.bin, args: config.args, prompt });
 }
 
 function codexInvokeConfig(config: CodexGeneratorConfig) {

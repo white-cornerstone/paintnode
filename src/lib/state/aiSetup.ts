@@ -4,10 +4,10 @@ import type { PaintNodeSettings } from './settings';
 
 export const AI_SETUP_STORAGE_KEY = 'paintnode.aiSetup';
 
-/** True when any AI CLI has been configured (path saved or provider customized). */
+/** True when a supported AI CLI path has been configured. */
 export function hasConfiguredAiCli(settings: PaintNodeSettings): boolean {
   const ai = settings.ai;
-  return Boolean(ai.codexBin.trim() || ai.antigravityBin.trim() || ai.customBin.trim());
+  return Boolean(ai.codexBin.trim() || ai.antigravityBin.trim());
 }
 
 /** Parse the stored seen-flag; any non-empty stored value counts as seen. */

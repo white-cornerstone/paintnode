@@ -70,12 +70,6 @@ pub(crate) fn png_data_url(bytes: &[u8]) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
-pub(crate) fn read_png_data_url(path: &Path) -> Result<String, String> {
-    let bytes =
-        fs::read(path).map_err(|e| format!("No output image found at {}: {e}", path.display()))?;
-    png_data_url(&bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
