@@ -173,6 +173,8 @@ export interface PaintNodeSettings {
     defaultBackground: CanvasBackground;
     showTransparencyChecker: boolean;
     keepAiRunInputs: boolean;
+    keepAiUpscaleComposedResult: boolean;
+    keepAiDebugArtifacts: boolean;
     layerAnnotationsExpanded: boolean;
   };
 }
@@ -274,6 +276,8 @@ export function defaultSettings(): PaintNodeSettings {
       defaultBackground: 'transparent',
       showTransparencyChecker: true,
       keepAiRunInputs: true,
+      keepAiUpscaleComposedResult: false,
+      keepAiDebugArtifacts: false,
       layerAnnotationsExpanded: true,
     },
   };
@@ -525,6 +529,14 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
         defaults.workspace.showTransparencyChecker,
       ),
       keepAiRunInputs: booleanOrDefault(workspace.keepAiRunInputs, defaults.workspace.keepAiRunInputs),
+      keepAiUpscaleComposedResult: booleanOrDefault(
+        workspace.keepAiUpscaleComposedResult,
+        defaults.workspace.keepAiUpscaleComposedResult,
+      ),
+      keepAiDebugArtifacts: booleanOrDefault(
+        workspace.keepAiDebugArtifacts ?? workspace.keepAntigravityDebugArtifacts,
+        defaults.workspace.keepAiDebugArtifacts,
+      ),
       layerAnnotationsExpanded: booleanOrDefault(
         workspace.layerAnnotationsExpanded,
         defaults.workspace.layerAnnotationsExpanded,

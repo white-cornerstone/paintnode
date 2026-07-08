@@ -97,6 +97,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
     const generationPrompt = userPrompt;
     const generationTarget = fillEdit ? null : targetDimensions();
     const keepJobDir = settings.value.workspace.keepAiRunInputs;
+    const keepDebugArtifacts = settings.value.workspace.keepAiDebugArtifacts;
     const fillJobProjectPath = fillEdit && keepJobDir ? taskProjectPath : null;
     if (fillInput) {
       aiTasks.setProgress(
@@ -126,7 +127,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         : imageProvider === 'codex'
         ? fillEdit
           ? await generateCodexFillImage(
-              codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
+              codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts),
               fillEdit.sourcePng,
               fillEdit.editTargetPng,
               fillEdit.maskPng,
@@ -135,14 +136,14 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
               false,
             )
           : await generateCodexImage(
-              codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+              codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
               generationPrompt,
               generationTarget,
               references,
             )
         : fillEdit
           ? await generateAntigravityFillImage(
-              antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
+              antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts),
               fillEdit.sourcePng,
               fillEdit.editTargetPng,
               fillEdit.maskPng,
@@ -151,7 +152,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
               false,
             )
           : await generateAntigravityImage(
-              antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+              antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
               generationPrompt,
               generationTarget,
               references,

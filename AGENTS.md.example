@@ -117,3 +117,18 @@ its purpose is discoverable on hover/focus. Use the shared `tooltip` action — 
 
 Keep heavy pixel/canvas work in `src/lib/engine/` as plain TypeScript so it never depends on
 Svelte's reactivity. Svelte runes are for UI state and chrome only.
+
+### AI workflow artifacts and debug mode
+
+AI provider integrations should treat normal run folders as user-facing workflow artifacts,
+not raw provider trace dumps. By default, keep only files that help the user resume, inspect,
+or manually adjust the workflow result: sources, masks, prompts, placement metadata, reusable
+part results, layer masks, and user-visible generated assets.
+
+Large or provider-internal diagnostics must be gated behind one app-level debug setting and
+default to off. This applies to Codex, Antigravity, and any future AI provider. Examples include
+full CLI/auth logs, raw HTTP request/response JSON, provider transcripts, temporary recovered
+cache files, comparison/debug images, and any payload that PaintNode already parsed or handled
+in memory. When debug mode is off, avoid writing those files at all; if a provider must create
+them, remove them after the task finishes or before reusing an existing job folder. When debug
+mode is on, preserve those artifacts only for troubleshooting.

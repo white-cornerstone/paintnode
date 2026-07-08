@@ -150,6 +150,7 @@
       aiTasks.setProgress(task.id, 'Preparing AI auto adjustment input...');
       editor.flash('Preparing AI auto adjustment...');
       const keepJobDir = settings.value.workspace.keepAiRunInputs;
+      const keepDebugArtifacts = settings.value.workspace.keepAiDebugArtifacts;
       progressListener.start(
         runId,
         (message, payload) => {
@@ -171,7 +172,7 @@
         const generated =
           imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(
-                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+                antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 sourcePng,
                 sourcePng,
                 maskPng,
@@ -180,7 +181,7 @@
                 prompt.trim(),
               )
             : await generateCodexRetouchImage(
-                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir),
+                codexConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 sourcePng,
                 sourcePng,
                 maskPng,

@@ -1432,11 +1432,31 @@ Use the storyboard as the layout reference. This is a generative synthesis task,
 
 Unless the user explicitly asks for an impossible or surreal composition, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction. If the user deliberately asks for something non-realistic, follow that request intentionally while keeping the result visually coherent.
 
-Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
+      Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
       const result =
         imageProvider === 'antigravity'
-          ? await composeAntigravityWorkflow(antigravityConfigFromRunOptions(runOptions, project.path, runId), prompt, sources)
-          : await composeCodexWorkflow(codexConfigFromRunOptions(runOptions, project.path, runId), prompt, sources);
+          ? await composeAntigravityWorkflow(
+              antigravityConfigFromRunOptions(
+                runOptions,
+                project.path,
+                runId,
+                false,
+                settings.value.workspace.keepAiDebugArtifacts,
+              ),
+              prompt,
+              sources,
+            )
+          : await composeCodexWorkflow(
+              codexConfigFromRunOptions(
+                runOptions,
+                project.path,
+                runId,
+                false,
+                settings.value.workspace.keepAiDebugArtifacts,
+              ),
+              prompt,
+              sources,
+            );
       if (result.asset) {
         await project.refresh();
         workflow.setOutput(result.asset, targetOutput.id);

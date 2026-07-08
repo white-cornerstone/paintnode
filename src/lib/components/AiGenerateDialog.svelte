@@ -35,6 +35,15 @@
   const currentBusy = $derived(task?.status === 'running' || busy);
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
   const roleSummary = $derived(aiRoleSummary(runOptions));
+  const dialogTitle = $derived(
+    taskDetail
+      ? taskDetail.fillMode
+        ? 'Generative Fill (AI)'
+        : 'Generate Image (AI)'
+      : editor.selection
+        ? 'Generative Fill (AI)'
+        : 'Generate Image (AI)',
+  );
   const fillFrame = $derived.by(() => {
     const doc = editor.doc;
     const selection = editor.selection;
@@ -120,7 +129,7 @@
   }
 </script>
 
-<Modal title="Generate Image (AI)" {onClose} width={560} height={560} minWidth={520} minHeight={420} resizable>
+<Modal title={dialogTitle} {onClose} width={560} height={560} minWidth={520} minHeight={420} resizable>
   <div class="dlg-form">
     <div class="dlg-scroll">
     {#if !desktop}
