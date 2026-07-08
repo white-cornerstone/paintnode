@@ -13,7 +13,15 @@ import { editor } from '../state/editor.svelte';
 import { project } from '../state/project.svelte';
 import { settings } from '../state/settings.svelte';
 import { aiRunOptionsFromSettings } from '../state/settings';
-import { AiProgressListener, createRunId, focusTaskDocument } from './taskSupport';
+import {
+  AiProgressListener,
+  aiRunningLabel,
+  createRunId,
+  focusTaskDocument,
+  imageProviderFromRunOptions,
+  plannerModeFromRunOptions,
+  plannerProviderFromRunOptions,
+} from './taskSupport';
 
 /**
  * Executor for `generate` tasks. Everything it needs comes from the task
@@ -42,16 +50,19 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
   const references = detail.references ?? [];
   const taskProjectPath = task.projectPath;
   const progressListener = new AiProgressListener();
+  const imageProvider = imageProviderFromRunOptions(runOptions);
+  const plannerMode = plannerModeFromRunOptions(runOptions);
+  const plannerProvider = plannerProviderFromRunOptions(runOptions);
   aiTasks.setProgress(
     task.id,
-    runOptions.provider === 'codex'
+    imageProvider === 'codex'
       ? 'Preparing Codex request...'
       : 'Preparing Antigravity request...',
   );
   editor.flash(
     fillMode
       ? 'Preparing generative fill...'
-      : runOptions.provider === 'codex'
+      : imageProvider === 'codex'
         ? 'Generating with Codex...'
         : 'Generating with Antigravity...',
   );
@@ -69,7 +80,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
       () =>
         aiTasks.setProgress(
           task.id,
-          runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+          aiRunningLabel(imageProvider),
         ),
     );
   }
@@ -93,8 +104,26 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         'Starting mask-guided generative fill...',
       );
     }
+    const useCodexPlannerForFill = !!fillEdit && plannerMode !== 'skip' && plannerProvider === 'codex';
     const generated =
-      runOptions.provider === 'codex'
+      useCodexPlannerForFill
+        ? await generateCodexFillImage(
+            codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
+            fillEdit.sourcePng,
+            fillEdit.editTargetPng,
+            fillEdit.maskPng,
+            generationPrompt,
+            references,
+            false,
+            {
+              imageProvider,
+              antigravity:
+                imageProvider === 'antigravity'
+                  ? antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir)
+                  : null,
+            },
+          )
+        : imageProvider === 'codex'
         ? fillEdit
           ? await generateCodexFillImage(
               codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),

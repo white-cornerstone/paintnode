@@ -74,12 +74,12 @@
   ];
   const providers: { value: AiProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
-    { value: 'antigravity', label: 'Antigravity account' },
+    { value: 'antigravity', label: 'Antigravity' },
   ];
-
   let open = $state(false);
   let submenu = $state<
     | 'autonomy'
+    | 'imageProvider'
     | 'reasoning'
     | 'model'
     | 'speed'
@@ -103,15 +103,21 @@
   const floatingMenuClass = 'ai-run-options-floating-menu';
   const dismissLayerClass = 'ai-run-options-dismiss-layer';
 
-  const providerLabel = $derived(providers.find((item) => item.value === options.provider)?.label ?? 'AI');
-  const codexModelLabel = $derived(CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label.replace('GPT-', '') ?? options.model);
+  const plannerEnabled = $derived(options.plannerMode !== 'skip');
+  const imageProvider = $derived(options.imageProvider ?? options.provider ?? 'codex');
+  const plannerProvider = $derived(options.plannerProvider ?? 'codex');
+  const plannerModeShort = $derived(options.plannerMode === 'force' ? 'Always' : 'Auto');
+  const showCodexAgentOptions = $derived((plannerEnabled && plannerProvider === 'codex') || (!plannerEnabled && imageProvider === 'codex'));
+  const showAntigravityAgentOptions = $derived(
+    (plannerEnabled && plannerProvider === 'antigravity') ||
+      (!plannerEnabled && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
+  );
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
   const imageQualityShort = $derived(
     imageQualities.find((item) => item.value === options.imageQuality)?.short ?? 'AutoQ',
   );
-  const imageModerationShort = $derived(options.imageModeration === 'low' ? 'LowM' : 'DefaultM');
-  const antigravityUsesAgent = $derived(antigravityModelScope === 'all');
+  const antigravityUsesAgent = $derived(showAntigravityAgentOptions);
   const antigravityModelOptions = $derived(ANTIGRAVITY_MODEL_OPTIONS);
   const antigravityModelTitle = $derived('Agent model');
   const antigravityModelLabel = $derived(
@@ -145,14 +151,45 @@
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetyDangerousContent)?.label ?? 'API default',
   );
   const summary = $derived.by(() => {
-    if (options.provider === 'codex') return `${codexModelLabel} ${reasoningShort} ${imageQualityShort} ${imageModerationShort}`;
-    if (options.provider === 'antigravity' && antigravityUsesAgent) return `Antigravity ${antigravityModelLabel} ${autonomyShort}`;
-    return `Antigravity ${antigravityImageModelLabel} ${antigravityImageSizeLabel}`;
+    const imageName = providerName(imageProvider);
+    if (!plannerEnabled) return `Planner: Off · Image: ${imageName}`;
+    const plannerName = providerName(plannerProvider);
+    if (plannerProvider === imageProvider) return `Planner: ${plannerModeShort} · Image: ${imageName}`;
+    return `Planner: ${plannerModeShort} ${plannerName} · Image: ${imageName}`;
+  });
+  const detailedSummary = $derived.by(() => {
+    const imageDetail = imageProvider === 'codex'
+      ? `Image: Codex, ${imageQualityShort} quality`
+      : `Image: Antigravity, ${antigravityImageSizeLabel}`;
+    if (!plannerEnabled) return `Planner: Off. ${imageDetail}`;
+    const plannerDetail = plannerProvider === 'codex'
+      ? `Planner: ${plannerModeShort}, Codex, ${reasoningShort} reasoning`
+      : `Planner: ${plannerModeShort}, Antigravity, ${autonomyShort} autonomy`;
+    return `${plannerDetail}. ${imageDetail}`;
   });
 
-  function setProvider(provider: AiProvider): void {
-    options = { ...options, provider };
-    submenu = provider === 'codex' ? 'reasoning' : 'antigravityImageModel';
+  function providerName(provider: AiProvider): string {
+    return provider === 'antigravity' ? 'Antigravity' : 'Codex';
+  }
+
+  function activePlannerMode(): 'auto' | 'force' {
+    if (options.plannerMode === 'force' || options.plannerMode === 'auto') return options.plannerMode;
+    return settings.value.ai.plannerMode === 'force' ? 'force' : 'auto';
+  }
+
+  function setPlannerProvider(provider: AiProvider): void {
+    options = { ...options, plannerMode: activePlannerMode(), plannerProvider: provider };
+    submenu = provider === 'codex' ? 'reasoning' : 'antigravityModel';
+  }
+
+  function skipPlanner(): void {
+    options = { ...options, plannerMode: 'skip' };
+    submenu = 'imageProvider';
+  }
+
+  function setImageProvider(provider: AiProvider): void {
+    options = { ...options, provider, imageProvider: provider };
+    submenu = provider === 'codex' ? 'quality' : 'antigravityImageModel';
   }
 
   function applyProfile(profileId: string): void {
@@ -315,19 +352,21 @@
   $effect(() => {
     if (!open) return;
     submenu;
-    options.provider;
+    options.plannerMode;
+    options.plannerProvider;
+    options.imageProvider;
     options.antigravitySafetyFiltering;
     void updateMenuPosition();
   });
 
   $effect(() => {
-    if (options.provider !== 'antigravity' || !antigravityUsesAgent) return;
+    if (!antigravityUsesAgent) return;
     if (antigravityModelOptions.some((item) => item.id === options.antigravityModel)) return;
     options = { ...options, antigravityModel: 'auto' };
   });
 
   $effect(() => {
-    if (options.provider !== 'antigravity' || antigravityUsesAgent) return;
+    if (imageProvider !== 'antigravity') return;
     if (ANTIGRAVITY_IMAGE_MODEL_OPTIONS.some((item) => item.id === options.antigravityImageModel)) return;
     options = { ...options, antigravityImageModel: 'gemini-3.1-flash-image' };
   });
@@ -355,109 +394,95 @@
         <div class="separator"></div>
       {/if}
 
-      <div class="menu-title">Provider</div>
-      {#each providers as provider (provider.value)}
-        <button type="button" class:active={options.provider === provider.value} onclick={() => setProvider(provider.value)}>
-          <span>{provider.label}</span>
-          {#if options.provider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
+        <div class="menu-title">Planner</div>
+        {#each providers as provider (provider.value)}
+          <button type="button" class:active={plannerEnabled && plannerProvider === provider.value} onclick={() => setPlannerProvider(provider.value)}>
+            <span>{provider.label}</span>
+            {#if plannerEnabled && plannerProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
+          </button>
+        {/each}
+        <button type="button" class:active={!plannerEnabled} onclick={skipPlanner}>
+          <span>Skip</span>
+          {#if !plannerEnabled}<Icon svg={Checkmark} size={15} />{/if}
         </button>
-      {/each}
 
-      {#if options.provider === 'codex'}
         <div class="separator"></div>
-        <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
-          <span>Autonomy</span>
-          <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'autonomy'}
-          <div class="subitems">
-            {#each autonomyLevels as item (item.value)}
-              <button type="button" class:active={options.autonomyLevel === item.value} onclick={() => setAutonomy(item.value)}>
-                <span>{item.label}</span>
-                {#if options.autonomyLevel === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
+        <div class="menu-title">Image Generator</div>
+        {#each providers as provider (provider.value)}
+          <button type="button" class:active={imageProvider === provider.value} onclick={() => setImageProvider(provider.value)}>
+            <span>{provider.label}</span>
+            {#if imageProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
+          </button>
+        {/each}
+
+        {#if showCodexAgentOptions}
+          <div class="separator"></div>
+          <div class="menu-title">{plannerEnabled ? 'Codex Planner' : 'Codex Request'}</div>
+          <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
+            <span>Autonomy</span>
+            <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'autonomy'}
+            <div class="subitems">
+              {#each autonomyLevels as item (item.value)}
+                <button type="button" class:active={options.autonomyLevel === item.value} onclick={() => setAutonomy(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.autonomyLevel === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'reasoning' ? null : 'reasoning')}>
+            <span>Reasoning</span>
+            <span class="value">{reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.label}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'reasoning'}
+            <div class="subitems">
+              {#each reasoningEfforts as item (item.value)}
+                <button type="button" class:active={options.reasoningEffort === item.value} onclick={() => setReasoning(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.reasoningEffort === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'model' ? null : 'model')}>
+            <span>Model</span>
+            <span class="value">{CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'model'}
+            <div class="subitems">
+              {#each CODEX_MODEL_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.model === item.id} onclick={() => setCodexModel(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.model === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'speed' ? null : 'speed')}>
+            <span>Speed</span>
+            <span class="value">{options.serviceTier === 'fast' ? 'Fast' : 'Default'}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'speed'}
+            <div class="subitems">
+              {#each serviceTiers as item (item.value)}
+                <button type="button" class:active={options.serviceTier === item.value} onclick={() => setServiceTier(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.serviceTier === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'reasoning' ? null : 'reasoning')}>
-          <span>Reasoning</span>
-          <span class="value">{reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.label}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'reasoning'}
-          <div class="subitems">
-            {#each reasoningEfforts as item (item.value)}
-              <button type="button" class:active={options.reasoningEffort === item.value} onclick={() => setReasoning(item.value)}>
-                <span>{item.label}</span>
-                {#if options.reasoningEffort === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'model' ? null : 'model')}>
-          <span>Model</span>
-          <span class="value">{CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'model'}
-          <div class="subitems">
-            {#each CODEX_MODEL_OPTIONS as item (item.id)}
-              <button type="button" class:active={options.model === item.id} onclick={() => setCodexModel(item.id)}>
-                <span>{item.label}</span>
-                {#if options.model === item.id}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'speed' ? null : 'speed')}>
-          <span>Speed</span>
-          <span class="value">{options.serviceTier === 'fast' ? 'Fast' : 'Default'}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'speed'}
-          <div class="subitems">
-            {#each serviceTiers as item (item.value)}
-              <button type="button" class:active={options.serviceTier === item.value} onclick={() => setServiceTier(item.value)}>
-                <span>{item.label}</span>
-                {#if options.serviceTier === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'quality' ? null : 'quality')}>
-          <span>Quality</span>
-          <span class="value">{imageQualities.find((item) => item.value === options.imageQuality)?.label}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'quality'}
-          <div class="subitems">
-            {#each imageQualities as item (item.value)}
-              <button type="button" class:active={options.imageQuality === item.value} onclick={() => setImageQuality(item.value)}>
-                <span>{item.label}</span>
-                {#if options.imageQuality === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button type="button" onclick={() => (submenu = submenu === 'moderation' ? null : 'moderation')}>
-          <span>Moderation</span>
-          <span class="value">{options.imageModeration === 'low' ? 'Low' : 'Default'}</span>
-          <Icon svg={ChevronRight} size={14} />
-        </button>
-        {#if submenu === 'moderation'}
-          <div class="subitems">
-            {#each imageModerations as item (item.value)}
-              <button type="button" class:active={options.imageModeration === item.value} onclick={() => setImageModeration(item.value)}>
-                <span>{item.label}</span>
-                {#if options.imageModeration === item.value}<Icon svg={Checkmark} size={15} />{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-      {:else if options.provider === 'antigravity'}
-        <div class="separator"></div>
-        {#if antigravityUsesAgent}
+
+        {#if showAntigravityAgentOptions}
+          <div class="separator"></div>
+          <div class="menu-title">Antigravity Planner</div>
           <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
             <span>Autonomy</span>
             <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
@@ -503,7 +528,44 @@
               {/each}
             </div>
           {/if}
-        {:else}
+        {/if}
+
+        {#if imageProvider === 'codex'}
+          <div class="separator"></div>
+          <div class="menu-title">Codex Image</div>
+          <button type="button" onclick={() => (submenu = submenu === 'quality' ? null : 'quality')}>
+            <span>Quality</span>
+            <span class="value">{imageQualities.find((item) => item.value === options.imageQuality)?.label}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'quality'}
+            <div class="subitems">
+              {#each imageQualities as item (item.value)}
+                <button type="button" class:active={options.imageQuality === item.value} onclick={() => setImageQuality(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.imageQuality === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'moderation' ? null : 'moderation')}>
+            <span>Moderation</span>
+            <span class="value">{options.imageModeration === 'low' ? 'Low' : 'Default'}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'moderation'}
+            <div class="subitems">
+              {#each imageModerations as item (item.value)}
+                <button type="button" class:active={options.imageModeration === item.value} onclick={() => setImageModeration(item.value)}>
+                  <span>{item.label}</span>
+                  {#if options.imageModeration === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {:else if imageProvider === 'antigravity'}
+          <div class="separator"></div>
+          <div class="menu-title">Antigravity Image</div>
           <button type="button" onclick={() => (submenu = submenu === 'antigravityImageModel' ? null : 'antigravityImageModel')}>
             <span>Image model</span>
             <span class="value">{antigravityImageModelLabel}</span>
@@ -603,7 +665,6 @@
             {/each}
           {/if}
         {/if}
-      {/if}
     </div>
   {/if}
 
@@ -612,8 +673,8 @@
     class="pill"
     type="button"
     disabled={disabled}
-    aria-label={`AI provider: ${providerLabel}, ${summary}`}
-    use:tooltip={{ text: `AI provider: ${providerLabel}`, placement: 'top' }}
+    aria-label={`AI generation flow: ${detailedSummary}`}
+    use:tooltip={{ text: `AI generation flow: ${detailedSummary}`, placement: 'top' }}
     onpointerdown={stopPointer}
     onclick={toggle}
   >
@@ -641,7 +702,7 @@
     white-space: nowrap;
   }
   .pill span {
-    max-width: 128px;
+    max-width: min(320px, 58vw);
     overflow: hidden;
     text-overflow: ellipsis;
   }

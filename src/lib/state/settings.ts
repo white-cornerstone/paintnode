@@ -81,6 +81,7 @@ export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity';
+export type AiPlannerMode = 'auto' | 'skip' | 'force';
 export type CanvasBackground = 'white' | 'transparent';
 /**
  * How strictly PaintNode validates fill/retouch candidates before pasting
@@ -90,7 +91,11 @@ export type CanvasBackground = 'white' | 'transparent';
 export type AiEditChecksLevel = 0 | 1 | 2 | 3;
 
 export interface AiRunOptions {
+  /** @deprecated Use imageProvider. Kept so older task/profile records still hydrate safely. */
   provider: AiProvider;
+  plannerMode: AiPlannerMode;
+  plannerProvider: AiProvider;
+  imageProvider: AiProvider;
   codexBin: string;
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
@@ -132,7 +137,11 @@ export interface PaintNodeSettings {
     showContextualTaskBarOnStartup: boolean;
   };
   ai: {
+    /** @deprecated Use imageProvider. Kept for backward-compatible settings migration. */
     provider: AiProvider;
+    plannerMode: AiPlannerMode;
+    plannerProvider: AiProvider;
+    imageProvider: AiProvider;
     codexBin: string;
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
@@ -196,6 +205,18 @@ const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
 const IMAGE_QUALITIES = new Set<string>(['auto', 'low', 'medium', 'high']);
 const IMAGE_MODERATIONS = new Set<string>(['auto', 'low']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
+const AI_PLANNER_MODES = new Set<string>(['auto', 'skip', 'force']);
+
+function normalizeAiProvider(value: unknown, fallback: AiProvider): AiProvider {
+  const text = String(value);
+  if (text === 'antigravity' || text === 'gemini') return 'antigravity';
+  if (text === 'codex') return 'codex';
+  return fallback;
+}
+
+function normalizePlannerMode(value: unknown, fallback: AiPlannerMode): AiPlannerMode {
+  return AI_PLANNER_MODES.has(String(value)) ? (value as AiPlannerMode) : fallback;
+}
 
 function normalizeAntigravitySafetyFiltering(value: unknown, fallback: AntigravitySafetyFiltering): AntigravitySafetyFiltering {
   return ANTIGRAVITY_SAFETY_FILTERING_IDS.has(String(value))
@@ -219,6 +240,9 @@ export function defaultSettings(): PaintNodeSettings {
     },
     ai: {
       provider: 'codex',
+      plannerMode: 'auto',
+      plannerProvider: 'codex',
+      imageProvider: 'codex',
       codexBin: '',
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
@@ -283,15 +307,15 @@ function nullableClampedInt(value: unknown, min: number, max: number): number | 
 
 function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai']): AiProfileOptions {
   const value = isRecord(raw) ? raw : {};
-  const savedProvider = String(value.provider);
+  const provider = normalizeAiProvider(value.provider, fallback.provider);
+  const imageProvider = normalizeAiProvider(value.imageProvider, provider);
+  const legacyPlannerMode: AiPlannerMode = provider === 'antigravity' ? 'skip' : fallback.plannerMode;
   const savedReasoningEffort = value.reasoningEffort === 'minimal' ? 'low' : value.reasoningEffort;
   return {
-    provider:
-      savedProvider === 'antigravity' || savedProvider === 'gemini'
-        ? 'antigravity'
-        : savedProvider === 'codex'
-          ? 'codex'
-          : fallback.provider,
+    provider: imageProvider,
+    plannerMode: normalizePlannerMode(value.plannerMode, legacyPlannerMode),
+    plannerProvider: normalizeAiProvider(value.plannerProvider, provider),
+    imageProvider,
     model: MODEL_IDS.has(String(value.model)) ? (value.model as CodexModelId) : fallback.model,
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
       ? (savedReasoningEffort as ReasoningEffort)
@@ -382,16 +406,19 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const workspace = isRecord(raw.workspace) ? raw.workspace : {};
   const autosaveIntervalMs = numberOrDefault(general.autosaveIntervalMs, defaults.general.autosaveIntervalMs);
 
-  const savedProvider = String(ai.provider);
-  const provider: AiProvider =
-    savedProvider === 'antigravity' || savedProvider === 'gemini' ? 'antigravity' : 'codex';
+  const provider = normalizeAiProvider(ai.provider, defaults.ai.provider);
+  const imageProvider = normalizeAiProvider(ai.imageProvider, provider);
+  const legacyPlannerMode: AiPlannerMode = provider === 'antigravity' ? 'skip' : defaults.ai.plannerMode;
   // Codex CLI retired the "minimal" reasoning effort; map old saves to the closest level.
   const savedReasoningEffort = ai.reasoningEffort === 'minimal' ? 'low' : ai.reasoningEffort;
   const savedAntigravityBin = ai.antigravityBin ?? ai.geminiBin;
   const savedAntigravityModel = ai.antigravityModel ?? ai.geminiModel;
   const savedAntigravityApprovalMode = ai.antigravityApprovalMode ?? ai.geminiApprovalMode;
   const normalizedAiBase: Omit<PaintNodeSettings['ai'], 'profiles' | 'defaultProfileId'> = {
-    provider,
+    provider: imageProvider,
+    plannerMode: normalizePlannerMode(ai.plannerMode, legacyPlannerMode),
+    plannerProvider: normalizeAiProvider(ai.plannerProvider, provider),
+    imageProvider,
     codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
     model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
@@ -509,7 +536,10 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
 export function defaultAiRunOptions(): AiRunOptions {
   const ai = defaultSettings().ai;
   return {
-    provider: ai.provider,
+    provider: ai.imageProvider,
+    plannerMode: ai.plannerMode,
+    plannerProvider: ai.plannerProvider,
+    imageProvider: ai.imageProvider,
     codexBin: ai.codexBin,
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
@@ -538,7 +568,10 @@ export function defaultAiRunOptions(): AiRunOptions {
 
 export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunOptions {
   return {
-    provider: value.ai.provider,
+    provider: value.ai.imageProvider,
+    plannerMode: value.ai.plannerMode,
+    plannerProvider: value.ai.plannerProvider,
+    imageProvider: value.ai.imageProvider,
     codexBin: value.ai.codexBin,
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
@@ -582,6 +615,7 @@ export function aiProfileRunOptionsFromSettings(value: PaintNodeSettings, profil
   return {
     ...base,
     ...profile.options,
+    provider: profile.options.imageProvider,
     codexBin: value.ai.codexBin,
     antigravityBin: value.ai.antigravityBin,
     fillAspectRatio: null,
@@ -594,7 +628,10 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
 
 export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
   return {
-    provider: options.provider,
+    provider: options.imageProvider,
+    plannerMode: options.plannerMode,
+    plannerProvider: options.plannerProvider,
+    imageProvider: options.imageProvider,
     codexBin: options.codexBin,
     model: options.model,
     reasoningEffort: options.reasoningEffort,

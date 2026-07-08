@@ -3,6 +3,7 @@ import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialo
 import type {
   AiRunOptions,
   AiAutonomyLevel,
+  AiProvider,
   CodexModelId,
   CodexImageModeration,
   CodexImageQuality,
@@ -154,6 +155,11 @@ export interface AntigravityGeneratorConfig {
   editChecksLevel?: number | null;
   /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
   fillAspectRatio?: string | null;
+}
+
+export interface PlannedFillImageConfig {
+  imageProvider?: AiProvider;
+  antigravity?: AntigravityGeneratorConfig | null;
 }
 
 export interface TargetDimensions {
@@ -424,6 +430,7 @@ export async function generateCodexFillImage(
   prompt: string,
   references: WorkflowSourceImage[] = [],
   storeAsset = true,
+  plannedImage?: PlannedFillImageConfig,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex generative fill is only available in the desktop app.');
@@ -431,6 +438,7 @@ export async function generateCodexFillImage(
   const bin = config.bin?.trim() ? config.bin.trim() : null;
   const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
   const runId = config.runId?.trim() ? config.runId.trim() : `fill-${Date.now()}`;
+  const antigravity = plannedImage?.antigravity ?? null;
   return invoke<GeneratedImageResult>('generate_codex_fill_image', {
     ...codexInvokeConfig({ ...config, runId }),
     bin,
@@ -440,6 +448,21 @@ export async function generateCodexFillImage(
     editTargetPng: Array.from(editTargetPng),
     maskPng: Array.from(maskPng),
     storeAsset,
+    imageProvider: plannedImage?.imageProvider ?? 'codex',
+    antigravityBin: antigravity?.bin?.trim() ? antigravity.bin.trim() : null,
+    antigravityModel: antigravity?.model ?? null,
+    antigravityApprovalMode: antigravity?.approvalMode ?? null,
+    antigravityImageModel: antigravity?.imageModel ?? null,
+    antigravityImageSize: antigravity?.imageSize ?? null,
+    antigravityPersonGeneration: antigravity?.personGeneration ?? null,
+    antigravityProminentPeople: antigravity?.prominentPeople ?? null,
+    antigravityCompressionQuality: antigravity?.compressionQuality ?? null,
+    antigravityAdvancedJson: antigravity?.advancedJson ?? null,
+    antigravitySafetyFiltering: antigravity?.safetyFiltering ?? null,
+    antigravitySafetyHarassment: antigravity?.safetyHarassment ?? null,
+    antigravitySafetyHateSpeech: antigravity?.safetyHateSpeech ?? null,
+    antigravitySafetySexuallyExplicit: antigravity?.safetySexuallyExplicit ?? null,
+    antigravitySafetyDangerousContent: antigravity?.safetyDangerousContent ?? null,
     referencePngs: references.map((source) => ({
       name: source.name,
       bytes: Array.from(source.bytes),

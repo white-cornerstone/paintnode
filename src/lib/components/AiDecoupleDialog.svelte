@@ -5,9 +5,13 @@
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import {
     AiProgressListener,
+    aiRunningLabel,
     copyTextToClipboard,
     createRunId,
     focusTaskDocument,
+    imageProviderFromRunOptions,
+    plannerModeFromRunOptions,
+    plannerProviderFromRunOptions,
     providerLabel,
   } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
@@ -59,6 +63,12 @@
   const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
   const currentNotes = $derived(taskDetail?.notes ?? notes);
+  const decoupleProvider = $derived(
+    plannerModeFromRunOptions(runOptions) === 'skip'
+      ? imageProviderFromRunOptions(runOptions)
+      : plannerProviderFromRunOptions(runOptions),
+  );
+  const decoupleProviderLabel = $derived(providerLabel(decoupleProvider));
 
   $effect(() => {
     if (!project.path && addToWorkflow) addToWorkflow = false;
@@ -183,11 +193,11 @@
       kind: 'decouple',
       runId,
       title: 'Extract Assets',
-      subtitle: `${sourceLayer.name} · ${providerLabel(runOptions.provider)}`,
+      subtitle: `${sourceLayer.name} · ${decoupleProviderLabel}`,
       progress: 'Preparing source layer...',
       detail: {
         kind: 'decouple',
-        providerLabel: providerLabel(runOptions.provider),
+        providerLabel: decoupleProviderLabel,
         prompt: prompt.trim() || DEFAULT_PROMPT,
         sourceLayerName: sourceLayer.name,
         addToWorkflow,
@@ -200,21 +210,21 @@
     onClose();
     const executeTask = async () => {
       aiTasks.setProgress(task.id, 'Preparing source layer...');
-      editor.flash(runOptions.provider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
+      editor.flash(decoupleProvider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
       progressListener.start(
         runId,
         (message) => aiTasks.setProgress(task.id, message),
         () =>
           aiTasks.setProgress(
             task.id,
-            runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...',
+            aiRunningLabel(decoupleProvider),
           ),
       );
 
       try {
         const sourcePng = await canvasPngBytes(sourceLayer.canvas);
         const result =
-          runOptions.provider === 'antigravity'
+          decoupleProvider === 'antigravity'
             ? await decoupleAntigravityImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId),
                 sourcePng,
@@ -341,8 +351,8 @@
     </div>
 
     <p class="hint">
-      Codex returns named workflow assets and a manifest. PaintNode saves transparent assets to the
-      project, applies alpha masks when provided, and uses color-key cleanup only as a fallback.
+      The selected agent returns named workflow assets and a manifest. PaintNode saves transparent
+      assets to the project, applies alpha masks when provided, and uses color-key cleanup only as a fallback.
     </p>
 
     {#if currentBusy}

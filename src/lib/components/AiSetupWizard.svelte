@@ -43,7 +43,7 @@
     {
       id: 'antigravity',
       icon: Rocket,
-      title: 'Antigravity account',
+      title: 'Antigravity',
       command: 'agy',
       description: 'Uses your Antigravity sign-in for PaintNode-owned image generation.',
     },
@@ -76,7 +76,7 @@
   ];
 
   let step = $state<Step>(1);
-  let provider = $state<WizardProvider>(settings.value.ai.provider === 'antigravity' ? 'antigravity' : 'codex');
+    let provider = $state<WizardProvider>(settings.value.ai.imageProvider === 'antigravity' ? 'antigravity' : 'codex');
   let userPicked = false;
   let codexDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
   let agyDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
@@ -143,11 +143,18 @@
     provider = id;
   }
 
-  function confirmProvider(): void {
-    settings.update({ ai: { provider } });
-    manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;
-    step = 2;
-  }
+    function confirmProvider(): void {
+      settings.update({
+        ai: {
+          provider,
+          imageProvider: provider,
+          plannerProvider: provider === 'codex' ? 'codex' : settings.value.ai.plannerProvider,
+          plannerMode: provider === 'antigravity' ? 'skip' : settings.value.ai.plannerMode === 'skip' ? 'auto' : settings.value.ai.plannerMode,
+        },
+      });
+      manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;
+      step = 2;
+    }
 
   function chooseProjectFolder(): void {
     void project.openFolder();

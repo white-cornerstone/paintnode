@@ -10,9 +10,10 @@
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
     ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS,
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
-    ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
-    ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
-    type AiProvider,
+      ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
+      ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
+      type AiPlannerMode,
+      type AiProvider,
     type CanvasBackground,
     type CodexImageModeration,
     type CodexImageQuality,
@@ -64,7 +65,7 @@
   let antigravityDetectBusy = $state(false);
   let codexDetection = $state<CodexDetectionResult | null>(null);
   let antigravityDetection = $state<CodexDetectionResult | null>(null);
-  let aiDefaultsProvider = $state<AiProvider>(settings.value.ai.provider);
+    let aiDefaultsProvider = $state<AiProvider>(settings.value.ai.imageProvider);
   let profileName = $state('');
   let selectedProfileId = $state(settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '');
   let selectedProfileOptions = $state(cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value)));
@@ -97,11 +98,12 @@
     return 'Antigravity';
   }
 
-  function createProfileFromDefaults(): void {
-    const id = newProfileId();
-    const defaults = cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value));
-    defaults.provider = aiDefaultsProvider;
-    const name = profileName.trim() || `${profileLabel(aiDefaultsProvider)} Profile`;
+    function createProfileFromDefaults(): void {
+      const id = newProfileId();
+      const defaults = cloneAiRunOptions(aiProviderDefaultsFromSettings(settings.value));
+      defaults.provider = aiDefaultsProvider;
+      defaults.imageProvider = aiDefaultsProvider;
+      const name = profileName.trim() || `${profileLabel(aiDefaultsProvider)} Profile`;
     const profiles = [
       ...settings.value.ai.profiles,
       {
@@ -324,20 +326,46 @@
           Open setup assistant…
         </button>
 
-        <label class="field">
-          <span>Default provider for new AI runs</span>
-          <select
-            value={settings.value.ai.provider}
-            onchange={(event) => {
-              const provider = textValue(event) as AiProvider;
-              settings.update({ ai: { provider } });
-              aiDefaultsProvider = provider;
-            }}
-          >
-            <option value="codex">Codex</option>
-            <option value="antigravity">Antigravity account / image generation</option>
-          </select>
-        </label>
+          <div class="grid-3">
+            <label class="field">
+              <span>Planner mode</span>
+              <select
+                value={settings.value.ai.plannerMode}
+                onchange={(event) => settings.update({ ai: { plannerMode: textValue(event) as AiPlannerMode } })}
+              >
+                <option value="auto">Auto by task</option>
+                <option value="skip">Skip planner</option>
+                <option value="force">Always plan</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Planner provider</span>
+              <select
+                value={settings.value.ai.plannerProvider}
+                disabled={settings.value.ai.plannerMode === 'skip'}
+                onchange={(event) => settings.update({ ai: { plannerProvider: textValue(event) as AiProvider } })}
+              >
+                <option value="codex">Codex</option>
+                <option value="antigravity">Antigravity</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Image generator</span>
+              <select
+                value={settings.value.ai.imageProvider}
+                onchange={(event) => {
+                  const provider = textValue(event) as AiProvider;
+                  settings.update({ ai: { provider, imageProvider: provider } });
+                  aiDefaultsProvider = provider;
+                }}
+              >
+                <option value="codex">Codex image generator</option>
+                <option value="antigravity">Antigravity image generator</option>
+              </select>
+            </label>
+          </div>
 
         <div class="provider-defaults">
           <div class="subsection-title">
@@ -476,7 +504,7 @@
             <button type="button" onclick={runAntigravityDetection} disabled={antigravityDetectBusy}>
               {antigravityDetectBusy ? 'Detecting...' : 'Detect'}
             </button>
-            <small class="detect-help">Used to refresh Antigravity account authentication when needed.</small>
+            <small class="detect-help">Used to refresh Antigravity authentication when needed.</small>
           </div>
 
           {#if antigravityDetection}
@@ -834,13 +862,17 @@
     color: var(--text);
     font-weight: 600;
   }
-  .grid-2,
-  .detect-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 12px;
-    align-items: end;
-  }
+    .grid-2,
+    .grid-3,
+    .detect-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: end;
+    }
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
   .detect-row {
     grid-template-columns: minmax(0, 1fr) auto;
   }

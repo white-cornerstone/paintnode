@@ -306,7 +306,10 @@ fn wake_antigravity_auth(antigravity_bin: &str, job_path: &Path) -> Result<(), S
     if output.status.success() {
         Ok(())
     } else {
-        Err(antigravity_command_failure("Antigravity auth helper", &output))
+        Err(antigravity_command_failure(
+            "Antigravity auth helper",
+            &output,
+        ))
     }
 }
 
@@ -1013,7 +1016,7 @@ fn antigravity_http_error_message(status: reqwest::StatusCode, body: &str) -> St
             " The direct request schema was rejected or the image model refused the request.",
         ),
         401 | 403 => message.push_str(
-            " Antigravity account authentication was rejected. Run `agy` in Terminal and sign in if this repeats.",
+            " Antigravity authentication was rejected. Run `agy` in Terminal and sign in if this repeats.",
         ),
         503 => message.push_str(" The Antigravity image model is currently at capacity."),
         _ => {}
@@ -1073,7 +1076,7 @@ fn run_antigravity_direct_image(
     if ai_run_cancelled(run_id) {
         return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
-    emit_codex_progress(app, run_id, "Authenticating Antigravity account");
+    emit_codex_progress(app, run_id, "Authenticating Antigravity");
     wake_antigravity_auth(antigravity_bin, job_path)?;
     let mut token = load_antigravity_keychain_token()?;
     let now = SystemTime::now()
@@ -1119,6 +1122,55 @@ fn run_antigravity_direct_image(
         return Err(antigravity_http_error_message(status, &text));
     }
     decode_antigravity_generate_content_response_text(&text)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_antigravity_owned_image_edit(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    job_path: &Path,
+    prompt: String,
+    image_paths: Vec<PathBuf>,
+    working: &AiWorkingCanvas,
+    model: Option<String>,
+    approval_mode: Option<String>,
+    image_model: Option<String>,
+    image_size: Option<String>,
+    person_generation: Option<String>,
+    prominent_people: Option<String>,
+    compression_quality: Option<u8>,
+    advanced_json: Option<String>,
+    safety_filtering: Option<String>,
+    safety_harassment: Option<String>,
+    safety_hate_speech: Option<String>,
+    safety_sexually_explicit: Option<String>,
+    safety_dangerous_content: Option<String>,
+) -> Result<Vec<u8>, String> {
+    let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+    let options = antigravity_command_options_with_image(
+        model,
+        approval_mode,
+        image_model,
+        image_size,
+        person_generation,
+        prominent_people,
+        compression_quality,
+        advanced_json,
+        safety_filtering,
+        safety_harassment,
+        safety_hate_speech,
+        safety_sexually_explicit,
+        safety_dangerous_content,
+    );
+    run_antigravity_direct_image(
+        app,
+        run_id,
+        &antigravity_bin,
+        job_path,
+        antigravity_direct_spec_for_working(prompt, image_paths, working),
+        &options,
+    )
 }
 
 fn antigravity_closest_aspect_label(dimensions: (u32, u32)) -> Option<String> {

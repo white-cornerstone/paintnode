@@ -28,6 +28,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
+  import { aiRunningLabel, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
   import { workflow, type WorkflowAssetNode, type WorkflowConnection, type WorkflowOutputNode } from '../state/workflow.svelte';
   import { Add, ArrowSync, CommentNote, Delete, Dismiss, DocumentSave, Edit, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
@@ -60,6 +61,7 @@
   let busy = $state(false);
   let progress = $state('');
   let error = $state('');
+  const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
   let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
@@ -1370,7 +1372,7 @@
         }
       });
     } catch {
-      progress = runOptions.provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...';
+      progress = aiRunningLabel(imageProvider);
     }
 
     try {
@@ -1432,7 +1434,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 
 Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
       const result =
-        runOptions.provider === 'antigravity'
+        imageProvider === 'antigravity'
           ? await composeAntigravityWorkflow(antigravityConfigFromRunOptions(runOptions, project.path, runId), prompt, sources)
           : await composeCodexWorkflow(codexConfigFromRunOptions(runOptions, project.path, runId), prompt, sources);
       if (result.asset) {
@@ -1793,7 +1795,7 @@ Human anatomy quality gate: if the final image contains a person, the arms, wris
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if runOptions.provider === 'antigravity'}
+          {#if imageProvider === 'antigravity'}
             <label>
               <span>Antigravity auth helper</span>
               <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
