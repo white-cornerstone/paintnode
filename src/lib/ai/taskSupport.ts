@@ -43,8 +43,13 @@ export function plannerModeLabel(mode: AiPlannerMode): string {
 export function aiRoleSummary(options: Pick<AiRunOptions, 'plannerMode' | 'plannerProvider' | 'imageProvider' | 'provider'>): string {
   const imageProvider = imageProviderFromRunOptions(options);
   const plannerMode = plannerModeFromRunOptions(options);
-  if (plannerMode === 'skip') return `Image: ${providerLabel(imageProvider)}`;
-  return `${plannerMode === 'force' ? 'Planner' : 'Auto'}: ${providerLabel(plannerProviderFromRunOptions(options))} -> Image: ${providerLabel(imageProvider)}`;
+  if (plannerMode === 'skip') return `Planner: Off · Image: ${providerLabel(imageProvider)}`;
+  const plannerLabel = plannerMode === 'force' ? 'Always' : 'Auto';
+  const plannerProvider = plannerProviderFromRunOptions(options);
+  if (plannerProvider === imageProvider) {
+    return `Planner: ${plannerLabel} · Image: ${providerLabel(imageProvider)}`;
+  }
+  return `Planner: ${plannerLabel} ${providerLabel(plannerProvider)} · Image: ${providerLabel(imageProvider)}`;
 }
 
 export function aiRunningLabel(provider: AiProvider): string {
