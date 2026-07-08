@@ -1221,7 +1221,7 @@ pub(crate) fn project_or_temp_job_path(
 mod tests {
     use super::*;
     use crate::ai::antigravity::antigravity_generate_prompt;
-    use crate::ai::codex::codex_prompt;
+    use crate::ai::codex::codex_direct_generate_prompt;
 
     #[test]
     fn temp_job_dir_removes_directory_on_drop() {
@@ -1280,10 +1280,11 @@ mod tests {
 
     #[test]
     fn generate_image_prompts_do_not_expose_canvas_geometry() {
-        let codex = codex_prompt("make an image", AiAutonomyLevel::Low, &[]);
-        assert!(codex.contains("Use $imagegen to generate one raster PNG for PaintNode"));
+        let codex = codex_direct_generate_prompt("make an image", &[]);
+        assert!(codex.contains("Generate exactly one raster PNG for PaintNode"));
         assert!(codex.contains("User image prompt:\nmake an image"));
-        assert!(codex.contains("largest image size / highest output resolution"));
+        assert!(!codex.contains("$imagegen"));
+        assert!(!codex.contains("generated-images cache"));
         assert!(!codex.contains("1280x800"));
         assert!(!codex.contains("1296x864"));
         assert!(!codex.contains("Working PNG"));

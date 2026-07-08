@@ -32,8 +32,8 @@ use crate::ai::fill_storyboard::{
     fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
     fill_storyboard_part_is_anchor, fill_storyboard_part_prompt, read_fill_storyboard_file,
     should_storyboard_fill, write_fill_storyboard_file, FillStoryboard,
-    FILL_STORYBOARD_DRAFT_CANVAS_FILE, FILL_STORYBOARD_DRAFT_FILE,
-    FILL_STORYBOARD_DRAFT_MASK_FILE, FILL_STORYBOARD_OVERVIEW_FILE,
+    FILL_STORYBOARD_DRAFT_CANVAS_FILE, FILL_STORYBOARD_DRAFT_FILE, FILL_STORYBOARD_DRAFT_MASK_FILE,
+    FILL_STORYBOARD_OVERVIEW_FILE,
 };
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
@@ -204,7 +204,10 @@ fn antigravity_image_backend_base_url() -> String {
 }
 
 fn antigravity_generate_content_url(image_base_url: &str) -> String {
-    format!("{}/v1internal:generateContent", image_base_url.trim_end_matches('/'))
+    format!(
+        "{}/v1internal:generateContent",
+        image_base_url.trim_end_matches('/')
+    )
 }
 
 fn antigravity_image_http_client(user_agent: &str) -> Result<Client, String> {
@@ -213,10 +216,12 @@ fn antigravity_image_http_client(user_agent: &str) -> Result<Client, String> {
         .timeout(Duration::from_secs(300))
         .user_agent(user_agent.to_string())
         .build()
-        .map_err(|e| format_antigravity_image_request_error(
-            "Failed to create Antigravity image HTTP client",
-            &e,
-        ))
+        .map_err(|e| {
+            format_antigravity_image_request_error(
+                "Failed to create Antigravity image HTTP client",
+                &e,
+            )
+        })
 }
 
 fn format_antigravity_image_request_error(context: &str, error: &reqwest::Error) -> String {
@@ -295,9 +300,9 @@ fn wake_antigravity_auth(antigravity_bin: &str, job_path: &Path) -> Result<(), S
         .arg("--log-file")
         .arg(job_path.join("agy-auth.log"))
         .arg("models");
-    let output = command
-        .output()
-        .map_err(|e| format!("Failed to launch Antigravity auth helper at '{antigravity_bin}': {e}"))?;
+    let output = command.output().map_err(|e| {
+        format!("Failed to launch Antigravity auth helper at '{antigravity_bin}': {e}")
+    })?;
     if output.status.success() {
         Ok(())
     } else {
@@ -323,9 +328,9 @@ fn parse_antigravity_keychain_token(raw: &str) -> Result<AntigravityAuthToken, S
         .map_err(|e| format!("Antigravity Keychain token envelope is not valid base64: {e}"))?;
     let envelope: AntigravityKeychainEnvelope = serde_json::from_slice(&decoded)
         .map_err(|e| format!("Antigravity Keychain token envelope is invalid JSON: {e}"))?;
-    let token = envelope
-        .token
-        .ok_or_else(|| "Antigravity Keychain token envelope did not contain a token.".to_string())?;
+    let token = envelope.token.ok_or_else(|| {
+        "Antigravity Keychain token envelope did not contain a token.".to_string()
+    })?;
     if token.access_token.trim().is_empty() {
         return Err("Antigravity Keychain token envelope had no access token.".into());
     }
@@ -396,7 +401,11 @@ fn parse_antigravity_expiry_unix_seconds(value: &str) -> Option<i64> {
             .skip(1)
             .find_map(|(index, ch)| (ch == '+' || ch == '-').then_some(index))?;
         let (time, offset) = time_and_offset.split_at(offset_index);
-        let sign = if offset.starts_with('-') { -1_i64 } else { 1_i64 };
+        let sign = if offset.starts_with('-') {
+            -1_i64
+        } else {
+            1_i64
+        };
         let offset = offset.get(1..)?;
         let mut offset_parts = offset.split(':');
         let hours = offset_parts.next()?.parse::<i64>().ok()?;
@@ -458,8 +467,12 @@ fn antigravity_image_request_prompt(prompt: &str, image_paths: &[PathBuf]) -> St
 }
 
 fn antigravity_inline_image_part(path: &Path) -> Result<serde_json::Value, String> {
-    let bytes = fs::read(path)
-        .map_err(|e| format!("Failed to read Antigravity image input at {}: {e}", path.display()))?;
+    let bytes = fs::read(path).map_err(|e| {
+        format!(
+            "Failed to read Antigravity image input at {}: {e}",
+            path.display()
+        )
+    })?;
     if !is_png(&bytes) {
         return Err(format!(
             "Antigravity image input at {} is not a PNG.",
@@ -478,7 +491,10 @@ fn apply_antigravity_advanced_image_options(
     image_config: &mut serde_json::Map<String, serde_json::Value>,
     advanced_json: Option<&str>,
 ) -> Result<(), String> {
-    let Some(advanced_json) = advanced_json.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(advanced_json) = advanced_json
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return Ok(());
     };
     let value: serde_json::Value = serde_json::from_str(advanced_json)
@@ -490,7 +506,9 @@ fn apply_antigravity_advanced_image_options(
         match key.as_str() {
             "aspectRatio" | "imageSize" | "personGeneration" | "prominentPeople" => {
                 if !value.is_string() {
-                    return Err(format!("Antigravity advanced option `{key}` must be a string."));
+                    return Err(format!(
+                        "Antigravity advanced option `{key}` must be a string."
+                    ));
                 }
                 image_config.insert(key.clone(), value.clone());
             }
@@ -508,13 +526,15 @@ fn apply_antigravity_advanced_image_options(
                     .entry("imageOutputOptions")
                     .or_insert_with(|| json!({}));
                 let object = output_options.as_object_mut().ok_or_else(|| {
-                    "Antigravity advanced option `imageOutputOptions` must be an object.".to_string()
+                    "Antigravity advanced option `imageOutputOptions` must be an object."
+                        .to_string()
                 })?;
                 object.insert("compressionQuality".into(), json!(quality));
             }
             "imageOutputOptions" => {
                 let options = value.as_object().ok_or_else(|| {
-                    "Antigravity advanced option `imageOutputOptions` must be an object.".to_string()
+                    "Antigravity advanced option `imageOutputOptions` must be an object."
+                        .to_string()
                 })?;
                 for (option_key, option_value) in options {
                     match option_key.as_str() {
@@ -542,7 +562,8 @@ fn apply_antigravity_advanced_image_options(
                     .entry("imageOutputOptions")
                     .or_insert_with(|| json!({}));
                 let object = output_options.as_object_mut().ok_or_else(|| {
-                    "Antigravity advanced option `imageOutputOptions` must be an object.".to_string()
+                    "Antigravity advanced option `imageOutputOptions` must be an object."
+                        .to_string()
                 })?;
                 for (option_key, option_value) in options {
                     object.insert(option_key.clone(), option_value.clone());
@@ -591,7 +612,9 @@ fn antigravity_safety_settings_json(options: &AntigravityCommandOptions) -> Vec<
                     }
                 })
                 .map(str::trim)
-                .filter(|value| !value.is_empty() && *value != ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD)?;
+                .filter(|value| {
+                    !value.is_empty() && *value != ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD
+                })?;
 
             Some(json!({
                 "category": category,
@@ -613,7 +636,12 @@ fn antigravity_image_request_json(
     }
 
     let mut image_config = serde_json::Map::new();
-    if let Some(aspect_ratio) = spec.aspect_ratio.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(aspect_ratio) = spec
+        .aspect_ratio
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         image_config.insert("aspectRatio".into(), json!(aspect_ratio));
     }
     let image_size = options
@@ -642,7 +670,10 @@ fn antigravity_image_request_json(
     let mut generation_config = serde_json::Map::new();
     generation_config.insert("responseModalities".into(), json!(["IMAGE"]));
     if !image_config.is_empty() {
-        generation_config.insert("imageConfig".into(), serde_json::Value::Object(image_config));
+        generation_config.insert(
+            "imageConfig".into(),
+            serde_json::Value::Object(image_config),
+        );
     }
 
     let mut request = serde_json::Map::new();
@@ -659,7 +690,10 @@ fn antigravity_image_request_json(
     );
     let safety_settings = antigravity_safety_settings_json(options);
     if !safety_settings.is_empty() {
-        request.insert("safetySettings".into(), serde_json::Value::Array(safety_settings));
+        request.insert(
+            "safetySettings".into(),
+            serde_json::Value::Array(safety_settings),
+        );
     }
 
     Ok(json!({
@@ -671,7 +705,10 @@ fn antigravity_image_request_json(
     }))
 }
 
-fn antigravity_image_bytes_to_png(bytes: &[u8], mime_type: Option<&str>) -> Result<Vec<u8>, String> {
+fn antigravity_image_bytes_to_png(
+    bytes: &[u8],
+    mime_type: Option<&str>,
+) -> Result<Vec<u8>, String> {
     if is_png(bytes) {
         return Ok(bytes.to_vec());
     }
@@ -703,10 +740,7 @@ fn json_string_field<'a>(
         .filter(|value| !value.is_empty())
 }
 
-fn collect_antigravity_safety_ratings(
-    value: &serde_json::Value,
-    diagnostics: &mut Vec<String>,
-) {
+fn collect_antigravity_safety_ratings(value: &serde_json::Value, diagnostics: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(object) => {
             if let Some(ratings) = object
@@ -747,10 +781,7 @@ fn collect_antigravity_safety_ratings(
     }
 }
 
-fn collect_antigravity_named_diagnostics(
-    value: &serde_json::Value,
-    diagnostics: &mut Vec<String>,
-) {
+fn collect_antigravity_named_diagnostics(value: &serde_json::Value, diagnostics: &mut Vec<String>) {
     const INTERESTING_KEYS: &[&str] = &[
         "blockReason",
         "blockReasonMessage",
@@ -852,7 +883,11 @@ fn sanitized_antigravity_response_excerpt(value: &serde_json::Value) -> String {
         let should_redact = key.is_some_and(|key| {
             matches!(
                 key,
-                "data" | "b64_json" | "inlineData" | "inline_data" | "thoughtSignature"
+                "data"
+                    | "b64_json"
+                    | "inlineData"
+                    | "inline_data"
+                    | "thoughtSignature"
                     | "thought_signature"
             )
         });
@@ -913,17 +948,32 @@ fn decode_antigravity_generate_content_response_text(text: &str) -> Result<Vec<u
         ));
     };
     for candidate in response.candidates {
-        if let Some(finish_message) = candidate.finish_message.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(finish_message) = candidate
+            .finish_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             push_unique_diagnostic(&mut diagnostics, finish_message);
         }
-        if let Some(finish_reason) = candidate.finish_reason.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(finish_reason) = candidate
+            .finish_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             push_unique_diagnostic(&mut diagnostics, format!("finishReason={finish_reason}"));
         }
         let Some(content) = candidate.content else {
             continue;
         };
         for part in content.parts {
-            if let Some(text) = part.text.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            if let Some(text) = part
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
                 push_unique_diagnostic(&mut diagnostics, text);
             }
             let Some(inline_data) = part.inline_data else {
@@ -931,7 +981,9 @@ fn decode_antigravity_generate_content_response_text(text: &str) -> Result<Vec<u
             };
             let bytes = BASE64_STANDARD
                 .decode(inline_data.data.trim().as_bytes())
-                .map_err(|e| format!("Antigravity image generation returned invalid base64 image data: {e}"))?;
+                .map_err(|e| {
+                    format!("Antigravity image generation returned invalid base64 image data: {e}")
+                })?;
             return antigravity_image_bytes_to_png(&bytes, inline_data.mime_type.as_deref());
         }
     }
@@ -994,12 +1046,17 @@ fn post_antigravity_image_request(
         token.access_token.trim().to_string()
     };
     let response = client
-        .post(antigravity_generate_content_url(&antigravity_image_backend_base_url()))
+        .post(antigravity_generate_content_url(
+            &antigravity_image_backend_base_url(),
+        ))
         .bearer_auth(bearer)
         .json(request_body)
         .send()
         .map_err(|e| {
-            format_antigravity_image_request_error("Antigravity image generation request failed", &e)
+            format_antigravity_image_request_error(
+                "Antigravity image generation request failed",
+                &e,
+            )
         })?;
     let status = response.status();
     let text = response
@@ -1054,7 +1111,10 @@ fn run_antigravity_direct_image(
         status = retry.0;
         text = retry.1;
     }
-    let _ = fs::write(job_path.join(PAINTNODE_ANTIGRAVITY_IMAGE_RESPONSE_FILE), &text);
+    let _ = fs::write(
+        job_path.join(PAINTNODE_ANTIGRAVITY_IMAGE_RESPONSE_FILE),
+        &text,
+    );
     if ai_run_cancelled(run_id) {
         return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
@@ -1070,8 +1130,12 @@ fn antigravity_closest_aspect_label(dimensions: (u32, u32)) -> Option<String> {
         .aspect_ratios
         .iter()
         .min_by(|a, b| {
-            let a_error = ((a.width as f64 / a.height as f64) / target_ratio).ln().abs();
-            let b_error = ((b.width as f64 / b.height as f64) / target_ratio).ln().abs();
+            let a_error = ((a.width as f64 / a.height as f64) / target_ratio)
+                .ln()
+                .abs();
+            let b_error = ((b.width as f64 / b.height as f64) / target_ratio)
+                .ln()
+                .abs();
             a_error
                 .partial_cmp(&b_error)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1445,7 +1509,12 @@ fn antigravity_command_options_with_image(
         clean_option(advanced_json).filter(|value| value.trim() != "{}" && value.trim() != "null");
     let safety_filtering = clean_option(safety_filtering)
         .filter(|value| value != "default")
-        .filter(|value| matches!(value.as_str(), "lessRestrictive" | "moreRestrictive" | "custom"));
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "lessRestrictive" | "moreRestrictive" | "custom"
+            )
+        });
     let clean_safety_threshold = |value: Option<String>| {
         clean_option(value).filter(|value| {
             matches!(
@@ -2392,14 +2461,13 @@ fn antigravity_restore_image_details(
             options,
         )
         .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        fs::write(&result_path, &bytes)
-            .map_err(|e| {
-                ai_part_progress_message(
-                    &placement,
-                    part_index,
-                    &format!("Failed to write Antigravity detail restoration result: {e}"),
-                )
-            })?;
+        fs::write(&result_path, &bytes).map_err(|e| {
+            ai_part_progress_message(
+                &placement,
+                part_index,
+                &format!("Failed to write Antigravity detail restoration result: {e}"),
+            )
+        })?;
         let (bytes, _result_dimensions, _normalized) =
             read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
@@ -2494,15 +2562,17 @@ pub(crate) async fn generate_antigravity_image(
             bytes
         } else {
             let _ = fs::remove_file(&result_path);
-            emit_codex_progress(&app, &run_id, "Generating through Antigravity image backend");
+            emit_codex_progress(
+                &app,
+                &run_id,
+                "Generating through Antigravity image backend",
+            );
             let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
-            let provider_size = aspect_ratio
-                .as_deref()
-                .and_then(|aspect| {
-                    target_dimensions
-                        .and_then(|target| antigravity_output_target(aspect, target))
-                        .map(|(tier, _)| tier.to_string())
-                });
+            let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
+                target_dimensions
+                    .and_then(|target| antigravity_output_target(aspect, target))
+                    .map(|(tier, _)| tier.to_string())
+            });
             let bytes = run_antigravity_direct_image(
                 &app,
                 &run_id,
@@ -3980,8 +4050,8 @@ mod tests {
             }
         });
         let encoded = BASE64_STANDARD.encode(envelope.to_string());
-        let parsed = parse_antigravity_keychain_token(&format!("consumer:{encoded}"))
-            .expect("parsed token");
+        let parsed =
+            parse_antigravity_keychain_token(&format!("consumer:{encoded}")).expect("parsed token");
 
         assert_eq!(parsed.access_token, "access-redacted");
         assert_eq!(parsed.token_type.as_deref(), Some("Bearer"));
@@ -4310,9 +4380,12 @@ mod tests {
 
         assert!(error.contains("returned no image data"));
         assert!(error.contains("blockReason: PROHIBITED_CONTENT"));
-        assert!(error.contains("blockReasonMessage: The prompt was blocked by the image safety system."));
+        assert!(error
+            .contains("blockReasonMessage: The prompt was blocked by the image safety system."));
         assert!(error.contains("finishReason: SAFETY"));
-        assert!(error.contains("Safety rating: HARM_CATEGORY_SEXUALLY_EXPLICIT (HIGH, blocked=true)"));
+        assert!(
+            error.contains("Safety rating: HARM_CATEGORY_SEXUALLY_EXPLICIT (HIGH, blocked=true)")
+        );
     }
 
     #[test]
@@ -4399,9 +4472,8 @@ mod tests {
             configured_or_default_antigravity_bin(None).expect("Antigravity CLI auth helper");
         wake_antigravity_auth(&antigravity_bin, job.path()).expect("auth wake");
         let token = load_antigravity_keychain_token().expect("keychain token");
-        let client =
-            antigravity_image_http_client(&antigravity_image_user_agent(&antigravity_bin))
-                .expect("client");
+        let client = antigravity_image_http_client(&antigravity_image_user_agent(&antigravity_bin))
+            .expect("client");
         let request = antigravity_image_request_json(
             &AntigravityImageRequestSpec {
                 prompt: "Generate a simple centered red square icon on a plain white background."

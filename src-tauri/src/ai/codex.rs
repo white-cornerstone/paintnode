@@ -22,9 +22,9 @@ use tauri::AppHandle;
 
 use crate::ai::canvas::{
     ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
-    ai_working_canvas_accepts_result_dimensions, read_png_bytes_cropped_to_ai_working_canvas,
-    remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
-    AI_CHROMA_KEY_HEX, AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
+    validate_optional_target_dimensions, AiWorkingCanvas, AI_CHROMA_KEY_HEX,
+    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::fill_storyboard::{
@@ -46,9 +46,8 @@ use crate::ai::{
     ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
     apply_ai_cli_environment, clean_option, cleanup_project_agent_job, cleanup_project_job_enabled,
     clear_ai_run_cancelled, codex_agent_message_text, command_failure, copy_png_candidate,
-    emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir,
-    image_agent_autonomy_contract, now_id, optional_project_dir, output_tail,
-    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
+    emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir,
+    output_tail, project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, safe_job_child_path, safe_png_source_file_name,
     should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
@@ -58,7 +57,6 @@ use crate::ai::{
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
-    read_png_data_url,
 };
 use crate::project::{
     add_asset, safe_file_name, safe_stem, store_generated_png_asset, write_asset_file,
@@ -72,6 +70,8 @@ const CODEX_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate reje
 - This is a strict in-place edit of `edit_target.png`: apply the requested change only inside the white mask area and reproduce every pixel outside the mask exactly as it appears in `edit_target.png`.
 - If the requested change cannot be honored inside the mask, make the closest faithful change rather than re-imagining the scene."#;
 const PAINTNODE_IMAGE_REQUEST_FILE: &str = "paintnode-image-request.json";
+const PAINTNODE_CODEX_IMAGE_REQUEST_FILE: &str = "paintnode-codex-image-request.json";
+const PAINTNODE_CODEX_IMAGE_RESPONSE_FILE: &str = "paintnode-codex-image-response.json";
 
 #[derive(Debug)]
 struct CodexCommandOptions {
@@ -92,12 +92,6 @@ impl Default for CodexCommandOptions {
             image_moderation: None,
         }
     }
-}
-
-#[derive(Debug)]
-struct CodexImageRunResult {
-    run: AgentRunResult,
-    image_cached_before_exit: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,72 +247,6 @@ where
     None
 }
 
-fn find_codex_cached_pngs_in_roots<I>(
-    roots: I,
-    thread_id: Option<&str>,
-    since: SystemTime,
-    result_path: &Path,
-) -> Vec<PathBuf>
-where
-    I: IntoIterator<Item = PathBuf>,
-{
-    let Some(thread_id) = thread_id.map(str::trim) else {
-        return Vec::new();
-    };
-    if thread_id.is_empty()
-        || thread_id.contains('/')
-        || thread_id.contains('\\')
-        || thread_id.contains("..")
-    {
-        return Vec::new();
-    }
-
-    let mut matches = Vec::new();
-    for root in roots {
-        let thread_root = root.join(thread_id);
-        matches.extend(find_pngs_since(&thread_root, result_path, since));
-    }
-    matches.sort_by(|a, b| {
-        a.modified
-            .cmp(&b.modified)
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    matches
-        .into_iter()
-        .map(|candidate| candidate.path)
-        .collect()
-}
-
-fn png_file_looks_stable(path: &Path) -> bool {
-    let Ok(first) = fs::metadata(path) else {
-        return false;
-    };
-    thread::sleep(Duration::from_millis(250));
-    let Ok(second) = fs::metadata(path) else {
-        return false;
-    };
-    first.len() == second.len() && file_has_png_signature(path) && png_dimensions(path).is_ok()
-}
-
-fn find_ready_codex_cached_png(
-    thread_id: Option<&str>,
-    since: SystemTime,
-    working: &AiWorkingCanvas,
-) -> Option<PathBuf> {
-    let exclude_path = Path::new("__paintnode-result-placeholder.png");
-    let candidates = find_codex_cached_pngs_in_roots(
-        codex_generated_images_roots(),
-        thread_id,
-        since,
-        exclude_path,
-    );
-    candidates.into_iter().rev().find(|candidate| {
-        png_dimensions(candidate).ok().is_some_and(|dimensions| {
-            ai_working_canvas_accepts_result_dimensions(working, dimensions)
-        }) && png_file_looks_stable(candidate)
-    })
-}
-
 fn copy_codex_cached_png_in_roots_to_job<I>(
     roots: I,
     job_path: &Path,
@@ -350,57 +278,6 @@ where
         ));
     }
     Ok(Some((candidate, staged_path)))
-}
-
-fn copy_codex_cached_pngs_in_roots_to_job<I>(
-    roots: I,
-    job_path: &Path,
-    thread_id: Option<&str>,
-    since: SystemTime,
-) -> Result<Vec<(PathBuf, PathBuf)>, String>
-where
-    I: IntoIterator<Item = PathBuf>,
-{
-    let generated_dir = job_path.join("generated");
-    let exclude_path = generated_dir.join("__paintnode-result-placeholder.png");
-    let candidates = find_codex_cached_pngs_in_roots(roots, thread_id, since, &exclude_path);
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    fs::create_dir_all(&generated_dir)
-        .map_err(|e| format!("Failed to create Codex generated image staging folder: {e}"))?;
-
-    let mut copied = Vec::new();
-    for candidate in candidates {
-        let candidate_name = candidate
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("codex-generated.png");
-        let staged_path = unique_child_path(&generated_dir, candidate_name);
-        if !copy_png_candidate(&candidate, &staged_path) {
-            return Err(format!(
-                "Failed to copy Codex generated image from {} to {}.",
-                candidate.display(),
-                staged_path.display()
-            ));
-        }
-        copied.push((candidate, staged_path));
-    }
-    Ok(copied)
-}
-
-fn copy_codex_cached_pngs_to_job(
-    job_path: &Path,
-    thread_id: Option<&str>,
-    since: SystemTime,
-) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-    copy_codex_cached_pngs_in_roots_to_job(
-        codex_generated_images_roots(),
-        job_path,
-        thread_id,
-        since,
-    )
 }
 
 fn copy_codex_cached_png_to_job(
@@ -542,109 +419,6 @@ fn run_codex_with_progress(
         },
         thread_id,
         satisfied_required_output: false,
-    })
-}
-
-fn run_codex_with_progress_until_cached_png(
-    command: &mut Command,
-    app: AppHandle,
-    run_id: String,
-    cache_since: SystemTime,
-    working: &AiWorkingCanvas,
-) -> Result<CodexImageRunResult, String> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to launch command: {e}"))?;
-
-    let stdout = Arc::new(Mutex::new(Vec::new()));
-    let stderr = Arc::new(Mutex::new(Vec::new()));
-    let thread_id = Arc::new(Mutex::new(None::<String>));
-    let mut readers = Vec::new();
-
-    if let Some(stream) = child.stdout.take() {
-        readers.push(spawn_output_reader(
-            stream,
-            Arc::clone(&stdout),
-            app.clone(),
-            run_id.clone(),
-            false,
-            Arc::clone(&thread_id),
-            "Codex".into(),
-        ));
-    }
-    if let Some(stream) = child.stderr.take() {
-        readers.push(spawn_output_reader(
-            stream,
-            Arc::clone(&stderr),
-            app.clone(),
-            run_id.clone(),
-            true,
-            Arc::clone(&thread_id),
-            "Codex".into(),
-        ));
-    }
-
-    let mut image_cached_before_exit = false;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| format!("Failed to wait for command: {e}"))?
-        {
-            break status;
-        }
-
-        let current_thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-        if find_ready_codex_cached_png(current_thread_id.as_deref(), cache_since, working).is_some()
-        {
-            image_cached_before_exit = true;
-            emit_codex_progress(
-                &app,
-                &run_id,
-                "Codex image generated; normalizing PaintNode retouch result",
-            );
-            let _ = child.kill();
-            break child
-                .wait()
-                .map_err(|e| format!("Failed to stop Codex after image generation: {e}"))?;
-        }
-
-        if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
-        }
-
-        thread::sleep(POLL_INTERVAL);
-    };
-
-    for reader in readers {
-        let _ = reader.join();
-    }
-
-    let stdout = stdout
-        .lock()
-        .map(|bytes| bytes.clone())
-        .unwrap_or_else(|_| Vec::new());
-    let stderr = stderr
-        .lock()
-        .map(|bytes| bytes.clone())
-        .unwrap_or_else(|_| Vec::new());
-    let thread_id = thread_id.lock().ok().and_then(|id| id.clone());
-
-    Ok(CodexImageRunResult {
-        run: AgentRunResult {
-            output: Output {
-                status,
-                stdout,
-                stderr,
-            },
-            thread_id,
-            satisfied_required_output: false,
-        },
-        image_cached_before_exit,
     })
 }
 
@@ -879,6 +653,13 @@ fn image_edit_url(image_base_url: &str) -> String {
     format!("{}/images/edits", image_base_url.trim_end_matches('/'))
 }
 
+fn image_generation_url(image_base_url: &str) -> String {
+    format!(
+        "{}/images/generations",
+        image_base_url.trim_end_matches('/')
+    )
+}
+
 fn format_codex_image_request_error(context: &str, error: &reqwest::Error) -> String {
     let mut message = format!("{context}: {error}");
     let mut causes = Vec::new();
@@ -923,6 +704,26 @@ fn codex_image_moderation_request_value(options: &CodexCommandOptions) -> &'stat
     }
 }
 
+fn codex_image_size_request_value(size: (u32, u32)) -> String {
+    gpt_image2_size_for_dimensions(size).unwrap_or_else(|| "auto".to_string())
+}
+
+fn codex_image_generation_request_json(
+    prompt: &str,
+    size: (u32, u32),
+    options: &CodexCommandOptions,
+) -> serde_json::Value {
+    json!({
+        "prompt": prompt,
+        "background": "auto",
+        "model": "gpt-image-2",
+        "size": codex_image_size_request_value(size),
+        "quality": options.image_quality.as_deref().unwrap_or("auto"),
+        "moderation": codex_image_moderation_request_value(options),
+        "output_format": "png",
+    })
+}
+
 fn codex_image_edit_request_json(
     prompt: &str,
     image_data_urls: Vec<String>,
@@ -938,7 +739,7 @@ fn codex_image_edit_request_json(
         "prompt": prompt,
         "background": "auto",
         "model": "gpt-image-2",
-        "size": format!("{}x{}", size.0, size.1),
+        "size": codex_image_size_request_value(size),
         "moderation": codex_image_moderation_request_value(options),
     })
 }
@@ -965,6 +766,16 @@ fn run_codex_subscription_image_edit(
     size: (u32, u32),
     options: &CodexCommandOptions,
 ) -> Result<Vec<u8>, String> {
+    run_codex_direct_image_request(prompt, image_paths, size, options, None)
+}
+
+fn run_codex_direct_image_request(
+    prompt: &str,
+    image_paths: &[PathBuf],
+    size: (u32, u32),
+    options: &CodexCommandOptions,
+    job_path: Option<&Path>,
+) -> Result<Vec<u8>, String> {
     let auth = load_codex_chatgpt_auth()?;
     let image_data_urls = image_paths
         .iter()
@@ -977,14 +788,31 @@ fn run_codex_subscription_image_edit(
             Ok(png_data_url_from_bytes(&bytes))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    if image_data_urls.is_empty() {
-        return Err("Codex image edit requires at least one source PNG.".into());
-    }
 
-    let request_body = codex_image_edit_request_json(prompt, image_data_urls, size, options);
+    let image_base_url = codex_image_backend_base_url();
+    let (url, request_body) = if image_data_urls.is_empty() {
+        (
+            image_generation_url(&image_base_url),
+            codex_image_generation_request_json(prompt, size, options),
+        )
+    } else {
+        (
+            image_edit_url(&image_base_url),
+            codex_image_edit_request_json(prompt, image_data_urls, size, options),
+        )
+    };
+    if let Some(job_path) = job_path {
+        let request_text = serde_json::to_vec_pretty(&request_body)
+            .map_err(|e| format!("Failed to encode Codex image request for inspection: {e}"))?;
+        fs::write(
+            job_path.join(PAINTNODE_CODEX_IMAGE_REQUEST_FILE),
+            request_text,
+        )
+        .map_err(|e| format!("Failed to write Codex image request: {e}"))?;
+    }
     let client = codex_image_http_client()?;
     let mut request = client
-        .post(image_edit_url(&codex_image_backend_base_url()))
+        .post(url)
         .bearer_auth(auth.access_token)
         .json(&request_body);
     if let Some(account_id) = auth.account_id {
@@ -997,6 +825,9 @@ fn run_codex_subscription_image_edit(
     let text = response
         .text()
         .map_err(|e| format!("Codex image generation response could not be read: {e}"))?;
+    if let Some(job_path) = job_path {
+        let _ = fs::write(job_path.join(PAINTNODE_CODEX_IMAGE_RESPONSE_FILE), &text);
+    }
     if !status.is_success() {
         let detail = output_tail(text.as_bytes());
         let auth_hint = if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -1013,52 +844,26 @@ fn run_codex_subscription_image_edit(
     decode_generated_image_response(parsed)
 }
 
-pub(crate) fn codex_prompt(
+pub(crate) fn codex_direct_generate_prompt(
     user_prompt: &str,
-    autonomy: AiAutonomyLevel,
     reference_names: &[String],
 ) -> String {
-    let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
-    let task_intro = "Use $imagegen to generate one raster PNG for PaintNode.";
-    let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n"
-    } else {
-        "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n- Do not create, edit, or delete files in the working directory.\n"
-    };
     let reference_note = reference_prompt_note(reference_names, "");
     format!(
-        r#"{task_intro}
+        r#"Generate exactly one raster PNG for PaintNode.
 
 User image prompt:
 {user_prompt}
 
 {reference_note}
 
-{autonomy_contract}
-
 Requirements:
-- Create exactly one image from the user prompt.
-- Use the largest image size / highest output resolution your image-generation tool supports.
-{managed_method_requirements}
+- Create one polished image from the user prompt.
+- Use any attached images as visual references for style, identity, composition, subject matter, or materials as implied by the prompt.
+- Do not create a collage, contact sheet, process diagram, UI screenshot, watermark, caption, or border unless the user explicitly asks for that.
 - Do not ask follow-up questions; make reasonable visual choices from the prompt.
-- If the prompt needs safety or quality adjustment, make a reasonable compliant rephrasing and continue with image generation.
-- Only return PROMPT_NEEDS_REVISION: if image generation is impossible without user input; include a concise reason and one safer revised prompt suggestion.
-- If successful, final response should be one short sentence confirming the image was generated."#
+- If the prompt needs a safety or quality adjustment, make the smallest compliant adjustment while preserving the user's intent."#
     )
-}
-
-fn build_codex_command(
-    codex_bin: &str,
-    job_path: &Path,
-    prompt: &str,
-    reference_paths: &[PathBuf],
-    reference_names: &[String],
-    options: &CodexCommandOptions,
-    autonomy: AiAutonomyLevel,
-    _json_progress: bool,
-) -> Command {
-    let prompt_text = codex_prompt(prompt.trim(), autonomy, reference_names);
-    build_codex_sdk_command(codex_bin, job_path, &prompt_text, reference_paths, options)
 }
 
 fn decouple_codex_prompt(user_prompt: &str) -> String {
@@ -1140,19 +945,7 @@ fn build_decouple_codex_command(
     build_codex_sdk_command(codex_bin, job_path, &prompt_text, &image_paths, options)
 }
 
-fn workflow_compose_prompt(
-    prompt: &str,
-    source_names: &[String],
-    autonomy: AiAutonomyLevel,
-) -> String {
-    let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
-    let task_intro =
-        "Use $imagegen to compose one new raster PNG for PaintNode from the attached workflow asset images.";
-    let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n"
-    } else {
-        "- Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\n- Do not create, edit, or delete files in the working directory.\n"
-    };
+fn codex_direct_workflow_compose_prompt(prompt: &str, source_names: &[String]) -> String {
     let sources = source_names
         .iter()
         .enumerate()
@@ -1160,7 +953,7 @@ fn workflow_compose_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        r#"{task_intro}
+        r#"Compose exactly one new raster PNG for PaintNode from the attached workflow asset images.
 
 Connected workflow inputs:
 {sources}
@@ -1168,35 +961,17 @@ Connected workflow inputs:
 Composition prompt:
 {prompt}
 
-{autonomy_contract}
-
 Requirements:
 - Treat every attached image as intentionally connected to the composition node.
 - The final PNG must visibly include every mandatory connected asset unless the prompt explicitly says to omit it.
-- This is a generative synthesis task, not a cut-and-paste compositing task: reason from the assets and prompt to create a new coherent photo/image.
-- Use the attached assets as visual references for identity, appearance, objects, environment, style, and layout. Reconstruct the final scene naturally instead of blindly pasting cropped source pixels together.
-- Do not satisfy the task by copying or lightly editing only one source image, especially a background/environment image. Do not make a collage, contact sheet, sticker-board, or obvious paste-up.
-- Unless the user explicitly asks for surreal or impossible results, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction.
-- If the user asks for an impossible or intentionally non-realistic composition, follow that request deliberately while still making the result visually coherent.
-- Use subject/person assets for the subject identity, pose, clothing, and body appearance; use prop/object assets for the object appearance; use environment assets for the setting.
+- This is a generative synthesis task, not a cut-and-paste compositing task: use the attached assets as references for identity, appearance, objects, environment, style, layout, lighting, and scale.
+- Reconstruct the final scene naturally instead of making a collage, contact sheet, sticker-board, or obvious paste-up.
+- Preserve normal real-world structure unless the prompt asks for surreal or impossible results.
+- If a storyboard sketch is attached, treat it as the primary spatial plan: preserve relative placement, left/right ordering, scale relationships, pose, prop positions, environment zones, and major negative space without copying the sketch style.
 - If the prompt describes a person holding or interacting with a prop, the person and prop must both be visible and physically connected in the final image.
-- Human anatomy is a hard quality requirement: exactly two arms, two hands, one palm per hand, natural wrists, plausible fingers, and no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints.
-- For held props, show a clean believable grip: the holding hand should wrap or support the prop naturally, and the other hand should remain anatomically separate and match the requested pose.
-- If any attached image name starts with "Storyboard sketch", treat that image as the primary spatial plan, not as optional inspiration.
-- Storyboard sketches are rough semantic diagrams: preserve their relative placement, left/right ordering, scale relationships, body pose, gesture direction, prop positions, foreground/background zones, and major negative space. Do not copy the rough sketch style into the final image.
-- Preserve storyboard coordinate regions exactly enough for composition: a subject centered in the left third/left half of the storyboard must remain in that same left-side region in the final image; do not mirror, recenter, or shift it to the opposite side unless the prompt explicitly overrides the storyboard.
-- Respect canvas halves, thirds, and major dividers shown in the storyboard. Large empty areas in the storyboard should remain visually open in the final image.
-- If the storyboard and text differ, keep the text's subject/action meaning but follow the storyboard's composition and placement unless the text explicitly overrides the storyboard.
-- Before generating the image, internally audit the storyboard into a concrete composition plan: subject bounding box, face/head position, torso direction, arm/hand poses, held-object position, gesture direction, environment zones, important dividers, and empty-space balance.
-- Pass that concrete composition plan to image generation. Do not rely on a generic interpretation of the text prompt when the storyboard provides a more specific pose or layout.
-- Create one coherent new image from the composition prompt and the mandatory asset list.
-- Match perspective, lighting, scale, and contact shadows plausibly.
-- Before finishing, zoom in mentally on the face, arms, hands, fingers, and held objects. If the requested subject, prop/object, environment, or hand anatomy is wrong, regenerate/refine until it is acceptable.
-{managed_method_requirements}
-- Do not ask follow-up questions.
-- If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
-
-Final response should be one short sentence confirming the composed image was generated."#
+- Pay special attention to human anatomy, hands, held objects, contact shadows, perspective, and lighting.
+- Do not include PaintNode UI, borders, labels, watermarks, or explanatory text unless explicitly requested.
+- If a safety or quality adjustment is needed, make the smallest compliant adjustment while preserving the composition intent."#
     )
 }
 
@@ -1448,24 +1223,17 @@ fn ai_retouch_attached_image_notes(
     }
 }
 
-fn ai_retouch_prompt(
+fn codex_direct_retouch_prompt(
     prompt: &str,
     has_annotated_source: bool,
     has_reference: bool,
     reference_names: &[String],
-    autonomy: AiAutonomyLevel,
     geometry_note: &str,
 ) -> String {
     let attached_image_notes =
         ai_retouch_attached_image_notes(has_annotated_source, has_reference, reference_names);
-    let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
-    let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache."
-    } else {
-        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\nDo not create, edit, copy, verify, or delete files in the working directory.\nYou do not need to copy the generated PNG to `result.png`, crop, resize, write helper scripts, or prove exact pixel preservation. Those are deterministic PaintNode responsibilities. The mask is attached as a separate user-editable layer mask and is never baked into your candidate, so protected pixels must stay visually identical in the candidate itself."
-    };
     format!(
-        r#"Use $imagegen to perform one in-place PaintNode retouch.
+        r#"Perform one in-place PaintNode retouch and return exactly one full-canvas PNG candidate.
 
 This is a fixed-canvas image editing task, not a new image generation task.
 
@@ -1482,95 +1250,28 @@ Attached images:
 
 Critical registration rule:
 Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
-The output must stay registered to the input image.
-
-Before using image generation, inspect `source.png`, `edit_target.png`, and `mask.png` and identify the actual stable registration anchors from the visible pixels.
-When invoking image generation, include only those image-specific anchors you observed from the attached inputs.
-Do not use or invent a generic anchor checklist.
-
-If the requested edit cannot be completed without moving, resizing, or reframing the subject or camera, simplify the edit instead.
+The output must stay registered to `edit_target.png`.
 
 User retouch prompt:
 {prompt}
 
-{autonomy_contract}
-
 Retouch scope:
-Only change pixels necessary to satisfy the user retouch prompt.
-The visible edit must stay inside the white/gray mask footprint.
-Do not use the mask as an instruction to repaint everything inside it. Treat `mask.png` as the maximum allowed edit area.
-Do not change unrequested content inside the mask.
-PaintNode imports your candidate as a new layer and attaches `mask.png` as a separate linked layer mask: white-mask pixels show your candidate and black/transparent-mask pixels keep the original visible. The mask is never baked into your candidate's pixels, so the user can still edit the mask afterwards.
-Because of that, make your generated candidate visually identical to `source.png` everywhere `mask.png` is black or transparent. Do not clean up, enhance, crop out, remove, sharpen, denoise, recolor, relight, straighten, or reframe any protected area.
-Keep every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint.
-Any edit whose visible change extends outside the mask is a failed retouch, even though the app masks the imported layer afterward. Scale, simplify, or localize the requested change so the complete visible edit fits inside the mask footprint.
+- Only change pixels necessary to satisfy the user retouch prompt.
+- The visible edit must stay inside the white/gray mask footprint.
+- Do not use the mask as an instruction to repaint everything inside it.
+- Do not change unrequested content inside the mask.
+- Make the candidate visually identical to `source.png` everywhere `mask.png` is black or transparent.
+- If the requested edit cannot be completed without moving, resizing, or reframing the subject or camera, simplify the edit instead.
 
 Person preservation:
-You may redraw clothing inside the editable area.
-Do not move or rescale the person.
-Preserve the original pose, head location, gaze, expression, body proportions, silhouette alignment, lighting direction, focus, grain, and camera style.
-If the prompt changes clothing or accessories, preserve the person's identity, face, hair, skin, hands, pose, body proportions, expression, gaze, and all unrequested surrounding content unless the user explicitly asks to alter those details.
-
-Locked context:
-Black or transparent mask areas are locked. They must look copied from the original image.
-Do not clean up, enhance, denoise, sharpen, recolor, relight, beautify, or reinterpret locked context.
-If `annotated_source.png` is attached, use its arrows, labels, and callout positions as guidance for what each nearby mask region should become.
-For text, logos, painted marks, signs, glare, or surface blemishes, remove only the foreground mark and reconstruct the continuous underlying surface. Do not cover it with a flat rectangle, paint swatch, or unrelated color block.
-Match the surrounding scene, perspective, lighting, focus, color, texture, grain, and camera style.
+You may redraw clothing inside the editable area, but do not move or rescale the person.
+Preserve identity, face, hair, skin, hands, pose, body proportions, expression, gaze, lighting direction, focus, grain, and camera style unless the user explicitly asks to alter those details.
 
 Output requirements:
-Return one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.
-Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, red arrows, yellow callout boxes, annotation text, guide marks, or mask visualization.
-{managed_method_requirements}
-Do not ask follow-up questions.
-If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
-
-Final response:
-One short sentence confirming the AI retouch image was generated."#
+- Return one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.
+- Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, red arrows, yellow callout boxes, annotation text, guide marks, or mask visualization.
+- If a safety or quality adjustment is needed, make the smallest compliant adjustment while keeping the edit inside the mask."#
     )
-}
-
-fn build_ai_retouch_codex_command(
-    codex_bin: &str,
-    job_path: &Path,
-    prompt_text: &str,
-    has_annotated_source: bool,
-    has_reference: bool,
-    has_overview: bool,
-    reference_paths: &[PathBuf],
-    options: &CodexCommandOptions,
-    _json_progress: bool,
-) -> Command {
-    let mut image_paths = vec![
-        job_path.join("source.png"),
-        job_path.join("edit_target.png"),
-        job_path.join("mask.png"),
-    ];
-    if has_annotated_source {
-        image_paths.push(job_path.join("annotated_source.png"));
-    }
-    if has_reference {
-        image_paths.push(job_path.join("reference.png"));
-    }
-    if has_overview {
-        image_paths.push(job_path.join("overview.png"));
-    }
-    image_paths.extend(reference_paths.iter().cloned());
-    build_codex_sdk_command(codex_bin, job_path, prompt_text, &image_paths, options)
-}
-
-fn build_workflow_compose_codex_command(
-    codex_bin: &str,
-    job_path: &Path,
-    image_paths: &[PathBuf],
-    prompt: &str,
-    source_names: &[String],
-    options: &CodexCommandOptions,
-    autonomy: AiAutonomyLevel,
-    _json_progress: bool,
-) -> Command {
-    let prompt_text = workflow_compose_prompt(prompt.trim(), source_names, autonomy);
-    build_codex_sdk_command(codex_bin, job_path, &prompt_text, image_paths, options)
 }
 
 fn output_mentions_unsupported_json(output: &Output) -> bool {
@@ -1686,8 +1387,8 @@ pub(crate) async fn generate_codex_image(
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
-        let autonomy = ai_autonomy_level(autonomy_level);
+        let _ = bin;
+        let _ = autonomy_level;
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
         } else {
@@ -1712,89 +1413,36 @@ pub(crate) async fn generate_codex_image(
         )?;
         let (reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
-        write_ai_job_prompt(
-            &job_path,
-            &codex_prompt(prompt.trim(), autonomy, &reference_names),
-            "Codex image generation",
-        )?;
+        let prompt_text = codex_direct_generate_prompt(prompt.trim(), &reference_names);
+        write_ai_job_prompt(&job_path, &prompt_text, "Codex image generation")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
         // A failed previous attempt may have gotten past generation; reuse its
         // image instead of paying for another one.
-        let (recovered_source_path, staged_result_path) = if let Some(previous) =
-            newest_previous_generated_png(&job_path)
+        let result_path = job_path.join("result.png");
+        let (recovered_source_path, staged_result_path) = if result_path.exists()
+            && file_has_png_signature(&result_path)
+            && png_dimensions(&result_path).is_ok()
         {
+            emit_codex_progress(&app, &run_id, "Reusing the previously generated image");
+            (result_path.clone(), result_path)
+        } else if let Some(previous) = newest_previous_generated_png(&job_path) {
             emit_codex_progress(&app, &run_id, "Reusing the previously generated image");
             (previous.clone(), previous)
         } else {
-            emit_codex_progress(&app, &run_id, "Starting local Codex");
-            let codex_started_at = SystemTime::now();
-            let mut command = build_codex_command(
-                &codex_bin,
-                &job_path,
-                prompt.trim(),
+            emit_codex_progress(&app, &run_id, "Requesting PaintNode Codex image generation");
+            let raw_bytes = run_codex_direct_image_request(
+                &prompt_text,
                 &reference_paths,
-                &reference_names,
+                target_dimensions.unwrap_or((0, 0)),
                 &codex_options,
-                autonomy,
-                true,
-            );
-            let mut run = run_codex_with_progress(&mut command, app.clone(), run_id.clone())
-                .map_err(|e| format!("Failed to run Codex at '{}': {e}", codex_command_label(&codex_bin)))?;
-
-            if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
-                emit_codex_progress(
-                    &app,
-                    &run_id,
-                    "Codex progress stream unavailable; retrying generation",
-                );
-                let mut fallback = build_codex_command(
-                    &codex_bin,
-                    &job_path,
-                    prompt.trim(),
-                    &reference_paths,
-                    &reference_names,
-                    &codex_options,
-                    autonomy,
-                    false,
-                );
-                run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone())
-                    .map_err(|e| format!("Failed to run Codex at '{}': {e}", codex_command_label(&codex_bin)))?;
-            }
-
-            if !run.output.status.success() {
-                if let Some(message) = final_codex_agent_message(&run.output) {
-                    return Err(format!("Codex did not generate an image.\n\n{message}"));
-                }
-                return Err(command_failure("Codex", &run.output));
-            }
-
-            let Some(copied) =
-                copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
-            else {
-                if let Some(message) = final_codex_agent_message(&run.output) {
-                    return Err(format!(
-                        "Codex did not expose a generated image in its generated-images cache.\n\n{message}"
-                    ));
-                }
-
-                let stdout = output_tail(&run.output.stdout);
-                let stderr = output_tail(&run.output.stderr);
-                let detail = if !stderr.is_empty() {
-                    stderr
-                } else if !stdout.is_empty() {
-                    stdout
-                } else {
-                    "Codex completed without exposing a generated PNG that PaintNode could copy."
-                        .into()
-                };
-                return Err(format!(
-                    "PaintNode could not find a new PNG in Codex's generated-images cache.\n\n{detail}"
-                ));
-            };
-            copied
+                Some(&job_path),
+            )?;
+            fs::write(&result_path, &raw_bytes)
+                .map_err(|e| format!("Failed to write generated image: {e}"))?;
+            (result_path.clone(), result_path)
         };
 
-        emit_codex_progress(&app, &run_id, "Reading copied PNG");
+        emit_codex_progress(&app, &run_id, "Reading generated PNG");
         let raw_bytes = fs::read(&staged_result_path)
             .map_err(|e| format!("Failed to read generated image: {e}"))?;
         png_dimensions_from_bytes(&raw_bytes)
@@ -1821,16 +1469,13 @@ pub(crate) async fn generate_codex_image(
                 bytes = codex_restore_image_details(
                     &app,
                     &run_id,
-                    &codex_bin,
                     &codex_options,
-                    autonomy,
                     &job_path.join("restore"),
                     &bytes,
                     "Generated image restoration",
                 )?;
-                fs::write(job_path.join("restore").join("result.png"), &bytes).map_err(|e| {
-                    format!("Failed to write restored generated image: {e}")
-                })?;
+                fs::write(job_path.join("restore").join("result.png"), &bytes)
+                    .map_err(|e| format!("Failed to write restored generated image: {e}"))?;
             }
             bytes
         } else {
@@ -2290,140 +1935,47 @@ fn run_codex_fill_part(
     ))
 }
 
-/// Run one AI-retouch placement part end-to-end, stopping Codex as soon as a
-/// usable cached PNG for this part appears.
-#[allow(clippy::too_many_arguments)]
-fn run_codex_retouch_part(
+fn run_codex_direct_edit_part(
     app: &AppHandle,
     run_id: &str,
-    codex_bin: &str,
-    options: &CodexCommandOptions,
     part_path: &Path,
+    options: &CodexCommandOptions,
     prompt_text: &str,
-    has_annotated_source: bool,
-    has_reference: bool,
-    has_overview: bool,
-    reference_paths: &[PathBuf],
+    image_paths: &[PathBuf],
     working: &AiWorkingCanvas,
+    label: &str,
 ) -> Result<CodexPartRun, String> {
-    write_codex_imagegen_options(part_path, working.original_dimensions, options)?;
-    let codex_started_at = SystemTime::now();
-    let mut command = build_ai_retouch_codex_command(
-        codex_bin,
-        part_path,
-        prompt_text,
-        has_annotated_source,
-        has_reference,
-        has_overview,
-        reference_paths,
-        options,
-        true,
-    );
-    let mut image_run = run_codex_with_progress_until_cached_png(
-        &mut command,
-        app.clone(),
-        run_id.to_string(),
-        codex_started_at,
-        working,
-    )
-    .map_err(|e| {
+    emit_codex_progress(
+        app,
+        run_id,
         format!(
-            "Failed to run Codex at '{}': {e}",
-            codex_command_label(&codex_bin)
-        )
-    })?;
-
-    if !image_run.image_cached_before_exit
-        && !image_run.run.output.status.success()
-        && output_mentions_unsupported_json(&image_run.run.output)
-    {
-        emit_codex_progress(
-            app,
-            run_id,
-            "Codex progress stream unavailable; retrying AI retouch",
-        );
-        let mut fallback = build_ai_retouch_codex_command(
-            codex_bin,
-            part_path,
-            prompt_text,
-            has_annotated_source,
-            has_reference,
-            has_overview,
-            reference_paths,
-            options,
-            false,
-        );
-        image_run = run_codex_with_progress_until_cached_png(
-            &mut fallback,
-            app.clone(),
-            run_id.to_string(),
-            codex_started_at,
-            working,
-        )
-        .map_err(|e| {
-            format!(
-                "Failed to run Codex at '{}': {e}",
-                codex_command_label(&codex_bin)
-            )
-        })?;
-    }
-
-    if !image_run.image_cached_before_exit && !image_run.run.output.status.success() {
-        if let Some(message) = final_codex_agent_message(&image_run.run.output) {
-            return Err(format!(
-                "Codex did not generate an AI retouch image.\n\n{message}"
-            ));
-        }
-        return Err(command_failure("Codex AI retouch", &image_run.run.output));
-    }
-
-    let cached_results = copy_codex_cached_pngs_to_job(
-        part_path,
-        image_run.run.thread_id.as_deref(),
-        codex_started_at,
+            "Requesting PaintNode Codex image edit at {}x{}",
+            working.original_dimensions.0, working.original_dimensions.1
+        ),
+    );
+    let result_png = run_codex_direct_image_request(
+        prompt_text,
+        image_paths,
+        working.original_dimensions,
+        options,
+        Some(part_path),
     )?;
     let requested_result_path = part_path.join("result.png");
-    let (recovered_source_path, staged_result_path) = if let Some((
-        recovered_source_path,
-        staged_result_path,
-    )) = cached_results.last().cloned()
-    {
-        (recovered_source_path, staged_result_path)
-    } else if requested_result_path.exists() {
-        (requested_result_path.clone(), requested_result_path)
-    } else {
-        if let Some(message) = final_codex_agent_message(&image_run.run.output) {
-            return Err(format!(
-                    "Codex did not expose an AI retouch image in its generated-images cache.\n\n{message}"
-                ));
-        }
-        return Err(
-            "PaintNode could not find an AI retouch PNG in Codex's generated-images cache.".into(),
-        );
-    };
+    fs::write(&requested_result_path, &result_png)
+        .map_err(|e| format!("Failed to write {label} result: {e}"))?;
     let (normalized_png, result_dimensions, normalized) =
-        read_png_bytes_cropped_to_ai_working_canvas(
-            &staged_result_path,
-            working,
-            "AI retouch candidate",
-        )?;
+        read_png_bytes_cropped_to_ai_working_canvas(&requested_result_path, working, label)?;
     Ok(CodexPartRun {
         normalized_png,
         result_dimensions,
         normalized,
-        recovered_source_path,
+        recovered_source_path: requested_result_path,
     })
 }
 
-fn codex_restore_prompt(autonomy: AiAutonomyLevel, geometry_note: &str) -> String {
-    let autonomy_contract = image_agent_autonomy_contract(autonomy, "Codex");
-    let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
-        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache."
-    } else {
-        "Use the normal Codex image-generation flow and keep the generated image in Codex's generated-images cache.\nDo not create, edit, copy, verify, or delete files in the working directory.\nYou do not need to copy the generated PNG to `result.png`, crop, resize, or write helper scripts. Those are deterministic PaintNode responsibilities."
-    };
+fn codex_direct_restore_prompt(geometry_note: &str) -> String {
     format!(
-        r#"Use $imagegen to perform one in-place PaintNode detail restoration.
+        r#"Restore image detail for one PaintNode fixed-canvas region and return exactly one full-canvas PNG candidate.
 
 This is a fixed-canvas image refinement task, not a new image generation task.
 
@@ -2435,27 +1987,21 @@ Attached images:
 {geometry_note}
 
 Restoration goal:
-Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
-Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
-Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so the result joins them without visible seams.
-Do not add, remove, move, restyle, or reinterpret any content.
-Do not change global brightness, contrast, or color balance.
-If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
+- Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
+- Preserve composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
+- Match the color balance, tone, brightness, contrast, grain, and detail level of already-restored areas so the result joins them without visible seams.
+- Do not add, remove, move, restyle, or reinterpret any content.
+- Do not change global brightness, contrast, or color balance.
+- If a detail is too blurred to identify, render plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
 
 Critical registration rule:
 Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
-The output must stay registered to the input image.
-
-{autonomy_contract}
+The output must stay registered to `edit_target.png`.
 
 Output requirements:
-Return one full-canvas PNG candidate with the same framing as `edit_target.png`, at the highest output resolution available to you.
-Do not include PaintNode UI, borders, labels, watermarks, or mask visualization.
-{managed_method_requirements}
-Do not ask follow-up questions.
-
-Final response:
-One short sentence confirming the restored image was generated."#
+- Return one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.
+- Do not include PaintNode UI, borders, labels, watermarks, or mask visualization.
+- If a safety or quality adjustment is needed, make the smallest compliant adjustment while preserving the existing image content."#
     )
 }
 
@@ -2464,9 +2010,7 @@ One short sentence confirming the restored image was generated."#
 fn codex_restore_image_details(
     app: &AppHandle,
     run_id: &str,
-    codex_bin: &str,
     options: &CodexCommandOptions,
-    autonomy: AiAutonomyLevel,
     restore_root: &Path,
     enlarged_png: &[u8],
     label: &str,
@@ -2521,27 +2065,36 @@ fn codex_restore_image_details(
         }
         write_codex_imagegen_options(&part_path, part.working.original_dimensions, options)?;
         let geometry_note = ai_part_geometry_note(&placement, part_index);
-        let prompt_text = codex_restore_prompt(autonomy, &geometry_note);
+        let prompt_text = codex_direct_restore_prompt(&geometry_note);
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
         emit_codex_part_progress(
             app,
             run_id,
             part_index,
             placement.parts.len(),
-            ai_part_progress_message(&placement, part_index, "Restoring image detail with Codex"),
+            ai_part_progress_message(
+                &placement,
+                part_index,
+                "Restoring image detail with Codex image generation",
+            ),
         );
-        let part_run = run_codex_retouch_part(
+        let mut image_paths = vec![
+            part_path.join("source.png"),
+            part_path.join("edit_target.png"),
+            part_path.join("mask.png"),
+        ];
+        if has_overview {
+            image_paths.push(part_path.join("overview.png"));
+        }
+        let part_run = run_codex_direct_edit_part(
             app,
             run_id,
-            codex_bin,
-            options,
             &part_path,
+            options,
             &prompt_text,
-            false,
-            false,
-            has_overview,
-            &[],
+            &image_paths,
             &part.working,
+            label,
         )
         .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
         fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
@@ -3109,8 +2662,8 @@ pub(crate) async fn generate_codex_retouch_image(
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
-        let autonomy = ai_autonomy_level(autonomy_level);
+        let _ = bin;
+        let _ = autonomy_level;
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
             format!("retouch-{}", now_id())
@@ -3206,12 +2759,11 @@ pub(crate) async fn generate_codex_retouch_image(
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
             let geometry_note = ai_part_prompt_context(&placement, part_index);
-            let base_prompt_text = ai_retouch_prompt(
+            let base_prompt_text = codex_direct_retouch_prompt(
                 prompt.trim(),
                 has_annotated_source,
                 has_reference,
                 &reference_names,
-                autonomy,
                 &geometry_note,
             );
 
@@ -3220,7 +2772,11 @@ pub(crate) async fn generate_codex_retouch_image(
                 &run_id,
                 part_index,
                 placement.parts.len(),
-                ai_part_progress_message(&placement, part_index, "Starting local Codex AI retouch"),
+                ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    "Starting Codex image generation AI retouch",
+                ),
             );
             let result_path = part_path.join("result.png");
             let mut accepted_run = None;
@@ -3232,18 +2788,30 @@ pub(crate) async fn generate_codex_retouch_image(
                     format!("{base_prompt_text}\n\n{retry_note}")
                 };
                 write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
-                let part_run = run_codex_retouch_part(
+                let mut image_paths = vec![
+                    part_path.join("source.png"),
+                    part_path.join("edit_target.png"),
+                    part_path.join("mask.png"),
+                ];
+                if has_annotated_source {
+                    image_paths.push(part_path.join("annotated_source.png"));
+                }
+                if has_reference {
+                    image_paths.push(part_path.join("reference.png"));
+                }
+                if has_overview {
+                    image_paths.push(part_path.join("overview.png"));
+                }
+                image_paths.extend(reference_paths.iter().cloned());
+                let part_run = run_codex_direct_edit_part(
                     &app,
                     &run_id,
-                    &codex_bin,
-                    &codex_options,
                     &part_path,
+                    &codex_options,
                     &prompt_text,
-                    has_annotated_source,
-                    has_reference,
-                    has_overview,
-                    &reference_paths,
+                    &image_paths,
                     &part.working,
+                    "AI retouch candidate",
                 )
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
                 if part_run.normalized {
@@ -3403,8 +2971,8 @@ pub(crate) async fn upscale_codex_image(
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
-        let autonomy = ai_autonomy_level(autonomy_level);
+        let _ = bin;
+        let _ = autonomy_level;
         let run_id = if run_id.trim().is_empty() {
             format!("upscale-{}", now_id())
         } else {
@@ -3444,9 +3012,7 @@ pub(crate) async fn upscale_codex_image(
         let bytes = codex_restore_image_details(
             &app,
             &run_id,
-            &codex_bin,
             &codex_options,
-            autonomy,
             &job_path,
             &enlarged_png,
             "AI upscale",
@@ -3771,8 +3337,8 @@ pub(crate) async fn compose_codex_workflow(
             image_quality,
             image_moderation,
         );
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
-        let autonomy = ai_autonomy_level(autonomy_level);
+        let _ = bin;
+        let _ = autonomy_level;
         let run_id = if run_id.trim().is_empty() {
             format!("workflow-{}", now_id())
         } else {
@@ -3815,85 +3381,29 @@ pub(crate) async fn compose_codex_workflow(
             source_names.push(name);
             image_paths.push(path);
         }
-        write_ai_job_prompt(
-            &job_path,
-            &workflow_compose_prompt(prompt.trim(), &source_names, autonomy),
-            "Codex workflow composition",
-        )?;
+        let prompt_text = codex_direct_workflow_compose_prompt(prompt.trim(), &source_names);
+        write_ai_job_prompt(&job_path, &prompt_text, "Codex workflow composition")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
-        emit_codex_progress(&app, &run_id, "Starting local Codex workflow composition");
-        let codex_started_at = SystemTime::now();
-        let mut command = build_workflow_compose_codex_command(
-            &codex_bin,
-            &job_path,
-            &image_paths,
-            prompt.trim(),
-            &source_names,
-            &codex_options,
-            autonomy,
-            true,
+        emit_codex_progress(
+            &app,
+            &run_id,
+            "Requesting PaintNode Codex workflow composition",
         );
-        let mut run = run_codex_with_progress(&mut command, app.clone(), run_id.clone())
-        .map_err(|e| format!("Failed to run Codex at '{}': {e}", codex_command_label(&codex_bin)))?;
+        let bytes = run_codex_direct_image_request(
+            &prompt_text,
+            &image_paths,
+            (0, 0),
+            &codex_options,
+            Some(&job_path),
+        )?;
+        let result_path = job_path.join("result.png");
+        fs::write(&result_path, &bytes)
+            .map_err(|e| format!("Failed to write composed image: {e}"))?;
 
-        if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
-            emit_codex_progress(
-                &app,
-                &run_id,
-                "Codex progress stream unavailable; retrying workflow composition",
-            );
-            let mut fallback = build_workflow_compose_codex_command(
-                &codex_bin,
-                &job_path,
-                &image_paths,
-                prompt.trim(),
-                &source_names,
-                &codex_options,
-                autonomy,
-                false,
-            );
-            run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone())
-            .map_err(|e| format!("Failed to run Codex at '{}': {e}", codex_command_label(&codex_bin)))?;
-        }
-
-        if !run.output.status.success() {
-            if let Some(message) = final_codex_agent_message(&run.output) {
-                return Err(format!("Codex did not compose an image.\n\n{message}"));
-            }
-            return Err(command_failure("Codex workflow composition", &run.output));
-        }
-
-        let Some((recovered_source_path, staged_result_path)) =
-            copy_codex_cached_png_to_job(&job_path, run.thread_id.as_deref(), codex_started_at)?
-        else {
-            if let Some(message) = final_codex_agent_message(&run.output) {
-                return Err(format!(
-                    "Codex did not expose a composed image in its generated-images cache.\n\n{message}"
-                ));
-            }
-            return Err("PaintNode could not find a composed PNG in Codex's generated-images cache.".into());
-        };
-
-        emit_codex_progress(&app, &run_id, "Reading composed PNG");
-        if !staged_result_path.exists() {
-            if let Some(message) = final_codex_agent_message(&run.output) {
-                return Err(format!(
-                    "Codex did not expose a composed image.\n\n{message}\n\nInternal copy path: {}",
-                    staged_result_path.display()
-                ));
-            }
-            return Err(format!(
-                "PaintNode could not find a composed PNG at {}.",
-                staged_result_path.display()
-            ));
-        }
-
-        let data_url = read_png_data_url(&staged_result_path)?;
+        let data_url = png_data_url_from_bytes(&bytes);
         let asset = if let Some(project_dir) = project_dir {
             emit_codex_progress(&app, &run_id, "Saving composed image to the project");
-            let bytes = fs::read(&staged_result_path)
-                .map_err(|e| format!("Failed to read composed image for project storage: {e}"))?;
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
             let asset = ProjectAsset::generated_png(
@@ -3904,10 +3414,7 @@ pub(crate) async fn compose_codex_workflow(
                     prompt.trim().chars().take(48).collect::<String>()
                 ),
                 Some(prompt.trim().into()),
-                recovered_source_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string),
+                Some("result.png".into()),
             );
             Some(add_asset(&project_dir, asset)?)
         } else {
@@ -3958,14 +3465,11 @@ mod tests {
                 Some("auto".to_string()),
                 Some("auto".to_string()),
             );
-            let command = build_codex_command(
+            let command = build_decouple_codex_command(
                 "codex",
                 job.path(),
-                "make an image",
-                &[],
-                &[],
+                "separate objects",
                 &options,
-                AiAutonomyLevel::Low,
                 true,
             );
             let args = command
@@ -4036,6 +3540,77 @@ mod tests {
     }
 
     #[test]
+    fn codex_image_generation_request_uses_size_quality_and_moderation() {
+        let options = CodexCommandOptions {
+            image_quality: Some("high".into()),
+            image_moderation: Some("low".into()),
+            ..CodexCommandOptions::default()
+        };
+        let body = codex_image_generation_request_json(
+            "make a watercolor lighthouse",
+            (1280, 720),
+            &options,
+        );
+
+        assert_eq!(body["prompt"], "make a watercolor lighthouse");
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body["background"], "auto");
+        assert_eq!(body["size"], "1280x720");
+        assert_eq!(body["quality"], "high");
+        assert_eq!(body["moderation"], "low");
+        assert_eq!(body["output_format"], "png");
+        assert!(body.get("images").is_none());
+    }
+
+    #[test]
+    fn codex_direct_image_requests_fall_back_to_auto_for_unsupported_size() {
+        let options = CodexCommandOptions::default();
+        let generation =
+            codex_image_generation_request_json("make a poster", (3000, 800), &options);
+        let edit = codex_image_edit_request_json(
+            "extend the scene",
+            vec!["data:image/png;base64,AAAA".into()],
+            (3000, 800),
+            &options,
+        );
+
+        assert_eq!(generation["size"], "auto");
+        assert_eq!(edit["size"], "auto");
+    }
+
+    #[test]
+    fn direct_codex_assist_prompts_do_not_use_imagegen_skill_or_cache_contract() {
+        let prompts = [
+            codex_direct_generate_prompt(
+                "paint a quiet kitchen",
+                &["references/reference-1-style.png".to_string()],
+            ),
+            codex_direct_retouch_prompt(
+                "remove glare",
+                true,
+                true,
+                &["references/reference-1-prop.png".to_string()],
+                TEST_GEOMETRY_NOTE,
+            ),
+            codex_direct_restore_prompt(TEST_GEOMETRY_NOTE),
+            codex_direct_workflow_compose_prompt(
+                "girl holds apple by the water",
+                &[
+                    "Girl With Empty Hands".to_string(),
+                    "Storyboard sketch".to_string(),
+                ],
+            ),
+        ];
+
+        for prompt in prompts {
+            assert!(!prompt.contains("$imagegen"));
+            assert!(!prompt.contains("generated-images cache"));
+            assert!(!prompt.contains("Use the imagegen skill"));
+            assert!(!prompt.contains("Save the final PNG as"));
+        }
+    }
+
+    #[test]
     fn paintnode_owned_image_prompt_combines_planner_constraints() {
         let request = PaintNodeImageRequest {
             prompt: "Extend the train bench and seaside view.".into(),
@@ -4057,14 +3632,11 @@ mod tests {
     #[test]
     fn codex_command_uses_augmented_cli_path() {
         let job = TempJobDir::new("paintnode-codex-path-test").expect("temp dir");
-        let command = build_codex_command(
+        let command = build_decouple_codex_command(
             "codex",
             job.path(),
-            "make an image",
-            &[],
-            &[],
+            "separate objects",
             &CodexCommandOptions::default(),
-            AiAutonomyLevel::Low,
             true,
         );
         let path = command
@@ -4079,34 +3651,17 @@ mod tests {
     }
 
     #[test]
-    fn codex_generate_command_attaches_reference_images_before_prompt() {
-        let job = TempJobDir::new("paintnode-codex-reference-test").expect("temp dir");
-        let reference_paths = vec![job.path().join("references").join("reference-1-style.png")];
-        let reference_names = vec!["references/reference-1-style.png".to_string()];
-        let command = build_codex_command(
-            "codex",
-            job.path(),
+    fn codex_direct_generate_prompt_mentions_reference_images() {
+        let prompt = codex_direct_generate_prompt(
             "make an image",
-            &reference_paths,
-            &reference_names,
-            &CodexCommandOptions::default(),
-            AiAutonomyLevel::Low,
-            true,
+            &["references/reference-1-style.png".to_string()],
         );
-        let args = command_args(&command);
-        assert_eq!(command.get_program().to_string_lossy(), "node");
-        assert!(
-            args.iter()
-                .any(|arg| arg.ends_with("scripts/codex-sdk-runner.mjs")),
-            "Codex commands should use the SDK runner"
-        );
-        assert_eq!(
-            sdk_image_args(&args),
-            vec![reference_paths[0].to_string_lossy().to_string()]
-        );
-        let prompt_arg = sdk_prompt_arg(&args);
-        assert!(prompt_arg.contains("Additional user reference images"));
-        assert!(prompt_arg.contains("`references/reference-1-style.png`"));
+
+        assert!(prompt.contains("Additional user reference images"));
+        assert!(prompt.contains("`references/reference-1-style.png`"));
+        assert!(prompt.contains("make an image"));
+        assert!(!prompt.contains("$imagegen"));
+        assert!(!prompt.contains("generated-images cache"));
     }
 
     const TEST_GEOMETRY_NOTE: &str =
@@ -4142,18 +3697,14 @@ mod tests {
     #[test]
     fn codex_without_user_bin_uses_sdk_bundled_codex() {
         let job = TempJobDir::new("paintnode-codex-sdk-bundled-test").expect("temp dir");
-        let options = CodexCommandOptions::default();
         let codex_bin = configured_codex_bin_or_sdk_default(None);
         assert_eq!(codex_bin, "");
 
-        let command = build_codex_command(
+        let command = build_decouple_codex_command(
             &codex_bin,
             job.path(),
-            "make an image",
-            &[],
-            &[],
-            &options,
-            AiAutonomyLevel::Low,
+            "separate objects",
+            &CodexCommandOptions::default(),
             true,
         );
         let args = command_args(&command);
@@ -4171,32 +3722,7 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_autonomy_prompts_omit_method_guardrails() {
-        let prompt = codex_prompt("make an image", AiAutonomyLevel::Unmanaged, &[]);
-        assert!(prompt.contains("Autonomy level: Unmanaged"));
-        assert!(prompt.contains("Use $imagegen"));
-        assert!(prompt.contains("normal Codex image-generation flow"));
-        assert!(!prompt.contains("PaintNode image geometry"));
-        assert!(!prompt.contains("Working PNG"));
-        assert!(!prompt.contains("Document rectangle"));
-        assert!(!prompt.contains("chroma"));
-        assert!(!prompt.contains("Do not create, edit, or delete files in the working directory"));
-        assert!(!prompt.contains("Do not write or run Python"));
-
-        let retouch = ai_retouch_prompt(
-            "remove glare",
-            false,
-            false,
-            &[],
-            AiAutonomyLevel::Unmanaged,
-            TEST_GEOMETRY_NOTE,
-        );
-        assert!(retouch.contains("Autonomy level: Unmanaged"));
-        assert!(retouch.contains("Use $imagegen"));
-        assert!(retouch.contains("normal Codex image-generation flow"));
-        assert!(!retouch.contains("Do not create, edit, copy, verify, or delete files"));
-        assert!(!retouch.contains("write helper scripts"));
-
+    fn unmanaged_fill_planner_prompt_omits_method_guardrails() {
         let fill = generative_fill_prompt(
             "extend photo",
             AiAutonomyLevel::Unmanaged,
@@ -4256,32 +3782,6 @@ mod tests {
         assert!(prompt.contains("\"alphaMask\": null"));
         assert!(prompt.contains("last fallback"));
         assert!(prompt.contains("PaintNode accepts only `#00ff00`"));
-    }
-
-    #[test]
-    fn workflow_compose_command_delimits_variadic_image_args_before_prompt() {
-        let job = TempJobDir::new("paintnode-workflow-command-test").expect("temp dir");
-        let image_paths = vec![job.path().join("girl.png"), job.path().join("truck.png")];
-        let names = vec!["girl".to_string(), "truck".to_string()];
-        let command = build_workflow_compose_codex_command(
-            "codex",
-            job.path(),
-            &image_paths,
-            "compose scene",
-            &names,
-            &CodexCommandOptions::default(),
-            AiAutonomyLevel::Low,
-            true,
-        );
-        let args = command_args(&command);
-        assert_eq!(
-            sdk_image_args(&args),
-            image_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-        );
-        assert!(sdk_prompt_arg(&args).contains("Composition prompt:\ncompose scene"));
     }
 
     #[test]
@@ -4418,7 +3918,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_and_retouch_commands_attach_overview_for_split_parts() {
+    fn fill_command_attaches_overview_for_split_parts() {
         let job = TempJobDir::new("paintnode-overview-command-test").expect("temp dir");
         let fill = build_generative_fill_codex_command(
             "codex",
@@ -4453,148 +3953,65 @@ mod tests {
         assert!(!fill_args
             .iter()
             .any(|arg| arg.contains(FILL_STORYBOARD_DRAFT_FILE)));
-
-        let retouch = build_ai_retouch_codex_command(
-            "codex",
-            job.path(),
-            "prompt",
-            false,
-            false,
-            true,
-            &[],
-            &CodexCommandOptions::default(),
-            true,
-        );
-        let retouch_args = command_args(&retouch);
-        assert_eq!(
-            sdk_image_args(&retouch_args),
-            vec![
-                job.path().join("source.png").to_string_lossy().to_string(),
-                job.path()
-                    .join("edit_target.png")
-                    .to_string_lossy()
-                    .to_string(),
-                job.path().join("mask.png").to_string_lossy().to_string(),
-                job.path()
-                    .join("overview.png")
-                    .to_string_lossy()
-                    .to_string()
-            ]
-        );
     }
 
     #[test]
-    fn ai_retouch_command_attaches_optional_guidance_before_reference() {
-        let job = TempJobDir::new("paintnode-retouch-command-test").expect("temp dir");
-        let prompt_text = ai_retouch_prompt(
+    fn codex_direct_retouch_prompt_describes_optional_guidance_and_mask_contract() {
+        let prompt = codex_direct_retouch_prompt(
             "remove glare",
             true,
             true,
-            &[],
-            AiAutonomyLevel::Low,
+            &["references/reference-1-style.png".to_string()],
             TEST_GEOMETRY_NOTE,
         );
-        let command = build_ai_retouch_codex_command(
-            "codex",
-            job.path(),
-            &prompt_text,
-            true,
-            true,
-            false,
-            &[],
-            &CodexCommandOptions::default(),
-            true,
-        );
-        let args = command_args(&command);
-        assert_eq!(
-            sdk_image_args(&args),
-            vec![
-                job.path().join("source.png").to_string_lossy().to_string(),
-                job.path()
-                    .join("edit_target.png")
-                    .to_string_lossy()
-                    .to_string(),
-                job.path().join("mask.png").to_string_lossy().to_string(),
-                job.path()
-                    .join("annotated_source.png")
-                    .to_string_lossy()
-                    .to_string(),
-                job.path()
-                    .join("reference.png")
-                    .to_string_lossy()
-                    .to_string()
-            ]
-        );
-        let prompt_arg = sdk_prompt_arg(&args);
-        assert!(prompt_arg.contains("Use $imagegen to perform one in-place PaintNode retouch"));
-        assert!(prompt_arg.contains("the full PaintNode document"));
-        assert!(!prompt_arg.contains("chroma"));
-        assert!(!prompt_arg.contains("#00ff00"));
-        assert!(!prompt_arg.contains("centered content rectangle"));
-        assert!(prompt_arg.contains("Black pixels are locked context"));
-        assert!(!prompt_arg.contains("PaintNode will crop"));
-        assert!(prompt_arg.contains("`annotated_source.png` is an optional guide image"));
-        assert!(prompt_arg.contains("arrows, labels, and callout positions as guidance"));
-        assert!(prompt_arg.contains("red arrows, yellow callout boxes, annotation text"));
-        assert!(prompt_arg.contains("User retouch prompt:\nremove glare"));
-        // The mask is attached as a separate editable layer mask, never baked
-        // into the candidate's pixels.
-        assert!(prompt_arg.contains("attaches `mask.png` as a separate linked layer mask"));
-        assert!(prompt_arg.contains("never baked into your candidate's pixels"));
-        assert!(prompt_arg.contains(
-            "visually identical to `source.png` everywhere `mask.png` is black or transparent"
+
+        assert!(prompt.contains("Perform one in-place PaintNode retouch"));
+        assert!(prompt.contains("the full PaintNode document"));
+        assert!(!prompt.contains("chroma"));
+        assert!(!prompt.contains("#00ff00"));
+        assert!(prompt.contains("Black pixels are locked context"));
+        assert!(prompt.contains("`annotated_source.png` is an optional guide image"));
+        assert!(prompt.contains("`reference.png` is an optional sampled reference area"));
+        assert!(prompt.contains("`references/reference-1-style.png`: user-added visual reference"));
+        assert!(prompt.contains("red arrows, yellow callout boxes, annotation text"));
+        assert!(prompt.contains("User retouch prompt:\nremove glare"));
+        assert!(prompt.contains(
+            "Make the candidate visually identical to `source.png` everywhere `mask.png` is black or transparent"
         ));
-        assert!(prompt_arg.contains("Do not clean up, enhance, crop out, remove"));
-        assert!(prompt_arg.contains("maximum allowed edit area"));
-        assert!(prompt_arg.contains(
-            "every newly generated, removed, replaced, reconstructed, relit, recolored, cleaned, extended, blended, shadowed, reflected, or otherwise changed visible pixel inside the white/gray mask footprint"
-        ));
-        assert!(prompt_arg.contains("visible change extends outside the mask is a failed retouch"));
-        assert!(prompt_arg.contains("preserve the person's identity, face, hair, skin, hands"));
-        assert!(prompt_arg.contains("all unrequested surrounding content"));
-        assert!(!prompt_arg.contains("nearby bag"));
-        assert!(!prompt_arg.contains("seat, window"));
-        assert!(prompt_arg.contains("Those are deterministic PaintNode responsibilities"));
-        assert!(prompt_arg.contains("generated image in Codex's generated-images cache"));
-        assert!(!prompt_arg.contains("Save the final exact-size PNG as `result.png`"));
+        assert!(prompt.contains("Preserve identity, face, hair, skin, hands"));
+        assert!(!prompt.contains("$imagegen"));
+        assert!(!prompt.contains("generated-images cache"));
     }
 
     #[test]
-    fn codex_restore_prompt_targets_detail_without_content_changes() {
-        let prompt = codex_restore_prompt(AiAutonomyLevel::Low, TEST_GEOMETRY_NOTE);
-        assert!(
-            prompt.contains("Use $imagegen to perform one in-place PaintNode detail restoration")
-        );
+    fn codex_direct_restore_prompt_targets_detail_without_content_changes() {
+        let prompt = codex_direct_restore_prompt(TEST_GEOMETRY_NOTE);
+
+        assert!(prompt.contains("Restore image detail for one PaintNode fixed-canvas region"));
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
-        assert!(prompt.contains("highest output resolution"));
         assert!(prompt.contains("the full PaintNode document"));
-        assert!(prompt.contains("generated-images cache"));
         assert!(prompt.contains("Critical registration rule"));
         assert!(!prompt.contains("chroma"));
         assert!(!prompt.contains("User retouch prompt"));
+        assert!(!prompt.contains("$imagegen"));
+        assert!(!prompt.contains("generated-images cache"));
     }
 
     #[test]
-    fn ai_retouch_prompt_keeps_registration_rules_without_chroma_geometry() {
-        let prompt = ai_retouch_prompt(
+    fn codex_direct_retouch_prompt_keeps_registration_rules_without_chroma_geometry() {
+        let prompt = codex_direct_retouch_prompt(
             "remove glare",
             false,
             false,
             &[],
-            AiAutonomyLevel::Low,
             "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.",
         );
 
-        assert!(prompt.contains("Use $imagegen to perform one in-place PaintNode retouch"));
+        assert!(prompt.contains("Perform one in-place PaintNode retouch"));
         assert!(prompt.contains(
             "This is a fixed-canvas image editing task, not a new image generation task"
         ));
         assert!(prompt.contains("Critical registration rule"));
-        assert!(prompt
-            .contains("identify the actual stable registration anchors from the visible pixels"));
-        assert!(prompt.contains(
-            "include only those image-specific anchors you observed from the attached inputs"
-        ));
         assert!(prompt.contains("a crop of a larger PaintNode document"));
         assert!(prompt
             .contains("paste your result back into the correct document region automatically"));
@@ -4613,18 +4030,19 @@ mod tests {
         assert!(!prompt.contains("#00ff00"));
         assert!(!prompt.contains("No annotated source guide"));
         assert!(!prompt.contains("No reference image is attached"));
+        assert!(!prompt.contains("$imagegen"));
+        assert!(!prompt.contains("generated-images cache"));
     }
 
     #[test]
-    fn workflow_compose_prompt_requires_connected_assets_and_storyboard() {
-        let prompt = workflow_compose_prompt(
+    fn codex_direct_workflow_compose_prompt_requires_connected_assets_and_storyboard() {
+        let prompt = codex_direct_workflow_compose_prompt(
             "girl holds apple by the water",
             &[
                 "Girl With Empty Hands".to_string(),
                 "Storyboard sketch: composition layout and handwritten placement annotations"
                     .to_string(),
             ],
-            AiAutonomyLevel::Low,
         );
 
         assert!(prompt.contains("Connected workflow inputs"));
@@ -4634,21 +4052,14 @@ mod tests {
         );
         assert!(prompt.contains("This is a generative synthesis task"));
         assert!(prompt.contains("Reconstruct the final scene naturally"));
-        assert!(prompt.contains(
-            "Do not satisfy the task by copying or lightly editing only one source image"
-        ));
-        assert!(prompt.contains("Unless the user explicitly asks for surreal or impossible"));
-        assert!(prompt.contains("Human anatomy is a hard quality requirement"));
-        assert!(prompt.contains("no duplicated palms"));
-        assert!(prompt.contains("treat that image as the primary spatial plan"));
-        assert!(prompt.contains("rough semantic diagrams"));
+        assert!(prompt.contains("not a cut-and-paste compositing task"));
+        assert!(prompt.contains("Preserve normal real-world structure"));
+        assert!(prompt.contains("Pay special attention to human anatomy"));
+        assert!(prompt.contains("treat it as the primary spatial plan"));
         assert!(prompt.contains("left/right ordering"));
-        assert!(prompt.contains("subject centered in the left third/left half"));
-        assert!(prompt.contains("do not mirror, recenter, or shift it to the opposite side"));
-        assert!(prompt.contains("follow the storyboard's composition and placement"));
-        assert!(prompt.contains("internally audit the storyboard into a concrete composition plan"));
-        assert!(prompt.contains("arm/hand poses"));
-        assert!(prompt.contains("when the storyboard provides a more specific pose or layout"));
+        assert!(prompt.contains("physically connected in the final image"));
+        assert!(!prompt.contains("$imagegen"));
+        assert!(!prompt.contains("generated-images cache"));
     }
 
     #[test]
@@ -4716,65 +4127,6 @@ mod tests {
     }
 
     #[test]
-    fn find_codex_cached_pngs_returns_all_thread_pngs_in_order() {
-        let cache = TempJobDir::new("paintnode-thread-cache-all-png-test").expect("cache dir");
-        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
-        let thread_dir = cache.path().join(thread_id);
-        let nested_dir = thread_dir.join("nested");
-        let inputs_dir = thread_dir.join("inputs");
-        fs::create_dir_all(&nested_dir).expect("nested dir");
-        fs::create_dir_all(&inputs_dir).expect("inputs dir");
-
-        let since = SystemTime::now();
-        thread::sleep(Duration::from_millis(20));
-        let first = thread_dir.join("first.png");
-        fs::write(&first, ONE_PIXEL_PNG).expect("first png");
-        thread::sleep(Duration::from_millis(20));
-        let second = nested_dir.join("second.png");
-        fs::write(&second, ONE_PIXEL_PNG).expect("second png");
-        fs::write(inputs_dir.join("ignored-input.png"), ONE_PIXEL_PNG).expect("input png");
-        fs::write(thread_dir.join("not-a-real.png"), b"not png").expect("invalid png");
-        fs::write(thread_dir.join("notes.txt"), b"hello").expect("text file");
-
-        let result_path = cache.path().join("result.png");
-        let found = find_codex_cached_pngs_in_roots(
-            vec![cache.path().to_path_buf()],
-            Some(thread_id),
-            since,
-            &result_path,
-        );
-
-        assert_eq!(found, vec![first, second]);
-    }
-
-    #[test]
-    fn find_codex_cached_pngs_ignores_old_or_unsafe_thread_inputs() {
-        let cache = TempJobDir::new("paintnode-thread-cache-safe-png-test").expect("cache dir");
-        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
-        let thread_dir = cache.path().join(thread_id);
-        fs::create_dir_all(&thread_dir).expect("thread dir");
-        fs::write(thread_dir.join("old.png"), ONE_PIXEL_PNG).expect("old png");
-
-        let future_since = SystemTime::now() + Duration::from_secs(30);
-        let result_path = cache.path().join("result.png");
-        let old_matches = find_codex_cached_pngs_in_roots(
-            vec![cache.path().to_path_buf()],
-            Some(thread_id),
-            future_since,
-            &result_path,
-        );
-        assert!(old_matches.is_empty());
-
-        let unsafe_matches = find_codex_cached_pngs_in_roots(
-            vec![cache.path().to_path_buf()],
-            Some("../outside"),
-            SystemTime::UNIX_EPOCH,
-            &result_path,
-        );
-        assert!(unsafe_matches.is_empty());
-    }
-
-    #[test]
     fn copy_codex_cached_png_to_job_preserves_cache_file_name() {
         let cache = TempJobDir::new("paintnode-cache-copy-test").expect("cache dir");
         let job = TempJobDir::new("paintnode-cache-copy-job-test").expect("job dir");
@@ -4804,36 +4156,5 @@ mod tests {
                 .join("ig_original_result_name.png")
         );
         assert!(file_has_png_signature(&staged_path));
-    }
-
-    #[test]
-    fn copy_codex_cached_pngs_to_job_copies_each_generated_png() {
-        let cache = TempJobDir::new("paintnode-cache-copy-all-test").expect("cache dir");
-        let job = TempJobDir::new("paintnode-cache-copy-all-job-test").expect("job dir");
-        let thread_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
-        let thread_dir = cache.path().join(thread_id);
-        fs::create_dir_all(&thread_dir).expect("thread dir");
-
-        let since = SystemTime::now();
-        thread::sleep(Duration::from_millis(20));
-        let first = thread_dir.join("first.png");
-        fs::write(&first, ONE_PIXEL_PNG).expect("first png");
-        thread::sleep(Duration::from_millis(20));
-        let second = thread_dir.join("second.png");
-        fs::write(&second, ONE_PIXEL_PNG).expect("second png");
-
-        let copied = copy_codex_cached_pngs_in_roots_to_job(
-            vec![cache.path().to_path_buf()],
-            job.path(),
-            Some(thread_id),
-            since,
-        )
-        .expect("copy should not fail");
-
-        assert_eq!(copied.len(), 2);
-        assert_eq!(copied[0].0, first);
-        assert_eq!(copied[1].0, second);
-        assert!(file_has_png_signature(&copied[0].1));
-        assert!(file_has_png_signature(&copied[1].1));
     }
 }
