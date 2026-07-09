@@ -1824,7 +1824,7 @@ pub(crate) fn antigravity_generate_director_prompt(
 - Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
 - Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
 - For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned Antigravity image tool to create the candidate.
-- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}`, and attach the candidate back to you for review when your participation level requires review.
+- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` naming the full candidate file, and attach a downscaled review preview of that candidate when your participation level requires review.
 
 JSON schema:
 {{

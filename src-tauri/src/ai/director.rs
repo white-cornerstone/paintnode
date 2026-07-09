@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -21,6 +22,8 @@ pub(crate) const PAINTNODE_DIRECTOR_TIMELINE_FILE: &str = "paintnode-director-ti
 
 const PAINTNODE_DIRECTOR_FULL_REVIEW_MAX_TURNS: usize = 5;
 const PAINTNODE_DIRECTOR_ENSURE_COMPLETION_MAX_TURNS: usize = 3;
+const PAINTNODE_DIRECTOR_REVIEW_PREVIEW_MAX_SIDE: u32 = 512;
+const PAINTNODE_DIRECTOR_REVIEW_PREVIEW_JPEG_QUALITY: u8 = 82;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -138,6 +141,10 @@ pub(crate) fn director_candidate_file(turn: usize) -> String {
     format!("director-candidate-{turn}.png")
 }
 
+pub(crate) fn director_candidate_preview_file(turn: usize) -> String {
+    format!("director-candidate-{turn}-preview.jpg")
+}
+
 pub(crate) fn clear_director_action_files(part_path: &Path, legacy_request_file: &str) {
     let _ = fs::remove_file(part_path.join(PAINTNODE_DIRECTOR_ACTION_FILE));
     let _ = fs::remove_file(part_path.join(legacy_request_file));
@@ -236,6 +243,7 @@ pub(crate) fn write_director_observation(
     turn: usize,
     status: &str,
     candidate_file: Option<&str>,
+    review_preview_file: Option<&str>,
     message: &str,
 ) -> Result<(), String> {
     let payload = json!({
@@ -244,6 +252,7 @@ pub(crate) fn write_director_observation(
         "event": "paintnodeObservation",
         "status": status,
         "candidate": candidate_file.map(|file| json!({ "file": file })),
+        "reviewPreview": review_preview_file.map(|file| json!({ "file": file })),
         "message": message,
     });
     write_director_json(
@@ -298,7 +307,7 @@ pub(crate) fn director_turn_prompt(
             "If the observation reports a failed image-tool call, write a new `generateCandidate` action with the smallest faithful prompt adjustment. If a candidate completed, no review turn should be needed."
         }
         AiDirectorInvolvement::FullReview => {
-            "Inspect the latest candidate image, any attached source/reference images, and `paintnode-director-observation.json`. Write `acceptResult` only if the candidate satisfies the task and the workflow review criteria. Otherwise write another `generateCandidate` action with the smallest useful correction."
+            "Inspect the attached downscaled review preview of the latest candidate image, any attached source/reference images, and `paintnode-director-observation.json`. The preview represents the full-resolution candidate named in the observation. Write `acceptResult` only if the candidate satisfies the task and the workflow review criteria. Otherwise write another `generateCandidate` action with the smallest useful correction."
         }
         AiDirectorInvolvement::PlanOnly => "Write one `generateCandidate` action only.",
     };
@@ -338,15 +347,54 @@ pub(crate) fn reset_director_loop_files(part_path: &Path) {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if file_name.starts_with("director-turn-")
+            if (file_name.starts_with("director-turn-")
                 && (file_name.ends_with("-prompt.txt")
                     || file_name.ends_with("-action.json")
-                    || file_name.ends_with("-observation.json"))
+                    || file_name.ends_with("-observation.json")))
+                || (file_name.starts_with("director-candidate-")
+                    && file_name.ends_with("-preview.jpg"))
             {
                 let _ = fs::remove_file(path);
             }
         }
     }
+}
+
+pub(crate) fn write_director_candidate_review_preview(
+    part_path: &Path,
+    turn: usize,
+    candidate_file: &str,
+) -> Result<String, String> {
+    let candidate_path = part_path.join(candidate_file);
+    let image = image::open(&candidate_path).map_err(|e| {
+        format!(
+            "Failed to decode Director candidate for review preview at {}: {e}",
+            candidate_path.display()
+        )
+    })?;
+    let preview = image.thumbnail(
+        PAINTNODE_DIRECTOR_REVIEW_PREVIEW_MAX_SIDE,
+        PAINTNODE_DIRECTOR_REVIEW_PREVIEW_MAX_SIDE,
+    );
+    let rgba = preview.to_rgba8();
+    let rgb = image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+        let pixel = rgba.get_pixel(x, y).0;
+        let alpha = pixel[3] as u16;
+        let matte = [242_u16, 242_u16, 242_u16];
+        image::Rgb([
+            ((pixel[0] as u16 * alpha + matte[0] * (255 - alpha)) / 255) as u8,
+            ((pixel[1] as u16 * alpha + matte[1] * (255 - alpha)) / 255) as u8,
+            ((pixel[2] as u16 * alpha + matte[2] * (255 - alpha)) / 255) as u8,
+        ])
+    });
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut bytes, PAINTNODE_DIRECTOR_REVIEW_PREVIEW_JPEG_QUALITY)
+        .encode_image(&image::DynamicImage::ImageRgb8(rgb))
+        .map_err(|e| format!("Failed to encode Director candidate review preview: {e}"))?;
+    let preview_file = director_candidate_preview_file(turn);
+    fs::write(part_path.join(&preview_file), bytes)
+        .map_err(|e| format!("Failed to write Director candidate review preview: {e}"))?;
+    Ok(preview_file)
 }
 
 pub(crate) fn run_candidate_director_loop<T, RunTurn, FinalMessage, GenerateCandidate>(
@@ -371,6 +419,7 @@ where
 
     let mut latest_result = None::<T>;
     let mut latest_candidate_file = None::<String>;
+    let mut latest_candidate_review_file = None::<String>;
 
     for turn in 1..=max_turns {
         clear_director_action_files(part_path, spec.legacy_request_file);
@@ -386,7 +435,7 @@ where
             )
             .map_err(|e| format!("Failed to write Director turn prompt: {e}"))?;
         }
-        let candidate_path = latest_candidate_file
+        let candidate_path = latest_candidate_review_file
             .as_ref()
             .map(|file| part_path.join(file));
         let run = run_turn(turn, &prompt_text, candidate_path.as_deref())?;
@@ -406,13 +455,26 @@ where
                 let prompt = image_request_prompt(&request)?;
                 match generate_candidate(turn, request, &prompt) {
                     Ok(candidate) => {
+                        let review_preview_file = write_director_candidate_review_preview(
+                            part_path,
+                            turn,
+                            &candidate.file_name,
+                        )
+                        .ok();
                         write_director_observation(
                             part_path,
                             turn,
                             "candidateGenerated",
                             Some(&candidate.file_name),
-                            "PaintNode generated a candidate image.",
+                            review_preview_file.as_deref(),
+                            if review_preview_file.is_some() {
+                                "PaintNode generated a candidate image and a downscaled review preview."
+                            } else {
+                                "PaintNode generated a candidate image."
+                            },
                         )?;
+                        latest_candidate_review_file =
+                            review_preview_file.or_else(|| Some(candidate.file_name.clone()));
                         latest_candidate_file = Some(candidate.file_name.clone());
                         latest_result = Some(candidate.result);
                         if spec.involvement == AiDirectorInvolvement::EnsureCompletion {
@@ -431,7 +493,14 @@ where
                         }
                     }
                     Err(error) => {
-                        write_director_observation(part_path, turn, "toolError", None, &error)?;
+                        write_director_observation(
+                            part_path,
+                            turn,
+                            "toolError",
+                            None,
+                            None,
+                            &error,
+                        )?;
                         if turn == max_turns {
                             write_director_final(
                                 part_path,
@@ -641,6 +710,7 @@ mod tests {
             1,
             "candidateGenerated",
             Some("director-candidate-1.png"),
+            Some("director-candidate-1-preview.jpg"),
             "PaintNode generated a candidate image.",
         )
         .expect("write observation");
@@ -662,5 +732,31 @@ mod tests {
         assert!(timeline.contains("\"event\":\"directorAction\""));
         assert!(timeline.contains("\"event\":\"paintnodeObservation\""));
         assert!(timeline.contains("\"event\":\"directorFinal\""));
+    }
+
+    #[test]
+    fn director_candidate_review_preview_is_downscaled_jpeg() {
+        let job = TempJobDir::new("paintnode-director-preview-test").expect("temp dir");
+        let candidate_file = director_candidate_file(1);
+        let source = image::RgbaImage::from_fn(1800, 1200, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8, 255])
+        });
+        let source_png =
+            crate::png::encode_rgba_png(source, "director preview source").expect("source png");
+        fs::write(job.path().join(&candidate_file), &source_png).expect("write candidate");
+
+        let preview_file = write_director_candidate_review_preview(job.path(), 1, &candidate_file)
+            .expect("preview");
+        let preview_path = job.path().join(preview_file);
+        let preview = image::open(&preview_path).expect("decode preview");
+
+        assert!(preview_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg")));
+        assert!(preview.width() <= PAINTNODE_DIRECTOR_REVIEW_PREVIEW_MAX_SIDE);
+        assert!(preview.height() <= PAINTNODE_DIRECTOR_REVIEW_PREVIEW_MAX_SIDE);
+        assert!(
+            fs::metadata(preview_path).expect("preview metadata").len() < source_png.len() as u64
+        );
     }
 }

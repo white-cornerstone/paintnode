@@ -744,7 +744,7 @@ fn director_action_file_contract(base_image: &str, prompt_label: &str) -> String
 - Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
 - Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
 - For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned image tool to create the candidate.
-- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write an observation, and attach the candidate back to you for review when your participation level requires review.
+- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write an observation naming the full candidate file, and attach a downscaled review preview of that candidate when your participation level requires review.
 
 JSON schema:
 {{
@@ -1329,7 +1329,7 @@ fn generative_fill_director_prompt(
   "notes": "optional short note for PaintNode"
 }}
 
-After PaintNode writes `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` and attaches a candidate image on a full-review turn, inspect `source.png` and the candidate. If the candidate is faithful, write:
+After PaintNode writes `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` and attaches a downscaled review preview on a full-review turn, inspect `source.png`, the observation, and the preview of the latest candidate. If the full candidate named in the observation is faithful, write:
 {{
   "version": 1,
   "action": "acceptResult",
