@@ -47,7 +47,7 @@ use crate::ai::placement::{
 };
 use crate::ai::{
     ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
+    clean_option, cleanup_project_agent_job, clear_ai_run_cancelled,
     command_failure_with_required_output, emit_codex_part_progress, emit_codex_progress,
     emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id, output_tail,
     project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
@@ -2218,31 +2218,26 @@ pub(crate) async fn detect_antigravity(
             }
         };
 
-        let mut command = Command::new(&antigravity_bin);
-        apply_ai_cli_environment(&mut command).arg("--version");
+        let job_path =
+            std::env::temp_dir().join(format!("paintnode-antigravity-detect-{}", now_id()));
+        let result = wake_antigravity_auth(&antigravity_bin, &job_path, false);
+        let _ = fs::remove_dir_all(&job_path);
 
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                CodexDetectionResult {
-                    found: true,
-                    path: Some(antigravity_bin),
-                    version: Some(if stdout.is_empty() { stderr } else { stdout }),
-                    error: None,
-                }
-            }
-            Ok(output) => CodexDetectionResult {
-                found: false,
-                path: Some(antigravity_bin),
-                version: None,
-                error: Some(command_failure("Antigravity detection", &output)),
+        match result {
+            Ok(()) => CodexDetectionResult {
+                found: true,
+                path: Some(antigravity_bin.clone()),
+                version: Some(format!(
+                    "Antigravity {}",
+                    antigravity_cli_version(&antigravity_bin)
+                )),
+                error: None,
             },
             Err(error) => CodexDetectionResult {
                 found: false,
                 path: Some(antigravity_bin),
                 version: None,
-                error: Some(format!("Failed to launch Antigravity CLI: {error}")),
+                error: Some(error),
             },
         }
     })

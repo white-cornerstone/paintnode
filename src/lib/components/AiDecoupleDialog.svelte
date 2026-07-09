@@ -27,7 +27,7 @@
   import { editor, type DecoupledLayerImport } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
-  import { aiRunOptionsFromSettings } from '../state/settings';
+  import { aiRunOptionsFromSettings, type AiProvider } from '../state/settings';
   import { workflow } from '../state/workflow.svelte';
   import {
     codexConfigFromRunOptions,
@@ -63,11 +63,13 @@
   const currentProgress = $derived(task?.progress ?? '');
   const currentBusy = $derived(task?.status === 'running' || busy);
   const currentNotes = $derived(taskDetail?.notes ?? notes);
-  const decoupleProvider = $derived(
-    plannerModeFromRunOptions(runOptions) === 'skip'
-      ? imageProviderFromRunOptions(runOptions)
-      : plannerProviderFromRunOptions(runOptions),
-  );
+  const decoupleProvider = $derived.by((): AiProvider => {
+    const plannerProvider = plannerProviderFromRunOptions(runOptions);
+    if (plannerModeFromRunOptions(runOptions) === 'skip' || plannerProvider === 'claude') {
+      return imageProviderFromRunOptions(runOptions);
+    }
+    return plannerProvider;
+  });
   const decoupleProviderLabel = $derived(providerLabel(decoupleProvider));
 
   $effect(() => {

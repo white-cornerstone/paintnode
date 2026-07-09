@@ -18,6 +18,12 @@ export const ANTIGRAVITY_MODEL_OPTIONS = [
   { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B Medium' },
 ] as const;
 
+export const CLAUDE_MODEL_OPTIONS = [
+  { id: 'default', label: 'Default' },
+  { id: 'sonnet', label: 'Sonnet' },
+  { id: 'opus', label: 'Opus' },
+] as const;
+
 export const ANTIGRAVITY_IMAGE_MODEL_OPTIONS = [
   { id: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' },
   { id: 'auto', label: 'Auto' },
@@ -67,6 +73,7 @@ export const ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS = [
 
 export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
 export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
+export type ClaudeModelId = (typeof CLAUDE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageModelId = (typeof ANTIGRAVITY_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageSize = (typeof ANTIGRAVITY_IMAGE_SIZE_OPTIONS)[number]['id'];
 export type AntigravityPersonGeneration = (typeof ANTIGRAVITY_PERSON_GENERATION_OPTIONS)[number]['id'];
@@ -81,7 +88,9 @@ export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity';
+export type AiPlannerProvider = AiProvider | 'claude';
 export type AiPlannerMode = 'auto' | 'skip' | 'force';
+export type AiExecutableMode = 'builtin' | 'custom';
 export type CanvasBackground = 'white' | 'transparent';
 /**
  * How strictly PaintNode validates fill/retouch candidates before pasting
@@ -94,15 +103,20 @@ export interface AiRunOptions {
   /** @deprecated Use imageProvider. Kept so older task/profile records still hydrate safely. */
   provider: AiProvider;
   plannerMode: AiPlannerMode;
-  plannerProvider: AiProvider;
+  plannerProvider: AiPlannerProvider;
   imageProvider: AiProvider;
+  codexExecutableMode: AiExecutableMode;
   codexBin: string;
+  claudeExecutableMode: AiExecutableMode;
+  claudeBin: string;
+  claudeModel: ClaudeModelId;
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
   serviceTier: ServiceTier;
   imageQuality: CodexImageQuality;
   imageModeration: CodexImageModeration;
   autonomyLevel: AiAutonomyLevel;
+  antigravityExecutableMode: AiExecutableMode;
   antigravityBin: string;
   antigravityModel: AntigravityModelId;
   antigravityApprovalMode: AntigravityApprovalMode;
@@ -121,7 +135,16 @@ export interface AiRunOptions {
   fillAspectRatio?: string | null;
 }
 
-export type AiProfileOptions = Omit<AiRunOptions, 'codexBin' | 'antigravityBin' | 'fillAspectRatio'>;
+export type AiProfileOptions = Omit<
+  AiRunOptions,
+  | 'codexExecutableMode'
+  | 'codexBin'
+  | 'claudeExecutableMode'
+  | 'claudeBin'
+  | 'antigravityExecutableMode'
+  | 'antigravityBin'
+  | 'fillAspectRatio'
+>;
 
 export interface AiSettingsProfile {
   id: string;
@@ -140,15 +163,20 @@ export interface PaintNodeSettings {
     /** @deprecated Use imageProvider. Kept for backward-compatible settings migration. */
     provider: AiProvider;
     plannerMode: AiPlannerMode;
-    plannerProvider: AiProvider;
+    plannerProvider: AiPlannerProvider;
     imageProvider: AiProvider;
+    codexExecutableMode: AiExecutableMode;
     codexBin: string;
+    claudeExecutableMode: AiExecutableMode;
+    claudeBin: string;
+    claudeModel: ClaudeModelId;
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
     serviceTier: ServiceTier;
     imageQuality: CodexImageQuality;
     imageModeration: CodexImageModeration;
     autonomyLevel: AiAutonomyLevel;
+    antigravityExecutableMode: AiExecutableMode;
     antigravityBin: string;
     antigravityModel: AntigravityModelId;
     antigravityApprovalMode: AntigravityApprovalMode;
@@ -188,6 +216,7 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
 
 const MODEL_IDS = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id));
+const CLAUDE_MODEL_IDS = new Set<string>(CLAUDE_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_MODEL_IDS = new Set<string>(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_SIZE_IDS = new Set<string>(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_PERSON_GENERATION_IDS = new Set<string>(
@@ -208,6 +237,7 @@ const IMAGE_QUALITIES = new Set<string>(['auto', 'low', 'medium', 'high']);
 const IMAGE_MODERATIONS = new Set<string>(['auto', 'low']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
 const AI_PLANNER_MODES = new Set<string>(['auto', 'skip', 'force']);
+const AI_EXECUTABLE_MODES = new Set<string>(['builtin', 'custom']);
 
 function normalizeAiProvider(value: unknown, fallback: AiProvider): AiProvider {
   const text = String(value);
@@ -216,8 +246,17 @@ function normalizeAiProvider(value: unknown, fallback: AiProvider): AiProvider {
   return fallback;
 }
 
+function normalizeAiPlannerProvider(value: unknown, fallback: AiPlannerProvider): AiPlannerProvider {
+  if (String(value) === 'claude') return 'claude';
+  return normalizeAiProvider(value, fallback === 'claude' ? 'codex' : fallback);
+}
+
 function normalizePlannerMode(value: unknown, fallback: AiPlannerMode): AiPlannerMode {
   return AI_PLANNER_MODES.has(String(value)) ? (value as AiPlannerMode) : fallback;
+}
+
+function normalizeExecutableMode(value: unknown, fallback: AiExecutableMode): AiExecutableMode {
+  return AI_EXECUTABLE_MODES.has(String(value)) ? (value as AiExecutableMode) : fallback;
 }
 
 function normalizeAntigravitySafetyFiltering(value: unknown, fallback: AntigravitySafetyFiltering): AntigravitySafetyFiltering {
@@ -245,13 +284,18 @@ export function defaultSettings(): PaintNodeSettings {
       plannerMode: 'auto',
       plannerProvider: 'codex',
       imageProvider: 'codex',
+      codexExecutableMode: 'builtin',
       codexBin: '',
+      claudeExecutableMode: 'builtin',
+      claudeBin: '',
+      claudeModel: 'default',
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
       serviceTier: 'default',
       imageQuality: 'auto',
       imageModeration: 'auto',
       autonomyLevel: 'low',
+      antigravityExecutableMode: 'builtin',
       antigravityBin: '',
       antigravityModel: 'auto',
       antigravityApprovalMode: 'skipPermissions',
@@ -318,8 +362,11 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
   return {
     provider: imageProvider,
     plannerMode: normalizePlannerMode(value.plannerMode, legacyPlannerMode),
-    plannerProvider: normalizeAiProvider(value.plannerProvider, provider),
+    plannerProvider: normalizeAiPlannerProvider(value.plannerProvider, provider),
     imageProvider,
+    claudeModel: CLAUDE_MODEL_IDS.has(String(value.claudeModel))
+      ? (value.claudeModel as ClaudeModelId)
+      : fallback.claudeModel,
     model: MODEL_IDS.has(String(value.model)) ? (value.model as CodexModelId) : fallback.model,
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
       ? (savedReasoningEffort as ReasoningEffort)
@@ -421,9 +468,15 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const normalizedAiBase: Omit<PaintNodeSettings['ai'], 'profiles' | 'defaultProfileId'> = {
     provider: imageProvider,
     plannerMode: normalizePlannerMode(ai.plannerMode, legacyPlannerMode),
-    plannerProvider: normalizeAiProvider(ai.plannerProvider, provider),
+    plannerProvider: normalizeAiPlannerProvider(ai.plannerProvider, provider),
     imageProvider,
+    codexExecutableMode: normalizeExecutableMode(ai.codexExecutableMode, defaults.ai.codexExecutableMode),
     codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
+    claudeExecutableMode: normalizeExecutableMode(ai.claudeExecutableMode, defaults.ai.claudeExecutableMode),
+    claudeBin: stringOrDefault(ai.claudeBin, defaults.ai.claudeBin),
+    claudeModel: CLAUDE_MODEL_IDS.has(String(ai.claudeModel))
+      ? (ai.claudeModel as ClaudeModelId)
+      : defaults.ai.claudeModel,
     model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
       ? (savedReasoningEffort as ReasoningEffort)
@@ -438,6 +491,10 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
     autonomyLevel: AI_AUTONOMY_LEVELS.has(String(ai.autonomyLevel))
       ? (ai.autonomyLevel as AiAutonomyLevel)
       : defaults.ai.autonomyLevel,
+    antigravityExecutableMode: normalizeExecutableMode(
+      ai.antigravityExecutableMode ?? ai.geminiExecutableMode,
+      defaults.ai.antigravityExecutableMode,
+    ),
     antigravityBin: stringOrDefault(savedAntigravityBin, defaults.ai.antigravityBin),
     antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(savedAntigravityModel))
       ? (savedAntigravityModel as AntigravityModelId)
@@ -552,13 +609,18 @@ export function defaultAiRunOptions(): AiRunOptions {
     plannerMode: ai.plannerMode,
     plannerProvider: ai.plannerProvider,
     imageProvider: ai.imageProvider,
+    codexExecutableMode: ai.codexExecutableMode,
     codexBin: ai.codexBin,
+    claudeExecutableMode: ai.claudeExecutableMode,
+    claudeBin: ai.claudeBin,
+    claudeModel: ai.claudeModel,
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
     serviceTier: ai.serviceTier,
     imageQuality: ai.imageQuality,
     imageModeration: ai.imageModeration,
     autonomyLevel: ai.autonomyLevel,
+    antigravityExecutableMode: ai.antigravityExecutableMode,
     antigravityBin: ai.antigravityBin,
     antigravityModel: ai.antigravityModel,
     antigravityApprovalMode: ai.antigravityApprovalMode,
@@ -584,13 +646,18 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
     plannerMode: value.ai.plannerMode,
     plannerProvider: value.ai.plannerProvider,
     imageProvider: value.ai.imageProvider,
+    codexExecutableMode: value.ai.codexExecutableMode,
     codexBin: value.ai.codexBin,
+    claudeExecutableMode: value.ai.claudeExecutableMode,
+    claudeBin: value.ai.claudeBin,
+    claudeModel: value.ai.claudeModel,
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
     serviceTier: value.ai.serviceTier,
     imageQuality: value.ai.imageQuality,
     imageModeration: value.ai.imageModeration,
     autonomyLevel: value.ai.autonomyLevel,
+    antigravityExecutableMode: value.ai.antigravityExecutableMode,
     antigravityBin: value.ai.antigravityBin,
     antigravityModel: value.ai.antigravityModel,
     antigravityApprovalMode: value.ai.antigravityApprovalMode,
@@ -612,7 +679,11 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
 
 export function aiProfileOptionsFromRunOptions(options: AiRunOptions): AiProfileOptions {
   const {
+    codexExecutableMode: _codexExecutableMode,
     codexBin: _codexBin,
+    claudeExecutableMode: _claudeExecutableMode,
+    claudeBin: _claudeBin,
+    antigravityExecutableMode: _antigravityExecutableMode,
     antigravityBin: _antigravityBin,
     fillAspectRatio: _fillAspectRatio,
     ...profileOptions
@@ -628,7 +699,11 @@ export function aiProfileRunOptionsFromSettings(value: PaintNodeSettings, profil
     ...base,
     ...profile.options,
     provider: profile.options.imageProvider,
+    codexExecutableMode: value.ai.codexExecutableMode,
     codexBin: value.ai.codexBin,
+    claudeExecutableMode: value.ai.claudeExecutableMode,
+    claudeBin: value.ai.claudeBin,
+    antigravityExecutableMode: value.ai.antigravityExecutableMode,
     antigravityBin: value.ai.antigravityBin,
     fillAspectRatio: null,
   };
@@ -644,13 +719,18 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
     plannerMode: options.plannerMode,
     plannerProvider: options.plannerProvider,
     imageProvider: options.imageProvider,
+    codexExecutableMode: options.codexExecutableMode,
     codexBin: options.codexBin,
+    claudeExecutableMode: options.claudeExecutableMode,
+    claudeBin: options.claudeBin,
+    claudeModel: options.claudeModel,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,
     imageQuality: options.imageQuality,
     imageModeration: options.imageModeration,
     autonomyLevel: options.autonomyLevel,
+    antigravityExecutableMode: options.antigravityExecutableMode,
     antigravityBin: options.antigravityBin,
     antigravityModel: options.antigravityModel,
     antigravityApprovalMode: options.antigravityApprovalMode,

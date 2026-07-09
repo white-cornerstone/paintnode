@@ -28,6 +28,11 @@ use crate::ai::canvas::{
     AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
+use crate::ai::claude::{
+    build_generative_fill_claude_command, claude_command_failure, claude_command_label,
+    claude_command_options, emit_claude_no_storyboard, final_claude_agent_message,
+    run_claude_with_progress, ClaudeCommandOptions,
+};
 use crate::ai::fill_storyboard::{
     fill_storyboard_master_prompt, fill_storyboard_part_is_anchor, fill_storyboard_part_prompt,
     preserve_invalid_fill_storyboard_file, read_fill_storyboard_file,
@@ -54,7 +59,7 @@ use crate::ai::{
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
     AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
     DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, TempJobDir,
-    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CODEX_RUNS_DIR, POLL_INTERVAL,
+    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -113,6 +118,40 @@ impl PaintNodeImageProvider {
         {
             Some("antigravity") | Some("agy") | Some("gemini") => Self::Antigravity,
             _ => Self::Codex,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PaintNodePlannerProvider {
+    Codex,
+    Claude,
+}
+
+impl PaintNodePlannerProvider {
+    fn from_option(value: Option<String>) -> Self {
+        match value
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("claude") => Self::Claude,
+            _ => Self::Codex,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+
+    fn runs_dir(&self) -> &'static str {
+        match self {
+            Self::Codex => CODEX_RUNS_DIR,
+            Self::Claude => CLAUDE_RUNS_DIR,
         }
     }
 }
@@ -2032,6 +2071,78 @@ fn run_codex_fill_part(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_claude_fill_part(
+    app: &AppHandle,
+    run_id: &str,
+    options: &ClaudeCommandOptions,
+    codex_options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
+    part_path: &Path,
+    prompt_text: &str,
+    has_overview: bool,
+    reference_paths: &[PathBuf],
+    working: &AiWorkingCanvas,
+) -> Result<CodexPartRun, String> {
+    write_codex_imagegen_options(part_path, working.original_dimensions, codex_options)?;
+    let mut command = build_generative_fill_claude_command(
+        options,
+        part_path,
+        prompt_text,
+        has_overview,
+        reference_paths,
+    );
+    let run =
+        run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+            format!(
+                "Failed to run Claude at '{}': {e}",
+                claude_command_label(options)
+            )
+        })?;
+
+    if !run.output.status.success() {
+        if let Some(message) = final_claude_agent_message(&run.output) {
+            return Err(format!(
+                "Claude did not plan a PaintNode fill request.\n\n{message}"
+            ));
+        }
+        return Err(claude_command_failure(
+            "Claude generative fill planner",
+            &run.output,
+        ));
+    }
+
+    let owned_request_path = part_path.join(PAINTNODE_IMAGE_REQUEST_FILE);
+    let requested_result_path = part_path.join("result.png");
+    if owned_request_path.exists() {
+        return run_paintnode_owned_fill_imagegen(
+            app,
+            run_id,
+            part_path,
+            codex_options,
+            image_options,
+            &owned_request_path,
+            working,
+        );
+    }
+
+    if requested_result_path.exists() {
+        return Err(format!(
+            "Claude created `{}` directly, but generative fill is PaintNode-controlled. Expected `{PAINTNODE_IMAGE_REQUEST_FILE}` so PaintNode can run its owned image-generation executor.",
+            requested_result_path.display()
+        ));
+    }
+
+    if let Some(message) = final_claude_agent_message(&run.output) {
+        return Err(format!(
+            "Claude did not create `{PAINTNODE_IMAGE_REQUEST_FILE}` for PaintNode's owned image-generation runner.\n\n{message}"
+        ));
+    }
+    Err(format!(
+        "Claude did not create `{PAINTNODE_IMAGE_REQUEST_FILE}` for PaintNode's owned image-generation runner."
+    ))
+}
+
 fn run_codex_direct_edit_part(
     app: &AppHandle,
     run_id: &str,
@@ -2276,6 +2387,9 @@ pub(crate) async fn generate_codex_fill_image(
     autonomy_level: Option<String>,
     edit_checks_level: Option<u8>,
     fill_aspect_ratio: Option<String>,
+    planner_provider: Option<String>,
+    claude_bin: Option<String>,
+    claude_model: Option<String>,
     image_provider: Option<String>,
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
@@ -2331,6 +2445,8 @@ pub(crate) async fn generate_codex_fill_image(
             image_quality,
             image_moderation,
         );
+        let planner_provider = PaintNodePlannerProvider::from_option(planner_provider);
+        let claude_options = claude_command_options(claude_bin, claude_model);
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let image_options = PaintNodeImageProviderOptions {
             provider: PaintNodeImageProvider::from_option(image_provider),
@@ -2370,7 +2486,12 @@ pub(crate) async fn generate_codex_fill_image(
         let store_asset = store_asset.unwrap_or(true);
         let temp_job;
         let job_path = if let Some(job_project_dir) = &job_project_dir {
-            project_agent_run_dir_for_run(job_project_dir, CODEX_RUNS_DIR, "fill", &run_id)?
+            project_agent_run_dir_for_run(
+                job_project_dir,
+                planner_provider.runs_dir(),
+                "fill",
+                &run_id,
+            )?
         } else {
             temp_job = TempJobDir::new("paintnode-fill")?;
             temp_job.path().to_path_buf()
@@ -2398,22 +2519,31 @@ pub(crate) async fn generate_codex_fill_image(
         let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "Generative fill")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
         let storyboard = if image_options.provider == PaintNodeImageProvider::Codex {
-            prepare_codex_fill_storyboard(
-                &app,
-                &run_id,
-                &codex_bin,
-                &codex_options,
-                &job_path,
-                &placement,
-                &composer,
-                prompt.trim(),
-                &reference_pngs,
-            )?
+            match &planner_provider {
+                PaintNodePlannerProvider::Codex => prepare_codex_fill_storyboard(
+                    &app,
+                    &run_id,
+                    &codex_bin,
+                    &codex_options,
+                    &job_path,
+                    &placement,
+                    &composer,
+                    prompt.trim(),
+                    &reference_pngs,
+                )?,
+                PaintNodePlannerProvider::Claude => {
+                    emit_claude_no_storyboard(&app, &run_id);
+                    None
+                }
+            }
         } else {
             emit_codex_progress(
                 &app,
                 &run_id,
-                "Skipping Codex storyboard draft; selected image generator owns fill pixels",
+                format!(
+                    "Skipping {} storyboard draft; selected image generator owns fill pixels",
+                    planner_provider.label()
+                ),
             );
             None
         };
@@ -2595,24 +2725,44 @@ pub(crate) async fn generate_codex_fill_image(
                 ai_part_progress_message(
                     &placement,
                     part_index,
-                    "Starting local Codex generative fill",
+                    &format!(
+                        "Starting local {} generative fill planner",
+                        planner_provider.label()
+                    ),
                 ),
             );
-            let result_path = part_path.join("result.png");
-            write_ai_job_prompt(&part_path, &base_prompt_text, "Codex generative fill")?;
-            let part_run = run_codex_fill_part(
-                &app,
-                &run_id,
-                &codex_bin,
-                &codex_options,
-                &image_options,
+            write_ai_job_prompt(
                 &part_path,
                 &base_prompt_text,
-                has_overview,
-                &storyboard_draft_paths,
-                &reference_paths,
-                &part.working,
-            )
+                &format!("{} generative fill planner", planner_provider.label()),
+            )?;
+            let part_run = match &planner_provider {
+                PaintNodePlannerProvider::Codex => run_codex_fill_part(
+                    &app,
+                    &run_id,
+                    &codex_bin,
+                    &codex_options,
+                    &image_options,
+                    &part_path,
+                    &base_prompt_text,
+                    has_overview,
+                    &storyboard_draft_paths,
+                    &reference_paths,
+                    &part.working,
+                ),
+                PaintNodePlannerProvider::Claude => run_claude_fill_part(
+                    &app,
+                    &run_id,
+                    &claude_options,
+                    &codex_options,
+                    &image_options,
+                    &part_path,
+                    &base_prompt_text,
+                    has_overview,
+                    &reference_paths,
+                    &part.working,
+                ),
+            }
             .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
             if part_run.normalized {
                 emit_codex_progress(
@@ -2622,7 +2772,8 @@ pub(crate) async fn generate_codex_fill_image(
                         &placement,
                         part_index,
                         &format!(
-                            "Normalized Codex fill from {}x{} to {}x{}",
+                            "Normalized {} fill from {}x{} to {}x{}",
+                            planner_provider.label(),
                             part_run.result_dimensions.0,
                             part_run.result_dimensions.1,
                             part.working.original_dimensions.0,
@@ -2656,6 +2807,7 @@ pub(crate) async fn generate_codex_fill_image(
             }
             fs::write(part_path.join("part_result.png"), &part_result_png)
                 .map_err(|e| format!("Failed to record generative fill part result: {e}"))?;
+            let result_path = part_path.join("result.png");
             if store_asset {
                 if let Some(project_dir) = project_dir.as_ref() {
                     let raw_name = format!("Generative fill raw part {}", part_index + 1);

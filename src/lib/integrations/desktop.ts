@@ -3,7 +3,9 @@ import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialo
 import type {
   AiRunOptions,
   AiAutonomyLevel,
+  AiPlannerProvider,
   AiProvider,
+  ClaudeModelId,
   CodexModelId,
   CodexImageModeration,
   CodexImageQuality,
@@ -116,6 +118,13 @@ export interface CodexGeneratorConfig {
   fillAspectRatio?: string | null;
 }
 
+export interface ClaudePlannerConfig {
+  /** Optional Claude Code executable override. Empty uses the Claude Agent SDK bundled CLI. */
+  bin?: string;
+  /** Claude model alias selected for planner-only runs. */
+  model?: ClaudeModelId | null;
+}
+
 export interface AntigravityGeneratorConfig {
   /** Optional path to the local Antigravity CLI auth helper. Empty uses the Rust-side defaults. */
   bin?: string;
@@ -162,6 +171,8 @@ export interface AntigravityGeneratorConfig {
 }
 
 export interface PlannedFillImageConfig {
+  plannerProvider?: AiPlannerProvider;
+  claude?: ClaudePlannerConfig | null;
   imageProvider?: AiProvider;
   antigravity?: AntigravityGeneratorConfig | null;
 }
@@ -335,7 +346,7 @@ export function codexConfigFromRunOptions(
   keepDebugArtifacts = false,
 ): CodexGeneratorConfig {
   return {
-    bin: options.codexBin,
+    bin: options.codexExecutableMode === 'custom' ? options.codexBin : '',
     projectPath,
     keepJobDir,
     keepDebugArtifacts,
@@ -351,6 +362,13 @@ export function codexConfigFromRunOptions(
   };
 }
 
+export function claudeConfigFromRunOptions(options: AiRunOptions): ClaudePlannerConfig {
+  return {
+    bin: options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
+    model: options.claudeModel,
+  };
+}
+
 export function antigravityConfigFromRunOptions(
   options: AiRunOptions,
   projectPath?: string | null,
@@ -359,7 +377,7 @@ export function antigravityConfigFromRunOptions(
   keepDebugArtifacts = false,
 ): AntigravityGeneratorConfig {
   return {
-    bin: options.antigravityBin,
+    bin: options.antigravityExecutableMode === 'custom' ? options.antigravityBin : '',
     projectPath,
     keepJobDir,
     keepDebugArtifacts,
@@ -397,6 +415,20 @@ export async function detectAntigravity(bin?: string): Promise<CodexDetectionRes
     throw new Error('Antigravity detection is only available in the desktop app.');
   }
   return invoke<CodexDetectionResult>('detect_antigravity', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+export async function detectClaude(bin?: string): Promise<CodexDetectionResult> {
+  if (!isDesktop()) {
+    return {
+      found: false,
+      path: null,
+      version: null,
+      error: 'Claude detection is only available in the desktop app.',
+    };
+  }
+  return invoke<CodexDetectionResult>('detect_claude', {
     bin: bin?.trim() ? bin.trim() : null,
   });
 }
@@ -449,6 +481,7 @@ export async function generateCodexFillImage(
   const projectPath = config.projectPath?.trim() ? config.projectPath.trim() : null;
   const runId = config.runId?.trim() ? config.runId.trim() : `fill-${Date.now()}`;
   const antigravity = plannedImage?.antigravity ?? null;
+  const claude = plannedImage?.claude ?? null;
   return invoke<GeneratedImageResult>('generate_codex_fill_image', {
     ...codexInvokeConfig({ ...config, runId }),
     bin,
@@ -458,6 +491,9 @@ export async function generateCodexFillImage(
     editTargetPng: Array.from(editTargetPng),
     maskPng: Array.from(maskPng),
     storeAsset,
+    plannerProvider: plannedImage?.plannerProvider ?? 'codex',
+    claudeBin: claude?.bin?.trim() ? claude.bin.trim() : null,
+    claudeModel: claude?.model && claude.model !== 'default' ? claude.model : null,
     imageProvider: plannedImage?.imageProvider ?? 'codex',
     antigravityBin: antigravity?.bin?.trim() ? antigravity.bin.trim() : null,
     antigravityModel: antigravity?.model ?? null,

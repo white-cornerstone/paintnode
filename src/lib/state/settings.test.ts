@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   CODEX_MODEL_OPTIONS,
+  CLAUDE_MODEL_OPTIONS,
   ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
   ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
   ANTIGRAVITY_MODEL_OPTIONS,
   ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
   ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
+  aiProfileOptionsFromRunOptions,
   aiProfileRunOptionsFromSettings,
   aiProviderDefaultsFromSettings,
   aiRunOptionsFromSettings,
@@ -145,6 +147,11 @@ describe('settings normalization', () => {
     expect(defaults.ai.plannerMode).toBe('auto');
     expect(defaults.ai.plannerProvider).toBe('codex');
     expect(defaults.ai.imageProvider).toBe('codex');
+    expect(defaults.ai.codexExecutableMode).toBe('builtin');
+    expect(defaults.ai.claudeExecutableMode).toBe('builtin');
+    expect(defaults.ai.antigravityExecutableMode).toBe('builtin');
+    expect(defaults.ai.claudeBin).toBe('');
+    expect(defaults.ai.claudeModel).toBe('default');
     expect(defaults.ai.autonomyLevel).toBe('low');
     expect(defaults.ai.antigravityModel).toBe('auto');
     expect(defaults.ai.antigravityApprovalMode).toBe('skipPermissions');
@@ -162,6 +169,7 @@ describe('settings normalization', () => {
     expect(defaults.ai.profiles).toEqual([]);
     expect(defaults.ai.defaultProfileId).toBeNull();
     expect(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id)).toContain('Gemini 3.5 Flash (High)');
+    expect(CLAUDE_MODEL_OPTIONS.map((option) => option.id)).toEqual(['default', 'sonnet', 'opus']);
   });
 
   it('exposes direct Antigravity image controls separately from agent models', () => {
@@ -275,6 +283,57 @@ describe('settings normalization', () => {
     expect(runOptions.imageProvider).toBe('antigravity');
   });
 
+  it('allows Claude as a planner provider without allowing it as an image provider', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        provider: 'claude',
+        plannerMode: 'force',
+        plannerProvider: 'claude',
+        imageProvider: 'claude',
+        claudeBin: '/bin/claude',
+        claudeModel: 'sonnet',
+      },
+    });
+
+    expect(normalized.ai.provider).toBe('codex');
+    expect(normalized.ai.imageProvider).toBe('codex');
+    expect(normalized.ai.plannerProvider).toBe('claude');
+    expect(normalized.ai.claudeBin).toBe('/bin/claude');
+    expect(normalized.ai.claudeModel).toBe('sonnet');
+    const runOptions = aiRunOptionsFromSettings(normalized);
+    expect(runOptions.plannerProvider).toBe('claude');
+    expect(runOptions.imageProvider).toBe('codex');
+  });
+
+  it('requires an explicit custom executable mode before saved binary paths act as overrides', () => {
+    const builtin = normalizeSettings({
+      ai: {
+        codexBin: '/bin/codex',
+        claudeBin: '/bin/claude',
+        antigravityBin: '/bin/agy',
+      },
+    });
+
+    expect(builtin.ai.codexExecutableMode).toBe('builtin');
+    expect(builtin.ai.claudeExecutableMode).toBe('builtin');
+    expect(builtin.ai.antigravityExecutableMode).toBe('builtin');
+
+    const custom = normalizeSettings({
+      ai: {
+        codexExecutableMode: 'custom',
+        codexBin: '/bin/codex',
+        claudeExecutableMode: 'custom',
+        claudeBin: '/bin/claude',
+        antigravityExecutableMode: 'custom',
+        antigravityBin: '/bin/agy',
+      },
+    });
+
+    expect(custom.ai.codexExecutableMode).toBe('custom');
+    expect(custom.ai.claudeExecutableMode).toBe('custom');
+    expect(custom.ai.antigravityExecutableMode).toBe('custom');
+  });
+
   it('migrates retired custom provider settings back to Codex', () => {
     const normalized = normalizeSettings({
       ai: {
@@ -300,7 +359,9 @@ describe('settings normalization', () => {
       ai: {
         provider: 'antigravity',
         autonomyLevel: 'guided',
+        codexExecutableMode: 'custom',
         codexBin: '/bin/codex',
+        antigravityExecutableMode: 'custom',
         antigravityBin: '/bin/agy',
         antigravityModel: 'Gemini 3.1 Pro (High)',
       },
@@ -310,6 +371,8 @@ describe('settings normalization', () => {
     runOptions.provider = 'codex';
 
     expect(runOptions.antigravityBin).toBe('/bin/agy');
+    expect(runOptions.codexExecutableMode).toBe('custom');
+    expect(runOptions.antigravityExecutableMode).toBe('custom');
     expect(runOptions.autonomyLevel).toBe('guided');
     expect(runOptions.imageQuality).toBe('auto');
     expect(runOptions.imageModeration).toBe('auto');
@@ -325,7 +388,9 @@ describe('settings normalization', () => {
     const value = normalizeSettings({
       ai: {
         provider: 'codex',
+        codexExecutableMode: 'custom',
         codexBin: '/new/codex',
+        antigravityExecutableMode: 'custom',
         antigravityBin: '/new/agy',
         profiles: [
           {
@@ -366,6 +431,83 @@ describe('settings normalization', () => {
     expect(runOptions.antigravityBin).toBe('/new/agy');
   });
 
+  it('stores profile presets with independent planner and image-generator settings', () => {
+    const value = normalizeSettings({
+      ai: {
+        profiles: [
+          {
+            id: 'high-quality',
+            name: 'High quality',
+            options: {
+              provider: 'codex',
+              plannerMode: 'force',
+              plannerProvider: 'claude',
+              imageProvider: 'codex',
+              claudeModel: 'opus',
+              model: 'gpt-5.5',
+              imageQuality: 'high',
+            },
+          },
+          {
+            id: 'fast-draft',
+            name: 'Fast draft',
+            options: {
+              provider: 'antigravity',
+              plannerMode: 'skip',
+              plannerProvider: 'codex',
+              imageProvider: 'antigravity',
+              antigravityImageModel: 'gemini-3.1-flash-image',
+              antigravityImageSize: '1K',
+            },
+          },
+        ],
+      },
+    });
+
+    const highQuality = aiProfileRunOptionsFromSettings(value, 'high-quality');
+    expect(highQuality.plannerMode).toBe('force');
+    expect(highQuality.plannerProvider).toBe('claude');
+    expect(highQuality.imageProvider).toBe('codex');
+    expect(highQuality.claudeModel).toBe('opus');
+    expect(highQuality.imageQuality).toBe('high');
+
+    const fastDraft = aiProfileRunOptionsFromSettings(value, 'fast-draft');
+    expect(fastDraft.plannerMode).toBe('skip');
+    expect(fastDraft.imageProvider).toBe('antigravity');
+    expect(fastDraft.antigravityImageModel).toBe('gemini-3.1-flash-image');
+    expect(fastDraft.antigravityImageSize).toBe('1K');
+  });
+
+  it('stores profile presets without machine-local executable overrides', () => {
+    const value = normalizeSettings({
+      ai: {
+        plannerMode: 'force',
+        plannerProvider: 'claude',
+        imageProvider: 'codex',
+        provider: 'codex',
+        claudeExecutableMode: 'custom',
+        claudeBin: '/bin/claude',
+        codexExecutableMode: 'custom',
+        codexBin: '/bin/codex',
+        antigravityExecutableMode: 'custom',
+        antigravityBin: '/bin/agy',
+        fillAspectRatio: '16:9',
+      },
+    });
+
+    const stored = aiProfileOptionsFromRunOptions(aiRunOptionsFromSettings(value)) as Record<string, unknown>;
+
+    expect(stored.plannerProvider).toBe('claude');
+    expect(stored.imageProvider).toBe('codex');
+    expect(stored.codexExecutableMode).toBeUndefined();
+    expect(stored.codexBin).toBeUndefined();
+    expect(stored.claudeExecutableMode).toBeUndefined();
+    expect(stored.claudeBin).toBeUndefined();
+    expect(stored.antigravityExecutableMode).toBeUndefined();
+    expect(stored.antigravityBin).toBeUndefined();
+    expect(stored.fillAspectRatio).toBeUndefined();
+  });
+
   it('can fetch provider defaults separately from a selected default profile', () => {
     const value = normalizeSettings({
       ai: {
@@ -387,5 +529,32 @@ describe('settings normalization', () => {
     expect(aiProviderDefaultsFromSettings(value).provider).toBe('codex');
     expect(aiProfileRunOptionsFromSettings(value, 'draft').provider).toBe('antigravity');
     expect(aiRunOptionsFromSettings(value).provider).toBe('antigravity');
+  });
+
+  it('does not apply the first saved profile unless the user marks it as default', () => {
+    const value = normalizeSettings({
+      ai: {
+        provider: 'codex',
+        imageProvider: 'codex',
+        defaultProfileId: null,
+        profiles: [
+          {
+            id: 'draft',
+            name: 'Draft',
+            options: {
+              provider: 'antigravity',
+              imageProvider: 'antigravity',
+              plannerMode: 'skip',
+              antigravityImageSize: '1K',
+            },
+          },
+        ],
+      },
+    });
+
+    expect(value.ai.defaultProfileId).toBeNull();
+    expect(aiRunOptionsFromSettings(value).provider).toBe('codex');
+    expect(aiRunOptionsFromSettings(value).imageProvider).toBe('codex');
+    expect(aiProfileRunOptionsFromSettings(value, 'draft').imageProvider).toBe('antigravity');
   });
 });

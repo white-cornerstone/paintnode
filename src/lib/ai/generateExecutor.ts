@@ -1,5 +1,6 @@
 import {
   codexConfigFromRunOptions,
+  claudeConfigFromRunOptions,
   antigravityConfigFromRunOptions,
   generateCodexFillImage,
   generateCodexImage,
@@ -105,9 +106,10 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         'Starting mask-guided generative fill...',
       );
     }
-    const useCodexPlannerForFill = !!fillEdit && plannerMode !== 'skip' && plannerProvider === 'codex';
+    const useAgentPlannerForFill =
+      !!fillEdit && plannerMode !== 'skip' && (plannerProvider === 'codex' || plannerProvider === 'claude');
     const generated =
-      useCodexPlannerForFill
+      useAgentPlannerForFill
         ? await generateCodexFillImage(
             codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
             fillEdit.sourcePng,
@@ -117,6 +119,11 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
             references,
             false,
             {
+              plannerProvider,
+              claude:
+                plannerProvider === 'claude'
+                  ? claudeConfigFromRunOptions(runOptions)
+                  : null,
               imageProvider,
               antigravity:
                 imageProvider === 'antigravity'

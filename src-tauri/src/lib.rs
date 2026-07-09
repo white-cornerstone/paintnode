@@ -54,6 +54,7 @@ pub fn run() {
             app::set_app_menu_enabled,
             ai::cancel_ai_run,
             ai::codex::detect_codex,
+            ai::claude::detect_claude,
             ai::antigravity::detect_antigravity,
             ai::codex::generate_codex_image,
             ai::codex::generate_codex_fill_image,

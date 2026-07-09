@@ -4,6 +4,7 @@
   import { tooltip } from '../actions/tooltip';
   import {
     CODEX_MODEL_OPTIONS,
+    CLAUDE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     ANTIGRAVITY_MODEL_OPTIONS,
@@ -12,12 +13,14 @@
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
     ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
+    type AiPlannerProvider,
     type AiProvider,
     type AiRunOptions,
     type AiAutonomyLevel,
     type CodexImageModeration,
     type CodexImageQuality,
     type CodexModelId,
+    type ClaudeModelId,
     type AntigravityApprovalMode,
     type AntigravityImageModelId,
     type AntigravityImageSize,
@@ -29,7 +32,9 @@
     type AntigravitySafetyThreshold,
     type ReasoningEffort,
     type ServiceTier,
+    aiProfileOptionsFromRunOptions,
     aiProfileRunOptionsFromSettings,
+    aiProviderDefaultsFromSettings,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
@@ -76,12 +81,18 @@
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
   ];
+  const plannerProviders: { value: AiPlannerProvider; label: string }[] = [
+    { value: 'codex', label: 'Codex' },
+    { value: 'antigravity', label: 'Antigravity' },
+    { value: 'claude', label: 'Claude' },
+  ];
   let open = $state(false);
   let submenu = $state<
     | 'autonomy'
     | 'imageProvider'
     | 'reasoning'
     | 'model'
+    | 'claudeModel'
     | 'speed'
     | 'quality'
     | 'moderation'
@@ -112,6 +123,7 @@
     (plannerEnabled && plannerProvider === 'antigravity') ||
       (!plannerEnabled && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
   );
+  const showClaudePlannerOptions = $derived(plannerEnabled && plannerProvider === 'claude');
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
   const imageQualityShort = $derived(
@@ -150,10 +162,13 @@
   const antigravitySafetyDangerousContentLabel = $derived(
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetyDangerousContent)?.label ?? 'API default',
   );
+  const claudeModelLabel = $derived(
+    CLAUDE_MODEL_OPTIONS.find((item) => item.id === options.claudeModel)?.label ?? 'Default',
+  );
   const summary = $derived.by(() => {
     const imageName = providerName(imageProvider);
     if (!plannerEnabled) return `Planner: Off · Image: ${imageName}`;
-    const plannerName = providerName(plannerProvider);
+    const plannerName = plannerProviderName(plannerProvider);
     if (plannerProvider === imageProvider) return `Planner: ${plannerModeShort} · Image: ${imageName}`;
     return `Planner: ${plannerModeShort} ${plannerName} · Image: ${imageName}`;
   });
@@ -164,7 +179,9 @@
     if (!plannerEnabled) return `Planner: Off. ${imageDetail}`;
     const plannerDetail = plannerProvider === 'codex'
       ? `Planner: ${plannerModeShort}, Codex, ${reasoningShort} reasoning`
-      : `Planner: ${plannerModeShort}, Antigravity, ${autonomyShort} autonomy`;
+      : plannerProvider === 'claude'
+        ? `Planner: ${plannerModeShort}, Claude, ${claudeModelLabel}`
+        : `Planner: ${plannerModeShort}, Antigravity, ${autonomyShort} autonomy`;
     return `${plannerDetail}. ${imageDetail}`;
   });
 
@@ -172,14 +189,18 @@
     return provider === 'antigravity' ? 'Antigravity' : 'Codex';
   }
 
+  function plannerProviderName(provider: AiPlannerProvider): string {
+    return provider === 'claude' ? 'Claude' : providerName(provider);
+  }
+
   function activePlannerMode(): 'auto' | 'force' {
     if (options.plannerMode === 'force' || options.plannerMode === 'auto') return options.plannerMode;
     return settings.value.ai.plannerMode === 'force' ? 'force' : 'auto';
   }
 
-  function setPlannerProvider(provider: AiProvider): void {
+  function setPlannerProvider(provider: AiPlannerProvider): void {
     options = { ...options, plannerMode: activePlannerMode(), plannerProvider: provider };
-    submenu = provider === 'codex' ? 'reasoning' : 'antigravityModel';
+    submenu = provider === 'codex' ? 'reasoning' : provider === 'claude' ? 'claudeModel' : 'antigravityModel';
   }
 
   function skipPlanner(): void {
@@ -198,12 +219,45 @@
     close();
   }
 
+  function applySettingsDefaults(): void {
+    options = aiProviderDefaultsFromSettings(settings.value);
+    submenu = null;
+    close();
+  }
+
+  function runOptionsMatch(left: AiRunOptions, right: AiRunOptions): boolean {
+    return JSON.stringify(aiProfileOptionsFromRunOptions(left)) === JSON.stringify(aiProfileOptionsFromRunOptions(right));
+  }
+
+  function settingsDefaultsActive(): boolean {
+    const defaults = aiProviderDefaultsFromSettings(settings.value);
+    if (!runOptionsMatch(options, defaults)) return false;
+    return !settings.value.ai.profiles.some((profile) => profileActive(profile.id));
+  }
+
+  function profileActive(profileId: string): boolean {
+    return runOptionsMatch(options, aiProfileRunOptionsFromSettings(settings.value, profileId));
+  }
+
+  function profileMenuSummary(profileId: string | null): string {
+    const profileOptions = profileId
+      ? aiProfileRunOptionsFromSettings(settings.value, profileId)
+      : aiProviderDefaultsFromSettings(settings.value);
+    const profileImageProvider = profileOptions.imageProvider ?? profileOptions.provider ?? 'codex';
+    if (profileOptions.plannerMode === 'skip') return `Planner: Skip · Image: ${providerName(profileImageProvider)}`;
+    return `Planner: ${plannerProviderName(profileOptions.plannerProvider)} · Image: ${providerName(profileImageProvider)}`;
+  }
+
   function setReasoning(reasoningEffort: ReasoningEffort): void {
     options = { ...options, reasoningEffort };
   }
 
   function setCodexModel(model: CodexModelId): void {
     options = { ...options, model };
+  }
+
+  function setClaudeModel(claudeModel: ClaudeModelId): void {
+    options = { ...options, claudeModel };
   }
 
   function setServiceTier(serviceTier: ServiceTier): void {
@@ -356,6 +410,7 @@
     options.plannerProvider;
     options.imageProvider;
     options.antigravitySafetyFiltering;
+    options.claudeModel;
     void updateMenuPosition();
   });
 
@@ -383,19 +438,30 @@
 <div class="ai-options">
   {#if open}
     <div bind:this={menuElement} use:portal class="menu" style={menuStyle} role="presentation" onpointerdown={stopPointer}>
+      <div class="menu-title">Profile</div>
+      <button type="button" class="profile-choice" class:active={settingsDefaultsActive()} onclick={applySettingsDefaults}>
+        <span class="profile-choice-text">
+          <span>Settings Defaults</span>
+          <small>{profileMenuSummary(null)}</small>
+        </span>
+        {#if settingsDefaultsActive()}<Icon svg={Checkmark} size={15} />{/if}
+      </button>
       {#if settings.value.ai.profiles.length}
-        <div class="menu-title">Profile</div>
         {#each settings.value.ai.profiles as profile (profile.id)}
-          <button type="button" onclick={() => applyProfile(profile.id)}>
-            <span>{profile.name}</span>
-            {#if settings.value.ai.defaultProfileId === profile.id}<span class="value">Default</span>{/if}
+          <button type="button" class="profile-choice" class:active={profileActive(profile.id)} onclick={() => applyProfile(profile.id)}>
+            <span class="profile-choice-text">
+              <span>{profile.name}</span>
+              <small>{profileMenuSummary(profile.id)}</small>
+            </span>
+            {#if settings.value.ai.defaultProfileId === profile.id}<span class="profile-default">Default</span>{/if}
+            {#if profileActive(profile.id)}<Icon svg={Checkmark} size={15} />{/if}
           </button>
         {/each}
-        <div class="separator"></div>
       {/if}
+      <div class="separator"></div>
 
         <div class="menu-title">Planner</div>
-        {#each providers as provider (provider.value)}
+        {#each plannerProviders as provider (provider.value)}
           <button type="button" class:active={plannerEnabled && plannerProvider === provider.value} onclick={() => setPlannerProvider(provider.value)}>
             <span>{provider.label}</span>
             {#if plannerEnabled && plannerProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
@@ -524,6 +590,26 @@
                 <button type="button" class:active={options.antigravityApprovalMode === item.value} onclick={() => setAntigravityApproval(item.value)}>
                   <span>{item.label}</span>
                   {#if options.antigravityApprovalMode === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+
+        {#if showClaudePlannerOptions}
+          <div class="separator"></div>
+          <div class="menu-title">Claude Planner</div>
+          <button type="button" onclick={() => (submenu = submenu === 'claudeModel' ? null : 'claudeModel')}>
+            <span>Model</span>
+            <span class="value">{claudeModelLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'claudeModel'}
+            <div class="subitems">
+              {#each CLAUDE_MODEL_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.claudeModel === item.id} onclick={() => setClaudeModel(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.claudeModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
                 </button>
               {/each}
             </div>
@@ -749,6 +835,36 @@
   .subitems button:hover,
   .subitems button.active {
     background: var(--bg-elevated);
+  }
+  .menu button.profile-choice {
+    align-items: start;
+  }
+  .profile-choice-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .profile-choice-text span {
+    overflow: hidden;
+    color: var(--text);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .profile-choice-text small {
+    overflow: hidden;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .profile-default {
+    padding: 1px 5px;
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+    color: var(--text-dim);
+    font-size: 10px;
   }
   .value {
     color: var(--text-dim);

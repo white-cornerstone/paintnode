@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { editor } from '../state/editor.svelte';
-import type { AiPlannerMode, AiProvider, AiRunOptions } from '../state/settings';
+import type { AiPlannerMode, AiPlannerProvider, AiProvider, AiRunOptions } from '../state/settings';
 
 /** Shared support for the background AI tasks and their dialogs (Generate, Retouch, Extract Assets). */
 
@@ -17,6 +17,11 @@ export function providerLabel(provider: AiProvider): string {
   return 'Codex';
 }
 
+export function plannerProviderLabel(provider: AiPlannerProvider): string {
+  if (provider === 'claude') return 'Claude';
+  return providerLabel(provider);
+}
+
 export function providerRunDir(provider: AiProvider): string {
   if (provider === 'antigravity') return 'antigravity-runs';
   return 'codex-runs';
@@ -26,7 +31,7 @@ export function imageProviderFromRunOptions(options: Pick<AiRunOptions, 'imagePr
   return options.imageProvider ?? options.provider ?? 'codex';
 }
 
-export function plannerProviderFromRunOptions(options: Pick<AiRunOptions, 'plannerProvider'>): AiProvider {
+export function plannerProviderFromRunOptions(options: Pick<AiRunOptions, 'plannerProvider'>): AiPlannerProvider {
   return options.plannerProvider ?? 'codex';
 }
 
@@ -49,7 +54,7 @@ export function aiRoleSummary(options: Pick<AiRunOptions, 'plannerMode' | 'plann
   if (plannerProvider === imageProvider) {
     return `Planner: ${plannerLabel} · Image: ${providerLabel(imageProvider)}`;
   }
-  return `Planner: ${plannerLabel} ${providerLabel(plannerProvider)} · Image: ${providerLabel(imageProvider)}`;
+  return `Planner: ${plannerLabel} ${plannerProviderLabel(plannerProvider)} · Image: ${providerLabel(imageProvider)}`;
 }
 
 export function aiRunningLabel(provider: AiProvider): string {
