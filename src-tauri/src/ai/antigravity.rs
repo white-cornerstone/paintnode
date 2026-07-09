@@ -63,7 +63,7 @@ use crate::ai::{
     emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract,
     now_id, output_tail, project_or_temp_job_path, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, required_png_output_is_ready, safe_job_child_path,
-    sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
+    sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
     write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
     AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
@@ -1305,7 +1305,7 @@ fn json_text(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(|v| v.as_str())
-        .and_then(sanitize_progress_line)
+        .and_then(sanitize_provider_progress_line)
 }
 
 fn tool_action_message(tool_call: &serde_json::Value) -> Option<String> {
@@ -5061,6 +5061,31 @@ mod tests {
         assert!(error.contains("Raw response excerpt"));
         assert!(error.contains("backend returned no candidate details"));
         assert!(error.contains("trace-redacted"));
+    }
+
+    #[test]
+    fn transcript_progress_hides_internal_run_dir_names() {
+        let line = json!({
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{
+                "args": {
+                    "toolAction": "I will list the codex-runs directory to see whether result.png exists."
+                }
+            }]
+        })
+        .to_string();
+
+        let messages = antigravity_transcript_messages(&line);
+
+        assert_eq!(
+            messages,
+            vec![
+                "Antigravity: I will list the job folder to see whether result.png exists."
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
