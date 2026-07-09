@@ -1,0 +1,85 @@
+name: Provider runtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: PaintNode provider package version
+        required: true
+        default: "1.0.0"
+      codex_sdk_version:
+        description: Codex SDK version
+        required: true
+        default: "0.144.0"
+      claude_sdk_version:
+        description: Claude Agent SDK version
+        required: true
+        default: "0.3.205"
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: "22.19.0"
+  RUNTIME_RELEASE_TAG: provider-runtimes-latest
+
+jobs:
+  build:
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [codex, claude]
+        arch: [arm64, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Download target Node runtime
+        shell: bash
+        run: |
+          curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-${{ matrix.arch }}.tar.gz"
+          tar -xzf "node-v${NODE_VERSION}-darwin-${{ matrix.arch }}.tar.gz"
+      - name: Build managed provider package
+        shell: bash
+        run: |
+          if [[ "${{ matrix.provider }}" == "codex" ]]; then
+            sdk="${{ inputs.codex_sdk_version }}"
+          else
+            sdk="${{ inputs.claude_sdk_version }}"
+          fi
+          node scripts/build-managed-runtime.mjs \
+            --provider "${{ matrix.provider }}" \
+            --sdk-version "$sdk" \
+            --package-version "${{ inputs.package_version }}" \
+            --platform darwin \
+            --arch "${{ matrix.arch }}" \
+            --node "$PWD/node-v${NODE_VERSION}-darwin-${{ matrix.arch }}/bin/node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.provider }}-${{ matrix.arch }}
+          path: dist/managed-runtimes/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: dist/managed-runtimes
+          merge-multiple: true
+      - name: Generate update manifest
+        run: node scripts/generate-runtime-manifest.mjs dist/managed-runtimes
+      - name: Publish independently updateable provider packages
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RUNTIME_RELEASE_TAG }}
+          name: PaintNode provider runtimes
+          prerelease: true
+          files: |
+            dist/managed-runtimes/*.zip
+            dist/managed-runtimes/runtime-manifest.json

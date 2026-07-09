@@ -640,6 +640,9 @@ fn codex_image_moderation(value: Option<String>) -> Option<String> {
 }
 
 fn codex_sdk_runner_script() -> PathBuf {
+    if let Some(path) = crate::managed_runtime::managed_runner("codex") {
+        return path;
+    }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent()
@@ -647,7 +650,23 @@ fn codex_sdk_runner_script() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("scripts").join("codex-sdk-runner.mjs"))
 }
 
+fn codex_sdk_node() -> PathBuf {
+    crate::managed_runtime::managed_node("codex").unwrap_or_else(|| PathBuf::from("node"))
+}
+
+fn managed_codex_bin_or<'a>(configured: &'a str) -> std::borrow::Cow<'a, str> {
+    if !configured.trim().is_empty() {
+        return std::borrow::Cow::Borrowed(configured);
+    }
+    crate::managed_runtime::managed_executable("codex")
+        .map(|path| std::borrow::Cow::Owned(path.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(configured))
+}
+
 fn codex_capabilities_runner_script() -> PathBuf {
+    if let Some(path) = crate::managed_runtime::managed_capabilities_runner("codex") {
+        return path;
+    }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent()
@@ -799,7 +818,8 @@ fn build_codex_sdk_command(
     image_paths: &[PathBuf],
     options: &CodexCommandOptions,
 ) -> Command {
-    let mut command = Command::new("node");
+    let codex_bin = managed_codex_bin_or(codex_bin);
+    let mut command = Command::new(codex_sdk_node());
     apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg(codex_sdk_runner_script())
@@ -811,7 +831,7 @@ fn build_codex_sdk_command(
         .arg("never")
         .arg("--skip-git-repo-check");
     if !codex_bin.trim().is_empty() {
-        command.arg("--codex-path").arg(codex_bin);
+        command.arg("--codex-path").arg(codex_bin.as_ref());
     }
     if let Some(model) = options.model.as_deref() {
         command.arg("--model").arg(model);
@@ -1929,9 +1949,12 @@ pub(crate) async fn discover_codex_capabilities(
     bin: Option<String>,
 ) -> Result<AiProviderCapabilitiesResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut command = Command::new("node");
+        let mut command = Command::new(codex_sdk_node());
         apply_ai_cli_environment(&mut command).arg(codex_capabilities_runner_script());
-        if let Some(bin) = configured_codex_bin(bin) {
+        if let Some(bin) = configured_codex_bin(bin).or_else(|| {
+            crate::managed_runtime::managed_executable("codex")
+                .map(|path| path.to_string_lossy().into_owned())
+        }) {
             command.arg("--codex-path").arg(bin);
         }
         command

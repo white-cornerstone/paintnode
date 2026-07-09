@@ -1,6 +1,7 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import ManagedRuntimeCard from './ManagedRuntimeCard.svelte';
   import { detectAntigravity, detectCodex, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
   import { markAiSetupSeen } from '../state/aiSetup';
   import {
@@ -21,6 +22,7 @@
     loadCodexCapabilities,
   } from '../ai/providerCapabilities';
   import { editor } from '../state/editor.svelte';
+  import type { ManagedRuntimeStatus } from '../ai/managedRuntime';
   import { project } from '../state/project.svelte';
   import { ui } from '../state/ui.svelte';
   import { Checkmark, CheckmarkCircle, ChevronLeft, Code, ErrorCircle, FolderAdd, Rocket, Sparkle } from '../icons';
@@ -172,6 +174,12 @@
     provider = id;
   }
 
+  function managedRuntimeChanged(status: ManagedRuntimeStatus | null): void {
+    if (status && (status.state === 'ready' || status.state === 'updateAvailable') && status.authenticated !== false) {
+      void runDetection('codex', '');
+    }
+  }
+
     function confirmProvider(): void {
       settings.update({
         ai: {
@@ -228,8 +236,8 @@
         <div>
           <h2>Welcome to PaintNode!</h2>
           <p>
-            PaintNode teams up with an AI CLI that runs right on your computer — your own sign-in, your own
-            machine. We're checking both for you now; pick the one you'd like as your default.
+            Choose an AI provider. PaintNode can install and maintain Codex for you; Antigravity continues to
+            use your existing <code>agy</code> installation and local sign-in.
           </p>
         </div>
       </div>
@@ -380,42 +388,60 @@
           </label>
         {/if}
       {:else}
-        <div class="result miss">
-          <span class="result-icon"><Icon svg={ErrorCircle} size={20} /></span>
-          <div>
-            <strong>Not found yet — no worries!</strong>
-            {#if provider === 'codex'}
-              <small>
-                Install the Codex CLI, then run <code>codex login</code> once in Terminal to sign in.
-                If it lives somewhere unusual, enter the full path below and try again.
-              </small>
-            {:else}
+        {#if provider === 'codex'}
+          <ManagedRuntimeCard
+            provider="codex"
+            onStatusChange={managedRuntimeChanged}
+          />
+
+          {#if selectedDetect.result?.error}
+            <p class="detail">{selectedDetect.result.error}</p>
+          {/if}
+
+          <details class="existing-runtime">
+            <summary>Use an existing installation</summary>
+            <div class="detect-row">
+              <label class="field">
+                <span>{providerName} executable</span>
+                <input
+                  type="text"
+                  bind:value={manualBin}
+                  placeholder="codex or full path"
+                  spellcheck="false"
+                />
+              </label>
+              <button type="button" onclick={() => void runDetection(provider, manualBin, true)}>Connect</button>
+            </div>
+          </details>
+        {:else}
+          <div class="result miss">
+            <span class="result-icon"><Icon svg={ErrorCircle} size={20} /></span>
+            <div>
+              <strong>Not found yet — no worries!</strong>
               <small>
                 Install Antigravity with Google's install script, then run <code>agy</code> once in Terminal to sign in.
                 If it lives somewhere unusual, enter the full path below and try again.
               </small>
-            {/if}
+            </div>
           </div>
-        </div>
 
-        {#if selectedDetect.result?.error}
-          <p class="detail">{selectedDetect.result.error}</p>
+          {#if selectedDetect.result?.error}
+            <p class="detail">{selectedDetect.result.error}</p>
+          {/if}
+
+          <div class="detect-row">
+            <label class="field">
+              <span>{providerName} command</span>
+              <input
+                type="text"
+                bind:value={manualBin}
+                placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
+                spellcheck="false"
+              />
+            </label>
+            <button type="button" onclick={() => void runDetection(provider, manualBin, true)}>Try again</button>
+          </div>
         {/if}
-
-        <div class="detect-row">
-          <label class="field">
-            <span>{providerName} command</span>
-            <input
-              type="text"
-              bind:value={manualBin}
-              placeholder={provider === 'codex'
-                ? 'codex, /opt/homebrew/bin/codex, or /usr/local/bin/codex'
-                : 'agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy'}
-              spellcheck="false"
-            />
-          </label>
-          <button type="button" onclick={() => void runDetection(provider, manualBin, true)}>Try again</button>
-        </div>
       {/if}
 
       <div class="actions">
