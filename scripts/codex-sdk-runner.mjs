@@ -2,7 +2,7 @@
 import { Codex } from '@openai/codex-sdk';
 
 function usage() {
-  return `Usage: codex-sdk-runner.mjs --cwd DIR [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
+  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -16,6 +16,7 @@ function requireValue(args, index, flag) {
 function parseArgs(argv) {
   const options = {
     cwd: process.cwd(),
+    sessionId: undefined,
     codexPath: undefined,
     model: undefined,
     reasoning: undefined,
@@ -47,6 +48,9 @@ function parseArgs(argv) {
     }
     if (arg === '--cwd') {
       options.cwd = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--session-id') {
+      options.sessionId = requireValue(argv, index, arg);
       index += 2;
     } else if (arg === '--codex-path') {
       options.codexPath = requireValue(argv, index, arg);
@@ -116,14 +120,19 @@ async function main() {
     env: sanitizedEnv(),
     config: sdkConfig(options),
   });
-  const thread = codex.startThread({
-    workingDirectory: options.cwd,
-    skipGitRepoCheck: options.skipGitRepoCheck,
-    model: options.model,
-    modelReasoningEffort: options.reasoning,
-    sandboxMode: options.sandbox,
-    approvalPolicy: options.approval,
-  });
+  const thread = options.sessionId
+    ? codex.resumeThread(options.sessionId)
+    : codex.startThread({
+        workingDirectory: options.cwd,
+        skipGitRepoCheck: options.skipGitRepoCheck,
+        model: options.model,
+        modelReasoningEffort: options.reasoning,
+        sandboxMode: options.sandbox,
+        approvalPolicy: options.approval,
+      });
+  if (options.sessionId) {
+    process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: options.sessionId, resumed: true })}\n`);
+  }
   const input = [
     ...options.images.map((path) => ({ type: 'local_image', path })),
     { type: 'text', text: prompt },

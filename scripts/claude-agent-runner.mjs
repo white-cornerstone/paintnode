@@ -7,7 +7,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 const require = createRequire(import.meta.url);
 
 function usage() {
-  return `Usage: claude-agent-runner.mjs --cwd DIR [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
+  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -21,6 +21,7 @@ function requireValue(args, index, flag) {
 function parseArgs(argv) {
   const options = {
     cwd: process.cwd(),
+    sessionId: undefined,
     claudePath: undefined,
     model: undefined,
     effort: undefined,
@@ -56,6 +57,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === '--cwd') {
       options.cwd = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--session-id') {
+      options.sessionId = requireValue(argv, index, arg);
       index += 2;
     } else if (arg === '--claude-path') {
       options.claudePath = requireValue(argv, index, arg);
@@ -202,7 +206,6 @@ async function main() {
   const prompt = options.promptParts.join(' ').trim() || (await readStdin()).trim();
   if (!prompt) throw new Error('Prompt is required');
 
-  process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: null })}\n`);
   process.stdout.write(`${JSON.stringify({ type: 'turn.started' })}\n`);
   const messages = query({
     prompt: plannerPrompt(prompt, options.images),
@@ -215,12 +218,24 @@ async function main() {
       allowedTools: ['Read', 'Write'],
       permissionMode: 'acceptEdits',
       maxTurns: 8,
+      resume: options.sessionId,
       env: sanitizedEnv(),
     },
   });
 
   let failed = false;
+  let announcedSession = false;
   for await (const message of messages) {
+    if (!announcedSession && typeof message.session_id === 'string' && message.session_id) {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: 'thread.started',
+          thread_id: message.session_id,
+          resumed: Boolean(options.sessionId),
+        })}\n`,
+      );
+      announcedSession = true;
+    }
     process.stdout.write(`${JSON.stringify({ type: 'claude.message', message })}\n`);
     if (message.type === 'assistant') {
       const text = textFromContent(message.message?.content);

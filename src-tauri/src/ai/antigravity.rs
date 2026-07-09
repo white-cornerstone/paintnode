@@ -1585,7 +1585,10 @@ fn run_antigravity_with_progress(
         .lock()
         .map(|bytes| bytes.clone())
         .unwrap_or_else(|_| Vec::new());
-    let thread_id = thread_id.lock().ok().and_then(|id| id.clone());
+    let thread_id = transcript_path
+        .as_deref()
+        .and_then(antigravity_brain_session_id)
+        .or_else(|| thread_id.lock().ok().and_then(|id| id.clone()));
 
     Ok(AgentRunResult {
         output: Output {
@@ -1737,12 +1740,15 @@ fn build_antigravity_command(
     options: &AntigravityCommandOptions,
     new_project: bool,
     _json_progress: bool,
+    session_id: Option<&str>,
 ) -> Command {
     let mut command = Command::new(antigravity_bin);
     apply_ai_cli_environment(&mut command);
     command.current_dir(workspace_path);
     apply_antigravity_command_options(&mut command, options);
-    if new_project {
+    if let Some(session_id) = session_id {
+        command.arg("--conversation").arg(session_id);
+    } else if new_project {
         command.arg("--new-project");
     }
     command.arg("--add-dir").arg(job_path);
@@ -2617,6 +2623,7 @@ fn run_antigravity(
     app: AppHandle,
     run_id: String,
     required_output: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
     let mut command = build_antigravity_command(
         antigravity_bin,
@@ -2626,6 +2633,7 @@ fn run_antigravity(
         options,
         new_project,
         true,
+        session_id,
     );
     run_antigravity_with_progress(
         &mut command,
@@ -2652,6 +2660,7 @@ pub(crate) fn run_antigravity_director_request(
     prompt: &str,
     new_project: bool,
     required_output: &str,
+    session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
     let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
     let mut options = antigravity_command_options(model, approval_mode);
@@ -2666,6 +2675,7 @@ pub(crate) fn run_antigravity_director_request(
         app.clone(),
         run_id.to_string(),
         Some(required_output),
+        session_id,
     )
 }
 
@@ -3218,7 +3228,7 @@ pub(crate) async fn generate_antigravity_image(
                         ensure_completion_acceptance_note:
                             "Candidate completed; ensure-completion mode does not run a separate quality review.",
                     },
-                    |_, turn_prompt_text, candidate_path| {
+                    |_, turn_prompt_text, candidate_path, session_id| {
                         let mut turn_image_paths = reference_paths.clone();
                         if let Some(candidate_path) = candidate_path {
                             turn_image_paths.push(candidate_path.to_path_buf());
@@ -3235,6 +3245,7 @@ pub(crate) async fn generate_antigravity_image(
                                 &job_path,
                                 turn_prompt_text,
                                 &turn_image_paths,
+                                session_id,
                             ),
                             AiDirectorProvider::Claude => {
                                 let mut command = build_director_claude_command(
@@ -3242,6 +3253,7 @@ pub(crate) async fn generate_antigravity_image(
                                     &job_path,
                                     turn_prompt_text,
                                     &turn_image_paths,
+                                    session_id,
                                 );
                                 let run = run_claude_with_progress(
                                     &mut command,
@@ -3274,6 +3286,7 @@ pub(crate) async fn generate_antigravity_image(
                                 app.clone(),
                                 run_id.clone(),
                                 Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                                session_id,
                             ),
                         }
                     },
@@ -4535,6 +4548,7 @@ pub(crate) async fn decouple_antigravity_image(
             app.clone(),
             run_id.clone(),
             Some("manifest.json"),
+            None,
         )?;
         let manifest_path = job_path.join("manifest.json");
         if !run.output.status.success() && !run.satisfied_required_output && !manifest_path.exists()
@@ -5430,6 +5444,7 @@ mod tests {
             &options,
             true,
             true,
+            None,
         );
         let args = command
             .get_args()
@@ -5468,6 +5483,7 @@ mod tests {
             &options,
             true,
             false,
+            None,
         );
         let args = command
             .get_args()
@@ -5500,6 +5516,7 @@ mod tests {
             &options,
             false,
             false,
+            None,
         );
         let args = command
             .get_args()
@@ -5516,6 +5533,33 @@ mod tests {
             args[add_dir_idx + 1],
             job_path.to_string_lossy().to_string()
         );
+    }
+
+    #[test]
+    fn antigravity_resumes_exact_conversation_without_creating_project() {
+        let job = TempJobDir::new("paintnode-antigravity-resume-test").expect("temp dir");
+        let options = antigravity_command_options(None, Some("default".to_string()));
+        let session_id = "c70ca67d-bd32-4cc2-a668-a74a767d46eb";
+        let command = build_antigravity_command(
+            "agy",
+            job.path(),
+            job.path(),
+            "review the latest candidate",
+            &options,
+            true,
+            false,
+            Some(session_id),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(!args.contains(&"--new-project".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--conversation", session_id]));
+        assert!(args.contains(&"-p".to_string()));
     }
 
     #[test]

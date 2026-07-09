@@ -538,12 +538,19 @@ pub(crate) fn run_codex_director_request(
     job_path: &Path,
     prompt_text: &str,
     image_paths: &[PathBuf],
+    session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
     let codex_bin = configured_codex_bin_or_sdk_default(bin);
     let mut options = codex_command_options(model, reasoning_effort, service_tier, None, None);
     options.keep_debug_artifacts = keep_debug_artifacts;
-    let mut command =
-        build_codex_sdk_command(&codex_bin, job_path, prompt_text, image_paths, &options);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        image_paths,
+        &options,
+        session_id,
+    );
     let run =
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
             format!(
@@ -818,6 +825,24 @@ fn build_codex_sdk_command(
     image_paths: &[PathBuf],
     options: &CodexCommandOptions,
 ) -> Command {
+    build_codex_sdk_command_with_session(
+        codex_bin,
+        job_path,
+        prompt_text,
+        image_paths,
+        options,
+        None,
+    )
+}
+
+fn build_codex_sdk_command_with_session(
+    codex_bin: &str,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+    options: &CodexCommandOptions,
+    session_id: Option<&str>,
+) -> Command {
     let codex_bin = managed_codex_bin_or(codex_bin);
     let mut command = Command::new(codex_sdk_node());
     apply_ai_cli_environment(&mut command)
@@ -830,6 +855,9 @@ fn build_codex_sdk_command(
         .arg("--approval")
         .arg("never")
         .arg("--skip-git-repo-check");
+    if let Some(session_id) = session_id {
+        command.arg("--session-id").arg(session_id);
+    }
     if !codex_bin.trim().is_empty() {
         command.arg("--codex-path").arg(codex_bin.as_ref());
     }
@@ -2560,15 +2588,17 @@ fn run_director_provider_action_turn(
     part_path: &Path,
     prompt_text: &str,
     image_paths: &[PathBuf],
+    session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
     match director_provider {
         PaintNodeDirectorProvider::Codex => {
-            let mut command = build_codex_sdk_command(
+            let mut command = build_codex_sdk_command_with_session(
                 codex_bin,
                 part_path,
                 prompt_text,
                 image_paths,
                 codex_options,
+                session_id,
             );
             let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
                 .map_err(|e| {
@@ -2586,8 +2616,13 @@ fn run_director_provider_action_turn(
             }
         }
         PaintNodeDirectorProvider::Claude => {
-            let mut command =
-                build_director_claude_command(claude_options, part_path, prompt_text, image_paths);
+            let mut command = build_director_claude_command(
+                claude_options,
+                part_path,
+                prompt_text,
+                image_paths,
+                session_id,
+            );
             let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string())
                 .map_err(|e| {
                     format!(
@@ -2615,6 +2650,7 @@ fn run_director_provider_action_turn(
             prompt_text,
             true,
             PAINTNODE_DIRECTOR_ACTION_FILE,
+            session_id,
         ),
     }
 }
@@ -2648,7 +2684,7 @@ fn run_agentic_fill_director_part(
             ensure_completion_acceptance_note:
                 "Candidate completed; ensure-completion mode does not run a separate quality review.",
         },
-        |_, prompt_text, candidate_path| {
+        |_, prompt_text, candidate_path, session_id| {
             let image_paths = fill_director_turn_image_paths(
                 part_path,
                 has_overview,
@@ -2666,6 +2702,7 @@ fn run_agentic_fill_director_part(
                 part_path,
                 prompt_text,
                 &image_paths,
+                session_id,
             )
         },
         |run| director_final_agent_message(director_provider, &run.output),
@@ -2883,6 +2920,7 @@ fn run_antigravity_fill_part(
         prompt_text,
         true,
         PAINTNODE_IMAGE_REQUEST_FILE,
+        None,
     )?;
 
     let owned_request_path = part_path.join(PAINTNODE_IMAGE_REQUEST_FILE);
@@ -3154,7 +3192,7 @@ fn codex_restore_image_details(
                     ensure_completion_acceptance_note:
                         "Candidate completed; ensure-completion mode does not run a separate quality review.",
                 },
-                |_, turn_prompt_text, candidate_path| {
+                |_, turn_prompt_text, candidate_path, session_id| {
                     let mut turn_image_paths = image_paths.clone();
                     if let Some(candidate_path) = candidate_path {
                         turn_image_paths.push(candidate_path.to_path_buf());
@@ -3170,6 +3208,7 @@ fn codex_restore_image_details(
                         &part_path,
                         turn_prompt_text,
                         &turn_image_paths,
+                        session_id,
                     )
                 },
                 |run| director_final_agent_message(&director_runner, &run.output),
@@ -4154,7 +4193,7 @@ pub(crate) async fn generate_codex_retouch_image(
                         ensure_completion_acceptance_note:
                             "Candidate completed; ensure-completion mode does not run a separate quality review.",
                     },
-                    |_, turn_prompt_text, candidate_path| {
+                    |_, turn_prompt_text, candidate_path, session_id| {
                         let mut turn_image_paths = image_paths.clone();
                         if let Some(candidate_path) = candidate_path {
                             turn_image_paths.push(candidate_path.to_path_buf());
@@ -4170,6 +4209,7 @@ pub(crate) async fn generate_codex_retouch_image(
                             &part_path,
                             turn_prompt_text,
                             &turn_image_paths,
+                            session_id,
                         )
                     },
                     |run| director_final_agent_message(&director_runner, &run.output),
@@ -4900,6 +4940,28 @@ mod tests {
                 .expect("service tier flag should be present");
             assert_eq!(args[service_tier_idx + 1], "fast");
         }
+    }
+
+    #[test]
+    fn codex_director_command_resumes_sdk_thread() {
+        let job = TempJobDir::new("paintnode-codex-resume-test").expect("temp dir");
+        let session_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "review the latest candidate",
+            &[],
+            &CodexCommandOptions::default(),
+            Some(session_id),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", session_id]));
     }
 
     #[test]

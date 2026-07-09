@@ -88,6 +88,16 @@ fn build_claude_agent_command(
     prompt_text: &str,
     image_paths: &[PathBuf],
 ) -> Command {
+    build_claude_agent_command_with_session(options, job_path, prompt_text, image_paths, None)
+}
+
+fn build_claude_agent_command_with_session(
+    options: &ClaudeCommandOptions,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+    session_id: Option<&str>,
+) -> Command {
     let managed_bin = managed_claude_bin_or(&options.bin);
     let mut command = Command::new(claude_sdk_node());
     apply_ai_cli_environment(&mut command)
@@ -95,6 +105,9 @@ fn build_claude_agent_command(
         .arg(claude_agent_runner_script())
         .arg("--cwd")
         .arg(job_path);
+    if let Some(session_id) = session_id {
+        command.arg("--session-id").arg(session_id);
+    }
     if !managed_bin.is_empty() {
         command.arg("--claude-path").arg(managed_bin);
     }
@@ -131,8 +144,9 @@ pub(crate) fn build_director_claude_command(
     job_path: &Path,
     prompt_text: &str,
     image_paths: &[PathBuf],
+    session_id: Option<&str>,
 ) -> Command {
-    build_claude_agent_command(options, job_path, prompt_text, image_paths)
+    build_claude_agent_command_with_session(options, job_path, prompt_text, image_paths, session_id)
 }
 
 pub(crate) fn run_claude_with_progress(
@@ -510,6 +524,28 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["--model", "sonnet"]));
         assert!(args.windows(2).any(|pair| pair == ["--effort", "max"]));
+    }
+
+    #[test]
+    fn director_command_resumes_agent_sdk_session() {
+        let job = TempJobDir::new("paintnode-claude-resume-test").expect("temp dir");
+        let options = claude_command_options(None, None, None);
+        let session_id = "af9de5e1-8b05-4790-9ea0-c70b427963f1";
+        let command = build_director_claude_command(
+            &options,
+            job.path(),
+            "review the latest candidate",
+            &[],
+            Some(session_id),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", session_id]));
     }
 
     #[test]

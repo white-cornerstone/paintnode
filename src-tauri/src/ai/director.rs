@@ -19,11 +19,62 @@ pub(crate) const PAINTNODE_DIRECTOR_ACTION_FILE: &str = "paintnode-director-acti
 pub(crate) const PAINTNODE_DIRECTOR_OBSERVATION_FILE: &str = "paintnode-director-observation.json";
 pub(crate) const PAINTNODE_DIRECTOR_FINAL_FILE: &str = "paintnode-director-final.json";
 pub(crate) const PAINTNODE_DIRECTOR_TIMELINE_FILE: &str = "paintnode-director-timeline.jsonl";
+pub(crate) const PAINTNODE_DIRECTOR_SESSION_FILE: &str = "paintnode-director-session.json";
 
 const PAINTNODE_DIRECTOR_FULL_REVIEW_MAX_TURNS: usize = 5;
 const PAINTNODE_DIRECTOR_ENSURE_COMPLETION_MAX_TURNS: usize = 3;
 const PAINTNODE_DIRECTOR_REVIEW_PREVIEW_MAX_SIDE: u32 = 512;
 const PAINTNODE_DIRECTOR_REVIEW_PREVIEW_JPEG_QUALITY: u8 = 82;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectorSessionRecord {
+    version: u8,
+    provider: String,
+    session_id: String,
+    last_turn: usize,
+}
+
+fn valid_director_session_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+fn load_director_session_id(part_path: &Path, provider_label: &str) -> Option<String> {
+    let text = fs::read_to_string(part_path.join(PAINTNODE_DIRECTOR_SESSION_FILE)).ok()?;
+    let record = serde_json::from_str::<DirectorSessionRecord>(&text).ok()?;
+    (record.version == 1
+        && record.provider == provider_label
+        && valid_director_session_id(&record.session_id))
+    .then_some(record.session_id)
+}
+
+fn write_director_session(
+    part_path: &Path,
+    provider_label: &str,
+    session_id: &str,
+    last_turn: usize,
+) -> Result<(), String> {
+    if !valid_director_session_id(session_id) {
+        return Err(format!(
+            "{provider_label} returned an invalid Director session identifier."
+        ));
+    }
+    write_director_json(
+        part_path,
+        PAINTNODE_DIRECTOR_SESSION_FILE,
+        json!({
+            "version": 1,
+            "provider": provider_label,
+            "sessionId": session_id,
+            "lastTurn": last_turn,
+        }),
+    )
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -450,7 +501,7 @@ pub(crate) fn run_candidate_director_loop<T, RunTurn, FinalMessage, GenerateCand
     mut generate_candidate: GenerateCandidate,
 ) -> Result<T, String>
 where
-    RunTurn: FnMut(usize, &str, Option<&Path>) -> Result<AgentRunResult, String>,
+    RunTurn: FnMut(usize, &str, Option<&Path>, Option<&str>) -> Result<AgentRunResult, String>,
     FinalMessage: FnMut(&AgentRunResult) -> Option<String>,
     GenerateCandidate:
         FnMut(usize, DirectorImageRequest, &str) -> Result<DirectorCandidate<T>, String>,
@@ -461,6 +512,7 @@ where
         AiDirectorInvolvement::PlanOnly => 1,
     };
     reset_director_loop_files(part_path);
+    let mut session_id = load_director_session_id(part_path, spec.provider_label);
     let mut artifact_cleanup = DirectorArtifactCleanup::new(part_path, spec.keep_debug_artifacts);
 
     let mut candidates = Vec::<(String, T)>::new();
@@ -484,7 +536,18 @@ where
         let candidate_path = latest_candidate_review_file
             .as_ref()
             .map(|file| part_path.join(file));
-        let run = run_turn(turn, &prompt_text, candidate_path.as_deref())?;
+        let run = run_turn(
+            turn,
+            &prompt_text,
+            candidate_path.as_deref(),
+            session_id.as_deref(),
+        )?;
+        if let Some(next_session_id) = run.thread_id.as_deref() {
+            write_director_session(part_path, spec.provider_label, next_session_id, turn)?;
+            session_id = Some(next_session_id.to_string());
+        } else if let Some(current_session_id) = session_id.as_deref() {
+            write_director_session(part_path, spec.provider_label, current_session_id, turn)?;
+        }
         let action = read_director_action_or_legacy_request(part_path, spec.legacy_request_file)
             .map_err(|error| {
                 if let Some(message) = final_agent_message(&run) {
@@ -843,7 +906,7 @@ mod tests {
                 review_criteria: "accept the intended candidate",
                 ensure_completion_acceptance_note: "completed",
             },
-            |_, _, _| {
+            |_, _, _, _| {
                 fs::write(
                     job.path().join(PAINTNODE_DIRECTOR_ACTION_FILE),
                     actions.pop_front().expect("next Director action"),
@@ -876,6 +939,75 @@ mod tests {
         let final_record = fs::read_to_string(job.path().join(PAINTNODE_DIRECTOR_FINAL_FILE))
             .expect("Director final record");
         assert!(final_record.contains("director-candidate-1.png"));
+    }
+
+    #[test]
+    fn director_reuses_provider_session_on_follow_up_turn() {
+        let job = TempJobDir::new("paintnode-director-session-test").expect("temp dir");
+        let session_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let mut actions = VecDeque::from([
+            r#"{ "action": "generateCandidate", "prompt": "first" }"#,
+            r#"{ "action": "acceptResult", "candidate": "director-candidate-1.png" }"#,
+        ]);
+        let mut seen_sessions = Vec::new();
+
+        let accepted = run_candidate_director_loop(
+            job.path(),
+            DirectorLoopSpec {
+                provider_label: "Codex",
+                involvement: AiDirectorInvolvement::FullReview,
+                keep_debug_artifacts: false,
+                legacy_request_file: "paintnode-image-request.json",
+                base_prompt_text: "direct the image",
+                review_criteria: "accept the intended candidate",
+                ensure_completion_acceptance_note: "completed",
+            },
+            |_, _, _, current_session| {
+                seen_sessions.push(current_session.map(str::to_string));
+                fs::write(
+                    job.path().join(PAINTNODE_DIRECTOR_ACTION_FILE),
+                    actions.pop_front().expect("next Director action"),
+                )
+                .expect("write Director action");
+                let mut run = successful_agent_run();
+                run.thread_id = Some(session_id.into());
+                Ok(run)
+            },
+            |_| None,
+            |turn, _, _| {
+                let candidate_file = director_candidate_file(turn);
+                fs::write(job.path().join(&candidate_file), b"candidate")
+                    .map_err(|error| error.to_string())?;
+                Ok(DirectorCandidate {
+                    result: turn,
+                    file_name: candidate_file,
+                })
+            },
+        )
+        .expect("accepted candidate");
+
+        assert_eq!(accepted, 1);
+        assert_eq!(seen_sessions, vec![None, Some(session_id.to_string())]);
+        let record = fs::read_to_string(job.path().join(PAINTNODE_DIRECTOR_SESSION_FILE))
+            .expect("Director session record");
+        let record: serde_json::Value = serde_json::from_str(&record).expect("session JSON");
+        assert_eq!(record["provider"], "Codex");
+        assert_eq!(record["sessionId"], session_id);
+        assert_eq!(record["lastTurn"], 2);
+    }
+
+    #[test]
+    fn director_session_record_is_scoped_to_provider_and_valid_uuid() {
+        let job = TempJobDir::new("paintnode-director-session-scope-test").expect("temp dir");
+        let session_id = "af9de5e1-8b05-4790-9ea0-c70b427963f1";
+        write_director_session(job.path(), "Antigravity", session_id, 1).expect("write session");
+
+        assert_eq!(
+            load_director_session_id(job.path(), "Antigravity").as_deref(),
+            Some(session_id)
+        );
+        assert!(load_director_session_id(job.path(), "Claude").is_none());
+        assert!(write_director_session(job.path(), "Antigravity", "not-a-uuid", 2).is_err());
     }
 
     fn successful_agent_run() -> AgentRunResult {
