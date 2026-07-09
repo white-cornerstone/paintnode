@@ -14,6 +14,7 @@ import type { AiProviderCapabilitiesResult } from '../integrations/desktop';
 const discovered: AiProviderCapabilitiesResult = {
   source: 'appServer',
   warning: null,
+  features: FALLBACK_CODEX_CAPABILITIES.features,
   models: [
     {
       id: 'vision-a',
@@ -52,12 +53,16 @@ describe('Codex capabilities', () => {
     expect(claudeReasoningOptions(FALLBACK_CLAUDE_CAPABILITIES, 'opus', 'max').at(-1)?.value).toBe('max');
     expect(claudeEffortForModel(FALLBACK_CLAUDE_CAPABILITIES, 'opus', 'max')).toBe('max');
     expect(FALLBACK_ANTIGRAVITY_CAPABILITIES.models[0].id).toBe('auto');
+    expect(FALLBACK_CLAUDE_CAPABILITIES.features.managedSubagents).toBe(true);
+    expect(FALLBACK_ANTIGRAVITY_CAPABILITIES.features.transport).toBe('cli');
+    expect(FALLBACK_ANTIGRAVITY_CAPABILITIES.features.structuredOutput).toBe(false);
   });
 
   it('shows only automatic effort when a discovered Claude model has no effort support', () => {
     const capabilities: AiProviderCapabilitiesResult = {
       source: 'agentSdk',
       warning: null,
+      features: FALLBACK_CLAUDE_CAPABILITIES.features,
       models: [
         {
           id: 'haiku',

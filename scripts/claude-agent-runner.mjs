@@ -1,13 +1,24 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { directorActionSchema } from './director-action-schema.mjs';
 
 const require = createRequire(import.meta.url);
 
+function writeDirectorAction(path, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('The SDK did not return a Director action object');
+  }
+  if (!directorActionSchema.properties.action.enum.includes(value.action)) {
+    throw new Error(`The SDK returned an unknown Director action: ${String(value.action)}`);
+  }
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
 function usage() {
-  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
+  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -22,6 +33,7 @@ function parseArgs(argv) {
   const options = {
     cwd: process.cwd(),
     sessionId: undefined,
+    outputFile: undefined,
     claudePath: undefined,
     model: undefined,
     effort: undefined,
@@ -60,6 +72,9 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--session-id') {
       options.sessionId = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--output-file') {
+      options.outputFile = requireValue(argv, index, arg);
       index += 2;
     } else if (arg === '--claude-path') {
       options.claudePath = requireValue(argv, index, arg);
@@ -219,12 +234,17 @@ async function main() {
       permissionMode: 'acceptEdits',
       maxTurns: 8,
       resume: options.sessionId,
+      outputFormat: options.outputFile
+        ? { type: 'json_schema', schema: directorActionSchema }
+        : undefined,
+      agentProgressSummaries: true,
       env: sanitizedEnv(),
     },
   });
 
   let failed = false;
   let announcedSession = false;
+  let structuredAction = null;
   for await (const message of messages) {
     if (!announcedSession && typeof message.session_id === 'string' && message.session_id) {
       process.stdout.write(
@@ -237,6 +257,34 @@ async function main() {
       announcedSession = true;
     }
     process.stdout.write(`${JSON.stringify({ type: 'claude.message', message })}\n`);
+    if (message.type === 'system' && message.subtype === 'task_started') {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: 'provider.progress',
+          kind: message.subagent_type ? 'subagentStarted' : 'taskStarted',
+          message: message.description || 'Claude started a background task',
+          detail: message.subagent_type || message.task_type || null,
+        })}\n`,
+      );
+    } else if (message.type === 'system' && message.subtype === 'task_progress') {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: 'provider.progress',
+          kind: message.subagent_type ? 'subagentProgress' : 'taskProgress',
+          message: message.summary || message.description || 'Claude background task is progressing',
+          detail: message.last_tool_name || message.subagent_type || null,
+        })}\n`,
+      );
+    } else if (message.type === 'tool_progress') {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: 'provider.progress',
+          kind: 'toolProgress',
+          message: `Claude is using ${message.tool_name}`,
+          detail: message.tool_name,
+        })}\n`,
+      );
+    }
     if (message.type === 'assistant') {
       const text = textFromContent(message.message?.content);
       if (text) {
@@ -244,6 +292,9 @@ async function main() {
       }
     } else if (message.type === 'result') {
       if (message.subtype && message.subtype !== 'success') failed = true;
+      if (message.subtype === 'success' && message.structured_output) {
+        structuredAction = message.structured_output;
+      }
       const result = message.result || message.error || message.subtype;
       if (typeof result === 'string' && result.trim()) {
         process.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result.trim() } })}\n`);
@@ -251,6 +302,13 @@ async function main() {
     } else if (message.type === 'system' && message.subtype === 'auth_status') {
       process.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Claude authentication checked.' } })}\n`);
     }
+  }
+  if (!failed && options.outputFile) {
+    if (!structuredAction) throw new Error('Claude did not return a structured Director action');
+    writeDirectorAction(options.outputFile, structuredAction);
+    process.stdout.write(
+      `${JSON.stringify({ type: 'provider.progress', kind: 'actionReady', message: 'Claude returned a structured Director action' })}\n`,
+    );
   }
   process.stdout.write(`${JSON.stringify({ type: failed ? 'error' : 'turn.completed' })}\n`);
   if (failed) process.exitCode = 1;

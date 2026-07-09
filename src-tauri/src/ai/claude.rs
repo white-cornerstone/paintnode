@@ -8,10 +8,11 @@ use std::thread;
 use serde::Deserialize;
 use tauri::AppHandle;
 
+use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 use crate::ai::{
-    ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled, codex_agent_message_text,
-    output_tail, spawn_output_reader, AgentRunResult, AiModelCapability,
-    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    ai_provider_features, ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled,
+    codex_agent_message_text, output_tail, spawn_output_reader, AgentRunResult, AiDirectorProvider,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 
@@ -146,7 +147,17 @@ pub(crate) fn build_director_claude_command(
     image_paths: &[PathBuf],
     session_id: Option<&str>,
 ) -> Command {
-    build_claude_agent_command_with_session(options, job_path, prompt_text, image_paths, session_id)
+    let mut command = build_claude_agent_command_with_session(
+        options,
+        job_path,
+        prompt_text,
+        image_paths,
+        session_id,
+    );
+    command
+        .arg("--output-file")
+        .arg(job_path.join(PAINTNODE_DIRECTOR_ACTION_FILE));
+    command
 }
 
 pub(crate) fn run_claude_with_progress(
@@ -403,6 +414,7 @@ fn fallback_claude_capabilities(warning: Option<String>) -> AiProviderCapabiliti
         .collect(),
         source: "fallback".into(),
         warning,
+        features: ai_provider_features(AiDirectorProvider::Claude),
     }
 }
 
@@ -457,6 +469,7 @@ fn parse_claude_capabilities(bytes: &[u8]) -> Result<AiProviderCapabilitiesResul
         models,
         source: "agentSdk".into(),
         warning: None,
+        features: ai_provider_features(AiDirectorProvider::Claude),
     })
 }
 
@@ -546,6 +559,9 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--session-id", session_id]));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
+        }));
     }
 
     #[test]

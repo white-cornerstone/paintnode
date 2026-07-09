@@ -103,6 +103,7 @@ impl Default for DirectorImageRequest {
 pub(crate) enum DirectorActionKind {
     GenerateCandidate,
     AcceptResult,
+    RequestUserInput,
     Fail,
 }
 
@@ -129,6 +130,12 @@ pub(crate) struct DirectorAction {
     pub(crate) candidate: Option<String>,
     #[serde(default)]
     pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) question: Option<String>,
+    #[serde(default)]
+    pub(crate) options: Vec<String>,
+    #[serde(default)]
+    pub(crate) allow_custom: bool,
 }
 
 impl DirectorAction {
@@ -142,6 +149,9 @@ impl DirectorAction {
             notes: Some(request.notes),
             candidate: None,
             reason: None,
+            question: None,
+            options: Vec::new(),
+            allow_custom: false,
         }
     }
 
@@ -422,13 +432,14 @@ Tool protocol:
 - Read `prompt.txt` for the original PaintNode Director brief when you need the task context.
 - Read `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` for the latest PaintNode tool result.
 - Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
-- Choose exactly one action: `generateCandidate`, `acceptResult`, or `fail`.
+- Choose exactly one action: `generateCandidate`, `acceptResult`, `requestUserInput`, or `fail`.
 - Do not invoke image-generation tools yourself, do not create `result.png`, and do not edit files other than `{PAINTNODE_DIRECTOR_ACTION_FILE}`.
-- Do not ask follow-up questions.
+- Use `requestUserInput` only when a missing user decision would materially change the intended image. Ask one concise question with up to four short options; set `allowCustom` when a free-form answer is useful.
 
 Action examples:
 {{ "version": 1, "action": "acceptResult", "candidate": "latest", "notes": "accepted" }}
 {{ "version": 1, "action": "generateCandidate", "baseImage": "source.png", "prompt": "revised prompt", "constraints": [], "avoid": [], "notes": "retry reason" }}
+{{ "version": 1, "action": "requestUserInput", "question": "Which lighting direction should the edit use?", "options": ["Warm sunset", "Cool daylight"], "allowCustom": true }}
 {{ "version": 1, "action": "fail", "reason": "short reason" }}"#
     )
 }
@@ -493,16 +504,24 @@ pub(crate) fn write_director_candidate_review_preview(
     Ok(preview_file)
 }
 
-pub(crate) fn run_candidate_director_loop<T, RunTurn, FinalMessage, GenerateCandidate>(
+pub(crate) fn run_candidate_director_loop<
+    T,
+    RunTurn,
+    FinalMessage,
+    RequestUserInput,
+    GenerateCandidate,
+>(
     part_path: &Path,
     spec: DirectorLoopSpec<'_>,
     mut run_turn: RunTurn,
     mut final_agent_message: FinalMessage,
+    mut request_user_input: RequestUserInput,
     mut generate_candidate: GenerateCandidate,
 ) -> Result<T, String>
 where
     RunTurn: FnMut(usize, &str, Option<&Path>, Option<&str>) -> Result<AgentRunResult, String>,
     FinalMessage: FnMut(&AgentRunResult) -> Option<String>,
+    RequestUserInput: FnMut(usize, &str, &[String], bool) -> Result<String, String>,
     GenerateCandidate:
         FnMut(usize, DirectorImageRequest, &str) -> Result<DirectorCandidate<T>, String>,
 {
@@ -664,6 +683,26 @@ where
                 )?;
                 artifact_cleanup.accept(&accepted_candidate_file);
                 return Ok(accepted);
+            }
+            DirectorActionKind::RequestUserInput => {
+                let question = action
+                    .question
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|question| !question.is_empty())
+                    .ok_or_else(|| {
+                        "AI Director requested user input without a question.".to_string()
+                    })?;
+                let answer =
+                    request_user_input(turn, question, &action.options, action.allow_custom)?;
+                write_director_observation(
+                    part_path,
+                    turn,
+                    "userInputProvided",
+                    latest_candidate_file.as_deref(),
+                    latest_candidate_review_file.as_deref(),
+                    &format!("The user answered the Director question: {answer}"),
+                )?;
             }
             DirectorActionKind::Fail => {
                 let reason = action.reason.or(action.notes).unwrap_or_else(|| {
@@ -828,6 +867,9 @@ mod tests {
             notes: Some("first attempt".into()),
             candidate: None,
             reason: None,
+            question: None,
+            options: Vec::new(),
+            allow_custom: false,
         };
 
         write_director_turn_action(job.path(), 1, &action).expect("write action");
@@ -915,6 +957,7 @@ mod tests {
                 Ok(successful_agent_run())
             },
             |_| None,
+            |_, _, _, _| Err("test did not expect user input".into()),
             |turn, _, _| {
                 let candidate_file = director_candidate_file(turn);
                 let candidate_png = crate::png::encode_rgba_png(
@@ -974,6 +1017,7 @@ mod tests {
                 Ok(run)
             },
             |_| None,
+            |_, _, _, _| Err("test did not expect user input".into()),
             |turn, _, _| {
                 let candidate_file = director_candidate_file(turn);
                 fs::write(job.path().join(&candidate_file), b"candidate")
@@ -1008,6 +1052,68 @@ mod tests {
         );
         assert!(load_director_session_id(job.path(), "Claude").is_none());
         assert!(write_director_session(job.path(), "Antigravity", "not-a-uuid", 2).is_err());
+    }
+
+    #[test]
+    fn director_records_user_answer_and_continues_same_loop() {
+        let job = TempJobDir::new("paintnode-director-user-input-test").expect("temp dir");
+        let mut actions = VecDeque::from([
+            r#"{ "action": "requestUserInput", "question": "Which mood?", "options": ["Warm", "Cool"], "allowCustom": true }"#,
+            r#"{ "action": "generateCandidate", "prompt": "use a warm mood" }"#,
+            r#"{ "action": "acceptResult", "candidate": "latest" }"#,
+        ]);
+        let mut questions = Vec::new();
+
+        let accepted = run_candidate_director_loop(
+            job.path(),
+            DirectorLoopSpec {
+                provider_label: "Claude",
+                involvement: AiDirectorInvolvement::FullReview,
+                keep_debug_artifacts: true,
+                legacy_request_file: "paintnode-image-request.json",
+                base_prompt_text: "direct the image",
+                review_criteria: "match the requested mood",
+                ensure_completion_acceptance_note: "completed",
+            },
+            |_, _, _, _| {
+                fs::write(
+                    job.path().join(PAINTNODE_DIRECTOR_ACTION_FILE),
+                    actions.pop_front().expect("next Director action"),
+                )
+                .expect("write Director action");
+                Ok(successful_agent_run())
+            },
+            |_| None,
+            |turn, question, options, allow_custom| {
+                questions.push((turn, question.to_string(), options.to_vec(), allow_custom));
+                Ok("Warm".into())
+            },
+            |turn, _, _| {
+                let candidate_file = director_candidate_file(turn);
+                fs::write(job.path().join(&candidate_file), b"candidate")
+                    .map_err(|error| error.to_string())?;
+                Ok(DirectorCandidate {
+                    result: turn,
+                    file_name: candidate_file,
+                })
+            },
+        )
+        .expect("accepted candidate");
+
+        assert_eq!(accepted, 2);
+        assert_eq!(
+            questions,
+            vec![(
+                1,
+                "Which mood?".into(),
+                vec!["Warm".into(), "Cool".into()],
+                true
+            )]
+        );
+        let observation = fs::read_to_string(job.path().join("director-turn-1-observation.json"))
+            .expect("user input observation");
+        assert!(observation.contains("userInputProvided"));
+        assert!(observation.contains("Warm"));
     }
 
     fn successful_agent_run() -> AgentRunResult {

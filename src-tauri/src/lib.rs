@@ -55,6 +55,7 @@ pub fn run() {
             app::app_memory_info,
             app::set_app_menu_enabled,
             ai::cancel_ai_run,
+            ai::submit_ai_director_input,
             ai::codex::detect_codex,
             ai::codex::discover_codex_capabilities,
             ai::claude::detect_claude,

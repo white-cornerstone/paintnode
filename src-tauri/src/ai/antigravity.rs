@@ -57,12 +57,13 @@ use crate::ai::placement::{
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
-    ai_director_restore_contract, ai_director_workflow_contract, ai_retouch_asset_name,
-    ai_run_cancelled, apply_ai_cli_environment, clean_option, cleanup_project_agent_job,
-    clear_ai_run_cancelled, command_failure_with_required_output, emit_codex_part_progress,
-    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract,
-    now_id, output_tail, project_or_temp_job_path, reference_prompt_note,
-    remove_legacy_generative_fill_agent_inputs, required_png_output_is_ready, safe_job_child_path,
+    ai_director_restore_contract, ai_director_workflow_contract, ai_provider_features,
+    ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
+    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure_with_required_output,
+    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
+    emit_provider_progress, image_agent_autonomy_contract, now_id, output_tail,
+    project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
+    request_ai_director_input, required_png_output_is_ready, safe_job_child_path,
     sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
     write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
@@ -1433,7 +1434,7 @@ fn emit_antigravity_transcript_progress(
     *offset += text.as_bytes().len() as u64;
     for line in text.lines() {
         for message in antigravity_transcript_messages(line) {
-            emit_codex_progress(app, run_id, message);
+            emit_provider_progress(app, run_id, "toolCompleted", "Antigravity", message, None);
         }
     }
 }
@@ -1828,9 +1829,10 @@ pub(crate) fn antigravity_generate_director_prompt(
             r#"PaintNode Director tool loop:
 - Do not create image pixels yourself and do not create `result.png`.
 - Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
-- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
+- Choose exactly one Director action: `generateCandidate`, `acceptResult`, `requestUserInput`, or `fail`.
 - For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned Antigravity image tool to create the candidate.
 - Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` naming the full candidate file, and attach a downscaled review preview of that candidate when your participation level requires review.
+- Use `requestUserInput` only when a missing user decision would materially change the intended image. Ask one concise question with up to four options.
 
 JSON schema:
 {{
@@ -1855,7 +1857,7 @@ Director review criteria:
             r#"Required Director action:
 - Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` only. PaintNode will call the Antigravity image backend after reading your action.
 - Do not save `result.png` yourself.
-- Do not ask follow-up questions.
+- To ask the user a necessary question, write a `requestUserInput` action instead of opening an interactive CLI prompt.
 {workspace_rule}
 
 Final response should be one short sentence confirming `{PAINTNODE_DIRECTOR_ACTION_FILE}` was created."#
@@ -2549,6 +2551,7 @@ fn fallback_antigravity_capabilities(warning: Option<String>) -> AiProviderCapab
         models,
         source: "fallback".into(),
         warning,
+        features: ai_provider_features(AiDirectorProvider::Antigravity),
     }
 }
 
@@ -2581,6 +2584,7 @@ fn parse_antigravity_capabilities(text: &str) -> Result<AiProviderCapabilitiesRe
         models,
         source: "cli".into(),
         warning: None,
+        features: ai_provider_features(AiDirectorProvider::Antigravity),
     })
 }
 
@@ -3294,6 +3298,17 @@ pub(crate) async fn generate_antigravity_image(
                         AiDirectorProvider::Codex => final_codex_agent_message(&run.output),
                         AiDirectorProvider::Claude => final_claude_agent_message(&run.output),
                         AiDirectorProvider::Antigravity => None,
+                    },
+                    |turn, question, options, allow_custom| {
+                        request_ai_director_input(
+                            &app,
+                            &run_id,
+                            director_provider.label(),
+                            turn,
+                            question,
+                            options,
+                            allow_custom,
+                        )
                     },
                     |turn, request, candidate_prompt| {
                         let candidate_file = director_candidate_file(turn);

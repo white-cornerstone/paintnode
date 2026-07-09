@@ -243,6 +243,26 @@ export interface AiProviderCapabilitiesResult {
   models: AiModelCapability[];
   source: 'appServer' | 'agentSdk' | 'cli' | 'fallback';
   warning: string | null;
+  features: AiProviderFeatureCapabilities;
+}
+
+export interface AiProviderFeatureCapabilities {
+  transport: 'sdk' | 'cli';
+  sessionReuse: boolean;
+  structuredOutput: boolean;
+  appMediatedUserInput: boolean;
+  autonomousSubagents: boolean;
+  managedSubagents: boolean;
+  structuredProgress: boolean;
+}
+
+export interface AiDirectorInputPayload {
+  runId: string;
+  requestId: string;
+  provider: string;
+  question: string;
+  options: string[];
+  allowCustom: boolean;
 }
 
 export interface ProjectAsset {
@@ -667,6 +687,20 @@ export async function generateCodexRetouchImage(
 export async function cancelAiRun(runId: string): Promise<void> {
   if (!isDesktop() || !runId.trim()) return;
   await invoke('cancel_ai_run', { runId: runId.trim() });
+}
+
+export async function submitAiDirectorInput(
+  request: Pick<AiDirectorInputPayload, 'runId' | 'requestId'>,
+  answer: string,
+  cancelled = false,
+): Promise<void> {
+  if (!isDesktop()) return;
+  await invoke('submit_ai_director_input', {
+    runId: request.runId,
+    requestId: request.requestId,
+    answer,
+    cancelled,
+  });
 }
 
 export async function upscaleCodexImage(

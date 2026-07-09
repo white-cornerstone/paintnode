@@ -33,6 +33,15 @@ export const FALLBACK_CODEX_CAPABILITIES: AiProviderCapabilitiesResult = {
   })),
   source: 'fallback',
   warning: null,
+  features: {
+    transport: 'sdk',
+    sessionReuse: true,
+    structuredOutput: true,
+    appMediatedUserInput: true,
+    autonomousSubagents: true,
+    managedSubagents: false,
+    structuredProgress: true,
+  },
 };
 
 const fallbackClaudeEfforts: AiReasoningCapability[] = [
@@ -55,6 +64,15 @@ export const FALLBACK_CLAUDE_CAPABILITIES: AiProviderCapabilitiesResult = {
   })),
   source: 'fallback',
   warning: null,
+  features: {
+    transport: 'sdk',
+    sessionReuse: true,
+    structuredOutput: true,
+    appMediatedUserInput: true,
+    autonomousSubagents: true,
+    managedSubagents: true,
+    structuredProgress: true,
+  },
 };
 
 export const FALLBACK_ANTIGRAVITY_CAPABILITIES: AiProviderCapabilitiesResult = {
@@ -68,6 +86,15 @@ export const FALLBACK_ANTIGRAVITY_CAPABILITIES: AiProviderCapabilitiesResult = {
   })),
   source: 'fallback',
   warning: null,
+  features: {
+    transport: 'cli',
+    sessionReuse: true,
+    structuredOutput: false,
+    appMediatedUserInput: true,
+    autonomousSubagents: true,
+    managedSubagents: false,
+    structuredProgress: false,
+  },
 };
 
 const cache = new Map<string, Promise<AiProviderCapabilitiesResult>>();
