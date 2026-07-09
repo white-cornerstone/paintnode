@@ -4,6 +4,7 @@ pub(crate) mod antigravity;
 pub(crate) mod canvas;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod director;
 pub(crate) mod fill_storyboard;
 pub(crate) mod placement;
 
