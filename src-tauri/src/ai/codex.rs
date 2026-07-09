@@ -89,7 +89,7 @@ const PAINTNODE_IMAGE_REQUEST_FILE: &str = "paintnode-image-request.json";
 const PAINTNODE_CODEX_IMAGE_REQUEST_FILE: &str = "paintnode-codex-image-request.json";
 const PAINTNODE_CODEX_IMAGE_RESPONSE_FILE: &str = "paintnode-codex-image-response.json";
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct CodexCommandOptions {
     model: Option<String>,
     reasoning_effort: Option<String>,
@@ -97,19 +97,6 @@ struct CodexCommandOptions {
     image_quality: Option<String>,
     image_moderation: Option<String>,
     keep_debug_artifacts: bool,
-}
-
-impl Default for CodexCommandOptions {
-    fn default() -> Self {
-        Self {
-            model: None,
-            reasoning_effort: None,
-            service_tier: None,
-            image_quality: None,
-            image_moderation: None,
-            keep_debug_artifacts: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -898,7 +885,7 @@ fn gpt_image2_size_for_dimensions(dimensions: (u32, u32)) -> Option<String> {
     let long = width.max(height);
     let short = width.min(height);
     let pixels = u64::from(width) * u64::from(height);
-    if long > 3840 || long > short * 3 || pixels < 655_360 || pixels > 8_294_400 {
+    if long > 3840 || long > short * 3 || !(655_360..=8_294_400).contains(&pixels) {
         return None;
     }
     Some(format!("{width}x{height}"))
@@ -1390,6 +1377,9 @@ fn build_decouple_codex_command(
     )
 }
 
+// These provider orchestration signatures mirror the stable Tauri command and
+// prompt contracts. Regrouping them requires a coordinated IPC API migration.
+#[allow(clippy::too_many_arguments)]
 fn build_decouple_codex_director_command(
     codex_bin: &str,
     job_path: &Path,
@@ -1441,6 +1431,7 @@ Requirements:
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn generative_fill_prompt(
     prompt: &str,
     autonomy: AiAutonomyLevel,
@@ -1468,6 +1459,7 @@ fn generative_fill_prompt(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generative_fill_director_prompt(
     prompt: &str,
     autonomy: AiAutonomyLevel,
@@ -1739,6 +1731,7 @@ Final response should be one short sentence confirming `{final_response_file}` w
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_generative_fill_codex_command(
     codex_bin: &str,
     job_path: &Path,
@@ -1827,6 +1820,7 @@ fn codex_direct_retouch_prompt(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn codex_direct_retouch_director_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -2021,6 +2015,7 @@ pub(crate) async fn discover_codex_capabilities(
 /// Codex auth files and strips API-key environment variables so this provider prefers the user's
 /// existing ChatGPT/Codex sign-in rather than accidental API billing.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_codex_image(
     app: AppHandle,
     bin: Option<String>,
@@ -2133,7 +2128,7 @@ pub(crate) async fn generate_codex_image(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!(
+                    format!(
                         "Cover-cropped Codex result from {}x{} to {}x{}",
                         source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
@@ -2143,7 +2138,7 @@ pub(crate) async fn generate_codex_image(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
+                    format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
                 );
                 let (restored, _) = codex_restore_image_details(
                     &app,
@@ -2289,7 +2284,7 @@ fn run_codex_fill_storyboard(
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
-                codex_command_label(&codex_bin)
+                codex_command_label(codex_bin)
             )
         })?;
 
@@ -2312,7 +2307,7 @@ fn run_codex_fill_storyboard(
             |e| {
                 format!(
                     "Failed to run Codex at '{}': {e}",
-                    codex_command_label(&codex_bin)
+                    codex_command_label(codex_bin)
                 )
             },
         )?;
@@ -2783,7 +2778,7 @@ fn run_codex_fill_part(
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
-                codex_command_label(&codex_bin)
+                codex_command_label(codex_bin)
             )
         })?;
 
@@ -2807,7 +2802,7 @@ fn run_codex_fill_part(
             |e| {
                 format!(
                     "Failed to run Codex at '{}': {e}",
-                    codex_command_label(&codex_bin)
+                    codex_command_label(codex_bin)
                 )
             },
         )?;
@@ -2983,6 +2978,7 @@ fn run_antigravity_fill_part(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_codex_direct_edit_part(
     app: &AppHandle,
     run_id: &str,
@@ -3099,6 +3095,7 @@ Output requirements:
 
 /// Run a tiled detail-restoration pass over an enlarged image: every part is
 /// regenerated at model-native density and pasted back at its position.
+#[allow(clippy::too_many_arguments)]
 fn codex_restore_image_details(
     app: &AppHandle,
     run_id: &str,
@@ -3332,6 +3329,7 @@ fn codex_restore_image_details(
 
 /// Run local Codex headlessly for a mask-guided generative fill.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_codex_fill_image(
     app: AppHandle,
     bin: Option<String>,
@@ -3621,7 +3619,7 @@ pub(crate) async fn generate_codex_fill_image(
                         emit_codex_progress(
                             &app,
                             &run_id,
-                            &format!("Skipping storyboard draft guide: {error}"),
+                            format!("Skipping storyboard draft guide: {error}"),
                         );
                         None
                     }
@@ -3934,6 +3932,7 @@ pub(crate) async fn generate_codex_fill_image(
 
 /// Run local Codex headlessly for an AI retouch request.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_codex_retouch_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4388,6 +4387,7 @@ pub(crate) async fn generate_codex_retouch_image(
 /// Enlarge a flattened document and restore its detail with tiled AI
 /// regeneration (AI -> Upscale). 100% skips the enlarge and only restores.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upscale_codex_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4456,7 +4456,7 @@ pub(crate) async fn upscale_codex_image(
             emit_codex_progress(
                 &app,
                 &run_id,
-                &format!(
+                format!(
                     "Enlarging image from {}x{} to {}x{}",
                     source_dimensions.0,
                     source_dimensions.1,
@@ -4527,6 +4527,7 @@ pub(crate) async fn upscale_codex_image(
 ///
 /// The app owns the deterministic import step; Codex only needs to satisfy the file contract.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decouple_codex_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4801,6 +4802,7 @@ pub(crate) async fn decouple_codex_image(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn compose_codex_workflow(
     app: AppHandle,
     bin: Option<String>,

@@ -520,7 +520,7 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
         }
     }
 
-    files.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    files.sort_by_key(|file| std::cmp::Reverse(file.modified_at));
     files
 }
 
@@ -531,7 +531,7 @@ fn project_state(project_path: &Path) -> Result<ProjectState, String> {
         .into_iter()
         .map(|asset| asset_view(project_path, asset))
         .collect::<Vec<_>>();
-    assets.sort_by(|a, b| b.asset.created_at.cmp(&a.asset.created_at));
+    assets.sort_by_key(|asset| std::cmp::Reverse(asset.asset.created_at));
     Ok(ProjectState {
         path: project_path.to_string_lossy().to_string(),
         name: manifest.name,
@@ -784,6 +784,8 @@ pub(crate) async fn project_refresh(project_path: String) -> Result<ProjectState
 }
 
 #[tauri::command]
+// The arguments are the existing Tauri IPC payload; changing their shape is an API migration.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn project_store_asset_bytes(
     project_path: String,
     name: String,

@@ -116,14 +116,12 @@ struct AntigravityKeychainEnvelope {
 #[derive(Debug, Deserialize)]
 struct AntigravityStoredToken {
     access_token: String,
-    token_type: Option<String>,
     expiry: Option<String>,
 }
 
 #[derive(Debug)]
 struct AntigravityAuthToken {
     access_token: String,
-    token_type: Option<String>,
     expiry: Option<String>,
 }
 
@@ -144,66 +142,35 @@ struct AntigravityGenerateContentEnvelope {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 struct AntigravityGenerateContentResponse {
     candidates: Vec<AntigravityCandidate>,
     model_version: Option<String>,
     response_id: Option<String>,
 }
 
-impl Default for AntigravityGenerateContentResponse {
-    fn default() -> Self {
-        Self {
-            candidates: Vec::new(),
-            model_version: None,
-            response_id: None,
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 struct AntigravityCandidate {
     content: Option<AntigravityContent>,
     finish_reason: Option<String>,
     finish_message: Option<String>,
 }
 
-impl Default for AntigravityCandidate {
-    fn default() -> Self {
-        Self {
-            content: None,
-            finish_reason: None,
-            finish_message: None,
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 struct AntigravityContent {
     parts: Vec<AntigravityPart>,
 }
 
-impl Default for AntigravityContent {
-    fn default() -> Self {
-        Self { parts: Vec::new() }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 struct AntigravityPart {
     inline_data: Option<AntigravityInlineData>,
     text: Option<String>,
-}
-
-impl Default for AntigravityPart {
-    fn default() -> Self {
-        Self {
-            inline_data: None,
-            text: None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,7 +337,6 @@ fn parse_antigravity_keychain_token(raw: &str) -> Result<AntigravityAuthToken, S
     }
     Ok(AntigravityAuthToken {
         access_token: token.access_token,
-        token_type: token.token_type,
         expiry: token.expiry,
     })
 }
@@ -1070,15 +1036,7 @@ fn post_antigravity_image_request(
     token: &AntigravityAuthToken,
     request_body: &serde_json::Value,
 ) -> Result<(reqwest::StatusCode, String), String> {
-    let bearer = if token
-        .token_type
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("bearer"))
-    {
-        token.access_token.trim().to_string()
-    } else {
-        token.access_token.trim().to_string()
-    };
+    let bearer = token.access_token.trim();
     let response = client
         .post(antigravity_generate_content_url(
             &antigravity_image_backend_base_url(),
@@ -1290,17 +1248,13 @@ fn find_antigravity_transcript(job_path: &Path, workspace_path: &Path) -> Option
     candidates.sort_by_key(|(modified, _)| *modified);
     candidates.reverse();
 
-    for (_, path) in candidates {
-        if path_contains_text(&path, &job_abs)
+    candidates.into_iter().map(|(_, path)| path).find(|path| {
+        path_contains_text(path, &job_abs)
             || job_rel
                 .as_deref()
-                .is_some_and(|relative| path_contains_text(&path, relative))
-            || path_contains_text(&path, &job_name)
-        {
-            return Some(path);
-        }
-    }
-    None
+                .is_some_and(|relative| path_contains_text(path, relative))
+            || path_contains_text(path, &job_name)
+    })
 }
 
 fn antigravity_transcript_log_paths(transcript_path: &Path) -> Vec<(&'static str, PathBuf)> {
@@ -1431,7 +1385,7 @@ fn emit_antigravity_transcript_progress(
     if file.read_to_string(&mut text).is_err() {
         return;
     }
-    *offset += text.as_bytes().len() as u64;
+    *offset += text.len() as u64;
     for line in text.lines() {
         for message in antigravity_transcript_messages(line) {
             emit_provider_progress(app, run_id, "toolCompleted", "Antigravity", message, None);
@@ -1552,7 +1506,7 @@ fn run_antigravity_with_progress(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!(
+                    format!(
                         "Antigravity wrote {required_output}; applying PaintNode post-processing"
                     ),
                 );
@@ -1733,6 +1687,9 @@ fn apply_antigravity_command_options(command: &mut Command, options: &Antigravit
     }
 }
 
+// These provider orchestration signatures mirror the stable Tauri command and
+// prompt contracts. Regrouping them requires a coordinated IPC API migration.
+#[allow(clippy::too_many_arguments)]
 fn build_antigravity_command(
     antigravity_bin: &str,
     workspace_path: &Path,
@@ -1905,6 +1862,7 @@ fn antigravity_storyboard_draft_note(_job_dir: &str, _has_storyboard_draft: bool
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn antigravity_fill_prompt(
     prompt: &str,
     job_dir: &str,
@@ -1938,6 +1896,7 @@ fn antigravity_fill_prompt(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn antigravity_fill_director_prompt(
     prompt: &str,
     job_dir: &str,
@@ -2102,6 +2061,7 @@ Final response should be one short sentence confirming `{result_path}` was creat
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn antigravity_retouch_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -2131,6 +2091,7 @@ fn antigravity_retouch_prompt(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn antigravity_retouch_director_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -2617,6 +2578,7 @@ pub(crate) async fn discover_antigravity_capabilities(
     .map_err(|error| format!("Antigravity capability task failed: {error}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_antigravity(
     antigravity_bin: &str,
     workspace_path: &Path,
@@ -3045,6 +3007,7 @@ fn antigravity_restore_image_details(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_antigravity_image(
     app: AppHandle,
     bin: Option<String>,
@@ -3124,10 +3087,8 @@ pub(crate) async fn generate_antigravity_image(
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
             project_or_temp_job_path(&app, &project_path, "antigravity", &run_id, keep_job_dir)?;
-        let workspace_path = project_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+        let workspace_path = project_dir.as_deref()
+            .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
             .to_path_buf();
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
@@ -3372,7 +3333,7 @@ pub(crate) async fn generate_antigravity_image(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!(
+                    format!(
                         "Cover-cropped Antigravity result from {}x{} to {}x{}",
                         source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
@@ -3382,7 +3343,7 @@ pub(crate) async fn generate_antigravity_image(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
+                    format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
                 );
                 let (restored, _) = antigravity_restore_image_details(
                     &app,
@@ -3447,6 +3408,7 @@ pub(crate) async fn generate_antigravity_image(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_antigravity_fill_image(
     app: AppHandle,
     bin: Option<String>,
@@ -3542,9 +3504,8 @@ pub(crate) async fn generate_antigravity_fill_image(
             )?;
         let store_asset = store_asset.unwrap_or(true);
         let workspace_path = project_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+            .as_deref()
+            .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
             .to_path_buf();
 
@@ -3672,7 +3633,7 @@ pub(crate) async fn generate_antigravity_fill_image(
                         emit_codex_progress(
                             &app,
                             &run_id,
-                            &format!("Skipping storyboard draft guide: {error}"),
+                            format!("Skipping storyboard draft guide: {error}"),
                         );
                         None
                     }
@@ -3945,6 +3906,7 @@ pub(crate) async fn generate_antigravity_fill_image(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_antigravity_retouch_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4034,10 +3996,8 @@ pub(crate) async fn generate_antigravity_retouch_image(
                 &run_id,
                 keep_job_dir,
             )?;
-        let workspace_path = project_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+        let workspace_path = project_dir.as_deref()
+            .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
             .to_path_buf();
 
@@ -4324,6 +4284,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
 /// Enlarge a flattened document and restore its detail with tiled AI
 /// regeneration (AI -> Upscale). 100% skips the enlarge and only restores.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upscale_antigravity_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4400,9 +4361,8 @@ pub(crate) async fn upscale_antigravity_image(
                 keep_job_dir,
             )?;
         let workspace_path = project_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+            .as_deref()
+            .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
             .to_path_buf();
         let new_antigravity_project = job_project_dir.is_none();
@@ -4413,7 +4373,7 @@ pub(crate) async fn upscale_antigravity_image(
             emit_codex_progress(
                 &app,
                 &run_id,
-                &format!(
+                format!(
                     "Enlarging image from {}x{} to {}x{}",
                     source_dimensions.0,
                     source_dimensions.1,
@@ -4482,6 +4442,7 @@ pub(crate) async fn upscale_antigravity_image(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decouple_antigravity_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4527,9 +4488,8 @@ pub(crate) async fn decouple_antigravity_image(
                 keep_job_dir,
             )?;
         let workspace_path = project_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+            .as_deref()
+            .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
             .to_path_buf();
         let new_antigravity_project = job_project_dir.is_none();
@@ -4712,6 +4672,7 @@ pub(crate) async fn decouple_antigravity_image(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn compose_antigravity_workflow(
     app: AppHandle,
     bin: Option<String>,
@@ -4778,9 +4739,8 @@ pub(crate) async fn compose_antigravity_workflow(
                 keep_job_dir,
             )?;
         let workspace_path = project_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .or_else(|| job_project_dir.as_ref().map(PathBuf::as_path))
+            .as_deref()
+            .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
             .to_path_buf();
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
@@ -4907,7 +4867,6 @@ mod tests {
             parse_antigravity_keychain_token(&format!("consumer:{encoded}")).expect("parsed token");
 
         assert_eq!(parsed.access_token, "access-redacted");
-        assert_eq!(parsed.token_type.as_deref(), Some("Bearer"));
         assert_eq!(
             parsed.expiry.as_deref(),
             Some("2026-07-08T13:21:59.513345+09:30")
@@ -4919,7 +4878,6 @@ mod tests {
         assert!(antigravity_token_needs_refresh(None, 100, 60));
         let token = AntigravityAuthToken {
             access_token: "access-redacted".into(),
-            token_type: Some("Bearer".into()),
             expiry: Some("1970-01-01T00:03:00Z".into()),
         };
 

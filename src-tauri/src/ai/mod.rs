@@ -743,7 +743,7 @@ pub(crate) fn emit_kept_job_dir(
         emit_codex_progress(
             app,
             run_id,
-            &format!("Saved AI run inputs: {}", job_path.display()),
+            format!("Saved AI run inputs: {}", job_path.display()),
         );
     }
 }
@@ -1609,22 +1609,21 @@ pub(crate) fn image_agent_autonomy_contract(
     }
 }
 
+type ProjectJobPath = (
+    Option<PathBuf>,
+    Option<PathBuf>,
+    PathBuf,
+    bool,
+    Option<TempJobDir>,
+);
+
 pub(crate) fn project_or_temp_job_path(
     app: &AppHandle,
     project_path: &Option<String>,
     prefix: &str,
     run_id: &str,
     keep_job_dir: bool,
-) -> Result<
-    (
-        Option<PathBuf>,
-        Option<PathBuf>,
-        PathBuf,
-        bool,
-        Option<TempJobDir>,
-    ),
-    String,
-> {
+) -> Result<ProjectJobPath, String> {
     let project_dir = optional_project_dir(project_path);
     let job_project_dir = ai_job_project_dir(app, &project_dir, keep_job_dir)?;
     if let Some(job_project_dir) = &job_project_dir {
