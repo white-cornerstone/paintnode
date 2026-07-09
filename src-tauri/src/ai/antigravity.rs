@@ -28,6 +28,11 @@ use crate::ai::canvas::{
     validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
     AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
+use crate::ai::director::{
+    director_candidate_file, director_uses_agentic_loop, image_request_prompt,
+    run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorLoopSpec,
+    PAINTNODE_DIRECTOR_ACTION_FILE, PAINTNODE_DIRECTOR_OBSERVATION_FILE,
+};
 use crate::ai::fill_storyboard::{
     fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
     fill_storyboard_part_is_anchor, fill_storyboard_part_prompt, read_fill_storyboard_file,
@@ -55,10 +60,11 @@ use crate::ai::{
     remove_legacy_generative_fill_agent_inputs, required_png_output_is_ready, safe_job_child_path,
     sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
-    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, CodexDetectionResult,
-    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
+    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
+    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
+    GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -1712,6 +1718,8 @@ pub(crate) fn antigravity_generate_director_prompt(
         director_involvement,
         "image generation",
     );
+    let agentic_tool_loop = director_provider == AiDirectorProvider::Antigravity
+        && director_uses_agentic_loop(director_mode, director_involvement);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -1725,6 +1733,55 @@ pub(crate) fn antigravity_generate_director_prompt(
         format!("{job_dir}/")
     };
     let reference_note = reference_prompt_note(reference_names, &reference_prefix);
+    let director_tool_contract = if agentic_tool_loop {
+        format!(
+            r#"PaintNode Director tool loop:
+- Do not create image pixels yourself and do not create `result.png`.
+- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
+- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
+- For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned Antigravity image tool to create the candidate.
+- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}`, and attach the candidate back to you for review when your participation level requires review.
+
+JSON schema:
+{{
+  "version": 1,
+  "action": "generateCandidate",
+  "baseImage": "none",
+  "prompt": "image prompt for PaintNode's owned Antigravity image tool",
+  "constraints": ["short constraints the image tool must obey"],
+  "avoid": ["short negative constraints"],
+  "notes": "optional short note for PaintNode"
+}}
+
+Director review criteria:
+{}"#,
+            workflow_review_criteria("image_generation")
+        )
+    } else {
+        String::new()
+    };
+    let required_output = if agentic_tool_loop {
+        format!(
+            r#"Required Director action:
+- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` only. PaintNode will call the Antigravity image backend after reading your action.
+- Do not save `result.png` yourself.
+- Do not ask follow-up questions.
+{workspace_rule}
+
+Final response should be one short sentence confirming `{PAINTNODE_DIRECTOR_ACTION_FILE}` was created."#
+        )
+    } else {
+        format!(
+            r#"Required output:
+- Save the final image as `{result_path}`.
+- PNG only.
+- Use the largest image size / highest output resolution your image-generation tool supports.
+- Do not ask follow-up questions.
+{workspace_rule}
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+        )
+    };
     format!(
         r#"Generate one raster PNG for PaintNode.
 
@@ -1735,16 +1792,11 @@ User image prompt:
 
 {director_contract}
 
+{director_tool_contract}
+
 {autonomy_contract}
 
-Required output:
-- Save the final image as `{result_path}`.
-- PNG only.
-- Use the largest image size / highest output resolution your image-generation tool supports.
-- Do not ask follow-up questions.
-{workspace_rule}
-
-Final response should be one short sentence confirming `{result_path}` was created."#
+{required_output}"#
     )
 }
 
@@ -2860,6 +2912,8 @@ pub(crate) async fn generate_antigravity_image(
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
+        let agentic_director_loop = director_provider == AiDirectorProvider::Antigravity
+            && director_uses_agentic_loop(director_mode, director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -2878,6 +2932,52 @@ pub(crate) async fn generate_antigravity_image(
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
         let (reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
+        let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
+        let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
+            target_dimensions
+                .and_then(|target| antigravity_output_target(aspect, target))
+                .map(|(tier, _)| tier.to_string())
+        });
+        write_ai_job_settings(
+            &job_path,
+            json!({
+                "version": 1,
+                "workflow": "generate_image",
+                "runId": run_id,
+                "provider": "Antigravity",
+                "agenticDirectorLoop": agentic_director_loop,
+                "director": {
+                    "provider": director_provider.label(),
+                    "mode": director_mode.label(),
+                    "involvement": director_involvement.label()
+                },
+                "imageGenerator": {
+                    "provider": "Antigravity",
+                    "model": options.image_model,
+                    "aspectRatio": aspect_ratio,
+                    "imageSize": provider_size,
+                    "personGeneration": options.person_generation,
+                    "prominentPeople": options.prominent_people,
+                    "compressionQuality": options.compression_quality,
+                    "safetyFiltering": options.safety_filtering,
+                    "safety": {
+                        "harassment": options.safety_harassment,
+                        "hateSpeech": options.safety_hate_speech,
+                        "sexuallyExplicit": options.safety_sexually_explicit,
+                        "dangerousContent": options.safety_dangerous_content
+                    }
+                },
+                "agent": {
+                    "model": options.model,
+                    "approvalMode": options.approval_mode,
+                    "autonomy": autonomy.label()
+                },
+                "targetDimensions": target_dimensions.map(|(width, height)| json!({ "width": width, "height": height })),
+                "referenceImages": reference_names,
+                "keepJobDir": keep_job_dir,
+                "debugArtifacts": options.keep_debug_artifacts
+            }),
+        )?;
         let prompt_text = antigravity_generate_director_prompt(
             prompt.trim(),
             &job_dir,
@@ -2901,30 +3001,82 @@ pub(crate) async fn generate_antigravity_image(
             bytes
         } else {
             let _ = fs::remove_file(&result_path);
-            emit_codex_progress(
-                &app,
-                &run_id,
-                "Generating through Antigravity image backend",
-            );
-            let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
-            let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
-                target_dimensions
-                    .and_then(|target| antigravity_output_target(aspect, target))
-                    .map(|(tier, _)| tier.to_string())
-            });
-            let bytes = run_antigravity_direct_image(
-                &app,
-                &run_id,
-                &antigravity_bin,
-                &job_path,
-                AntigravityImageRequestSpec {
-                    prompt: prompt_text.clone(),
-                    image_paths: reference_paths,
-                    aspect_ratio,
-                    image_size: provider_size,
-                },
-                &options,
-            )?;
+            let bytes = if agentic_director_loop {
+                emit_codex_progress(&app, &run_id, "Starting Antigravity AI Director");
+                run_candidate_director_loop(
+                    &job_path,
+                    DirectorLoopSpec {
+                        provider_label: "Antigravity",
+                        involvement: director_involvement,
+                        legacy_request_file: "paintnode-image-request.json",
+                        base_prompt_text: &prompt_text,
+                        review_criteria: workflow_review_criteria("image_generation"),
+                        ensure_completion_acceptance_note:
+                            "Candidate completed; ensure-completion mode does not run a separate quality review.",
+                    },
+                    |_, turn_prompt_text, _candidate_path| {
+                        run_antigravity(
+                            &antigravity_bin,
+                            &workspace_path,
+                            &job_path,
+                            turn_prompt_text,
+                            &options,
+                            true,
+                            app.clone(),
+                            run_id.clone(),
+                            Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                        )
+                    },
+                    |_| None,
+                    |turn, request, candidate_prompt| {
+                        let candidate_file = director_candidate_file(turn);
+                        let candidate = run_antigravity_direct_image(
+                            &app,
+                            &run_id,
+                            &antigravity_bin,
+                            &job_path,
+                            AntigravityImageRequestSpec {
+                                prompt: image_request_prompt(&request)
+                                    .unwrap_or_else(|_| candidate_prompt.to_string()),
+                                image_paths: reference_paths.clone(),
+                                aspect_ratio: aspect_ratio.clone(),
+                                image_size: provider_size.clone(),
+                            },
+                            &options,
+                        )?;
+                        fs::write(job_path.join(&candidate_file), &candidate).map_err(|e| {
+                            format!("Failed to write Antigravity Director candidate: {e}")
+                        })?;
+                        png_dimensions_from_bytes(&candidate).ok_or_else(|| {
+                            "Antigravity Director candidate PNG dimensions are invalid."
+                                .to_string()
+                        })?;
+                        Ok(DirectorCandidate {
+                            result: candidate,
+                            file_name: candidate_file,
+                        })
+                    },
+                )?
+            } else {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    "Generating through Antigravity image backend",
+                );
+                run_antigravity_direct_image(
+                    &app,
+                    &run_id,
+                    &antigravity_bin,
+                    &job_path,
+                    AntigravityImageRequestSpec {
+                        prompt: prompt_text.clone(),
+                        image_paths: reference_paths,
+                        aspect_ratio: aspect_ratio.clone(),
+                        image_size: provider_size.clone(),
+                    },
+                    &options,
+                )?
+            };
             fs::write(&result_path, &bytes)
                 .map_err(|e| format!("Failed to write Antigravity image result: {e}"))?;
             png_dimensions_from_bytes(&bytes)
@@ -5068,6 +5220,41 @@ mod tests {
         assert!(!prompt.contains("edit_target.png"));
         assert!(!prompt.contains("Use $imagegen"));
         assert!(!prompt.contains("chroma"));
+    }
+
+    #[test]
+    fn antigravity_generate_prompt_uses_director_action_contract_when_active() {
+        let active = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+            &[],
+        );
+
+        assert!(active.contains("AI Director provider: Antigravity"));
+        assert!(active.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(active.contains(PAINTNODE_DIRECTOR_OBSERVATION_FILE));
+        assert!(active.contains("Allowed PaintNode tool action: `generateCandidate`"));
+        assert!(active.contains("Director review criteria"));
+        assert!(!active.contains("Save the final image as"));
+        assert!(!active.contains("Do not create `result.png`.\n- PNG only"));
+
+        let plan_only = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::PlanOnly,
+            &[],
+        );
+
+        assert!(plan_only.contains("AI Director participation: Plan only"));
+        assert!(plan_only.contains("Save the final image as"));
+        assert!(!plan_only.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
     }
 
     #[test]

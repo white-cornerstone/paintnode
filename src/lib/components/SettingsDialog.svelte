@@ -659,7 +659,7 @@
           </label>
 
           <label class="field">
-            <span>AI Director 參與程度</span>
+            <span>AI Director involvement</span>
             <select
               value={settings.value.ai.directorInvolvement}
               disabled={settings.value.ai.directorMode === 'skip'}
@@ -1301,7 +1301,7 @@
                     </div>
 
                     <label class="field">
-                      <span>參與程度</span>
+                      <span>Involvement</span>
                       <select
                         value={profileDraftOptions.directorInvolvement}
                         onchange={(event) =>

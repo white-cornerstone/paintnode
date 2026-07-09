@@ -286,11 +286,32 @@ pub(crate) enum AiAutonomyLevel {
     Unmanaged,
 }
 
+impl AiAutonomyLevel {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Guided => "guided",
+            Self::Open => "open",
+            Self::Unmanaged => "unmanaged",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiDirectorMode {
     Auto,
     Skip,
     Force,
+}
+
+impl AiDirectorMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Skip => "skip",
+            Self::Force => "force",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,6 +336,16 @@ pub(crate) enum AiDirectorInvolvement {
     PlanOnly,
     EnsureCompletion,
     FullReview,
+}
+
+impl AiDirectorInvolvement {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PlanOnly => "planOnly",
+            Self::EnsureCompletion => "ensureCompletion",
+            Self::FullReview => "fullReview",
+        }
+    }
 }
 
 pub(crate) struct TempJobDir {
@@ -462,6 +493,16 @@ pub(crate) fn write_ai_job_prompt(
 ) -> Result<(), String> {
     fs::write(job_path.join("prompt.txt"), prompt)
         .map_err(|e| format!("Failed to write {label} prompt file: {e}"))
+}
+
+pub(crate) fn write_ai_job_settings(
+    job_path: &Path,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    let text = serde_json::to_vec_pretty(&settings)
+        .map_err(|e| format!("Failed to encode AI job settings: {e}"))?;
+    fs::write(job_path.join("job-settings.json"), text)
+        .map_err(|e| format!("Failed to write AI job settings file: {e}"))
 }
 
 pub(crate) fn remove_legacy_generative_fill_agent_inputs(part_path: &Path) {
@@ -1233,6 +1274,7 @@ mod tests {
     use super::*;
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::codex::codex_direct_generate_prompt;
+    use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 
     #[test]
     fn temp_job_dir_removes_directory_on_drop() {
@@ -1311,7 +1353,9 @@ mod tests {
         );
         assert!(antigravity.contains("Generate one raster PNG for PaintNode"));
         assert!(antigravity.contains("User image prompt:\nmake an image"));
-        assert!(antigravity.contains("largest image size / highest output resolution"));
+        assert!(antigravity.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(antigravity.contains("PaintNode Director tool loop"));
+        assert!(!antigravity.contains("Save the final image as"));
         assert!(!antigravity.contains("1280x800"));
         assert!(!antigravity.contains("1296x864"));
         assert!(!antigravity.contains("Working PNG"));

@@ -254,7 +254,7 @@ pub(crate) fn director_turn_prompt(
             "If the observation reports a failed image-tool call, write a new `generateCandidate` action with the smallest faithful prompt adjustment. If a candidate completed, no review turn should be needed."
         }
         AiDirectorInvolvement::FullReview => {
-            "Inspect `source.png`, the latest candidate image, and `paintnode-director-observation.json`. Write `acceptResult` only if the candidate satisfies the task and the workflow review criteria. Otherwise write another `generateCandidate` action with the smallest useful correction."
+            "Inspect the latest candidate image, any attached source/reference images, and `paintnode-director-observation.json`. Write `acceptResult` only if the candidate satisfies the task and the workflow review criteria. Otherwise write another `generateCandidate` action with the smallest useful correction."
         }
         AiDirectorInvolvement::PlanOnly => "Write one `generateCandidate` action only.",
     };
@@ -483,6 +483,9 @@ pub(crate) fn workflow_review_criteria(workflow: &str) -> &'static str {
         }
         "decouple" => {
             "- Asset pack must extract meaningful reusable objects from the source, with transparent PNGs and no duplicated visual ownership across assets.\n- Preserve object identity, natural edges, contact logic, and soft alpha details where useful.\n- Manifest entries must point to valid PNG files and describe reusable layer names."
+        }
+        "image_generation" => {
+            "- Candidate must satisfy the user's image prompt and reference-image intent without adding UI, borders, watermarks, contact-sheet layouts, or explanatory text.\n- Preserve requested style, subject relationships, camera/lens/medium character, composition intent, and safety-compliant prompt adjustments.\n- Do not accept blocked-prompt drift, irrelevant subjects, collage output, or over-processed rendering that contradicts the requested medium."
         }
         _ => "- Candidate must satisfy the user request while preserving source-image facts and PaintNode's fixed-frame editing constraints.",
     }

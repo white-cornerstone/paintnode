@@ -494,7 +494,7 @@
 
         {#if directorEnabled}
           <button type="button" onclick={() => (submenu = submenu === 'directorInvolvement' ? null : 'directorInvolvement')}>
-            <span>參與程度</span>
+            <span>Involvement</span>
             <span class="value">{directorInvolvementLabel}</span>
             <Icon svg={ChevronRight} size={14} />
           </button>
