@@ -30,12 +30,13 @@ describe('settings normalization', () => {
     expect(CODEX_MODEL_OPTIONS.map((option) => option.label)).toEqual(['GPT-5.5', 'GPT-5.4', 'GPT-5.4-Mini']);
   });
 
-  it('falls back to GPT-5.5 for unknown saved models', () => {
-    expect(normalizeSettings({ ai: { model: 'gpt-5.3-codex-spark' } }).ai.model).toBe('gpt-5.5');
+  it('preserves saved model ids for runtime capability discovery', () => {
+    expect(normalizeSettings({ ai: { model: 'future-image-model' } }).ai.model).toBe('future-image-model');
   });
 
-  it('migrates the retired minimal reasoning effort to low', () => {
-    expect(normalizeSettings({ ai: { reasoningEffort: 'minimal' } }).ai.reasoningEffort).toBe('low');
+  it('preserves reasoning efforts supported by runtime capability discovery', () => {
+    expect(normalizeSettings({ ai: { reasoningEffort: 'minimal' } }).ai.reasoningEffort).toBe('minimal');
+    expect(normalizeSettings({ ai: { reasoningEffort: 'none' } }).ai.reasoningEffort).toBe('none');
   });
 
   it('falls back to the default reasoning effort for unknown saved values', () => {
@@ -195,7 +196,7 @@ describe('settings normalization', () => {
     ]);
   });
 
-  it('falls back to safe Antigravity defaults for unknown saved Antigravity settings', () => {
+  it('preserves Antigravity model ids for runtime discovery and normalizes other invalid settings', () => {
     const normalized = normalizeSettings({
       ai: {
         provider: 'antigravity',
@@ -220,7 +221,7 @@ describe('settings normalization', () => {
     expect(normalized.ai.directorProvider).toBe('antigravity');
     expect(normalized.ai.imageProvider).toBe('antigravity');
     expect(normalized.ai.autonomyLevel).toBe('low');
-    expect(normalized.ai.antigravityModel).toBe('auto');
+    expect(normalized.ai.antigravityModel).toBe('antigravity-1-old');
     expect(normalized.ai.antigravityApprovalMode).toBe('skipPermissions');
     expect(normalized.ai.antigravityImageModel).toBe('gemini-3.1-flash-image');
     expect(normalized.ai.antigravityImageSize).toBe('auto');
@@ -232,6 +233,12 @@ describe('settings normalization', () => {
     expect(normalized.ai.antigravitySafetyHateSpeech).toBe('BLOCK_NONE');
     expect(normalized.ai.antigravitySafetySexuallyExplicit).toBe('HARM_BLOCK_THRESHOLD_UNSPECIFIED');
     expect(normalized.ai.antigravitySafetyDangerousContent).toBe('OFF');
+  });
+
+  it('uses automatic Claude effort by default and preserves supported saved values', () => {
+    expect(defaultSettings().ai.claudeEffort).toBe('auto');
+    expect(normalizeSettings({ ai: { claudeEffort: 'max' } }).ai.claudeEffort).toBe('max');
+    expect(normalizeSettings({ ai: { claudeEffort: 'extreme' } }).ai.claudeEffort).toBe('auto');
   });
 
   it('falls back to safe Codex image-generation controls for unknown saved values', () => {

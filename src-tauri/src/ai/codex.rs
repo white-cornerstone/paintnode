@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::ai::antigravity::run_antigravity_owned_image_edit;
+use crate::ai::antigravity::{run_antigravity_director_request, run_antigravity_owned_image_edit};
 use crate::ai::canvas::{
     ai_candidate_rejection, ai_edit_checks_level, ai_retouch_editable_mask_png,
     read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
@@ -29,9 +29,14 @@ use crate::ai::canvas::{
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::claude::{
-    build_generative_fill_claude_command, claude_command_failure, claude_command_label,
-    claude_command_options, emit_claude_no_storyboard, final_claude_agent_message,
+    build_director_claude_command, build_generative_fill_claude_command, claude_command_failure,
+    claude_command_label, claude_command_options, final_claude_agent_message,
     run_claude_with_progress, ClaudeCommandOptions,
+};
+use crate::ai::director::{
+    director_candidate_file, director_uses_agentic_loop, image_request_prompt,
+    run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorImageRequest,
+    DirectorLoopSpec, PAINTNODE_DIRECTOR_ACTION_FILE, PAINTNODE_DIRECTOR_OBSERVATION_FILE,
 };
 use crate::ai::fill_storyboard::{
     fill_storyboard_master_prompt, fill_storyboard_part_is_anchor, fill_storyboard_part_prompt,
@@ -49,19 +54,21 @@ use crate::ai::placement::{
     AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_restore_contract,
-    ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
+    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
+    ai_director_restore_contract, ai_director_workflow_contract, ai_job_project_dir,
+    ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
+    cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
     codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
     emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, safe_job_child_path, safe_png_source_file_name,
     should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
-    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, CodexDetectionResult,
+    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CLAUDE_RUNS_DIR,
-    CODEX_RUNS_DIR, POLL_INTERVAL,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -125,27 +132,38 @@ impl PaintNodeImageProvider {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum PaintNodePlannerProvider {
+enum PaintNodeDirectorProvider {
     Codex,
+    Antigravity,
     Claude,
 }
 
-impl PaintNodePlannerProvider {
-    fn from_option(value: Option<String>) -> Self {
-        match value
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("claude") => Self::Claude,
-            _ => Self::Codex,
+impl PaintNodeDirectorProvider {
+    fn from_options(director_provider: Option<String>, planner_provider: Option<String>) -> Self {
+        let provider = ai_director_provider(director_provider.or(planner_provider));
+        Self::from_director_provider(provider)
+    }
+
+    fn from_director_provider(provider: AiDirectorProvider) -> Self {
+        match provider {
+            AiDirectorProvider::Codex => Self::Codex,
+            AiDirectorProvider::Antigravity => Self::Antigravity,
+            AiDirectorProvider::Claude => Self::Claude,
+        }
+    }
+
+    fn as_director_provider(&self) -> AiDirectorProvider {
+        match self {
+            Self::Codex => AiDirectorProvider::Codex,
+            Self::Antigravity => AiDirectorProvider::Antigravity,
+            Self::Claude => AiDirectorProvider::Claude,
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
             Self::Codex => "Codex",
+            Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
         }
     }
@@ -153,6 +171,7 @@ impl PaintNodePlannerProvider {
     fn runs_dir(&self) -> &'static str {
         match self {
             Self::Codex => CODEX_RUNS_DIR,
+            Self::Antigravity => ANTIGRAVITY_RUNS_DIR,
             Self::Claude => CLAUDE_RUNS_DIR,
         }
     }
@@ -176,6 +195,27 @@ struct PaintNodeImageProviderOptions {
     antigravity_safety_hate_speech: Option<String>,
     antigravity_safety_sexually_explicit: Option<String>,
     antigravity_safety_dangerous_content: Option<String>,
+}
+
+fn codex_image_provider_options(keep_debug_artifacts: bool) -> PaintNodeImageProviderOptions {
+    PaintNodeImageProviderOptions {
+        provider: PaintNodeImageProvider::Codex,
+        keep_debug_artifacts,
+        antigravity_bin: None,
+        antigravity_model: None,
+        antigravity_approval_mode: None,
+        antigravity_image_model: None,
+        antigravity_image_size: None,
+        antigravity_person_generation: None,
+        antigravity_prominent_people: None,
+        antigravity_compression_quality: None,
+        antigravity_advanced_json: None,
+        antigravity_safety_filtering: None,
+        antigravity_safety_harassment: None,
+        antigravity_safety_hate_speech: None,
+        antigravity_safety_sexually_explicit: None,
+        antigravity_safety_dangerous_content: None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,27 +245,7 @@ struct CodexImageData {
     b64_json: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-struct PaintNodeImageRequest {
-    base_image: String,
-    prompt: String,
-    constraints: Vec<String>,
-    avoid: Vec<String>,
-    notes: String,
-}
-
-impl Default for PaintNodeImageRequest {
-    fn default() -> Self {
-        Self {
-            base_image: "source.png".into(),
-            prompt: String::new(),
-            constraints: Vec::new(),
-            avoid: Vec::new(),
-            notes: String::new(),
-        }
-    }
-}
+type PaintNodeImageRequest = DirectorImageRequest;
 
 #[derive(Clone, Debug)]
 struct CodexCachedPng {
@@ -417,7 +437,7 @@ fn final_codex_agent_message_from_text(stdout: &str, stderr: &str) -> Option<Str
     }
 }
 
-fn final_codex_agent_message(output: &Output) -> Option<String> {
+pub(crate) fn final_codex_agent_message(output: &Output) -> Option<String> {
     final_codex_agent_message_from_text(
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
@@ -506,6 +526,40 @@ fn run_codex_with_progress(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_director_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    keep_debug_artifacts: bool,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let mut options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    options.keep_debug_artifacts = keep_debug_artifacts;
+    let mut command =
+        build_codex_sdk_command(&codex_bin, job_path, prompt_text, image_paths, &options);
+    let run =
+        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+            format!(
+                "Failed to run Codex at '{}': {e}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!("Codex Director failed.\n\n{message}"))
+    } else {
+        Err(command_failure("Codex Director", &run.output))
+    }
+}
+
 fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String> {
     if let Some(bin) = configured_codex_bin(bin) {
         return Ok(bin);
@@ -591,6 +645,151 @@ fn codex_sdk_runner_script() -> PathBuf {
         .parent()
         .map(|root| root.join("scripts").join("codex-sdk-runner.mjs"))
         .unwrap_or_else(|| PathBuf::from("scripts").join("codex-sdk-runner.mjs"))
+}
+
+fn codex_capabilities_runner_script() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .map(|root| root.join("scripts").join("codex-capabilities.mjs"))
+        .unwrap_or_else(|| PathBuf::from("scripts").join("codex-capabilities.mjs"))
+}
+
+fn fallback_codex_capabilities(warning: Option<String>) -> AiProviderCapabilitiesResult {
+    let efforts = || {
+        [
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("xhigh", "Extra High"),
+        ]
+        .into_iter()
+        .map(|(value, label)| AiReasoningCapability {
+            value: value.into(),
+            label: label.into(),
+        })
+        .collect()
+    };
+    AiProviderCapabilitiesResult {
+        models: [
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4-Mini"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, label))| AiModelCapability {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            supported_reasoning_efforts: efforts(),
+            default_reasoning_effort: Some("medium".into()),
+            is_default: index == 0,
+        })
+        .collect(),
+        source: "fallback".into(),
+        warning,
+    }
+}
+
+fn parse_codex_capabilities(output: &Output) -> Result<AiProviderCapabilitiesResult, String> {
+    if !output.status.success() {
+        return Err(command_failure("Codex capability discovery", output));
+    }
+    parse_codex_capabilities_payload(&output.stdout)
+}
+
+fn parse_codex_capabilities_payload(bytes: &[u8]) -> Result<AiProviderCapabilitiesResult, String> {
+    let payload: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Codex returned invalid capability data: {error}"))?;
+    let data = payload
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Codex capability data did not include a model list.".to_string())?;
+    let mut models = Vec::new();
+    for item in data {
+        if item.get("hidden").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+        let id = item
+            .get("model")
+            .or_else(|| item.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Codex returned a model without an id.".to_string())?;
+        let supports_images = item
+            .get("inputModalities")
+            .and_then(serde_json::Value::as_array)
+            .map(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("image"))
+            })
+            .unwrap_or(true);
+        if !supports_images {
+            continue;
+        }
+        let label = item
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(id);
+        let supported_reasoning_efforts = item
+            .get("supportedReasoningEfforts")
+            .and_then(serde_json::Value::as_array)
+            .map(|efforts| {
+                efforts
+                    .iter()
+                    .filter_map(|effort| {
+                        let value = effort
+                            .get("reasoningEffort")
+                            .and_then(serde_json::Value::as_str)?;
+                        Some(AiReasoningCapability {
+                            value: value.into(),
+                            label: codex_reasoning_effort_label(value),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.push(AiModelCapability {
+            id: id.into(),
+            label: label.into(),
+            description: item
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            supported_reasoning_efforts,
+            default_reasoning_effort: item
+                .get("defaultReasoningEffort")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            is_default: item
+                .get("isDefault")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    if models.is_empty() {
+        return Err("Codex did not advertise any available models.".into());
+    }
+    Ok(AiProviderCapabilitiesResult {
+        models,
+        source: "appServer".into(),
+        warning: None,
+    })
+}
+
+fn codex_reasoning_effort_label(value: &str) -> String {
+    match value {
+        "none" => "None".into(),
+        "minimal" => "Minimal".into(),
+        "low" => "Low".into(),
+        "medium" => "Medium".into(),
+        "high" => "High".into(),
+        "xhigh" => "Extra High".into(),
+        other => other.into(),
+    }
 }
 
 fn build_codex_sdk_command(
@@ -682,6 +881,45 @@ fn codex_fill_director_contract(autonomy: AiAutonomyLevel) -> &'static str {
             "Autonomy level: Low. Inspect the attached images visually and write the requested image-generation request file only. Do not call image-generation tools, do not run shell/Python/OpenCV/Pillow, and do not create helper scripts. PaintNode owns synthesis, resizing, masking, validation, and import."
         }
     }
+}
+
+fn director_action_file_contract(base_image: &str, prompt_label: &str) -> String {
+    format!(
+        r#"PaintNode Director tool loop:
+- Do not create image pixels yourself and do not create `result.png`.
+- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
+- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
+- For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned image tool to create the candidate.
+- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write an observation naming the full candidate file, and attach a downscaled review preview of that candidate when your participation level requires review.
+
+JSON schema:
+{{
+  "version": 1,
+  "action": "generateCandidate",
+  "baseImage": "{base_image}",
+  "prompt": "{prompt_label}",
+  "constraints": ["short constraints the image tool must obey"],
+  "avoid": ["short negative constraints"],
+  "notes": "optional short note for PaintNode"
+}}"#
+    )
+}
+
+fn director_review_criteria_section(
+    workflow: &str,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    if director_mode == AiDirectorMode::Skip {
+        return String::new();
+    }
+    let label = match director_involvement {
+        AiDirectorInvolvement::PlanOnly => "Director planning criteria",
+        AiDirectorInvolvement::EnsureCompletion | AiDirectorInvolvement::FullReview => {
+            "Director review criteria"
+        }
+    };
+    format!("\n{label}:\n{}\n", workflow_review_criteria(workflow))
 }
 
 fn codex_auth_paths() -> Vec<PathBuf> {
@@ -934,11 +1172,34 @@ fn run_codex_direct_image_request(
     decode_generated_image_response(parsed)
 }
 
+#[cfg(test)]
 pub(crate) fn codex_direct_generate_prompt(
     user_prompt: &str,
     reference_names: &[String],
 ) -> String {
+    codex_direct_generate_director_prompt(
+        user_prompt,
+        reference_names,
+        AiDirectorProvider::Codex,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+    )
+}
+
+pub(crate) fn codex_direct_generate_director_prompt(
+    user_prompt: &str,
+    reference_names: &[String],
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
     let reference_note = reference_prompt_note(reference_names, "");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "image generation",
+    );
     format!(
         r#"Generate exactly one raster PNG for PaintNode.
 
@@ -946,6 +1207,8 @@ User image prompt:
 {user_prompt}
 
 {reference_note}
+
+{director_contract}
 
 Requirements:
 - Create one polished image from the user prompt.
@@ -956,12 +1219,38 @@ Requirements:
     )
 }
 
+#[cfg(test)]
 fn decouple_codex_prompt(user_prompt: &str) -> String {
+    decouple_codex_director_prompt(
+        user_prompt,
+        AiDirectorProvider::Codex,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+    )
+}
+
+fn decouple_codex_director_prompt(
+    user_prompt: &str,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "asset decoupling",
+    );
+    let director_review_criteria =
+        director_review_criteria_section("decouple", director_mode, director_involvement);
     format!(
         r##"Use the attached `source.png` to create a PaintNode recomposition asset pack.
 
 User guidance:
 {user_prompt}
+
+{director_contract}
+{director_review_criteria}
 
 Goal:
 - Extract or regenerate useful standalone visual assets from the source image for later AI compositing workflows and storyboard planning.
@@ -1023,14 +1312,42 @@ Final response:
     )
 }
 
+#[cfg(test)]
 fn build_decouple_codex_command(
     codex_bin: &str,
     job_path: &Path,
     prompt: &str,
     options: &CodexCommandOptions,
+    json_progress: bool,
+) -> Command {
+    build_decouple_codex_director_command(
+        codex_bin,
+        job_path,
+        prompt,
+        options,
+        AiDirectorProvider::Codex,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        json_progress,
+    )
+}
+
+fn build_decouple_codex_director_command(
+    codex_bin: &str,
+    job_path: &Path,
+    prompt: &str,
+    options: &CodexCommandOptions,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
     _json_progress: bool,
 ) -> Command {
-    let prompt_text = decouple_codex_prompt(prompt.trim());
+    let prompt_text = decouple_codex_director_prompt(
+        prompt.trim(),
+        director_provider,
+        director_mode,
+        director_involvement,
+    );
     let image_paths = vec![job_path.join("source.png")];
     build_codex_sdk_command(codex_bin, job_path, &prompt_text, &image_paths, options)
 }
@@ -1065,6 +1382,7 @@ Requirements:
     )
 }
 
+#[cfg(test)]
 fn generative_fill_prompt(
     prompt: &str,
     autonomy: AiAutonomyLevel,
@@ -1076,20 +1394,136 @@ fn generative_fill_prompt(
     has_storyboard_draft: bool,
     reference_names: &[String],
 ) -> String {
+    generative_fill_director_prompt(
+        prompt,
+        autonomy,
+        AiDirectorProvider::Codex,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        geometry_note,
+        storyboard_note,
+        storyboard_anchor,
+        storyboard_fallback,
+        has_overview,
+        has_storyboard_draft,
+        reference_names,
+    )
+}
+
+fn generative_fill_director_prompt(
+    prompt: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    geometry_note: &str,
+    storyboard_note: &str,
+    storyboard_anchor: bool,
+    storyboard_fallback: bool,
+    has_overview: bool,
+    has_storyboard_draft: bool,
+    reference_names: &[String],
+) -> String {
     let autonomy_contract = codex_fill_director_contract(autonomy);
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "generative fill",
+    );
+    let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
     let task_intro =
         "Plan one PaintNode-controlled generative fill image request from the attached frame.";
-    let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
+    let request_file_requirement = if agentic_tool_loop {
         format!(
-            "- Do not invoke Codex built-in image tools and do not create `result.png`. Write only `{PAINTNODE_IMAGE_REQUEST_FILE}`; PaintNode will run its owned image generator after reading that request.\n"
+            "- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.\n- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.\n"
         )
     } else {
         format!(
-            "- Do not invoke Codex built-in image tools and do not create `result.png`. Write only `{PAINTNODE_IMAGE_REQUEST_FILE}`; PaintNode will run its owned image generator after reading that request.\n- Do not create, edit, or delete any other files in the working directory.\n"
+            "- Write `{PAINTNODE_IMAGE_REQUEST_FILE}` as UTF-8 JSON in the current working directory.\n"
+        )
+    };
+    let request_subject = if agentic_tool_loop {
+        "The `generateCandidate` action"
+    } else {
+        "The request"
+    };
+    let managed_method_requirements = if agentic_tool_loop {
+        format!(
+            "- Do not invoke image-generation tools yourself and do not create `result.png`. PaintNode will execute the image tool after reading `{PAINTNODE_DIRECTOR_ACTION_FILE}`.\n- Do not create `{PAINTNODE_IMAGE_REQUEST_FILE}` directly while using the Director tool loop.\n- Do not create, edit, or delete any other files in the working directory except `{PAINTNODE_DIRECTOR_ACTION_FILE}`.\n"
+        )
+    } else if autonomy == AiAutonomyLevel::Unmanaged {
+        format!(
+            "- Do not invoke image-generation tools yourself and do not create `result.png`. Write only `{PAINTNODE_IMAGE_REQUEST_FILE}`; PaintNode will run its owned image generator after reading that request.\n"
+        )
+    } else {
+        format!(
+            "- Do not invoke image-generation tools yourself and do not create `result.png`. Write only `{PAINTNODE_IMAGE_REQUEST_FILE}`; PaintNode will run its owned image generator after reading that request.\n- Do not create, edit, or delete any other files in the working directory.\n"
         )
     };
     let reference_note = reference_prompt_note(reference_names, "");
     let has_storyboard = !storyboard_note.trim().is_empty();
+    let director_json_schema = if agentic_tool_loop {
+        format!(
+            r#"{{
+  "version": 1,
+  "action": "generateCandidate",
+  "baseImage": "source.png",
+  "prompt": "image prompt for PaintNode's owned generator",
+  "constraints": ["short constraints the generator must obey"],
+  "avoid": ["short negative constraints"],
+  "notes": "optional short note for PaintNode"
+}}
+
+After PaintNode writes `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` and attaches a downscaled review preview on a full-review turn, inspect `source.png`, the observation, and the preview of the latest candidate. If the full candidate named in the observation is faithful, write:
+{{
+  "version": 1,
+  "action": "acceptResult",
+  "candidate": "latest",
+  "notes": "short acceptance note"
+}}
+
+If the candidate is blocked, missing, over-retouched, compositionally wrong, or otherwise unfaithful, write another `generateCandidate` action with the smallest revised prompt needed. If the task cannot be completed faithfully, write:
+{{
+  "version": 1,
+  "action": "fail",
+  "reason": "short reason"
+}}"#
+        )
+    } else {
+        String::new()
+    };
+    let legacy_json_schema = |kind: &str| {
+        format!(
+            r#"{{
+  "version": 1,
+  "kind": "{kind}",
+  "baseImage": "source.png",
+  "prompt": "enhanced image prompt for PaintNode's owned generator",
+  "constraints": ["short constraints the generator must obey"],
+  "avoid": ["short negative constraints"],
+  "notes": "optional short note for PaintNode"
+}}"#
+        )
+    };
+    let final_response_file = if agentic_tool_loop {
+        PAINTNODE_DIRECTOR_ACTION_FILE
+    } else {
+        PAINTNODE_IMAGE_REQUEST_FILE
+    };
+    let review_requirement = if agentic_tool_loop {
+        match director_involvement {
+            AiDirectorInvolvement::EnsureCompletion => {
+                "- If PaintNode reports that the image tool failed, recover by writing another `generateCandidate` action with the smallest faithful prompt adjustment. PaintNode will accept the first completed candidate without a separate quality-review turn.\n"
+            }
+            AiDirectorInvolvement::FullReview => {
+                "- After PaintNode generates a candidate and reports the observation, review the candidate against `source.png`, the prompt, protected context, grain/texture, exposure character, and style intent before accepting. Retry with a revised `generateCandidate` action when the candidate is not faithful enough.\n"
+            }
+            AiDirectorInvolvement::PlanOnly => "",
+        }
+    } else {
+        ""
+    };
     let overview_note = if has_overview {
         "\n2. `overview.png` may be present as a downscaled surrounding-document preview with a red outline around this local frame. Use it only as non-editable composition and continuity guidance. `source.png` is the only base/edit image; never use `overview.png` as the source or base image, never copy its pixels or resolution, and never reproduce the red outline."
     } else {
@@ -1105,6 +1539,8 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 Task:
 - This is an image enhancement/restoration pass at the same size, not a new composition, new generative fill, outpaint, story continuation, or scene redesign.
 - Improve clarity, texture, natural detail, edge quality, lighting consistency, and local realism only for pixels already visible in the low-detail draft.
@@ -1115,28 +1551,25 @@ Task:
 {autonomy_contract}
 
 Requirements:
-- Write `{PAINTNODE_IMAGE_REQUEST_FILE}` as UTF-8 JSON in the current working directory.
-- The request must describe an in-place enhancement of `source.png`, not a newly composed independent image.
-- The request must instruct PaintNode's owned generator to use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
+{request_file_requirement}- {request_subject} must describe an in-place enhancement of `source.png`, not a newly composed independent image.
+- {request_subject} must instruct PaintNode's owned generator to use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
 - PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 {managed_method_requirements}
+{review_requirement}
 - Do not ask follow-up questions.
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing while preserving the existing visible draft content and composition.
 
 JSON schema:
-{{
-  "version": 1,
-  "kind": "draft_enhancement",
-  "baseImage": "source.png",
-  "prompt": "enhanced image prompt for PaintNode's owned generator",
-  "constraints": ["short constraints the generator must obey"],
-  "avoid": ["short negative constraints"],
-  "notes": "optional short note for PaintNode"
-}}
+{}
 
-Final response should be one short sentence confirming `{PAINTNODE_IMAGE_REQUEST_FILE}` was created."#
+Final response should be one short sentence confirming `{final_response_file}` was created."#,
+            if agentic_tool_loop {
+                director_json_schema.clone()
+            } else {
+                legacy_json_schema("draft_enhancement")
+            }
         );
     }
     if has_storyboard {
@@ -1168,34 +1601,33 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 {storyboard_note}{fallback_prompt}
 
 {autonomy_contract}
 
 Requirements:
-- Write `{PAINTNODE_IMAGE_REQUEST_FILE}` as UTF-8 JSON in the current working directory.
-- The request must describe an in-place edit of `source.png`, not a newly composed independent image.
+{request_file_requirement}- {request_subject} must describe an in-place edit of `source.png`, not a newly composed independent image.
 {storyboard_instruction_note}
-- The request must instruct PaintNode's owned generator to use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
+- {request_subject} must instruct PaintNode's owned generator to use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
 - Keep the attached frame registered: no crop, zoom, reframe, or shift.
 - PaintNode will crop, paste, and apply the editable mask after import. Do not draw mask edges, gray buffers, borders, or guides into the pixels.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 {managed_method_requirements}
+{review_requirement}
 - Do not ask follow-up questions.
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
 JSON schema:
-{{
-  "version": 1,
-  "kind": "generative_fill",
-  "baseImage": "source.png",
-  "prompt": "enhanced image prompt for PaintNode's owned generator",
-  "constraints": ["short constraints the generator must obey"],
-  "avoid": ["short negative constraints"],
-  "notes": "optional short note for PaintNode"
-}}
+{}
 
-Final response should be one short sentence confirming `{PAINTNODE_IMAGE_REQUEST_FILE}` was created."#
+Final response should be one short sentence confirming `{final_response_file}` was created."#,
+            if agentic_tool_loop {
+                director_json_schema.clone()
+            } else {
+                legacy_json_schema("generative_fill")
+            }
         );
     }
     let user_prompt_heading = "Original user edit prompt:";
@@ -1210,6 +1642,8 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 {storyboard_note}
 
 {user_prompt_heading}
@@ -1219,29 +1653,26 @@ Input files:
 
 Requirements:
 - Prefer one full PNG with the exact same framing as `source.png`.
-- Write `{PAINTNODE_IMAGE_REQUEST_FILE}` as UTF-8 JSON in the current working directory.
-- The request must describe an in-place edit of `source.png`, not a newly composed photograph.
-- The request must instruct PaintNode's owned generator to use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
+{request_file_requirement}- {request_subject} must describe an in-place edit of `source.png`, not a newly composed photograph.
+- {request_subject} must instruct PaintNode's owned generator to use `source.png` as the only base image. Do not use `overview.png` as the image source, edit target, or output template.
 - Fill the intended editable/empty area implied by the attached frame and prompt, matching surrounding scene, perspective, lighting, focus, color, grain, and camera style.
 - Keep existing visible context stable and registered. PaintNode will crop, paste, and apply the editable mask after import.
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 - If extending a real photo, avoid inventing crisp readable text in newly generated distant signs or advertisements; partial or indistinct text is preferable.
 {managed_method_requirements}
+{review_requirement}
 - Do not ask follow-up questions.
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
 JSON schema:
-{{
-  "version": 1,
-  "kind": "generative_fill",
-  "baseImage": "source.png",
-  "prompt": "enhanced image prompt for PaintNode's owned generator",
-  "constraints": ["short constraints the generator must obey"],
-  "avoid": ["short negative constraints"],
-  "notes": "optional short note for PaintNode"
-}}
+{}
 
-Final response should be one short sentence confirming `{PAINTNODE_IMAGE_REQUEST_FILE}` was created."#
+Final response should be one short sentence confirming `{final_response_file}` was created."#,
+        if agentic_tool_loop {
+            director_json_schema
+        } else {
+            legacy_json_schema("generative_fill")
+        }
     )
 }
 
@@ -1313,6 +1744,7 @@ fn ai_retouch_attached_image_notes(
     }
 }
 
+#[cfg(test)]
 fn codex_direct_retouch_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -1320,10 +1752,61 @@ fn codex_direct_retouch_prompt(
     reference_names: &[String],
     geometry_note: &str,
 ) -> String {
+    codex_direct_retouch_director_prompt(
+        prompt,
+        has_annotated_source,
+        has_reference,
+        reference_names,
+        geometry_note,
+        AiDirectorProvider::Codex,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+    )
+}
+
+fn codex_direct_retouch_director_prompt(
+    prompt: &str,
+    has_annotated_source: bool,
+    has_reference: bool,
+    reference_names: &[String],
+    geometry_note: &str,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
     let attached_image_notes =
         ai_retouch_attached_image_notes(has_annotated_source, has_reference, reference_names);
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "AI retouch",
+    );
+    let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
+    let director_tool_contract = if agentic_tool_loop {
+        format!(
+            "\n{}\n{}",
+            director_action_file_contract(
+                "edit_target.png",
+                "in-place retouch prompt for PaintNode's owned image tool"
+            ),
+            director_review_criteria_section("retouch", director_mode, director_involvement)
+        )
+    } else {
+        director_review_criteria_section("retouch", director_mode, director_involvement)
+    };
+    let opening = if agentic_tool_loop {
+        "Act as PaintNode's AI Director for one in-place PaintNode retouch."
+    } else {
+        "Perform one in-place PaintNode retouch and return exactly one full-canvas PNG candidate."
+    };
+    let output_requirements = if agentic_tool_loop {
+        "- The `generateCandidate` action must request one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.\n- The candidate must not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, red arrows, yellow callout boxes, annotation text, guide marks, or mask visualization.\n- If a safety or quality adjustment is needed, make the smallest compliant prompt adjustment while keeping the edit inside the mask."
+    } else {
+        "- Return one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.\n- Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, red arrows, yellow callout boxes, annotation text, guide marks, or mask visualization.\n- If a safety or quality adjustment is needed, make the smallest compliant adjustment while keeping the edit inside the mask."
+    };
     format!(
-        r#"Perform one in-place PaintNode retouch and return exactly one full-canvas PNG candidate.
+        r#"{opening}
 
 This is a fixed-canvas image editing task, not a new image generation task.
 
@@ -1337,6 +1820,9 @@ Attached images:
    - Transparent pixels are locked context and must remain unchanged.{attached_image_notes}
 
 {geometry_note}
+
+{director_contract}
+{director_tool_contract}
 
 Critical registration rule:
 Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, reframe, straighten, or change the camera perspective.
@@ -1358,9 +1844,7 @@ You may redraw clothing inside the editable area, but do not move or rescale the
 Preserve identity, face, hair, skin, hands, pose, body proportions, expression, gaze, lighting direction, focus, grain, and camera style unless the user explicitly asks to alter those details.
 
 Output requirements:
-- Return one full-canvas PNG candidate with the same dimensions and framing as `edit_target.png`.
-- Do not include PaintNode UI, checkerboard transparency, selection outlines, borders, labels, red arrows, yellow callout boxes, annotation text, guide marks, or mask visualization.
-- If a safety or quality adjustment is needed, make the smallest compliant adjustment while keeping the edit inside the mask."#
+{output_requirements}"#
     )
 }
 
@@ -1440,6 +1924,31 @@ pub(crate) async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionRe
     .map_err(|e| format!("Task error: {e}"))
 }
 
+#[tauri::command]
+pub(crate) async fn discover_codex_capabilities(
+    bin: Option<String>,
+) -> Result<AiProviderCapabilitiesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut command = Command::new("node");
+        apply_ai_cli_environment(&mut command).arg(codex_capabilities_runner_script());
+        if let Some(bin) = configured_codex_bin(bin) {
+            command.arg("--codex-path").arg(bin);
+        }
+        command
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY");
+        match command.output() {
+            Ok(output) => parse_codex_capabilities(&output)
+                .unwrap_or_else(|error| fallback_codex_capabilities(Some(error))),
+            Err(error) => fallback_codex_capabilities(Some(format!(
+                "Failed to launch Codex capability discovery: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|error| format!("Task error: {error}"))
+}
+
 /// Run local Codex headlessly to generate an image into a temp job folder.
 ///
 /// Auth is intentionally left to the user's local Codex installation. This command never reads
@@ -1462,6 +1971,7 @@ pub(crate) async fn generate_codex_image(
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
     director_mode: Option<String>,
+    director_provider: Option<String>,
     director_involvement: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
@@ -1481,9 +1991,10 @@ pub(crate) async fn generate_codex_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let _ = bin;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let _ = autonomy_level;
         let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
@@ -1509,7 +2020,13 @@ pub(crate) async fn generate_codex_image(
         )?;
         let (reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
-        let prompt_text = codex_direct_generate_prompt(prompt.trim(), &reference_names);
+        let prompt_text = codex_direct_generate_director_prompt(
+            prompt.trim(),
+            &reference_names,
+            director_provider,
+            director_mode,
+            director_involvement,
+        );
         write_ai_job_prompt(&job_path, &prompt_text, "Codex image generation")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
         // A failed previous attempt may have gotten past generation; reuse its
@@ -1565,12 +2082,14 @@ pub(crate) async fn generate_codex_image(
                 let (restored, _) = codex_restore_image_details(
                     &app,
                     &run_id,
+                    &codex_bin,
                     &codex_options,
                     &job_path.join("restore"),
                     &bytes,
                     "Generated image restoration",
                     false,
                     true,
+                    director_provider,
                     director_mode,
                     director_involvement,
                 )?;
@@ -1861,6 +2380,31 @@ fn run_paintnode_owned_fill_imagegen(
         )
     })?;
     let prompt = paintnode_owned_image_prompt(&request)?;
+    run_paintnode_owned_fill_image_request(
+        app,
+        run_id,
+        part_path,
+        options,
+        image_options,
+        &request,
+        &prompt,
+        "result.png",
+        working,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_paintnode_owned_fill_image_request(
+    app: &AppHandle,
+    run_id: &str,
+    part_path: &Path,
+    options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
+    request: &PaintNodeImageRequest,
+    prompt: &str,
+    result_file_name: &str,
+    working: &AiWorkingCanvas,
+) -> Result<CodexPartRun, String> {
     let base_image = if request.base_image.trim().is_empty() {
         "source.png"
     } else {
@@ -1888,7 +2432,7 @@ fn run_paintnode_owned_fill_imagegen(
                 run_id,
                 image_options.antigravity_bin.clone(),
                 part_path,
-                prompt.clone(),
+                prompt.to_string(),
                 vec![base_path],
                 working,
                 image_options.antigravity_model.clone(),
@@ -1917,7 +2461,7 @@ fn run_paintnode_owned_fill_imagegen(
                 ),
             );
             run_codex_direct_image_request(
-                &prompt,
+                prompt,
                 &[base_path],
                 working.original_dimensions,
                 options,
@@ -1925,7 +2469,7 @@ fn run_paintnode_owned_fill_imagegen(
             )?
         }
     };
-    let requested_result_path = part_path.join("result.png");
+    let requested_result_path = part_path.join(result_file_name);
     fs::write(&requested_result_path, &result_png).map_err(|e| {
         format!(
             "Failed to write Codex generative fill result at {}: {e}",
@@ -1949,35 +2493,178 @@ fn run_paintnode_owned_fill_imagegen(
 }
 
 fn paintnode_owned_image_prompt(request: &PaintNodeImageRequest) -> Result<String, String> {
-    let prompt = request.prompt.trim();
-    if prompt.is_empty() {
-        return Err(format!(
-            "PaintNode image request must include a non-empty `prompt`."
-        ));
+    image_request_prompt(request)
+}
+
+fn fill_director_turn_image_paths(
+    part_path: &Path,
+    has_overview: bool,
+    reference_paths: &[PathBuf],
+    candidate_path: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut image_paths = vec![part_path.join("source.png")];
+    if has_overview {
+        image_paths.push(part_path.join("overview.png"));
     }
-    let mut lines = vec![prompt.to_string()];
-    if !request.constraints.is_empty() {
-        lines.push("\nConstraints:".into());
-        for item in &request.constraints {
-            let item = item.trim();
-            if !item.is_empty() {
-                lines.push(format!("- {item}"));
-            }
+    image_paths.extend(reference_paths.iter().cloned());
+    if let Some(candidate_path) = candidate_path {
+        image_paths.push(candidate_path.to_path_buf());
+    }
+    image_paths
+}
+
+fn director_final_agent_message(
+    provider: &PaintNodeDirectorProvider,
+    output: &Output,
+) -> Option<String> {
+    match provider {
+        PaintNodeDirectorProvider::Claude => final_claude_agent_message(output),
+        PaintNodeDirectorProvider::Codex | PaintNodeDirectorProvider::Antigravity => {
+            final_codex_agent_message(output)
         }
     }
-    if !request.avoid.is_empty() {
-        lines.push("\nAvoid:".into());
-        for item in &request.avoid {
-            let item = item.trim();
-            if !item.is_empty() {
-                lines.push(format!("- {item}"));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_director_provider_action_turn(
+    app: &AppHandle,
+    run_id: &str,
+    director_provider: &PaintNodeDirectorProvider,
+    codex_bin: &str,
+    claude_options: &ClaudeCommandOptions,
+    codex_options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
+    part_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+) -> Result<AgentRunResult, String> {
+    match director_provider {
+        PaintNodeDirectorProvider::Codex => {
+            let mut command = build_codex_sdk_command(
+                codex_bin,
+                part_path,
+                prompt_text,
+                image_paths,
+                codex_options,
+            );
+            let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
+                .map_err(|e| {
+                    format!(
+                        "Failed to run Codex at '{}': {e}",
+                        codex_command_label(codex_bin)
+                    )
+                })?;
+            if run.output.status.success() {
+                Ok(run)
+            } else if let Some(message) = final_codex_agent_message(&run.output) {
+                Err(format!("Codex Director failed.\n\n{message}"))
+            } else {
+                Err(command_failure("Codex Director", &run.output))
             }
         }
+        PaintNodeDirectorProvider::Claude => {
+            let mut command =
+                build_director_claude_command(claude_options, part_path, prompt_text, image_paths);
+            let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string())
+                .map_err(|e| {
+                    format!(
+                        "Failed to run Claude at '{}': {e}",
+                        claude_command_label(claude_options)
+                    )
+                })?;
+            if run.output.status.success() {
+                Ok(run)
+            } else if let Some(message) = final_claude_agent_message(&run.output) {
+                Err(format!("Claude Director failed.\n\n{message}"))
+            } else {
+                Err(claude_command_failure("Claude Director", &run.output))
+            }
+        }
+        PaintNodeDirectorProvider::Antigravity => run_antigravity_director_request(
+            app,
+            run_id,
+            image_options.antigravity_bin.clone(),
+            image_options.antigravity_model.clone(),
+            image_options.antigravity_approval_mode.clone(),
+            image_options.keep_debug_artifacts,
+            part_path,
+            part_path,
+            prompt_text,
+            true,
+            PAINTNODE_DIRECTOR_ACTION_FILE,
+        ),
     }
-    if !request.notes.trim().is_empty() {
-        lines.push(format!("\nNotes: {}", request.notes.trim()));
-    }
-    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_agentic_fill_director_part(
+    app: &AppHandle,
+    run_id: &str,
+    director_provider: &PaintNodeDirectorProvider,
+    codex_bin: &str,
+    claude_options: &ClaudeCommandOptions,
+    codex_options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
+    part_path: &Path,
+    base_prompt_text: &str,
+    has_overview: bool,
+    reference_paths: &[PathBuf],
+    working: &AiWorkingCanvas,
+    director_involvement: AiDirectorInvolvement,
+) -> Result<CodexPartRun, String> {
+    write_codex_imagegen_options(part_path, working.original_dimensions, codex_options)?;
+    run_candidate_director_loop(
+        part_path,
+        DirectorLoopSpec {
+            provider_label: director_provider.label(),
+            involvement: director_involvement,
+            keep_debug_artifacts: codex_options.keep_debug_artifacts,
+            legacy_request_file: PAINTNODE_IMAGE_REQUEST_FILE,
+            base_prompt_text,
+            review_criteria: workflow_review_criteria("generative_fill"),
+            ensure_completion_acceptance_note:
+                "Candidate completed; ensure-completion mode does not run a separate quality review.",
+        },
+        |_, prompt_text, candidate_path| {
+            let image_paths = fill_director_turn_image_paths(
+                part_path,
+                has_overview,
+                reference_paths,
+                candidate_path,
+            );
+            run_director_provider_action_turn(
+                app,
+                run_id,
+                director_provider,
+                codex_bin,
+                claude_options,
+                codex_options,
+                image_options,
+                part_path,
+                prompt_text,
+                &image_paths,
+            )
+        },
+        |run| director_final_agent_message(director_provider, &run.output),
+        |turn, request, prompt| {
+            let candidate_file = director_candidate_file(turn);
+            let result = run_paintnode_owned_fill_image_request(
+                app,
+                run_id,
+                part_path,
+                codex_options,
+                image_options,
+                &request,
+                prompt,
+                &candidate_file,
+                working,
+            )?;
+            Ok(DirectorCandidate {
+                result,
+                file_name: candidate_file,
+            })
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2115,7 +2802,7 @@ fn run_claude_fill_part(
             ));
         }
         return Err(claude_command_failure(
-            "Claude generative fill planner",
+            "Claude generative fill Director",
             &run.output,
         ));
     }
@@ -2148,6 +2835,63 @@ fn run_claude_fill_part(
     }
     Err(format!(
         "Claude did not create `{PAINTNODE_IMAGE_REQUEST_FILE}` for PaintNode's owned image-generation runner."
+    ))
+}
+
+fn run_antigravity_fill_part(
+    app: &AppHandle,
+    run_id: &str,
+    codex_options: &CodexCommandOptions,
+    image_options: &PaintNodeImageProviderOptions,
+    part_path: &Path,
+    prompt_text: &str,
+    working: &AiWorkingCanvas,
+) -> Result<CodexPartRun, String> {
+    write_codex_imagegen_options(part_path, working.original_dimensions, codex_options)?;
+    let run = run_antigravity_director_request(
+        app,
+        run_id,
+        image_options.antigravity_bin.clone(),
+        image_options.antigravity_model.clone(),
+        image_options.antigravity_approval_mode.clone(),
+        image_options.keep_debug_artifacts,
+        part_path,
+        part_path,
+        prompt_text,
+        true,
+        PAINTNODE_IMAGE_REQUEST_FILE,
+    )?;
+
+    let owned_request_path = part_path.join(PAINTNODE_IMAGE_REQUEST_FILE);
+    let requested_result_path = part_path.join("result.png");
+    if owned_request_path.exists() {
+        return run_paintnode_owned_fill_imagegen(
+            app,
+            run_id,
+            part_path,
+            codex_options,
+            image_options,
+            &owned_request_path,
+            working,
+        );
+    }
+
+    if requested_result_path.exists() {
+        return Err(format!(
+            "Antigravity created `{}` directly, but generative fill is PaintNode-controlled. Expected `{PAINTNODE_IMAGE_REQUEST_FILE}` so PaintNode can run its owned image-generation executor.",
+            requested_result_path.display()
+        ));
+    }
+
+    if !run.output.status.success() {
+        return Err(command_failure(
+            "Antigravity generative fill Director",
+            &run.output,
+        ));
+    }
+
+    Err(format!(
+        "Antigravity did not create `{PAINTNODE_IMAGE_REQUEST_FILE}` for PaintNode's owned image-generation runner."
     ))
 }
 
@@ -2189,14 +2933,53 @@ fn run_codex_direct_edit_part(
     })
 }
 
+#[cfg(test)]
 fn codex_direct_restore_prompt(
     geometry_note: &str,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
 ) -> String {
-    let director_contract = ai_director_restore_contract(director_mode, director_involvement);
+    codex_direct_restore_director_prompt(
+        geometry_note,
+        AiDirectorProvider::Codex,
+        director_mode,
+        director_involvement,
+    )
+}
+
+fn codex_direct_restore_director_prompt(
+    geometry_note: &str,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    let director_contract =
+        ai_director_restore_contract(director_provider, director_mode, director_involvement);
+    let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
+    let director_tool_contract = if agentic_tool_loop {
+        format!(
+            "\n{}\n{}",
+            director_action_file_contract(
+                "source.png",
+                "detail restoration prompt for PaintNode's owned image tool"
+            ),
+            director_review_criteria_section("upscale", director_mode, director_involvement)
+        )
+    } else {
+        director_review_criteria_section("upscale", director_mode, director_involvement)
+    };
+    let opening = if agentic_tool_loop {
+        "Act as PaintNode's AI Director for one fixed-canvas image-detail restoration region."
+    } else {
+        "Restore image detail for one PaintNode fixed-canvas region and return exactly one full-canvas PNG candidate."
+    };
+    let output_requirements = if agentic_tool_loop {
+        "- The `generateCandidate` action must request one full-canvas PNG candidate with the same dimensions and framing as `source.png`.\n- The candidate must not include PaintNode UI, borders, labels, watermarks, or mask visualization.\n- If a safety or quality adjustment is needed, make the smallest compliant prompt adjustment while preserving the existing image content."
+    } else {
+        "- Return one full-canvas PNG candidate with the same dimensions and framing as `source.png`.\n- Do not include PaintNode UI, borders, labels, watermarks, or mask visualization.\n- If a safety or quality adjustment is needed, make the smallest compliant adjustment while preserving the existing image content."
+    };
     format!(
-        r#"Restore image detail for one PaintNode fixed-canvas region and return exactly one full-canvas PNG candidate.
+        r#"{opening}
 
 This is a fixed-canvas image refinement task, not a new image generation task.
 
@@ -2206,6 +2989,7 @@ Attached images:
 
 {geometry_note}
 {director_contract}
+{director_tool_contract}
 
 Restoration goal:
 - Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
@@ -2221,9 +3005,7 @@ Do not translate, shift, crop, zoom, rotate, scale, stretch, warp, resize, refra
 The output must stay registered to `source.png`.
 
 Output requirements:
-- Return one full-canvas PNG candidate with the same dimensions and framing as `source.png`.
-- Do not include PaintNode UI, borders, labels, watermarks, or mask visualization.
-- If a safety or quality adjustment is needed, make the smallest compliant adjustment while preserving the existing image content."#
+{output_requirements}"#
     )
 }
 
@@ -2232,12 +3014,14 @@ Output requirements:
 fn codex_restore_image_details(
     app: &AppHandle,
     run_id: &str,
+    codex_bin: &str,
     options: &CodexCommandOptions,
     restore_root: &Path,
     enlarged_png: &[u8],
     label: &str,
     upscale_layers: bool,
     return_composed: bool,
+    director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
 ) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
@@ -2248,6 +3032,11 @@ fn codex_restore_image_details(
     } else {
         plan_ai_restore_placement(AiEditProvider::Codex, dimensions, label)?
     };
+    let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
+    let director_runner = PaintNodeDirectorProvider::from_director_provider(director_provider);
+    let claude_options = claude_command_options(None, None, None);
+    let image_options = codex_image_provider_options(options.keep_debug_artifacts);
+    let workflow_name = if upscale_layers { "upscale" } else { "restore" };
     let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
     let mut layer_results = Vec::new();
     fs::create_dir_all(restore_root)
@@ -2307,8 +3096,12 @@ fn codex_restore_image_details(
         }
         write_codex_imagegen_options(&part_path, part.working.original_dimensions, options)?;
         let geometry_note = ai_part_geometry_note(&placement, part_index);
-        let prompt_text =
-            codex_direct_restore_prompt(&geometry_note, director_mode, director_involvement);
+        let prompt_text = codex_direct_restore_director_prompt(
+            &geometry_note,
+            director_provider,
+            director_mode,
+            director_involvement,
+        );
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
         emit_codex_part_progress(
             app,
@@ -2325,17 +3118,72 @@ fn codex_restore_image_details(
         if has_overview {
             image_paths.push(part_path.join("overview.png"));
         }
-        let part_run = run_codex_direct_edit_part(
-            app,
-            run_id,
-            &part_path,
-            options,
-            &prompt_text,
-            &image_paths,
-            &part.working,
-            label,
-        )
-        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+        let part_run = if agentic_tool_loop {
+            run_candidate_director_loop(
+                &part_path,
+                DirectorLoopSpec {
+                    provider_label: director_runner.label(),
+                    involvement: director_involvement,
+                    keep_debug_artifacts: options.keep_debug_artifacts,
+                    legacy_request_file: PAINTNODE_IMAGE_REQUEST_FILE,
+                    base_prompt_text: &prompt_text,
+                    review_criteria: workflow_review_criteria(workflow_name),
+                    ensure_completion_acceptance_note:
+                        "Candidate completed; ensure-completion mode does not run a separate quality review.",
+                },
+                |_, turn_prompt_text, candidate_path| {
+                    let mut turn_image_paths = image_paths.clone();
+                    if let Some(candidate_path) = candidate_path {
+                        turn_image_paths.push(candidate_path.to_path_buf());
+                    }
+                    run_director_provider_action_turn(
+                        app,
+                        run_id,
+                        &director_runner,
+                        codex_bin,
+                        &claude_options,
+                        options,
+                        &image_options,
+                        &part_path,
+                        turn_prompt_text,
+                        &turn_image_paths,
+                    )
+                },
+                |run| director_final_agent_message(&director_runner, &run.output),
+                |turn, _request, candidate_prompt| {
+                    let part_run = run_codex_direct_edit_part(
+                        app,
+                        run_id,
+                        &part_path,
+                        options,
+                        candidate_prompt,
+                        &image_paths,
+                        &part.working,
+                        label,
+                    )
+                    .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                    let candidate_file = director_candidate_file(turn);
+                    fs::write(part_path.join(&candidate_file), &part_run.normalized_png)
+                        .map_err(|e| format!("Failed to write {label} Director candidate: {e}"))?;
+                    Ok(DirectorCandidate {
+                        result: part_run,
+                        file_name: candidate_file,
+                    })
+                },
+            )?
+        } else {
+            run_codex_direct_edit_part(
+                app,
+                run_id,
+                &part_path,
+                options,
+                &prompt_text,
+                &image_paths,
+                &part.working,
+                label,
+            )
+            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+        };
         let _ = fs::remove_file(&part_run.recovered_source_path);
         let unaligned_bytes = part_run.normalized_png.clone();
         let (part_result_png, drift_correction) =
@@ -2403,11 +3251,15 @@ pub(crate) async fn generate_codex_fill_image(
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
     edit_checks_level: Option<u8>,
     fill_aspect_ratio: Option<String>,
     planner_provider: Option<String>,
     claude_bin: Option<String>,
     claude_model: Option<String>,
+    claude_effort: Option<String>,
     image_provider: Option<String>,
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
@@ -2463,8 +3315,11 @@ pub(crate) async fn generate_codex_fill_image(
             image_quality,
             image_moderation,
         );
-        let planner_provider = PaintNodePlannerProvider::from_option(planner_provider);
-        let claude_options = claude_command_options(claude_bin, claude_model);
+        let director_provider =
+            PaintNodeDirectorProvider::from_options(director_provider, planner_provider);
+        let director_mode = ai_director_mode(director_mode);
+        let director_involvement = ai_director_involvement(director_involvement);
+        let claude_options = claude_command_options(claude_bin, claude_model, claude_effort);
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let image_options = PaintNodeImageProviderOptions {
             provider: PaintNodeImageProvider::from_option(image_provider),
@@ -2506,7 +3361,7 @@ pub(crate) async fn generate_codex_fill_image(
         let job_path = if let Some(job_project_dir) = &job_project_dir {
             project_agent_run_dir_for_run(
                 job_project_dir,
-                planner_provider.runs_dir(),
+                director_provider.runs_dir(),
                 "fill",
                 &run_id,
             )?
@@ -2537,8 +3392,8 @@ pub(crate) async fn generate_codex_fill_image(
         let resumable = prepare_ai_job_dir_for_placement(&job_path, &placement, "Generative fill")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
         let storyboard = if image_options.provider == PaintNodeImageProvider::Codex {
-            match &planner_provider {
-                PaintNodePlannerProvider::Codex => prepare_codex_fill_storyboard(
+            match &director_provider {
+                PaintNodeDirectorProvider::Codex => prepare_codex_fill_storyboard(
                     &app,
                     &run_id,
                     &codex_bin,
@@ -2549,8 +3404,15 @@ pub(crate) async fn generate_codex_fill_image(
                     prompt.trim(),
                     &reference_pngs,
                 )?,
-                PaintNodePlannerProvider::Claude => {
-                    emit_claude_no_storyboard(&app, &run_id);
+                PaintNodeDirectorProvider::Antigravity | PaintNodeDirectorProvider::Claude => {
+                    emit_codex_progress(
+                        &app,
+                        &run_id,
+                        format!(
+                            "Skipping visual storyboard draft; {} Director does not generate images in the planning stage",
+                            director_provider.label()
+                        ),
+                    );
                     None
                 }
             }
@@ -2560,7 +3422,7 @@ pub(crate) async fn generate_codex_fill_image(
                 &run_id,
                 format!(
                     "Skipping {} storyboard draft; selected image generator owns fill pixels",
-                    planner_provider.label()
+                    director_provider.label()
                 ),
             );
             None
@@ -2722,9 +3584,12 @@ pub(crate) async fn generate_codex_fill_image(
                 .as_ref()
                 .map(|storyboard| storyboard.fallback)
                 .unwrap_or(false);
-            let base_prompt_text = generative_fill_prompt(
+            let base_prompt_text = generative_fill_director_prompt(
                 prompt.trim(),
                 autonomy,
+                director_provider.as_director_provider(),
+                director_mode,
+                director_involvement,
                 &geometry_note,
                 &storyboard_note,
                 storyboard_anchor,
@@ -2744,33 +3609,23 @@ pub(crate) async fn generate_codex_fill_image(
                     &placement,
                     part_index,
                     &format!(
-                        "Starting local {} generative fill planner",
-                        planner_provider.label()
+                        "Starting local {} generative fill Director",
+                        director_provider.label()
                     ),
                 ),
             );
             write_ai_job_prompt(
                 &part_path,
                 &base_prompt_text,
-                &format!("{} generative fill planner", planner_provider.label()),
+                &format!("{} generative fill Director", director_provider.label()),
             )?;
-            let part_run = match &planner_provider {
-                PaintNodePlannerProvider::Codex => run_codex_fill_part(
+            let part_run = if director_uses_agentic_loop(director_mode, director_involvement)
+            {
+                run_agentic_fill_director_part(
                     &app,
                     &run_id,
+                    &director_provider,
                     &codex_bin,
-                    &codex_options,
-                    &image_options,
-                    &part_path,
-                    &base_prompt_text,
-                    has_overview,
-                    &storyboard_draft_paths,
-                    &reference_paths,
-                    &part.working,
-                ),
-                PaintNodePlannerProvider::Claude => run_claude_fill_part(
-                    &app,
-                    &run_id,
                     &claude_options,
                     &codex_options,
                     &image_options,
@@ -2779,7 +3634,45 @@ pub(crate) async fn generate_codex_fill_image(
                     has_overview,
                     &reference_paths,
                     &part.working,
-                ),
+                    director_involvement,
+                )
+            } else {
+                match &director_provider {
+                    PaintNodeDirectorProvider::Codex => run_codex_fill_part(
+                        &app,
+                        &run_id,
+                        &codex_bin,
+                        &codex_options,
+                        &image_options,
+                        &part_path,
+                        &base_prompt_text,
+                        has_overview,
+                        &storyboard_draft_paths,
+                        &reference_paths,
+                        &part.working,
+                    ),
+                    PaintNodeDirectorProvider::Antigravity => run_antigravity_fill_part(
+                        &app,
+                        &run_id,
+                        &codex_options,
+                        &image_options,
+                        &part_path,
+                        &base_prompt_text,
+                        &part.working,
+                    ),
+                    PaintNodeDirectorProvider::Claude => run_claude_fill_part(
+                        &app,
+                        &run_id,
+                        &claude_options,
+                        &codex_options,
+                        &image_options,
+                        &part_path,
+                        &base_prompt_text,
+                        has_overview,
+                        &reference_paths,
+                        &part.working,
+                    ),
+                }
             }
             .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
             if part_run.normalized {
@@ -2791,7 +3684,7 @@ pub(crate) async fn generate_codex_fill_image(
                         part_index,
                         &format!(
                             "Normalized {} fill from {}x{} to {}x{}",
-                            planner_provider.label(),
+                            director_provider.label(),
                             part_run.result_dimensions.0,
                             part_run.result_dimensions.1,
                             part.working.original_dimensions.0,
@@ -2961,6 +3854,9 @@ pub(crate) async fn generate_codex_retouch_image(
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
     edit_checks_level: Option<u8>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
@@ -3031,8 +3927,15 @@ pub(crate) async fn generate_codex_retouch_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let _ = bin;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let _ = autonomy_level;
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_runner = PaintNodeDirectorProvider::from_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
+        let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
+        let claude_options = claude_command_options(None, None, None);
+        let image_options = codex_image_provider_options(codex_options.keep_debug_artifacts);
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
             format!("retouch-{}", now_id())
@@ -3128,12 +4031,15 @@ pub(crate) async fn generate_codex_retouch_image(
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
             let geometry_note = ai_part_prompt_context(&placement, part_index);
-            let base_prompt_text = codex_direct_retouch_prompt(
+            let base_prompt_text = codex_direct_retouch_director_prompt(
                 prompt.trim(),
                 has_annotated_source,
                 has_reference,
                 &reference_names,
                 &geometry_note,
+                director_provider,
+                director_mode,
+                director_involvement,
             );
 
             emit_codex_part_progress(
@@ -3148,41 +4054,35 @@ pub(crate) async fn generate_codex_retouch_image(
                 ),
             );
             let result_path = part_path.join("result.png");
-            let mut accepted_run = None;
-            let mut retry_note = "";
-            for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                let prompt_text = if retry_note.is_empty() {
-                    base_prompt_text.clone()
-                } else {
-                    format!("{base_prompt_text}\n\n{retry_note}")
-                };
-                write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
-                let mut image_paths = vec![
-                    part_path.join("source.png"),
-                    part_path.join("edit_target.png"),
-                    part_path.join("mask.png"),
-                ];
-                if has_annotated_source {
-                    image_paths.push(part_path.join("annotated_source.png"));
-                }
-                if has_reference {
-                    image_paths.push(part_path.join("reference.png"));
-                }
-                if has_overview {
-                    image_paths.push(part_path.join("overview.png"));
-                }
-                image_paths.extend(reference_paths.iter().cloned());
+            write_ai_job_prompt(&part_path, &base_prompt_text, "Codex AI retouch")?;
+            let mut image_paths = vec![
+                part_path.join("source.png"),
+                part_path.join("edit_target.png"),
+                part_path.join("mask.png"),
+            ];
+            if has_annotated_source {
+                image_paths.push(part_path.join("annotated_source.png"));
+            }
+            if has_reference {
+                image_paths.push(part_path.join("reference.png"));
+            }
+            if has_overview {
+                image_paths.push(part_path.join("overview.png"));
+            }
+            image_paths.extend(reference_paths.iter().cloned());
+            let run_retouch_candidate =
+                |turn: usize, prompt_text: &str| -> Result<CodexPartRun, (String, Option<bool>)> {
                 let part_run = run_codex_direct_edit_part(
                     &app,
                     &run_id,
                     &part_path,
                     &codex_options,
-                    &prompt_text,
+                    prompt_text,
                     &image_paths,
                     &part.working,
                     "AI retouch candidate",
                 )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                .map_err(|e| (ai_part_progress_message(&placement, part_index, &e), None))?;
                 if part_run.normalized {
                     emit_codex_progress(
                         &app,
@@ -3200,8 +4100,6 @@ pub(crate) async fn generate_codex_retouch_image(
                         ),
                     );
                 }
-                // Result checks: in-place drift, then seam continuity when
-                // the user's check level enables it.
                 let rejection = ai_candidate_rejection(
                     checks_level,
                     &inputs.edit_target_png,
@@ -3210,47 +4108,117 @@ pub(crate) async fn generate_codex_retouch_image(
                     &part_run.normalized_png,
                     "AI retouch candidate",
                 )
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                let Some(rejection) = rejection else {
-                    accepted_run = Some(part_run);
-                    break;
-                };
-                retry_note = if rejection.continuation_retry {
-                    AI_SEAM_RETRY_NOTE
-                } else {
-                    CODEX_IN_PLACE_RETRY_NOTE
-                };
-                if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
-                    emit_codex_progress(
-                        &app,
-                        &run_id,
-                        ai_part_progress_message(
-                            &placement,
-                            part_index,
-                            &format!(
-                                "Rejected AI retouch candidate: {}; retrying with stricter instructions",
-                                rejection.reason
-                            ),
-                        ),
-                    );
-                    remove_rejected_ai_candidate(&result_path)
-                        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-                    continue;
+                .map_err(|e| (ai_part_progress_message(&placement, part_index, &e), None))?;
+                if let Some(rejection) = rejection {
+                    let _ = fs::remove_file(&part_run.recovered_source_path);
+                    return Err((
+                        format!("PaintNode rejected candidate {turn}: {}", rejection.reason),
+                        Some(rejection.continuation_retry),
+                    ));
                 }
-                // Drop the rejected candidate so a resumed retry cannot
-                // silently import it via reuse_part_result.
-                let _ = fs::remove_file(&result_path);
-                return Err(ai_part_progress_message(
-                    &placement,
-                    part_index,
-                    &format!(
-                        "The AI image model produced an unusable candidate: {}. Try a smaller edit area, a simpler prompt, or a lower result-checks level.",
-                        rejection.reason
-                    ),
-                ));
-            }
-            let part_run = accepted_run
-                .ok_or_else(|| "AI retouch produced no accepted candidate.".to_string())?;
+                Ok(part_run)
+            };
+            let part_run = if agentic_tool_loop {
+                run_candidate_director_loop(
+                    &part_path,
+                    DirectorLoopSpec {
+                        provider_label: director_runner.label(),
+                        involvement: director_involvement,
+                        keep_debug_artifacts: codex_options.keep_debug_artifacts,
+                        legacy_request_file: PAINTNODE_IMAGE_REQUEST_FILE,
+                        base_prompt_text: &base_prompt_text,
+                        review_criteria: workflow_review_criteria("retouch"),
+                        ensure_completion_acceptance_note:
+                            "Candidate completed; ensure-completion mode does not run a separate quality review.",
+                    },
+                    |_, turn_prompt_text, candidate_path| {
+                        let mut turn_image_paths = image_paths.clone();
+                        if let Some(candidate_path) = candidate_path {
+                            turn_image_paths.push(candidate_path.to_path_buf());
+                        }
+                        run_director_provider_action_turn(
+                            &app,
+                            &run_id,
+                            &director_runner,
+                            &codex_bin,
+                            &claude_options,
+                            &codex_options,
+                            &image_options,
+                            &part_path,
+                            turn_prompt_text,
+                            &turn_image_paths,
+                        )
+                    },
+                    |run| director_final_agent_message(&director_runner, &run.output),
+                    |turn, _request, candidate_prompt| {
+                        let part_run = run_retouch_candidate(turn, candidate_prompt)
+                            .map_err(|(error, _)| error)?;
+                        let candidate_file = director_candidate_file(turn);
+                        fs::write(part_path.join(&candidate_file), &part_run.normalized_png)
+                            .map_err(|e| {
+                                format!("Failed to write AI retouch Director candidate: {e}")
+                            })?;
+                        Ok(DirectorCandidate {
+                            result: part_run,
+                            file_name: candidate_file,
+                        })
+                    },
+                )
+                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+            } else {
+                let mut accepted_run = None;
+                let mut retry_note = "";
+                for attempt in 0..AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                    let prompt_text = if retry_note.is_empty() {
+                        base_prompt_text.clone()
+                    } else {
+                        format!("{base_prompt_text}\n\n{retry_note}")
+                    };
+                    write_ai_job_prompt(&part_path, &prompt_text, "Codex AI retouch")?;
+                    match run_retouch_candidate((attempt + 1) as usize, &prompt_text) {
+                        Ok(part_run) => {
+                            accepted_run = Some(part_run);
+                            break;
+                        }
+                        Err((rejection_reason, Some(continuation_retry))) => {
+                            retry_note = if continuation_retry {
+                                AI_SEAM_RETRY_NOTE
+                            } else {
+                                CODEX_IN_PLACE_RETRY_NOTE
+                            };
+                            if attempt + 1 < AI_PROTECTED_DRIFT_MAX_ATTEMPTS {
+                                emit_codex_progress(
+                                    &app,
+                                    &run_id,
+                                    ai_part_progress_message(
+                                        &placement,
+                                        part_index,
+                                        &format!(
+                                            "Rejected AI retouch candidate: {}; retrying with stricter instructions",
+                                            rejection_reason
+                                        ),
+                                    ),
+                                );
+                                remove_rejected_ai_candidate(&result_path).map_err(|e| {
+                                    ai_part_progress_message(&placement, part_index, &e)
+                                })?;
+                                continue;
+                            }
+                            let _ = fs::remove_file(&result_path);
+                            return Err(ai_part_progress_message(
+                                &placement,
+                                part_index,
+                                &format!(
+                                    "The AI image model produced an unusable candidate: {rejection_reason}. Try a smaller edit area, a simpler prompt, or a lower result-checks level."
+                                ),
+                            ));
+                        }
+                        Err((error, None)) => return Err(error),
+                    }
+                }
+                accepted_run
+                    .ok_or_else(|| "AI retouch produced no accepted candidate.".to_string())?
+            };
             fs::write(part_path.join("part_result.png"), &part_run.normalized_png)
                 .map_err(|e| format!("Failed to record AI retouch part result: {e}"))?;
             composer.apply_part_result(part, &part_run.normalized_png, "AI retouch")?;
@@ -3325,6 +4293,7 @@ pub(crate) async fn upscale_codex_image(
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
     director_mode: Option<String>,
+    director_provider: Option<String>,
     director_involvement: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
@@ -3345,9 +4314,10 @@ pub(crate) async fn upscale_codex_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let _ = bin;
+        let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let _ = autonomy_level;
         let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("upscale-{}", now_id())
@@ -3389,12 +4359,14 @@ pub(crate) async fn upscale_codex_image(
         let (composed_bytes, layer_results) = codex_restore_image_details(
             &app,
             &run_id,
+            &codex_bin,
             &codex_options,
             &job_path,
             &enlarged_png,
             "AI upscale",
             true,
             keep_composed_result,
+            director_provider,
             director_mode,
             director_involvement,
         )?;
@@ -3459,6 +4431,9 @@ pub(crate) async fn decouple_codex_image(
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
 ) -> Result<DecoupleImageResult, String> {
     if !is_png(&source_png) {
         return Err("Asset extraction source must be a PNG image.".into());
@@ -3475,6 +4450,9 @@ pub(crate) async fn decouple_codex_image(
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let codex_bin = configured_codex_bin_or_sdk_default(bin);
         let _autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("decouple-{}", now_id())
         } else {
@@ -3509,12 +4487,25 @@ pub(crate) async fn decouple_codex_image(
         };
         write_ai_job_prompt(
             &job_path,
-            &decouple_codex_prompt(user_prompt),
+            &decouple_codex_director_prompt(
+                user_prompt,
+                director_provider,
+                director_mode,
+                director_involvement,
+            ),
             "Codex asset extraction",
         )?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
-        let mut command =
-            build_decouple_codex_command(&codex_bin, &job_path, user_prompt, &codex_options, true);
+        let mut command = build_decouple_codex_director_command(
+            &codex_bin,
+            &job_path,
+            user_prompt,
+            &codex_options,
+            director_provider,
+            director_mode,
+            director_involvement,
+            true,
+        );
         let mut run =
             run_codex_with_progress(&mut command, app.clone(), run_id.clone()).map_err(|e| {
                 format!(
@@ -3529,11 +4520,14 @@ pub(crate) async fn decouple_codex_image(
                 &run_id,
                 "Codex progress stream unavailable; retrying asset extraction",
             );
-            let mut fallback = build_decouple_codex_command(
+            let mut fallback = build_decouple_codex_director_command(
                 &codex_bin,
                 &job_path,
                 user_prompt,
                 &codex_options,
+                director_provider,
+                director_mode,
+                director_involvement,
                 false,
             );
             run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone()).map_err(
@@ -3886,6 +4880,27 @@ mod tests {
     }
 
     #[test]
+    fn capability_parser_keeps_image_models_and_advertised_effort_order() {
+        let capabilities = parse_codex_capabilities_payload(br#"{"data":[{"model":"vision-a","displayName":"Vision A","inputModalities":["text","image"],"supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"},{"reasoningEffort":"high","description":"Deep"}],"defaultReasoningEffort":"high","isDefault":true},{"model":"text-only","displayName":"Text only","inputModalities":["text"],"supportedReasoningEfforts":[],"isDefault":false}]}"#)
+            .expect("capabilities");
+        assert_eq!(capabilities.source, "appServer");
+        assert_eq!(capabilities.models.len(), 1);
+        assert_eq!(capabilities.models[0].id, "vision-a");
+        assert_eq!(
+            capabilities.models[0].supported_reasoning_efforts[0].value,
+            "medium"
+        );
+        assert_eq!(
+            capabilities.models[0].supported_reasoning_efforts[1].value,
+            "high"
+        );
+        assert_eq!(
+            capabilities.models[0].default_reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
     fn codex_imagegen_options_record_supported_size_quality_and_moderation() {
         let job = TempJobDir::new("paintnode-codex-imagegen-options-test").expect("temp dir");
         let options = CodexCommandOptions {
@@ -4136,10 +5151,13 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_fill_director_prompt_omits_method_guardrails() {
-        let fill = generative_fill_prompt(
+    fn unmanaged_plan_only_fill_director_prompt_omits_method_guardrails() {
+        let fill = generative_fill_director_prompt(
             "extend photo",
             AiAutonomyLevel::Unmanaged,
+            AiDirectorProvider::Codex,
+            AiDirectorMode::Force,
+            AiDirectorInvolvement::PlanOnly,
             TEST_GEOMETRY_NOTE,
             "",
             false,
@@ -4150,6 +5168,7 @@ mod tests {
         );
         assert!(fill.contains("Autonomy level: Unmanaged"));
         assert!(fill.contains(PAINTNODE_IMAGE_REQUEST_FILE));
+        assert!(!fill.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
         assert!(!fill.contains("$imagegen"));
         assert!(!fill.contains("normal Codex image-generation flow"));
         assert!(!fill.contains("Do not create, edit, or delete files"));
@@ -4185,6 +5204,8 @@ mod tests {
             prompt.contains("If a person/character originally holds a separately extracted prop")
         );
         assert!(prompt.contains("natural empty hands"));
+        assert!(prompt.contains("Director review criteria"));
+        assert!(prompt.contains("Manifest entries must point to valid PNG files"));
     }
 
     #[test]
@@ -4246,7 +5267,10 @@ mod tests {
         assert!(prompt_arg.contains("PaintNode will crop, paste, and apply the editable mask"));
         assert!(!prompt_arg.contains("edit_target.png"));
         assert!(!prompt_arg.contains("mask.png"));
-        assert!(prompt_arg.contains(PAINTNODE_IMAGE_REQUEST_FILE));
+        assert!(prompt_arg.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(prompt_arg.contains("generateCandidate"));
+        assert!(prompt_arg.contains("acceptResult"));
+        assert!(prompt_arg.contains(PAINTNODE_DIRECTOR_OBSERVATION_FILE));
         assert!(!prompt_arg.contains("$imagegen"));
         assert!(!prompt_arg.contains("generated-images cache"));
         assert!(!prompt_arg.contains("Save the final PNG as `result.png`"));
@@ -4271,7 +5295,8 @@ mod tests {
         assert!(storyboard_prompt.contains("never use `overview.png` as the source or base image"));
         assert!(storyboard_prompt.contains("never reproduce the red outline"));
         assert!(storyboard_prompt.contains("image enhancement/restoration pass at the same size"));
-        assert!(storyboard_prompt.contains(PAINTNODE_IMAGE_REQUEST_FILE));
+        assert!(storyboard_prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(storyboard_prompt.contains("acceptResult"));
         assert!(!storyboard_prompt.contains("$imagegen"));
         assert!(!storyboard_prompt.contains("generated-images cache"));
         assert!(storyboard_prompt.contains("Do not add, remove, duplicate, replace, move"));
@@ -4324,11 +5349,35 @@ mod tests {
         ];
 
         for prompt in prompts {
-            assert!(prompt.contains(PAINTNODE_IMAGE_REQUEST_FILE));
+            assert!(prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+            assert!(prompt.contains("generateCandidate"));
             assert!(!prompt.contains("$imagegen"));
             assert!(!prompt.contains("normal Codex image-generation flow"));
             assert!(!prompt.contains("generated-images cache"));
         }
+    }
+
+    #[test]
+    fn plan_only_fill_prompt_uses_legacy_image_request_contract() {
+        let prompt = generative_fill_director_prompt(
+            "extend photo",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Claude,
+            AiDirectorMode::Force,
+            AiDirectorInvolvement::PlanOnly,
+            TEST_GEOMETRY_NOTE,
+            "",
+            false,
+            false,
+            false,
+            false,
+            &[],
+        );
+
+        assert!(prompt.contains("AI Director participation: Plan only"));
+        assert!(prompt.contains(PAINTNODE_IMAGE_REQUEST_FILE));
+        assert!(!prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(!prompt.contains("acceptResult"));
     }
 
     #[test]
@@ -4379,7 +5428,13 @@ mod tests {
             TEST_GEOMETRY_NOTE,
         );
 
-        assert!(prompt.contains("Perform one in-place PaintNode retouch"));
+        assert!(
+            prompt.contains("Act as PaintNode's AI Director for one in-place PaintNode retouch")
+        );
+        assert!(prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(prompt.contains("Allowed PaintNode tool action: `generateCandidate`"));
+        assert!(prompt.contains("Director review criteria"));
+        assert!(prompt.contains("over-smoothed skin"));
         assert!(prompt.contains("the full PaintNode document"));
         assert!(!prompt.contains("chroma"));
         assert!(!prompt.contains("#00ff00"));
@@ -4392,6 +5447,8 @@ mod tests {
         assert!(prompt.contains(
             "Make the candidate visually identical to `source.png` everywhere `mask.png` is black or transparent"
         ));
+        assert!(prompt
+            .contains("The `generateCandidate` action must request one full-canvas PNG candidate"));
         assert!(prompt.contains("Preserve identity, face, hair, skin, hands"));
         assert!(!prompt.contains("$imagegen"));
         assert!(!prompt.contains("generated-images cache"));
@@ -4405,8 +5462,16 @@ mod tests {
             AiDirectorInvolvement::FullReview,
         );
 
-        assert!(prompt.contains("Restore image detail for one PaintNode fixed-canvas region"));
+        assert!(prompt.contains(
+            "Act as PaintNode's AI Director for one fixed-canvas image-detail restoration region"
+        ));
         assert!(prompt.contains("AI Director participation: Full review"));
+        assert!(prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(prompt.contains("Allowed PaintNode tool action: `generateCandidate`"));
+        assert!(prompt.contains("Director review criteria"));
+        assert!(prompt.contains("plastic denoising"));
+        assert!(prompt
+            .contains("The `generateCandidate` action must request one full-canvas PNG candidate"));
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
         assert!(prompt.contains("Preserve intentional medium character such as film grain"));
         assert!(prompt.contains("the full PaintNode document"));
@@ -4438,8 +5503,13 @@ mod tests {
         );
 
         assert!(plan_only.contains("AI Director participation: Plan only"));
+        assert!(plan_only.contains("Restore image detail for one PaintNode fixed-canvas region"));
+        assert!(!plan_only.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(plan_only.contains("Director planning criteria"));
         assert!(ensure_completion.contains("AI Director participation: Ensure completion"));
+        assert!(ensure_completion.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
         assert!(!skipped.contains("AI Director participation:"));
+        assert!(!skipped.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
     }
 
     #[test]
@@ -4452,7 +5522,9 @@ mod tests {
             "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.",
         );
 
-        assert!(prompt.contains("Perform one in-place PaintNode retouch"));
+        assert!(
+            prompt.contains("Act as PaintNode's AI Director for one in-place PaintNode retouch")
+        );
         assert!(prompt.contains(
             "This is a fixed-canvas image editing task, not a new image generation task"
         ));
@@ -4466,7 +5538,8 @@ mod tests {
         assert!(!prompt.contains("subject eye position"));
         assert!(!prompt.contains("nearby bag"));
         assert!(prompt
-            .contains("Return one full-canvas PNG candidate with the same dimensions and framing"));
+            .contains("The `generateCandidate` action must request one full-canvas PNG candidate"));
+        assert!(prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
         assert!(prompt.contains("Do not translate, shift, crop, zoom, rotate"));
         assert!(prompt.contains("User retouch prompt:\nremove glare"));
         assert!(!prompt.contains("PaintNode image geometry:\n- Working PNG"));

@@ -9,6 +9,7 @@ describe('codexConfigFromRunOptions', () => {
       imageQuality: 'high' as const,
       imageModeration: 'low' as const,
       directorMode: 'force' as const,
+      directorProvider: 'claude' as const,
       directorInvolvement: 'ensureCompletion' as const,
     };
 
@@ -17,6 +18,7 @@ describe('codexConfigFromRunOptions', () => {
     expect(config.imageQuality).toBe('high');
     expect(config.imageModeration).toBe('low');
     expect(config.directorMode).toBe('force');
+    expect(config.directorProvider).toBe('claude');
     expect(config.directorInvolvement).toBe('ensureCompletion');
   });
 

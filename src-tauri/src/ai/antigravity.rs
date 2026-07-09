@@ -28,6 +28,16 @@ use crate::ai::canvas::{
     validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
     AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
+use crate::ai::claude::{
+    build_director_claude_command, claude_command_failure, claude_command_label,
+    claude_command_options, final_claude_agent_message, run_claude_with_progress,
+};
+use crate::ai::codex::{final_codex_agent_message, run_codex_director_request};
+use crate::ai::director::{
+    director_candidate_file, director_uses_agentic_loop, image_request_prompt,
+    run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorLoopSpec,
+    PAINTNODE_DIRECTOR_ACTION_FILE, PAINTNODE_DIRECTOR_OBSERVATION_FILE,
+};
 use crate::ai::fill_storyboard::{
     fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
     fill_storyboard_part_is_anchor, fill_storyboard_part_prompt, read_fill_storyboard_file,
@@ -46,18 +56,20 @@ use crate::ai::placement::{
     AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_restore_contract,
-    ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
-    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure_with_required_output,
-    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
-    image_agent_autonomy_contract, now_id, output_tail, project_or_temp_job_path,
-    reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
-    required_png_output_is_ready, safe_job_child_path, sanitize_progress_line, should_keep_job_dir,
-    spawn_output_reader, synthesize_decouple_asset_manifest, validate_reference_pngs,
-    watched_job_files, write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    AiDirectorInvolvement, AiDirectorMode, CodexDetectionResult, DecoupleImageResult,
-    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
-    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
+    ai_director_restore_contract, ai_director_workflow_contract, ai_retouch_asset_name,
+    ai_run_cancelled, apply_ai_cli_environment, clean_option, cleanup_project_agent_job,
+    clear_ai_run_cancelled, command_failure_with_required_output, emit_codex_part_progress,
+    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract,
+    now_id, output_tail, project_or_temp_job_path, reference_prompt_note,
+    remove_legacy_generative_fill_agent_inputs, required_png_output_is_ready, safe_job_child_path,
+    sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
+    synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
+    write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
+    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
+    AiProviderCapabilitiesResult, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
+    DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage,
+    AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -86,6 +98,7 @@ const DEFAULT_ANTIGRAVITY_IMAGE_MODEL: &str = "gemini-3.1-flash-image";
 const PAINTNODE_ANTIGRAVITY_IMAGE_REQUEST_FILE: &str = "paintnode-antigravity-image-request.json";
 const PAINTNODE_ANTIGRAVITY_IMAGE_RESPONSE_FILE: &str = "paintnode-antigravity-image-response.json";
 const ANTIGRAVITY_AUTH_LOG_FILE: &str = "agy-auth.log";
+const ANTIGRAVITY_SESSION_FILE: &str = "antigravity-session.json";
 const ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD: &str = "HARM_BLOCK_THRESHOLD_UNSPECIFIED";
 const ANTIGRAVITY_SAFETY_CATEGORIES: [(&str, &str); 4] = [
     ("HARM_CATEGORY_HARASSMENT", "harassment"),
@@ -1289,11 +1302,81 @@ fn find_antigravity_transcript(job_path: &Path, workspace_path: &Path) -> Option
     None
 }
 
+fn antigravity_transcript_log_paths(transcript_path: &Path) -> Vec<(&'static str, PathBuf)> {
+    let Some(logs_dir) = transcript_path.parent() else {
+        return Vec::new();
+    };
+    [
+        ("transcript", logs_dir.join("transcript.jsonl")),
+        ("fullTranscript", logs_dir.join("transcript_full.jsonl")),
+    ]
+    .into_iter()
+    .filter(|(_, path)| path.exists())
+    .collect()
+}
+
+fn antigravity_brain_session_id(transcript_path: &Path) -> Option<String> {
+    transcript_path
+        .ancestors()
+        .nth(3)
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+fn copy_antigravity_debug_transcript(
+    job_path: &Path,
+    label: &str,
+    source: &Path,
+) -> Option<String> {
+    let file_name = match label {
+        "fullTranscript" => "agy-transcript-full.jsonl",
+        _ => "agy-transcript.jsonl",
+    };
+    fs::copy(source, job_path.join(file_name)).ok()?;
+    Some(file_name.to_string())
+}
+
+fn write_antigravity_session_reference(
+    job_path: &Path,
+    transcript_path: &Path,
+    keep_debug_artifacts: bool,
+) {
+    let logs: Vec<serde_json::Value> = antigravity_transcript_log_paths(transcript_path)
+        .into_iter()
+        .map(|(label, path)| {
+            let copied_file = keep_debug_artifacts
+                .then(|| copy_antigravity_debug_transcript(job_path, label, &path))
+                .flatten();
+            json!({
+                "label": label,
+                "path": path.to_string_lossy(),
+                "copiedFile": copied_file,
+            })
+        })
+        .collect();
+    let payload = json!({
+        "version": 1,
+        "provider": "Antigravity",
+        "brainSessionId": antigravity_brain_session_id(transcript_path),
+        "debugArtifacts": keep_debug_artifacts,
+        "note": if keep_debug_artifacts {
+            "Raw Antigravity transcripts were copied into this job folder for debugging."
+        } else {
+            "Raw Antigravity transcripts are provider debug artifacts and are not copied unless debug artifacts are enabled."
+        },
+        "logs": logs,
+    });
+    if let Ok(text) = serde_json::to_vec_pretty(&payload) {
+        let _ = fs::write(job_path.join(ANTIGRAVITY_SESSION_FILE), text);
+    }
+}
+
 fn json_text(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(|v| v.as_str())
-        .and_then(sanitize_progress_line)
+        .and_then(sanitize_provider_progress_line)
 }
 
 fn tool_action_message(tool_call: &serde_json::Value) -> Option<String> {
@@ -1362,6 +1445,7 @@ fn run_antigravity_with_progress(
     workspace_path: &Path,
     job_path: &Path,
     required_output: Option<&str>,
+    keep_debug_artifacts: bool,
 ) -> Result<AgentRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -1401,6 +1485,7 @@ fn run_antigravity_with_progress(
     let mut file_snapshot = watched_job_files(job_path);
     let mut transcript_path = None::<PathBuf>;
     let mut transcript_offset = 0_u64;
+    let mut wrote_session_reference = false;
     let mut last_transcript_poll = Instant::now();
     let mut required_output_snapshot = None::<(u64, Option<SystemTime>, Instant)>;
     let (status, satisfied_required_output) = loop {
@@ -1420,6 +1505,9 @@ fn run_antigravity_with_progress(
                 transcript_path = find_antigravity_transcript(job_path, workspace_path);
             }
             if let Some(path) = transcript_path.as_deref() {
+                if !wrote_session_reference {
+                    write_antigravity_session_reference(job_path, path, keep_debug_artifacts);
+                }
                 emit_antigravity_transcript_progress(&app, &run_id, path, &mut transcript_offset);
             }
             break (status, false);
@@ -1445,6 +1533,10 @@ fn run_antigravity_with_progress(
                 }
             }
             if let Some(path) = transcript_path.as_deref() {
+                if !wrote_session_reference {
+                    write_antigravity_session_reference(job_path, path, keep_debug_artifacts);
+                    wrote_session_reference = true;
+                }
                 emit_antigravity_transcript_progress(&app, &run_id, path, &mut transcript_offset);
             }
             last_transcript_poll = Instant::now();
@@ -1676,14 +1768,42 @@ fn antigravity_result_path(job_dir: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn antigravity_generate_prompt(
     user_prompt: &str,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
     reference_names: &[String],
 ) -> String {
+    antigravity_generate_director_prompt(
+        user_prompt,
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        reference_names,
+    )
+}
+
+pub(crate) fn antigravity_generate_director_prompt(
+    user_prompt: &str,
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    reference_names: &[String],
+) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "image generation",
+    );
+    let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -1697,6 +1817,55 @@ pub(crate) fn antigravity_generate_prompt(
         format!("{job_dir}/")
     };
     let reference_note = reference_prompt_note(reference_names, &reference_prefix);
+    let director_tool_contract = if agentic_tool_loop {
+        format!(
+            r#"PaintNode Director tool loop:
+- Do not create image pixels yourself and do not create `result.png`.
+- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
+- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
+- For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned Antigravity image tool to create the candidate.
+- Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write `{PAINTNODE_DIRECTOR_OBSERVATION_FILE}` naming the full candidate file, and attach a downscaled review preview of that candidate when your participation level requires review.
+
+JSON schema:
+{{
+  "version": 1,
+  "action": "generateCandidate",
+  "baseImage": "none",
+  "prompt": "image prompt for PaintNode's owned Antigravity image tool",
+  "constraints": ["short constraints the image tool must obey"],
+  "avoid": ["short negative constraints"],
+  "notes": "optional short note for PaintNode"
+}}
+
+Director review criteria:
+{}"#,
+            workflow_review_criteria("image_generation")
+        )
+    } else {
+        String::new()
+    };
+    let required_output = if agentic_tool_loop {
+        format!(
+            r#"Required Director action:
+- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` only. PaintNode will call the Antigravity image backend after reading your action.
+- Do not save `result.png` yourself.
+- Do not ask follow-up questions.
+{workspace_rule}
+
+Final response should be one short sentence confirming `{PAINTNODE_DIRECTOR_ACTION_FILE}` was created."#
+        )
+    } else {
+        format!(
+            r#"Required output:
+- Save the final image as `{result_path}`.
+- PNG only.
+- Use the largest image size / highest output resolution your image-generation tool supports.
+- Do not ask follow-up questions.
+{workspace_rule}
+
+Final response should be one short sentence confirming `{result_path}` was created."#
+        )
+    };
     format!(
         r#"Generate one raster PNG for PaintNode.
 
@@ -1705,16 +1874,13 @@ User image prompt:
 
 {reference_note}
 
+{director_contract}
+
+{director_tool_contract}
+
 {autonomy_contract}
 
-Required output:
-- Save the final image as `{result_path}`.
-- PNG only.
-- Use the largest image size / highest output resolution your image-generation tool supports.
-- Do not ask follow-up questions.
-{workspace_rule}
-
-Final response should be one short sentence confirming `{result_path}` was created."#
+{required_output}"#
     )
 }
 
@@ -1730,6 +1896,7 @@ fn antigravity_storyboard_draft_note(_job_dir: &str, _has_storyboard_draft: bool
     String::new()
 }
 
+#[cfg(test)]
 fn antigravity_fill_prompt(
     prompt: &str,
     job_dir: &str,
@@ -1744,8 +1911,50 @@ fn antigravity_fill_prompt(
     reference_names: &[String],
     working: &AiWorkingCanvas,
 ) -> String {
+    antigravity_fill_director_prompt(
+        prompt,
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        geometry_note,
+        storyboard_note,
+        storyboard_anchor,
+        storyboard_fallback,
+        has_overview,
+        has_storyboard_draft,
+        continuation,
+        reference_names,
+        working,
+    )
+}
+
+fn antigravity_fill_director_prompt(
+    prompt: &str,
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    geometry_note: &str,
+    storyboard_note: &str,
+    storyboard_anchor: bool,
+    storyboard_fallback: bool,
+    has_overview: bool,
+    has_storyboard_draft: bool,
+    continuation: bool,
+    reference_names: &[String],
+    working: &AiWorkingCanvas,
+) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "generative fill",
+    );
     let has_storyboard = !storyboard_note.trim().is_empty();
     let tool_call_note = antigravity_fill_image_tool_call_note(
         job_dir,
@@ -1775,6 +1984,8 @@ Input files:
 - `{job_dir}/source.png`: PaintNode edit frame to enhance. It already contains the orchestrator's rough low-detail visual draft.{overview_note}
 
 {geometry_note}
+
+{director_contract}
 
 Task:
 - This is an image enhancement/restoration pass at the same size, not a new composition, new generative fill, outpaint, story continuation, or scene redesign.
@@ -1826,6 +2037,8 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 {storyboard_note}{fallback_prompt}
 
 {autonomy_contract}
@@ -1855,6 +2068,8 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 {storyboard_note}
 
 {user_prompt_heading}
@@ -1878,6 +2093,7 @@ Final response should be one short sentence confirming `{result_path}` was creat
     )
 }
 
+#[cfg(test)]
 fn antigravity_retouch_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -1885,6 +2101,38 @@ fn antigravity_retouch_prompt(
     reference_names: &[String],
     job_dir: &str,
     autonomy: AiAutonomyLevel,
+    geometry_note: &str,
+    has_overview: bool,
+    continuation: bool,
+    working: &AiWorkingCanvas,
+) -> String {
+    antigravity_retouch_director_prompt(
+        prompt,
+        has_annotated_source,
+        has_reference,
+        reference_names,
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        geometry_note,
+        has_overview,
+        continuation,
+        working,
+    )
+}
+
+fn antigravity_retouch_director_prompt(
+    prompt: &str,
+    has_annotated_source: bool,
+    has_reference: bool,
+    reference_names: &[String],
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
     geometry_note: &str,
     has_overview: bool,
     continuation: bool,
@@ -1908,6 +2156,12 @@ fn antigravity_retouch_prompt(
     let extra_reference_note = reference_prompt_note(reference_names, &reference_prefix);
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "AI retouch",
+    );
     let tool_call_note =
         antigravity_image_tool_call_note(job_dir, working, continuation, false, false, false);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
@@ -1938,6 +2192,8 @@ Input files:
 {extra_reference_note}
 
 {geometry_note}
+
+{director_contract}
 
 User retouch prompt:
 {prompt}
@@ -2141,12 +2397,26 @@ PaintNode will do after `{result_path}` exists:
     )
 }
 
-fn antigravity_decouple_prompt(prompt: &str, job_dir: &str) -> String {
+fn antigravity_decouple_director_prompt(
+    prompt: &str,
+    job_dir: &str,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "asset decoupling",
+    );
     format!(
         r#"Extract reusable visual assets from `{job_dir}/source.png` for PaintNode.
 
 User guidance:
 {prompt}
+
+{director_contract}
 
 Required output:
 - Work only inside `{job_dir}`.
@@ -2246,6 +2516,97 @@ pub(crate) async fn detect_antigravity(
     .map_err(|e| format!("Task error: {e}"))
 }
 
+fn fallback_antigravity_capabilities(warning: Option<String>) -> AiProviderCapabilitiesResult {
+    let models = [
+        ("auto", "Auto"),
+        ("Gemini 3.5 Flash (High)", "Gemini 3.5 Flash High"),
+        ("Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash Medium"),
+        ("Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash Low"),
+        ("Gemini 3.1 Pro (High)", "Gemini 3.1 Pro High"),
+        ("Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro Low"),
+        ("Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6 Thinking"),
+        ("Claude Opus 4.6 (Thinking)", "Claude Opus 4.6 Thinking"),
+        ("GPT-OSS 120B (Medium)", "GPT-OSS 120B Medium"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (id, label))| AiModelCapability {
+        id: id.into(),
+        label: label.into(),
+        description: None,
+        supported_reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
+        is_default: index == 0,
+    })
+    .collect();
+    AiProviderCapabilitiesResult {
+        models,
+        source: "fallback".into(),
+        warning,
+    }
+}
+
+fn parse_antigravity_capabilities(text: &str) -> Result<AiProviderCapabilitiesResult, String> {
+    let mut models = vec![AiModelCapability {
+        id: "auto".into(),
+        label: "Auto".into(),
+        description: None,
+        supported_reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
+        is_default: true,
+    }];
+    models.extend(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| AiModelCapability {
+                id: line.into(),
+                label: line.replace(" (", " ").trim_end_matches(')').to_string(),
+                description: None,
+                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+                is_default: false,
+            }),
+    );
+    if models.len() == 1 {
+        return Err("Antigravity did not advertise any available models.".into());
+    }
+    Ok(AiProviderCapabilitiesResult {
+        models,
+        source: "cli".into(),
+        warning: None,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn discover_antigravity_capabilities(
+    bin: Option<String>,
+) -> Result<AiProviderCapabilitiesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let antigravity_bin = match configured_or_default_antigravity_bin(bin) {
+            Ok(bin) => bin,
+            Err(error) => return fallback_antigravity_capabilities(Some(error)),
+        };
+        let mut command = Command::new(&antigravity_bin);
+        apply_ai_cli_environment(&mut command).arg("models");
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                parse_antigravity_capabilities(&String::from_utf8_lossy(&output.stdout))
+                    .unwrap_or_else(|error| fallback_antigravity_capabilities(Some(error)))
+            }
+            Ok(output) => fallback_antigravity_capabilities(Some(antigravity_command_failure(
+                "Antigravity capability discovery",
+                &output,
+            ))),
+            Err(error) => fallback_antigravity_capabilities(Some(format!(
+                "Failed to launch Antigravity capability discovery: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|error| format!("Antigravity capability task failed: {error}"))
+}
+
 fn run_antigravity(
     antigravity_bin: &str,
     workspace_path: &Path,
@@ -2273,8 +2634,39 @@ fn run_antigravity(
         workspace_path,
         job_path,
         required_output,
+        options.keep_debug_artifacts,
     )
     .map_err(|e| format!("Failed to run Antigravity at '{antigravity_bin}': {e}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_antigravity_director_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    approval_mode: Option<String>,
+    keep_debug_artifacts: bool,
+    workspace_path: &Path,
+    job_path: &Path,
+    prompt: &str,
+    new_project: bool,
+    required_output: &str,
+) -> Result<AgentRunResult, String> {
+    let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+    let mut options = antigravity_command_options(model, approval_mode);
+    options.keep_debug_artifacts = keep_debug_artifacts;
+    run_antigravity(
+        &antigravity_bin,
+        workspace_path,
+        job_path,
+        prompt,
+        &options,
+        new_project,
+        app.clone(),
+        run_id.to_string(),
+        Some(required_output),
+    )
 }
 
 fn write_antigravity_storyboard_draft_guides(
@@ -2388,6 +2780,7 @@ fn prepare_antigravity_fill_storyboard(
     Ok(Some(fallback))
 }
 
+#[cfg(test)]
 fn antigravity_restore_prompt(
     job_dir: &str,
     autonomy: AiAutonomyLevel,
@@ -2396,8 +2789,29 @@ fn antigravity_restore_prompt(
     geometry_note: &str,
     has_overview: bool,
 ) -> String {
+    antigravity_restore_director_prompt(
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        director_mode,
+        director_involvement,
+        geometry_note,
+        has_overview,
+    )
+}
+
+fn antigravity_restore_director_prompt(
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    geometry_note: &str,
+    has_overview: bool,
+) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
-    let director_contract = ai_director_restore_contract(director_mode, director_involvement);
+    let director_contract =
+        ai_director_restore_contract(director_provider, director_mode, director_involvement);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
@@ -2455,6 +2869,7 @@ fn antigravity_restore_image_details(
     label: &str,
     upscale_layers: bool,
     return_composed: bool,
+    director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
 ) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
@@ -2524,9 +2939,10 @@ fn antigravity_restore_image_details(
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
         let geometry_note = ai_part_geometry_note(&placement, part_index);
-        let prompt_text = antigravity_restore_prompt(
+        let prompt_text = antigravity_restore_director_prompt(
             &job_dir,
             autonomy,
+            director_provider,
             director_mode,
             director_involvement,
             &geometry_note,
@@ -2639,7 +3055,15 @@ pub(crate) async fn generate_antigravity_image(
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     director_mode: Option<String>,
+    director_provider: Option<String>,
     director_involvement: Option<String>,
+    codex_bin: Option<String>,
+    codex_model: Option<String>,
+    codex_reasoning_effort: Option<String>,
+    codex_service_tier: Option<String>,
+    claude_bin: Option<String>,
+    claude_model: Option<String>,
+    claude_effort: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -2669,7 +3093,14 @@ pub(crate) async fn generate_antigravity_image(
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
         let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
+        let agentic_director_loop = director_uses_agentic_loop(director_mode, director_involvement);
+        let claude_options = claude_command_options(
+            claude_bin.clone(),
+            claude_model.clone(),
+            claude_effort.clone(),
+        );
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -2688,8 +3119,77 @@ pub(crate) async fn generate_antigravity_image(
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
         let (reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
-        let prompt_text =
-            antigravity_generate_prompt(prompt.trim(), &job_dir, autonomy, &reference_names);
+        let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
+        let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
+            target_dimensions
+                .and_then(|target| antigravity_output_target(aspect, target))
+                .map(|(tier, _)| tier.to_string())
+        });
+        write_ai_job_settings(
+            &job_path,
+            json!({
+                "version": 1,
+                "workflow": "generate_image",
+                "runId": run_id,
+                "provider": "Antigravity",
+                "agenticDirectorLoop": agentic_director_loop,
+                "director": {
+                    "provider": director_provider.label(),
+                    "mode": director_mode.label(),
+                    "involvement": director_involvement.label(),
+                    "codex": {
+                        "bin": codex_bin,
+                        "model": codex_model,
+                        "reasoningEffort": codex_reasoning_effort,
+                        "serviceTier": codex_service_tier
+                    },
+                    "claude": {
+                        "bin": claude_bin,
+                        "model": claude_model,
+                        "effort": claude_effort
+                    },
+                    "antigravity": {
+                        "bin": antigravity_bin,
+                        "model": options.model,
+                        "approvalMode": options.approval_mode
+                    }
+                },
+                "imageGenerator": {
+                    "provider": "Antigravity",
+                    "model": options.image_model,
+                    "aspectRatio": aspect_ratio,
+                    "imageSize": provider_size,
+                    "personGeneration": options.person_generation,
+                    "prominentPeople": options.prominent_people,
+                    "compressionQuality": options.compression_quality,
+                    "safetyFiltering": options.safety_filtering,
+                    "safety": {
+                        "harassment": options.safety_harassment,
+                        "hateSpeech": options.safety_hate_speech,
+                        "sexuallyExplicit": options.safety_sexually_explicit,
+                        "dangerousContent": options.safety_dangerous_content
+                    }
+                },
+                "agent": {
+                    "model": options.model,
+                    "approvalMode": options.approval_mode,
+                    "autonomy": autonomy.label()
+                },
+                "targetDimensions": target_dimensions.map(|(width, height)| json!({ "width": width, "height": height })),
+                "referenceImages": reference_names,
+                "keepJobDir": keep_job_dir,
+                "debugArtifacts": options.keep_debug_artifacts
+            }),
+        )?;
+        let prompt_text = antigravity_generate_director_prompt(
+            prompt.trim(),
+            &job_dir,
+            autonomy,
+            director_provider,
+            director_mode,
+            director_involvement,
+            &reference_names,
+        );
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity image generation")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
@@ -2704,30 +3204,133 @@ pub(crate) async fn generate_antigravity_image(
             bytes
         } else {
             let _ = fs::remove_file(&result_path);
-            emit_codex_progress(
-                &app,
-                &run_id,
-                "Generating through Antigravity image backend",
-            );
-            let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
-            let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
-                target_dimensions
-                    .and_then(|target| antigravity_output_target(aspect, target))
-                    .map(|(tier, _)| tier.to_string())
-            });
-            let bytes = run_antigravity_direct_image(
-                &app,
-                &run_id,
-                &antigravity_bin,
-                &job_path,
-                AntigravityImageRequestSpec {
-                    prompt: prompt_text.clone(),
-                    image_paths: reference_paths,
-                    aspect_ratio,
-                    image_size: provider_size,
-                },
-                &options,
-            )?;
+            let bytes = if agentic_director_loop {
+                emit_codex_progress(&app, &run_id, "Starting Antigravity AI Director");
+                run_candidate_director_loop(
+                    &job_path,
+                    DirectorLoopSpec {
+                        provider_label: director_provider.label(),
+                        involvement: director_involvement,
+                        keep_debug_artifacts: options.keep_debug_artifacts,
+                        legacy_request_file: "paintnode-image-request.json",
+                        base_prompt_text: &prompt_text,
+                        review_criteria: workflow_review_criteria("image_generation"),
+                        ensure_completion_acceptance_note:
+                            "Candidate completed; ensure-completion mode does not run a separate quality review.",
+                    },
+                    |_, turn_prompt_text, candidate_path| {
+                        let mut turn_image_paths = reference_paths.clone();
+                        if let Some(candidate_path) = candidate_path {
+                            turn_image_paths.push(candidate_path.to_path_buf());
+                        }
+                        match director_provider {
+                            AiDirectorProvider::Codex => run_codex_director_request(
+                                &app,
+                                &run_id,
+                                codex_bin.clone(),
+                                codex_model.clone(),
+                                codex_reasoning_effort.clone(),
+                                codex_service_tier.clone(),
+                                options.keep_debug_artifacts,
+                                &job_path,
+                                turn_prompt_text,
+                                &turn_image_paths,
+                            ),
+                            AiDirectorProvider::Claude => {
+                                let mut command = build_director_claude_command(
+                                    &claude_options,
+                                    &job_path,
+                                    turn_prompt_text,
+                                    &turn_image_paths,
+                                );
+                                let run = run_claude_with_progress(
+                                    &mut command,
+                                    app.clone(),
+                                    run_id.clone(),
+                                )
+                                .map_err(|e| {
+                                    format!(
+                                        "Failed to run Claude at '{}': {e}",
+                                        claude_command_label(&claude_options)
+                                    )
+                                })?;
+                                if run.output.status.success() {
+                                    Ok(run)
+                                } else if let Some(message) =
+                                    final_claude_agent_message(&run.output)
+                                {
+                                    Err(format!("Claude Director failed.\n\n{message}"))
+                                } else {
+                                    Err(claude_command_failure("Claude Director", &run.output))
+                                }
+                            }
+                            AiDirectorProvider::Antigravity => run_antigravity(
+                                &antigravity_bin,
+                                &workspace_path,
+                                &job_path,
+                                turn_prompt_text,
+                                &options,
+                                true,
+                                app.clone(),
+                                run_id.clone(),
+                                Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                            ),
+                        }
+                    },
+                    |run| match director_provider {
+                        AiDirectorProvider::Codex => final_codex_agent_message(&run.output),
+                        AiDirectorProvider::Claude => final_claude_agent_message(&run.output),
+                        AiDirectorProvider::Antigravity => None,
+                    },
+                    |turn, request, candidate_prompt| {
+                        let candidate_file = director_candidate_file(turn);
+                        let candidate = run_antigravity_direct_image(
+                            &app,
+                            &run_id,
+                            &antigravity_bin,
+                            &job_path,
+                            AntigravityImageRequestSpec {
+                                prompt: image_request_prompt(&request)
+                                    .unwrap_or_else(|_| candidate_prompt.to_string()),
+                                image_paths: reference_paths.clone(),
+                                aspect_ratio: aspect_ratio.clone(),
+                                image_size: provider_size.clone(),
+                            },
+                            &options,
+                        )?;
+                        fs::write(job_path.join(&candidate_file), &candidate).map_err(|e| {
+                            format!("Failed to write Antigravity Director candidate: {e}")
+                        })?;
+                        png_dimensions_from_bytes(&candidate).ok_or_else(|| {
+                            "Antigravity Director candidate PNG dimensions are invalid."
+                                .to_string()
+                        })?;
+                        Ok(DirectorCandidate {
+                            result: candidate,
+                            file_name: candidate_file,
+                        })
+                    },
+                )?
+            } else {
+                emit_codex_progress(
+                    &app,
+                    &run_id,
+                    "Generating through Antigravity image backend",
+                );
+                run_antigravity_direct_image(
+                    &app,
+                    &run_id,
+                    &antigravity_bin,
+                    &job_path,
+                    AntigravityImageRequestSpec {
+                        prompt: prompt_text.clone(),
+                        image_paths: reference_paths,
+                        aspect_ratio: aspect_ratio.clone(),
+                        image_size: provider_size.clone(),
+                    },
+                    &options,
+                )?
+            };
             fs::write(&result_path, &bytes)
                 .map_err(|e| format!("Failed to write Antigravity image result: {e}"))?;
             png_dimensions_from_bytes(&bytes)
@@ -2766,6 +3369,7 @@ pub(crate) async fn generate_antigravity_image(
                     "Generated image restoration",
                     false,
                     true,
+                    director_provider,
                     director_mode,
                     director_involvement,
                 )?;
@@ -2842,6 +3446,9 @@ pub(crate) async fn generate_antigravity_fill_image(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
     edit_checks_level: Option<u8>,
     fill_aspect_ratio: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
@@ -2882,6 +3489,9 @@ pub(crate) async fn generate_antigravity_fill_image(
         );
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let _checks_level = ai_edit_checks_level(edit_checks_level);
         let fill_aspect_ratio = fill_aspect_ratio
             .as_deref()
@@ -3099,10 +3709,13 @@ pub(crate) async fn generate_antigravity_fill_image(
                 .as_ref()
                 .map(|storyboard| storyboard.fallback)
                 .unwrap_or(false);
-            let base_prompt_text = antigravity_fill_prompt(
+            let base_prompt_text = antigravity_fill_director_prompt(
                 prompt.trim(),
                 &job_dir,
                 autonomy,
+                director_provider,
+                director_mode,
+                director_involvement,
                 &geometry_note,
                 &storyboard_note,
                 storyboard_anchor,
@@ -3332,6 +3945,9 @@ pub(crate) async fn generate_antigravity_retouch_image(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
     edit_checks_level: Option<u8>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
@@ -3371,6 +3987,9 @@ pub(crate) async fn generate_antigravity_retouch_image(
         );
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-retouch-{}", now_id())
@@ -3475,13 +4094,16 @@ pub(crate) async fn generate_antigravity_retouch_image(
             .map_err(|e| format!("Failed to write AI retouch PaintNode contract: {e}"))?;
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
-            let base_prompt_text = antigravity_retouch_prompt(
+            let base_prompt_text = antigravity_retouch_director_prompt(
                 prompt.trim(),
                 has_annotated_source,
                 has_reference,
                 &reference_names,
                 &job_dir,
                 autonomy,
+                director_provider,
+                director_mode,
+                director_involvement,
                 &geometry_note,
                 has_overview,
                 placement.is_split() && part_index > 0,
@@ -3699,6 +4321,7 @@ pub(crate) async fn upscale_antigravity_image(
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     director_mode: Option<String>,
+    director_provider: Option<String>,
     director_involvement: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
@@ -3730,6 +4353,7 @@ pub(crate) async fn upscale_antigravity_image(
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
         let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-upscale-{}", now_id())
@@ -3786,6 +4410,7 @@ pub(crate) async fn upscale_antigravity_image(
             "AI upscale",
             true,
             keep_composed_result,
+            director_provider,
             director_mode,
             director_involvement,
         )?;
@@ -3842,6 +4467,9 @@ pub(crate) async fn decouple_antigravity_image(
     model: Option<String>,
     approval_mode: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
 ) -> Result<DecoupleImageResult, String> {
     if !is_png(&source_png) {
         return Err("Asset extraction source must be a PNG image.".into());
@@ -3852,6 +4480,9 @@ pub(crate) async fn decouple_antigravity_image(
         let mut options = antigravity_command_options(model, approval_mode);
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-decouple-{}", now_id())
         } else {
@@ -3883,7 +4514,13 @@ pub(crate) async fn decouple_antigravity_image(
         } else {
             prompt.trim()
         };
-        let prompt_text = antigravity_decouple_prompt(user_prompt, &job_dir);
+        let prompt_text = antigravity_decouple_director_prompt(
+            user_prompt,
+            &job_dir,
+            director_provider,
+            director_mode,
+            director_involvement,
+        );
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity asset extraction")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
@@ -4211,6 +4848,19 @@ mod tests {
     use crate::ai::ANTIGRAVITY_RUNS_DIR;
     use crate::ai::{TempJobDir, PAINTNODE_WORK_DIR};
     use crate::test_util::test_rgba_png;
+
+    #[test]
+    fn capability_parser_preserves_cli_model_order() {
+        let result = parse_antigravity_capabilities(
+            "Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Opus 4.6 (Thinking)\n",
+        )
+        .expect("Antigravity capabilities");
+        assert_eq!(result.source, "cli");
+        assert_eq!(result.models[0].id, "auto");
+        assert_eq!(result.models[1].id, "Gemini 3.5 Flash (Medium)");
+        assert_eq!(result.models[2].id, "Gemini 3.5 Flash (High)");
+        assert_eq!(result.models[3].label, "Claude Opus 4.6 Thinking");
+    }
 
     #[test]
     fn parses_antigravity_keychain_token_envelope() {
@@ -4606,6 +5256,59 @@ mod tests {
     }
 
     #[test]
+    fn transcript_progress_hides_internal_run_dir_names() {
+        let line = json!({
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{
+                "args": {
+                    "toolAction": "I will list the codex-runs directory to see whether result.png exists."
+                }
+            }]
+        })
+        .to_string();
+
+        let messages = antigravity_transcript_messages(&line);
+
+        assert_eq!(
+            messages,
+            vec![
+                "Antigravity: I will list the job folder to see whether result.png exists."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn writes_antigravity_session_reference_and_debug_transcript_copy() {
+        let job = TempJobDir::new("paintnode-antigravity-session-test").expect("temp job");
+        let brain = TempJobDir::new("paintnode-antigravity-brain-test").expect("temp brain");
+        let logs_dir = brain
+            .path()
+            .join("session-1")
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&logs_dir).expect("logs dir");
+        let transcript = logs_dir.join("transcript.jsonl");
+        let full_transcript = logs_dir.join("transcript_full.jsonl");
+        fs::write(&transcript, "{}\n").expect("write transcript");
+        fs::write(&full_transcript, "{\"full\":true}\n").expect("write full transcript");
+
+        write_antigravity_session_reference(job.path(), &transcript, true);
+
+        let reference =
+            fs::read_to_string(job.path().join(ANTIGRAVITY_SESSION_FILE)).expect("reference");
+        assert!(reference.contains("\"provider\": \"Antigravity\""));
+        assert!(reference.contains("\"brainSessionId\": \"session-1\""));
+        assert!(reference.contains("\"debugArtifacts\": true"));
+        assert!(reference.contains("\"copiedFile\": \"agy-transcript.jsonl\""));
+        assert!(reference.contains("\"copiedFile\": \"agy-transcript-full.jsonl\""));
+        assert!(job.path().join("agy-transcript.jsonl").exists());
+        assert!(job.path().join("agy-transcript-full.jsonl").exists());
+    }
+
+    #[test]
     fn formats_antigravity_http_auth_and_capacity_errors() {
         let auth = antigravity_http_error_message(reqwest::StatusCode::FORBIDDEN, "{}");
         assert!(auth.contains("HTTP 403"));
@@ -4837,6 +5540,67 @@ mod tests {
         assert!(!prompt.contains("edit_target.png"));
         assert!(!prompt.contains("Use $imagegen"));
         assert!(!prompt.contains("chroma"));
+    }
+
+    #[test]
+    fn antigravity_generate_prompt_uses_director_action_contract_when_active() {
+        let active = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+            &[],
+        );
+
+        assert!(active.contains("AI Director provider: Antigravity"));
+        assert!(active.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(active.contains(PAINTNODE_DIRECTOR_OBSERVATION_FILE));
+        assert!(active.contains("Allowed PaintNode tool action: `generateCandidate`"));
+        assert!(active.contains("Director review criteria"));
+        assert!(!active.contains("Save the final image as"));
+        assert!(!active.contains("Do not create `result.png`.\n- PNG only"));
+
+        let codex_director = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Codex,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+            &[],
+        );
+        assert!(codex_director.contains("AI Director provider: Codex"));
+        assert!(codex_director.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(!codex_director.contains("Save the final image as"));
+
+        let claude_director = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Claude,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+            &[],
+        );
+        assert!(claude_director.contains("AI Director provider: Claude"));
+        assert!(claude_director.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(!claude_director.contains("Save the final image as"));
+
+        let plan_only = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::PlanOnly,
+            &[],
+        );
+
+        assert!(plan_only.contains("AI Director participation: Plan only"));
+        assert!(plan_only.contains("Save the final image as"));
+        assert!(!plan_only.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
     }
 
     #[test]

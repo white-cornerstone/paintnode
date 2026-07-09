@@ -4,6 +4,7 @@ pub(crate) mod antigravity;
 pub(crate) mod canvas;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod director;
 pub(crate) mod fill_storyboard;
 pub(crate) mod placement;
 
@@ -152,6 +153,32 @@ pub(crate) struct CodexDetectionResult {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AiReasoningCapability {
+    value: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiModelCapability {
+    id: String,
+    label: String,
+    description: Option<String>,
+    supported_reasoning_efforts: Vec<AiReasoningCapability>,
+    default_reasoning_effort: Option<String>,
+    is_default: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiProviderCapabilitiesResult {
+    models: Vec<AiModelCapability>,
+    source: String,
+    warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DecoupledLayerResult {
     name: String,
     data_url: String,
@@ -285,6 +312,17 @@ pub(crate) enum AiAutonomyLevel {
     Unmanaged,
 }
 
+impl AiAutonomyLevel {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Guided => "guided",
+            Self::Open => "open",
+            Self::Unmanaged => "unmanaged",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiDirectorMode {
     Auto,
@@ -292,11 +330,48 @@ pub(crate) enum AiDirectorMode {
     Force,
 }
 
+impl AiDirectorMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Skip => "skip",
+            Self::Force => "force",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AiDirectorProvider {
+    Codex,
+    Antigravity,
+    Claude,
+}
+
+impl AiDirectorProvider {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Antigravity => "Antigravity",
+            Self::Claude => "Claude",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiDirectorInvolvement {
     PlanOnly,
     EnsureCompletion,
     FullReview,
+}
+
+impl AiDirectorInvolvement {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PlanOnly => "planOnly",
+            Self::EnsureCompletion => "ensureCompletion",
+            Self::FullReview => "fullReview",
+        }
+    }
 }
 
 pub(crate) struct TempJobDir {
@@ -444,6 +519,16 @@ pub(crate) fn write_ai_job_prompt(
 ) -> Result<(), String> {
     fs::write(job_path.join("prompt.txt"), prompt)
         .map_err(|e| format!("Failed to write {label} prompt file: {e}"))
+}
+
+pub(crate) fn write_ai_job_settings(
+    job_path: &Path,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    let text = serde_json::to_vec_pretty(&settings)
+        .map_err(|e| format!("Failed to encode AI job settings: {e}"))?;
+    fs::write(job_path.join("job-settings.json"), text)
+        .map_err(|e| format!("Failed to write AI job settings file: {e}"))
 }
 
 pub(crate) fn remove_legacy_generative_fill_agent_inputs(part_path: &Path) {
@@ -604,6 +689,29 @@ pub(crate) fn sanitize_progress_line(line: &str) -> Option<String> {
     }
 }
 
+fn normalize_progress_run_dir_references(text: String) -> String {
+    [CODEX_RUNS_DIR, CLAUDE_RUNS_DIR, ANTIGRAVITY_RUNS_DIR]
+        .into_iter()
+        .fold(text, |current, dir| {
+            [
+                (format!("`{dir}` directory"), "job folder"),
+                (format!("`{dir}` folder"), "job folder"),
+                (format!("{dir} directory"), "job folder"),
+                (format!("{dir} folder"), "job folder"),
+                (format!("`{dir}`"), "job folder"),
+                (dir.to_string(), "job folder"),
+            ]
+            .into_iter()
+            .fold(current, |next, (needle, replacement)| {
+                next.replace(&needle, replacement)
+            })
+        })
+}
+
+pub(crate) fn sanitize_provider_progress_line(line: &str) -> Option<String> {
+    sanitize_progress_line(line).map(normalize_progress_run_dir_references)
+}
+
 pub(crate) fn json_string_at<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
     let mut current = value;
     for key in path {
@@ -662,7 +770,7 @@ fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) 
         if event_type.contains("error") {
             let message = json_string_at(&value, &["message"])
                 .or_else(|| json_string_at(&value, &["error", "message"]))
-                .and_then(sanitize_progress_line)
+                .and_then(sanitize_provider_progress_line)
                 .unwrap_or_else(|| format!("{provider_label} reported an error"));
             return Some(message);
         }
@@ -682,8 +790,8 @@ fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) 
                 ));
             }
             if combined.contains("agent_message") {
-                if let Some(message) =
-                    codex_agent_message_text(trimmed).and_then(|text| sanitize_progress_line(&text))
+                if let Some(message) = codex_agent_message_text(trimmed)
+                    .and_then(|text| sanitize_provider_progress_line(&text))
                 {
                     let lower = message.to_ascii_lowercase();
                     if lower.contains("using the imagegen skill")
@@ -700,7 +808,7 @@ fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) 
         return None;
     }
 
-    let text = sanitize_progress_line(trimmed)?;
+    let text = sanitize_provider_progress_line(trimmed)?;
     let lower = text.to_ascii_lowercase();
     let provider_lower = provider_label.to_ascii_lowercase();
     if is_stderr
@@ -1104,6 +1212,18 @@ pub(crate) fn ai_director_mode(value: Option<String>) -> AiDirectorMode {
     }
 }
 
+pub(crate) fn ai_director_provider(value: Option<String>) -> AiDirectorProvider {
+    match clean_option(value)
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("antigravity") | Some("agy") | Some("gemini") => AiDirectorProvider::Antigravity,
+        Some("claude") => AiDirectorProvider::Claude,
+        _ => AiDirectorProvider::Codex,
+    }
+}
+
 pub(crate) fn ai_director_involvement(value: Option<String>) -> AiDirectorInvolvement {
     match clean_option(value).as_deref() {
         Some("planOnly") => AiDirectorInvolvement::PlanOnly,
@@ -1113,22 +1233,33 @@ pub(crate) fn ai_director_involvement(value: Option<String>) -> AiDirectorInvolv
 }
 
 pub(crate) fn ai_director_restore_contract(
+    provider: AiDirectorProvider,
     mode: AiDirectorMode,
     involvement: AiDirectorInvolvement,
-) -> &'static str {
+) -> String {
+    ai_director_workflow_contract(provider, mode, involvement, "detail restoration")
+}
+
+pub(crate) fn ai_director_workflow_contract(
+    provider: AiDirectorProvider,
+    mode: AiDirectorMode,
+    involvement: AiDirectorInvolvement,
+    workflow: &str,
+) -> String {
     if mode == AiDirectorMode::Skip {
-        return "";
+        return String::new();
     }
+    let label = provider.label();
     match involvement {
-        AiDirectorInvolvement::PlanOnly => {
-            "AI Director participation: Plan only. Treat this prompt as the Director's preservation plan for the restore pass; do not run a separate review loop."
-        }
-        AiDirectorInvolvement::EnsureCompletion => {
-            "AI Director participation: Ensure completion. If a provider safety or quality issue blocks the exact wording, make the smallest compliant prompt adjustment while preserving the source image, intentional medium character, and upscale/detail-recovery intent."
-        }
-        AiDirectorInvolvement::FullReview => {
-            "AI Director participation: Full review. Before returning, compare the candidate against the source image and revise internally until content, framing, grain/texture, exposure character, and local detail remain faithful. Return only the final accepted PNG."
-        }
+        AiDirectorInvolvement::PlanOnly => format!(
+            "AI Director provider: {label}.\nAI Director participation: Plan only. Treat this prompt as the Director's plan for the {workflow} workflow; do not run a separate blocked-prompt or quality-review loop."
+        ),
+        AiDirectorInvolvement::EnsureCompletion => format!(
+            "AI Director provider: {label}.\nAI Director participation: Ensure completion. If a provider safety or quality issue blocks the exact wording during the {workflow} workflow, make the smallest compliant prompt adjustment while preserving the user's intent, source-image facts, protected areas, and intentional medium character."
+        ),
+        AiDirectorInvolvement::FullReview => format!(
+            "AI Director provider: {label}.\nAI Director participation: Full review. Supervise the {workflow} workflow from planning through completion: preserve the user's intent, recover from blocked wording with the smallest faithful prompt adjustment, and before returning compare the candidate against the source/task requirements. Revise internally until content, framing, grain/texture, exposure character, local detail, and protected areas remain faithful. Return only the final accepted result."
+        ),
     }
 }
 
@@ -1192,6 +1323,7 @@ mod tests {
     use super::*;
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::codex::codex_direct_generate_prompt;
+    use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 
     #[test]
     fn temp_job_dir_removes_directory_on_drop() {
@@ -1249,6 +1381,22 @@ mod tests {
     }
 
     #[test]
+    fn provider_progress_message_hides_internal_run_dir_names() {
+        let message = provider_progress_message(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"I will list the codex-runs directory to see whether result.png exists."}}"#,
+            false,
+            "Antigravity",
+        )
+        .expect("agent message should map to progress");
+
+        assert_eq!(
+            message,
+            "Antigravity: I will list the job folder to see whether result.png exists."
+        );
+        assert!(!message.contains("codex-runs"));
+    }
+
+    #[test]
     fn generate_image_prompts_do_not_expose_canvas_geometry() {
         let codex = codex_direct_generate_prompt("make an image", &[]);
         assert!(codex.contains("Generate exactly one raster PNG for PaintNode"));
@@ -1270,7 +1418,9 @@ mod tests {
         );
         assert!(antigravity.contains("Generate one raster PNG for PaintNode"));
         assert!(antigravity.contains("User image prompt:\nmake an image"));
-        assert!(antigravity.contains("largest image size / highest output resolution"));
+        assert!(antigravity.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(antigravity.contains("PaintNode Director tool loop"));
+        assert!(!antigravity.contains("Save the final image as"));
         assert!(!antigravity.contains("1280x800"));
         assert!(!antigravity.contains("1296x864"));
         assert!(!antigravity.contains("Working PNG"));

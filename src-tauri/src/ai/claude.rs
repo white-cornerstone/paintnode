@@ -1,4 +1,4 @@
-//! Claude planner provider: uses the Claude Agent SDK only to write PaintNode request files.
+//! Claude Director provider: uses the Claude Agent SDK to write PaintNode request files.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -10,7 +10,8 @@ use tauri::AppHandle;
 
 use crate::ai::{
     ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled, codex_agent_message_text,
-    emit_codex_progress, output_tail, spawn_output_reader, AgentRunResult, CodexDetectionResult,
+    output_tail, spawn_output_reader, AgentRunResult, AiModelCapability,
+    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 
@@ -18,6 +19,7 @@ use crate::ai::{
 pub(crate) struct ClaudeCommandOptions {
     bin: String,
     model: Option<String>,
+    effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +34,7 @@ struct ClaudeDetectEvent {
 pub(crate) fn claude_command_options(
     bin: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
 ) -> ClaudeCommandOptions {
     ClaudeCommandOptions {
         bin: bin
@@ -41,6 +44,9 @@ pub(crate) fn claude_command_options(
         model: model
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty() && value != "default"),
+        effort: effort
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value != "auto"),
     }
 }
 
@@ -78,6 +84,9 @@ fn build_claude_agent_command(
     if let Some(model) = options.model.as_deref() {
         command.arg("--model").arg(model);
     }
+    if let Some(effort) = options.effort.as_deref() {
+        command.arg("--effort").arg(effort);
+    }
     for path in image_paths {
         command.arg("--image").arg(path);
     }
@@ -98,6 +107,15 @@ pub(crate) fn build_generative_fill_claude_command(
     }
     image_paths.extend(reference_paths.iter().cloned());
     build_claude_agent_command(options, job_path, prompt_text, &image_paths)
+}
+
+pub(crate) fn build_director_claude_command(
+    options: &ClaudeCommandOptions,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+) -> Command {
+    build_claude_agent_command(options, job_path, prompt_text, image_paths)
 }
 
 pub(crate) fn run_claude_with_progress(
@@ -309,10 +327,170 @@ pub(crate) async fn detect_claude(bin: Option<String>) -> Result<CodexDetectionR
     .map_err(|e| format!("Claude detection task failed: {e}"))
 }
 
-pub(crate) fn emit_claude_no_storyboard(app: &AppHandle, run_id: &str) {
-    emit_codex_progress(
-        app,
-        run_id,
-        "Skipping visual storyboard draft; Claude planner does not generate images",
-    );
+fn claude_effort_label(value: &str) -> String {
+    match value {
+        "xhigh" => "Extra High".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    }
+}
+
+fn fallback_claude_capabilities(warning: Option<String>) -> AiProviderCapabilitiesResult {
+    let efforts = || {
+        ["low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .map(|value| AiReasoningCapability {
+                value: value.into(),
+                label: claude_effort_label(value),
+            })
+            .collect()
+    };
+    AiProviderCapabilitiesResult {
+        models: [
+            ("default", "Default"),
+            ("sonnet", "Sonnet"),
+            ("opus", "Opus"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, label))| AiModelCapability {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            supported_reasoning_efforts: efforts(),
+            default_reasoning_effort: Some("auto".into()),
+            is_default: index == 0,
+        })
+        .collect(),
+        source: "fallback".into(),
+        warning,
+    }
+}
+
+fn parse_claude_capabilities(bytes: &[u8]) -> Result<AiProviderCapabilitiesResult, String> {
+    let payload: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Claude returned invalid capability data: {error}"))?;
+    let models = payload
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Claude capability data did not include a model list.".to_string())?
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("value")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let efforts: Vec<AiReasoningCapability> = item
+                .get("supportedEffortLevels")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|value| AiReasoningCapability {
+                            value: value.into(),
+                            label: claude_effort_label(value),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(AiModelCapability {
+                id: id.into(),
+                label: item
+                    .get("displayName")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(id)
+                    .into(),
+                description: item
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                default_reasoning_effort: Some("auto".into()),
+                supported_reasoning_efforts: efforts,
+                is_default: id == "default",
+            })
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err("Claude did not advertise any available models.".into());
+    }
+    Ok(AiProviderCapabilitiesResult {
+        models,
+        source: "agentSdk".into(),
+        warning: None,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn discover_claude_capabilities(
+    bin: Option<String>,
+) -> Result<AiProviderCapabilitiesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut command = Command::new("node");
+        apply_ai_cli_environment(&mut command)
+            .arg(claude_agent_runner_script())
+            .arg("--capabilities");
+        if let Some(bin) = bin
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            command.arg("--claude-path").arg(bin);
+        }
+        match command.output() {
+            Ok(output) if output.status.success() => parse_claude_capabilities(&output.stdout)
+                .unwrap_or_else(|error| fallback_claude_capabilities(Some(error))),
+            Ok(output) => fallback_claude_capabilities(Some(claude_command_failure(
+                "Claude capability discovery",
+                &output,
+            ))),
+            Err(error) => fallback_claude_capabilities(Some(format!(
+                "Failed to launch Claude capability discovery: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|error| format!("Claude capability task failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::TempJobDir;
+
+    #[test]
+    fn capability_parser_preserves_models_and_per_model_efforts() {
+        let result = parse_claude_capabilities(
+            br#"{"models":[{"value":"default","displayName":"Default (recommended)","description":"Best available","supportedEffortLevels":["low","medium","high","xhigh","max"]},{"value":"haiku","displayName":"Haiku","description":"Fast"}]}"#,
+        )
+        .expect("Claude capabilities");
+        assert_eq!(result.source, "agentSdk");
+        assert_eq!(result.models.len(), 2);
+        assert_eq!(result.models[0].id, "default");
+        assert_eq!(result.models[0].supported_reasoning_efforts.len(), 5);
+        assert!(result.models[1].supported_reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn command_applies_discovered_model_and_effort() {
+        let job = TempJobDir::new("paintnode-claude-capability-test").expect("temp dir");
+        let options = claude_command_options(None, Some("sonnet".into()), Some("max".into()));
+        let command = build_claude_agent_command(&options, job.path(), "review", &[]);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--model", "sonnet"]));
+        assert!(args.windows(2).any(|pair| pair == ["--effort", "max"]));
+    }
+
+    #[test]
+    fn command_omits_automatic_effort() {
+        let options = claude_command_options(None, Some("haiku".into()), Some("auto".into()));
+        assert!(options.effort.is_none());
+    }
 }

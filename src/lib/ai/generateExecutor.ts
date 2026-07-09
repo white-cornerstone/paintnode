@@ -106,8 +106,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         'Starting mask-guided generative fill...',
       );
     }
-    const useAgentDirectorForFill =
-      !!fillEdit && directorMode !== 'skip' && (directorProvider === 'codex' || directorProvider === 'claude');
+    const useAgentDirectorForFill = !!fillEdit && directorMode !== 'skip';
     const generated =
       useAgentDirectorForFill
         ? await generateCodexFillImage(
@@ -119,6 +118,7 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
             references,
             false,
             {
+              directorProvider,
               plannerProvider: directorProvider,
               claude:
                 directorProvider === 'claude'
@@ -126,8 +126,8 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
                   : null,
               imageProvider,
               antigravity:
-                imageProvider === 'antigravity'
-                  ? antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir)
+                imageProvider === 'antigravity' || directorProvider === 'antigravity'
+                  ? antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts)
                   : null,
             },
           )

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
@@ -27,6 +27,7 @@ function parseArgs(argv) {
     images: [],
     promptParts: [],
     detect: false,
+    capabilities: false,
   };
 
   let index = 0;
@@ -50,6 +51,9 @@ function parseArgs(argv) {
     if (arg === '--detect') {
       options.detect = true;
       index += 1;
+    } else if (arg === '--capabilities') {
+      options.capabilities = true;
+      index += 1;
     } else if (arg === '--cwd') {
       options.cwd = requireValue(argv, index, arg);
       index += 2;
@@ -72,6 +76,29 @@ function parseArgs(argv) {
   return options;
 }
 
+async function discoverCapabilities(options) {
+  const abortController = new AbortController();
+  async function* idleInput() {
+    await new Promise((resolve) => abortController.signal.addEventListener('abort', resolve, { once: true }));
+  }
+  const session = query({
+    prompt: idleInput(),
+    options: {
+      pathToClaudeCodeExecutable: options.claudePath,
+      abortController,
+      tools: [],
+      permissionMode: 'plan',
+      env: sanitizedEnv(),
+    },
+  });
+  try {
+    const models = await session.supportedModels();
+    process.stdout.write(`${JSON.stringify({ models })}\n`);
+  } finally {
+    abortController.abort();
+  }
+}
+
 function sanitizedEnv() {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -83,7 +110,10 @@ function sanitizedEnv() {
 
 function sdkPackageVersion() {
   try {
-    return require('@anthropic-ai/claude-agent-sdk/package.json').version;
+    const sdkEntry = require.resolve('@anthropic-ai/claude-agent-sdk');
+    const packageJsonPath = path.join(path.dirname(sdkEntry), 'package.json');
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    return typeof packageJson.version === 'string' ? packageJson.version : null;
   } catch {
     return null;
   }
@@ -162,6 +192,10 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.detect) {
     detect(options);
+    return;
+  }
+  if (options.capabilities) {
+    await discoverCapabilities(options);
     return;
   }
 

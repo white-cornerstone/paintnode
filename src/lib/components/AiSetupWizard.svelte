@@ -6,7 +6,6 @@
   import {
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
-    CODEX_MODEL_OPTIONS,
     type AiAutonomyLevel,
     type AntigravityImageModelId,
     type AntigravityImageSize,
@@ -14,6 +13,13 @@
     type ReasoningEffort,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
+  import {
+    FALLBACK_CODEX_CAPABILITIES,
+    codexEffortForModel,
+    codexModelOptions,
+    codexReasoningOptions,
+    loadCodexCapabilities,
+  } from '../ai/providerCapabilities';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { ui } from '../state/ui.svelte';
@@ -48,12 +54,6 @@
       description: 'Uses your Antigravity sign-in for PaintNode-owned image generation.',
     },
   ];
-  const reasoningEfforts: { value: ReasoningEffort; label: string }[] = [
-    { value: 'low', label: 'Low' },
-    { value: 'medium', label: 'Medium' },
-    { value: 'high', label: 'High' },
-    { value: 'xhigh', label: 'Extra High' },
-  ];
   const autonomyLevels: { value: AiAutonomyLevel; label: string }[] = [
     { value: 'low', label: 'Low autonomy' },
     { value: 'guided', label: 'Guided tools' },
@@ -82,12 +82,22 @@
   let agyDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
   let manualBin = $state('');
   let firstPrompt = $state(starterPrompts[0].prompt);
+  let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
 
   const providerName = $derived(provider === 'antigravity' ? 'Antigravity' : 'Codex');
   const providerCommand = $derived(provider === 'antigravity' ? 'agy' : 'codex');
   const selectedDetect = $derived(provider === 'antigravity' ? agyDetect : codexDetect);
+  const availableCodexModels = $derived(codexModelOptions(codexCapabilities, settings.value.ai.model));
+  const availableReasoningEfforts = $derived(
+    codexReasoningOptions(codexCapabilities, settings.value.ai.model, settings.value.ai.reasoningEffort),
+  );
 
   if (desktop) {
+    void loadCodexCapabilities(
+      settings.value.ai.codexExecutableMode === 'custom' ? settings.value.ai.codexBin : '',
+    ).then((capabilities) => {
+      codexCapabilities = capabilities;
+    });
     void runDetection('codex', settings.value.ai.codexExecutableMode === 'custom' ? settings.value.ai.codexBin : '');
     void runDetection(
       'antigravity',
@@ -97,6 +107,19 @@
 
   function textValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
+  }
+
+  function setCodexModel(model: CodexModelId): void {
+    settings.update({
+      ai: {
+        model,
+        reasoningEffort: codexEffortForModel(
+          codexCapabilities,
+          model,
+          settings.value.ai.reasoningEffort,
+        ),
+      },
+    });
   }
 
   function dismiss(): void {
@@ -294,9 +317,9 @@
               <span>Model</span>
               <select
                 value={settings.value.ai.model}
-                onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
+                onchange={(event) => setCodexModel(textValue(event) as CodexModelId)}
               >
-                {#each CODEX_MODEL_OPTIONS as option (option.id)}
+                {#each availableCodexModels as option (option.id)}
                   <option value={option.id}>{option.label}</option>
                 {/each}
               </select>
@@ -307,7 +330,7 @@
                 value={settings.value.ai.reasoningEffort}
                 onchange={(event) => settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
               >
-                {#each reasoningEfforts as option (option.value)}
+                {#each availableReasoningEfforts as option (option.value)}
                   <option value={option.value}>{option.label}</option>
                 {/each}
               </select>

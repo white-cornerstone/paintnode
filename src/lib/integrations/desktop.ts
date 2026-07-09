@@ -8,6 +8,7 @@ import type {
   AiDirectorMode,
   AiProvider,
   ClaudeModelId,
+  ClaudeEffort,
   CodexModelId,
   CodexImageModeration,
   CodexImageQuality,
@@ -116,6 +117,8 @@ export interface CodexGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
   /** Whether the AI Director participates in the workflow. */
   directorMode?: AiDirectorMode | null;
+  /** Reasoning provider selected to act as AI Director. */
+  directorProvider?: AiDirectorProvider | null;
   /** How far the AI Director should stay involved after planning. */
   directorInvolvement?: AiDirectorInvolvement | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
@@ -124,12 +127,17 @@ export interface CodexGeneratorConfig {
   fillAspectRatio?: string | null;
 }
 
-export interface ClaudePlannerConfig {
+export interface ClaudeDirectorConfig {
   /** Optional Claude Code executable override. Empty uses the Claude Agent SDK bundled CLI. */
   bin?: string;
-  /** Claude model alias selected for planner-only runs. */
+  /** Claude model alias selected for Director runs. */
   model?: ClaudeModelId | null;
+  /** Claude effort selected for Director runs. */
+  effort?: ClaudeEffort | null;
 }
+
+/** @deprecated Use ClaudeDirectorConfig. */
+export type ClaudePlannerConfig = ClaudeDirectorConfig;
 
 export interface AntigravityGeneratorConfig {
   /** Optional path to the local Antigravity CLI auth helper. Empty uses the Rust-side defaults. */
@@ -172,8 +180,24 @@ export interface AntigravityGeneratorConfig {
   autonomyLevel?: AiAutonomyLevel | null;
   /** Whether the AI Director participates in the workflow. */
   directorMode?: AiDirectorMode | null;
+  /** Reasoning provider selected to act as AI Director. */
+  directorProvider?: AiDirectorProvider | null;
   /** How far the AI Director should stay involved after planning. */
   directorInvolvement?: AiDirectorInvolvement | null;
+  /** Codex executable used when Codex is selected as AI Director. */
+  codexBin?: string | null;
+  /** Codex reasoning model used when Codex is selected as AI Director. */
+  codexModel?: CodexModelId | null;
+  /** Codex reasoning effort used when Codex is selected as AI Director. */
+  codexReasoningEffort?: ReasoningEffort | null;
+  /** Codex service tier used when Codex is selected as AI Director. */
+  codexServiceTier?: ServiceTier | null;
+  /** Claude executable used when Claude is selected as AI Director. */
+  claudeBin?: string | null;
+  /** Claude model used when Claude is selected as AI Director. */
+  claudeModel?: ClaudeModelId | null;
+  /** Claude reasoning effort used when Claude is selected as AI Director. */
+  claudeEffort?: ClaudeEffort | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
   /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
@@ -181,8 +205,10 @@ export interface AntigravityGeneratorConfig {
 }
 
 export interface PlannedFillImageConfig {
+  directorProvider?: AiDirectorProvider;
+  /** @deprecated Use directorProvider. */
   plannerProvider?: AiDirectorProvider;
-  claude?: ClaudePlannerConfig | null;
+  claude?: ClaudeDirectorConfig | null;
   imageProvider?: AiProvider;
   antigravity?: AntigravityGeneratorConfig | null;
 }
@@ -197,6 +223,26 @@ export interface CodexDetectionResult {
   path: string | null;
   version: string | null;
   error: string | null;
+}
+
+export interface AiReasoningCapability {
+  value: string;
+  label: string;
+}
+
+export interface AiModelCapability {
+  id: string;
+  label: string;
+  description: string | null;
+  supportedReasoningEfforts: AiReasoningCapability[];
+  defaultReasoningEffort: string | null;
+  isDefault: boolean;
+}
+
+export interface AiProviderCapabilitiesResult {
+  models: AiModelCapability[];
+  source: 'appServer' | 'agentSdk' | 'cli' | 'fallback';
+  warning: string | null;
 }
 
 export interface ProjectAsset {
@@ -297,10 +343,6 @@ export interface NativeDroppedFile {
 }
 
 function codexInvokeConfig(config: CodexGeneratorConfig) {
-  // Tasks persisted before "minimal" was retired may still carry it; Codex CLI
-  // rejects the value, so clamp to the closest supported level.
-  const reasoningEffort =
-    (config.reasoningEffort as string) === 'minimal' ? 'low' : (config.reasoningEffort ?? null);
   return {
     bin: config.bin?.trim() ? config.bin.trim() : null,
     projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
@@ -308,11 +350,14 @@ function codexInvokeConfig(config: CodexGeneratorConfig) {
     keepDebugArtifacts: config.keepDebugArtifacts ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     model: config.model,
-    reasoningEffort,
+    reasoningEffort: config.reasoningEffort ?? null,
     serviceTier: config.serviceTier ?? 'default',
     imageQuality: config.imageQuality ?? 'auto',
     imageModeration: config.imageModeration ?? 'auto',
     autonomyLevel: config.autonomyLevel ?? 'low',
+    directorProvider: config.directorProvider ?? 'codex',
+    directorMode: config.directorMode ?? 'auto',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
@@ -328,6 +373,16 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig, includeImag
     model: config.model,
     approvalMode: config.approvalMode ?? 'skipPermissions',
     autonomyLevel: config.autonomyLevel ?? 'low',
+    directorProvider: config.directorProvider ?? 'antigravity',
+    directorMode: config.directorMode ?? 'auto',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
+    codexBin: config.codexBin?.trim() ? config.codexBin.trim() : null,
+    codexModel: config.codexModel ?? null,
+    codexReasoningEffort: config.codexReasoningEffort ?? null,
+    codexServiceTier: config.codexServiceTier ?? 'default',
+    claudeBin: config.claudeBin?.trim() ? config.claudeBin.trim() : null,
+    claudeModel: config.claudeModel && config.claudeModel !== 'default' ? config.claudeModel : null,
+    claudeEffort: config.claudeEffort ?? null,
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
@@ -368,16 +423,18 @@ export function codexConfigFromRunOptions(
     imageModeration: options.imageModeration,
     autonomyLevel: options.autonomyLevel,
     directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
+    directorProvider: options.directorProvider ?? options.plannerProvider ?? 'codex',
     directorInvolvement: options.directorInvolvement ?? 'fullReview',
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };
 }
 
-export function claudeConfigFromRunOptions(options: AiRunOptions): ClaudePlannerConfig {
+export function claudeConfigFromRunOptions(options: AiRunOptions): ClaudeDirectorConfig {
   return {
     bin: options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
     model: options.claudeModel,
+    effort: options.claudeEffort,
   };
 }
 
@@ -409,7 +466,15 @@ export function antigravityConfigFromRunOptions(
     safetyDangerousContent: options.antigravitySafetyDangerousContent,
     autonomyLevel: options.autonomyLevel,
     directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
+    directorProvider: options.directorProvider ?? options.plannerProvider ?? 'antigravity',
     directorInvolvement: options.directorInvolvement ?? 'fullReview',
+    codexBin: options.codexExecutableMode === 'custom' ? options.codexBin : '',
+    codexModel: options.model,
+    codexReasoningEffort: options.reasoningEffort,
+    codexServiceTier: options.serviceTier,
+    claudeBin: options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
+    claudeModel: options.claudeModel,
+    claudeEffort: options.claudeEffort,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };
@@ -420,6 +485,33 @@ export async function detectCodex(bin?: string): Promise<CodexDetectionResult> {
     throw new Error('Codex detection is only available in the desktop app.');
   }
   return invoke<CodexDetectionResult>('detect_codex', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+export async function discoverCodexCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
+  if (!isDesktop()) {
+    throw new Error('Codex capability discovery is only available in the desktop app.');
+  }
+  return invoke<AiProviderCapabilitiesResult>('discover_codex_capabilities', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+export async function discoverClaudeCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
+  if (!isDesktop()) {
+    throw new Error('Claude capability discovery is only available in the desktop app.');
+  }
+  return invoke<AiProviderCapabilitiesResult>('discover_claude_capabilities', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+export async function discoverAntigravityCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
+  if (!isDesktop()) {
+    throw new Error('Antigravity capability discovery is only available in the desktop app.');
+  }
+  return invoke<AiProviderCapabilitiesResult>('discover_antigravity_capabilities', {
     bin: bin?.trim() ? bin.trim() : null,
   });
 }
@@ -498,6 +590,8 @@ export async function generateCodexFillImage(
   const runId = config.runId?.trim() ? config.runId.trim() : `fill-${Date.now()}`;
   const antigravity = plannedImage?.antigravity ?? null;
   const claude = plannedImage?.claude ?? null;
+  const directorProvider =
+    plannedImage?.directorProvider ?? plannedImage?.plannerProvider ?? config.directorProvider ?? 'codex';
   return invoke<GeneratedImageResult>('generate_codex_fill_image', {
     ...codexInvokeConfig({ ...config, runId }),
     bin,
@@ -507,9 +601,11 @@ export async function generateCodexFillImage(
     editTargetPng: Array.from(editTargetPng),
     maskPng: Array.from(maskPng),
     storeAsset,
-    plannerProvider: plannedImage?.plannerProvider ?? 'codex',
+    directorProvider,
+    plannerProvider: directorProvider,
     claudeBin: claude?.bin?.trim() ? claude.bin.trim() : null,
     claudeModel: claude?.model && claude.model !== 'default' ? claude.model : null,
+    claudeEffort: claude?.effort ?? null,
     imageProvider: plannedImage?.imageProvider ?? 'codex',
     antigravityBin: antigravity?.bin?.trim() ? antigravity.bin.trim() : null,
     antigravityModel: antigravity?.model ?? null,
