@@ -98,6 +98,7 @@ const DEFAULT_ANTIGRAVITY_IMAGE_MODEL: &str = "gemini-3.1-flash-image";
 const PAINTNODE_ANTIGRAVITY_IMAGE_REQUEST_FILE: &str = "paintnode-antigravity-image-request.json";
 const PAINTNODE_ANTIGRAVITY_IMAGE_RESPONSE_FILE: &str = "paintnode-antigravity-image-response.json";
 const ANTIGRAVITY_AUTH_LOG_FILE: &str = "agy-auth.log";
+const ANTIGRAVITY_SESSION_FILE: &str = "antigravity-session.json";
 const ANTIGRAVITY_SAFETY_DEFAULT_THRESHOLD: &str = "HARM_BLOCK_THRESHOLD_UNSPECIFIED";
 const ANTIGRAVITY_SAFETY_CATEGORIES: [(&str, &str); 4] = [
     ("HARM_CATEGORY_HARASSMENT", "harassment"),
@@ -1301,6 +1302,76 @@ fn find_antigravity_transcript(job_path: &Path, workspace_path: &Path) -> Option
     None
 }
 
+fn antigravity_transcript_log_paths(transcript_path: &Path) -> Vec<(&'static str, PathBuf)> {
+    let Some(logs_dir) = transcript_path.parent() else {
+        return Vec::new();
+    };
+    [
+        ("transcript", logs_dir.join("transcript.jsonl")),
+        ("fullTranscript", logs_dir.join("transcript_full.jsonl")),
+    ]
+    .into_iter()
+    .filter(|(_, path)| path.exists())
+    .collect()
+}
+
+fn antigravity_brain_session_id(transcript_path: &Path) -> Option<String> {
+    transcript_path
+        .ancestors()
+        .nth(3)
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+fn copy_antigravity_debug_transcript(
+    job_path: &Path,
+    label: &str,
+    source: &Path,
+) -> Option<String> {
+    let file_name = match label {
+        "fullTranscript" => "agy-transcript-full.jsonl",
+        _ => "agy-transcript.jsonl",
+    };
+    fs::copy(source, job_path.join(file_name)).ok()?;
+    Some(file_name.to_string())
+}
+
+fn write_antigravity_session_reference(
+    job_path: &Path,
+    transcript_path: &Path,
+    keep_debug_artifacts: bool,
+) {
+    let logs: Vec<serde_json::Value> = antigravity_transcript_log_paths(transcript_path)
+        .into_iter()
+        .map(|(label, path)| {
+            let copied_file = keep_debug_artifacts
+                .then(|| copy_antigravity_debug_transcript(job_path, label, &path))
+                .flatten();
+            json!({
+                "label": label,
+                "path": path.to_string_lossy(),
+                "copiedFile": copied_file,
+            })
+        })
+        .collect();
+    let payload = json!({
+        "version": 1,
+        "provider": "Antigravity",
+        "brainSessionId": antigravity_brain_session_id(transcript_path),
+        "debugArtifacts": keep_debug_artifacts,
+        "note": if keep_debug_artifacts {
+            "Raw Antigravity transcripts were copied into this job folder for debugging."
+        } else {
+            "Raw Antigravity transcripts are provider debug artifacts and are not copied unless debug artifacts are enabled."
+        },
+        "logs": logs,
+    });
+    if let Ok(text) = serde_json::to_vec_pretty(&payload) {
+        let _ = fs::write(job_path.join(ANTIGRAVITY_SESSION_FILE), text);
+    }
+}
+
 fn json_text(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -1374,6 +1445,7 @@ fn run_antigravity_with_progress(
     workspace_path: &Path,
     job_path: &Path,
     required_output: Option<&str>,
+    keep_debug_artifacts: bool,
 ) -> Result<AgentRunResult, String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -1413,6 +1485,7 @@ fn run_antigravity_with_progress(
     let mut file_snapshot = watched_job_files(job_path);
     let mut transcript_path = None::<PathBuf>;
     let mut transcript_offset = 0_u64;
+    let mut wrote_session_reference = false;
     let mut last_transcript_poll = Instant::now();
     let mut required_output_snapshot = None::<(u64, Option<SystemTime>, Instant)>;
     let (status, satisfied_required_output) = loop {
@@ -1432,6 +1505,9 @@ fn run_antigravity_with_progress(
                 transcript_path = find_antigravity_transcript(job_path, workspace_path);
             }
             if let Some(path) = transcript_path.as_deref() {
+                if !wrote_session_reference {
+                    write_antigravity_session_reference(job_path, path, keep_debug_artifacts);
+                }
                 emit_antigravity_transcript_progress(&app, &run_id, path, &mut transcript_offset);
             }
             break (status, false);
@@ -1457,6 +1533,10 @@ fn run_antigravity_with_progress(
                 }
             }
             if let Some(path) = transcript_path.as_deref() {
+                if !wrote_session_reference {
+                    write_antigravity_session_reference(job_path, path, keep_debug_artifacts);
+                    wrote_session_reference = true;
+                }
                 emit_antigravity_transcript_progress(&app, &run_id, path, &mut transcript_offset);
             }
             last_transcript_poll = Instant::now();
@@ -2463,6 +2543,7 @@ fn run_antigravity(
         workspace_path,
         job_path,
         required_output,
+        options.keep_debug_artifacts,
     )
     .map_err(|e| format!("Failed to run Antigravity at '{antigravity_bin}': {e}"))
 }
@@ -5086,6 +5167,34 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn writes_antigravity_session_reference_and_debug_transcript_copy() {
+        let job = TempJobDir::new("paintnode-antigravity-session-test").expect("temp job");
+        let brain = TempJobDir::new("paintnode-antigravity-brain-test").expect("temp brain");
+        let logs_dir = brain
+            .path()
+            .join("session-1")
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&logs_dir).expect("logs dir");
+        let transcript = logs_dir.join("transcript.jsonl");
+        let full_transcript = logs_dir.join("transcript_full.jsonl");
+        fs::write(&transcript, "{}\n").expect("write transcript");
+        fs::write(&full_transcript, "{\"full\":true}\n").expect("write full transcript");
+
+        write_antigravity_session_reference(job.path(), &transcript, true);
+
+        let reference =
+            fs::read_to_string(job.path().join(ANTIGRAVITY_SESSION_FILE)).expect("reference");
+        assert!(reference.contains("\"provider\": \"Antigravity\""));
+        assert!(reference.contains("\"brainSessionId\": \"session-1\""));
+        assert!(reference.contains("\"debugArtifacts\": true"));
+        assert!(reference.contains("\"copiedFile\": \"agy-transcript.jsonl\""));
+        assert!(reference.contains("\"copiedFile\": \"agy-transcript-full.jsonl\""));
+        assert!(job.path().join("agy-transcript.jsonl").exists());
+        assert!(job.path().join("agy-transcript-full.jsonl").exists());
     }
 
     #[test]

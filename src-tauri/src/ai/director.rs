@@ -6,9 +6,10 @@
 //! accept, retry, or fail.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::ai::{AgentRunResult, AiDirectorInvolvement, AiDirectorMode};
@@ -16,6 +17,7 @@ use crate::ai::{AgentRunResult, AiDirectorInvolvement, AiDirectorMode};
 pub(crate) const PAINTNODE_DIRECTOR_ACTION_FILE: &str = "paintnode-director-action.json";
 pub(crate) const PAINTNODE_DIRECTOR_OBSERVATION_FILE: &str = "paintnode-director-observation.json";
 pub(crate) const PAINTNODE_DIRECTOR_FINAL_FILE: &str = "paintnode-director-final.json";
+pub(crate) const PAINTNODE_DIRECTOR_TIMELINE_FILE: &str = "paintnode-director-timeline.jsonl";
 
 const PAINTNODE_DIRECTOR_FULL_REVIEW_MAX_TURNS: usize = 5;
 const PAINTNODE_DIRECTOR_ENSURE_COMPLETION_MAX_TURNS: usize = 3;
@@ -42,7 +44,7 @@ impl Default for DirectorImageRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum DirectorActionKind {
     GenerateCandidate,
@@ -54,7 +56,7 @@ fn default_director_action_kind() -> DirectorActionKind {
     DirectorActionKind::GenerateCandidate
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DirectorAction {
     #[serde(default = "default_director_action_kind")]
@@ -194,6 +196,41 @@ pub(crate) fn write_director_json(
         .map_err(|e| format!("Failed to write PaintNode Director {file_name}: {e}"))
 }
 
+fn append_director_timeline_event(
+    part_path: &Path,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(part_path.join(PAINTNODE_DIRECTOR_TIMELINE_FILE))
+        .map_err(|e| format!("Failed to open PaintNode Director timeline: {e}"))?;
+    let text = serde_json::to_vec(&payload)
+        .map_err(|e| format!("Failed to encode PaintNode Director timeline event: {e}"))?;
+    file.write_all(&text)
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|e| format!("Failed to write PaintNode Director timeline event: {e}"))
+}
+
+pub(crate) fn write_director_turn_action(
+    part_path: &Path,
+    turn: usize,
+    action: &DirectorAction,
+) -> Result<(), String> {
+    let payload = json!({
+        "version": 1,
+        "turn": turn,
+        "event": "directorAction",
+        "action": action,
+    });
+    write_director_json(
+        part_path,
+        &format!("director-turn-{turn}-action.json"),
+        payload.clone(),
+    )?;
+    append_director_timeline_event(part_path, payload)
+}
+
 pub(crate) fn write_director_observation(
     part_path: &Path,
     turn: usize,
@@ -201,17 +238,25 @@ pub(crate) fn write_director_observation(
     candidate_file: Option<&str>,
     message: &str,
 ) -> Result<(), String> {
+    let payload = json!({
+        "version": 1,
+        "turn": turn,
+        "event": "paintnodeObservation",
+        "status": status,
+        "candidate": candidate_file.map(|file| json!({ "file": file })),
+        "message": message,
+    });
     write_director_json(
         part_path,
         PAINTNODE_DIRECTOR_OBSERVATION_FILE,
-        json!({
-            "version": 1,
-            "turn": turn,
-            "status": status,
-            "candidate": candidate_file.map(|file| json!({ "file": file })),
-            "message": message,
-        }),
-    )
+        payload.clone(),
+    )?;
+    write_director_json(
+        part_path,
+        &format!("director-turn-{turn}-observation.json"),
+        payload.clone(),
+    )?;
+    append_director_timeline_event(part_path, payload)
 }
 
 fn director_involvement_label(involvement: AiDirectorInvolvement) -> &'static str {
@@ -230,18 +275,17 @@ pub(crate) fn write_director_final(
     candidate_file: Option<&str>,
     notes: &str,
 ) -> Result<(), String> {
-    write_director_json(
-        part_path,
-        PAINTNODE_DIRECTOR_FINAL_FILE,
-        json!({
-            "version": 1,
-            "status": status,
-            "provider": provider_label,
-            "involvement": director_involvement_label(involvement),
-            "candidate": candidate_file.map(|file| json!({ "file": file })),
-            "notes": notes,
-        }),
-    )
+    let payload = json!({
+        "version": 1,
+        "event": "directorFinal",
+        "status": status,
+        "provider": provider_label,
+        "involvement": director_involvement_label(involvement),
+        "candidate": candidate_file.map(|file| json!({ "file": file })),
+        "notes": notes,
+    });
+    write_director_json(part_path, PAINTNODE_DIRECTOR_FINAL_FILE, payload.clone())?;
+    append_director_timeline_event(part_path, payload)
 }
 
 pub(crate) fn director_turn_prompt(
@@ -287,6 +331,22 @@ Action examples:
 pub(crate) fn reset_director_loop_files(part_path: &Path) {
     let _ = fs::remove_file(part_path.join(PAINTNODE_DIRECTOR_OBSERVATION_FILE));
     let _ = fs::remove_file(part_path.join(PAINTNODE_DIRECTOR_FINAL_FILE));
+    let _ = fs::remove_file(part_path.join(PAINTNODE_DIRECTOR_TIMELINE_FILE));
+    if let Ok(entries) = fs::read_dir(part_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with("director-turn-")
+                && (file_name.ends_with("-prompt.txt")
+                    || file_name.ends_with("-action.json")
+                    || file_name.ends_with("-observation.json"))
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 pub(crate) fn run_candidate_director_loop<T, RunTurn, FinalMessage, GenerateCandidate>(
@@ -338,6 +398,7 @@ where
                     error
                 }
             })?;
+        write_director_turn_action(part_path, turn, &action)?;
 
         match action.action {
             DirectorActionKind::GenerateCandidate => {
@@ -558,5 +619,48 @@ mod tests {
         assert!(prompt.contains("\"action\": \"acceptResult\""));
         assert!(prompt.contains("\"action\": \"generateCandidate\""));
         assert!(prompt.contains("\"action\": \"fail\""));
+    }
+
+    #[test]
+    fn director_writes_turn_snapshots_and_timeline() {
+        let job = TempJobDir::new("paintnode-director-timeline-test").expect("temp dir");
+        let action = DirectorAction {
+            action: DirectorActionKind::GenerateCandidate,
+            base_image: Some("source.png".into()),
+            prompt: "keep the film grain".into(),
+            constraints: vec!["natural texture".into()],
+            avoid: vec!["plastic denoise".into()],
+            notes: Some("first attempt".into()),
+            candidate: None,
+            reason: None,
+        };
+
+        write_director_turn_action(job.path(), 1, &action).expect("write action");
+        write_director_observation(
+            job.path(),
+            1,
+            "candidateGenerated",
+            Some("director-candidate-1.png"),
+            "PaintNode generated a candidate image.",
+        )
+        .expect("write observation");
+        write_director_final(
+            job.path(),
+            "accepted",
+            "Antigravity",
+            AiDirectorInvolvement::FullReview,
+            Some("director-candidate-1.png"),
+            "accepted",
+        )
+        .expect("write final");
+
+        assert!(job.path().join("director-turn-1-action.json").exists());
+        assert!(job.path().join("director-turn-1-observation.json").exists());
+        let timeline = fs::read_to_string(job.path().join(PAINTNODE_DIRECTOR_TIMELINE_FILE))
+            .expect("timeline");
+        assert_eq!(timeline.lines().count(), 3);
+        assert!(timeline.contains("\"event\":\"directorAction\""));
+        assert!(timeline.contains("\"event\":\"paintnodeObservation\""));
+        assert!(timeline.contains("\"event\":\"directorFinal\""));
     }
 }
