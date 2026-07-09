@@ -8,12 +8,16 @@ describe('codexConfigFromRunOptions', () => {
       ...defaultAiRunOptions(),
       imageQuality: 'high' as const,
       imageModeration: 'low' as const,
+      directorMode: 'force' as const,
+      directorInvolvement: 'ensureCompletion' as const,
     };
 
     const config = codexConfigFromRunOptions(options, '/tmp/project', 'fill-test', true);
 
     expect(config.imageQuality).toBe('high');
     expect(config.imageModeration).toBe('low');
+    expect(config.directorMode).toBe('force');
+    expect(config.directorInvolvement).toBe('ensureCompletion');
   });
 
   it('only passes binary overrides when the custom executable route is selected', () => {

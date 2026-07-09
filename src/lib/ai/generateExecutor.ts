@@ -18,10 +18,10 @@ import {
   AiProgressListener,
   aiRunningLabel,
   createRunId,
+  directorModeFromRunOptions,
+  directorProviderFromRunOptions,
   focusTaskDocument,
   imageProviderFromRunOptions,
-  plannerModeFromRunOptions,
-  plannerProviderFromRunOptions,
 } from './taskSupport';
 
 /**
@@ -52,8 +52,8 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
   const taskProjectPath = task.projectPath;
   const progressListener = new AiProgressListener();
   const imageProvider = imageProviderFromRunOptions(runOptions);
-  const plannerMode = plannerModeFromRunOptions(runOptions);
-  const plannerProvider = plannerProviderFromRunOptions(runOptions);
+  const directorMode = directorModeFromRunOptions(runOptions);
+  const directorProvider = directorProviderFromRunOptions(runOptions);
   aiTasks.setProgress(
     task.id,
     imageProvider === 'codex'
@@ -106,12 +106,12 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
         'Starting mask-guided generative fill...',
       );
     }
-    const useAgentPlannerForFill =
-      !!fillEdit && plannerMode !== 'skip' && (plannerProvider === 'codex' || plannerProvider === 'claude');
+    const useAgentDirectorForFill =
+      !!fillEdit && directorMode !== 'skip' && (directorProvider === 'codex' || directorProvider === 'claude');
     const generated =
-      useAgentPlannerForFill
+      useAgentDirectorForFill
         ? await generateCodexFillImage(
-            codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir),
+            codexConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts),
             fillEdit.sourcePng,
             fillEdit.editTargetPng,
             fillEdit.maskPng,
@@ -119,9 +119,9 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
             references,
             false,
             {
-              plannerProvider,
+              plannerProvider: directorProvider,
               claude:
-                plannerProvider === 'claude'
+                directorProvider === 'claude'
                   ? claudeConfigFromRunOptions(runOptions)
                   : null,
               imageProvider,

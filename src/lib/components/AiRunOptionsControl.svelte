@@ -13,10 +13,11 @@
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
     ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
-    type AiPlannerProvider,
+    type AiDirectorProvider,
     type AiProvider,
     type AiRunOptions,
     type AiAutonomyLevel,
+    type AiDirectorInvolvement,
     type CodexImageModeration,
     type CodexImageQuality,
     type CodexModelId,
@@ -77,11 +78,16 @@
     { value: 'open', label: 'Open-ended', short: 'Open' },
     { value: 'unmanaged', label: 'Unmanaged', short: 'Unmanaged' },
   ];
+  const directorInvolvementLevels: { value: AiDirectorInvolvement; label: string; short: string }[] = [
+    { value: 'planOnly', label: 'Plan only', short: 'Plan' },
+    { value: 'ensureCompletion', label: 'Ensure completion', short: 'Complete' },
+    { value: 'fullReview', label: 'Full review', short: 'Full' },
+  ];
   const providers: { value: AiProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
   ];
-  const plannerProviders: { value: AiPlannerProvider; label: string }[] = [
+  const directorProviders: { value: AiDirectorProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
     { value: 'claude', label: 'Claude' },
@@ -90,6 +96,7 @@
   let submenu = $state<
     | 'autonomy'
     | 'imageProvider'
+    | 'directorInvolvement'
     | 'reasoning'
     | 'model'
     | 'claudeModel'
@@ -114,16 +121,24 @@
   const floatingMenuClass = 'ai-run-options-floating-menu';
   const dismissLayerClass = 'ai-run-options-dismiss-layer';
 
-  const plannerEnabled = $derived(options.plannerMode !== 'skip');
+  const directorEnabled = $derived((options.directorMode ?? options.plannerMode) !== 'skip');
   const imageProvider = $derived(options.imageProvider ?? options.provider ?? 'codex');
-  const plannerProvider = $derived(options.plannerProvider ?? 'codex');
-  const plannerModeShort = $derived(options.plannerMode === 'force' ? 'Always' : 'Auto');
-  const showCodexAgentOptions = $derived((plannerEnabled && plannerProvider === 'codex') || (!plannerEnabled && imageProvider === 'codex'));
-  const showAntigravityAgentOptions = $derived(
-    (plannerEnabled && plannerProvider === 'antigravity') ||
-      (!plannerEnabled && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
+  const directorProvider = $derived(options.directorProvider ?? options.plannerProvider ?? 'codex');
+  const directorMode = $derived(options.directorMode ?? options.plannerMode ?? 'auto');
+  const directorModeShort = $derived(directorMode === 'force' ? 'Always' : 'Auto');
+  const directorInvolvement = $derived(options.directorInvolvement ?? 'fullReview');
+  const directorInvolvementShort = $derived(
+    directorInvolvementLevels.find((item) => item.value === directorInvolvement)?.short ?? 'Full',
   );
-  const showClaudePlannerOptions = $derived(plannerEnabled && plannerProvider === 'claude');
+  const directorInvolvementLabel = $derived(
+    directorInvolvementLevels.find((item) => item.value === directorInvolvement)?.label ?? 'Full review',
+  );
+  const showCodexAgentOptions = $derived((directorEnabled && directorProvider === 'codex') || (!directorEnabled && imageProvider === 'codex'));
+  const showAntigravityAgentOptions = $derived(
+    (directorEnabled && directorProvider === 'antigravity') ||
+      (!directorEnabled && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
+  );
+  const showClaudeDirectorOptions = $derived(directorEnabled && directorProvider === 'claude');
   const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
   const imageQualityShort = $derived(
@@ -167,45 +182,49 @@
   );
   const summary = $derived.by(() => {
     const imageName = providerName(imageProvider);
-    if (!plannerEnabled) return `Planner: Off · Image: ${imageName}`;
-    const plannerName = plannerProviderName(plannerProvider);
-    if (plannerProvider === imageProvider) return `Planner: ${plannerModeShort} · Image: ${imageName}`;
-    return `Planner: ${plannerModeShort} ${plannerName} · Image: ${imageName}`;
+    if (!directorEnabled) return `Director: Off · Image: ${imageName}`;
+    const directorName = directorProviderName(directorProvider);
+    if (directorProvider === imageProvider) return `Director: ${directorModeShort}, ${directorInvolvementShort} · Image: ${imageName}`;
+    return `Director: ${directorModeShort} ${directorName}, ${directorInvolvementShort} · Image: ${imageName}`;
   });
   const detailedSummary = $derived.by(() => {
     const imageDetail = imageProvider === 'codex'
       ? `Image: Codex, ${imageQualityShort} quality`
       : `Image: Antigravity, ${antigravityImageSizeLabel}`;
-    if (!plannerEnabled) return `Planner: Off. ${imageDetail}`;
-    const plannerDetail = plannerProvider === 'codex'
-      ? `Planner: ${plannerModeShort}, Codex, ${reasoningShort} reasoning`
-      : plannerProvider === 'claude'
-        ? `Planner: ${plannerModeShort}, Claude, ${claudeModelLabel}`
-        : `Planner: ${plannerModeShort}, Antigravity, ${autonomyShort} autonomy`;
-    return `${plannerDetail}. ${imageDetail}`;
+    if (!directorEnabled) return `Director: Off. ${imageDetail}`;
+    const directorDetail = directorProvider === 'codex'
+      ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Codex, ${reasoningShort} reasoning`
+      : directorProvider === 'claude'
+        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Claude, ${claudeModelLabel}`
+      : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
+    return `${directorDetail}. ${imageDetail}`;
   });
 
   function providerName(provider: AiProvider): string {
     return provider === 'antigravity' ? 'Antigravity' : 'Codex';
   }
 
-  function plannerProviderName(provider: AiPlannerProvider): string {
+  function directorProviderName(provider: AiDirectorProvider): string {
     return provider === 'claude' ? 'Claude' : providerName(provider);
   }
 
-  function activePlannerMode(): 'auto' | 'force' {
-    if (options.plannerMode === 'force' || options.plannerMode === 'auto') return options.plannerMode;
-    return settings.value.ai.plannerMode === 'force' ? 'force' : 'auto';
+  function activeDirectorMode(): 'auto' | 'force' {
+    if (directorMode === 'force' || directorMode === 'auto') return directorMode;
+    return settings.value.ai.directorMode === 'force' ? 'force' : 'auto';
   }
 
-  function setPlannerProvider(provider: AiPlannerProvider): void {
-    options = { ...options, plannerMode: activePlannerMode(), plannerProvider: provider };
+  function setDirectorProvider(provider: AiDirectorProvider): void {
+    options = { ...options, directorMode: activeDirectorMode(), directorProvider: provider, directorInvolvement };
     submenu = provider === 'codex' ? 'reasoning' : provider === 'claude' ? 'claudeModel' : 'antigravityModel';
   }
 
-  function skipPlanner(): void {
-    options = { ...options, plannerMode: 'skip' };
+  function skipDirector(): void {
+    options = { ...options, directorMode: 'skip' };
     submenu = 'imageProvider';
+  }
+
+  function setDirectorInvolvement(next: AiDirectorInvolvement): void {
+    options = { ...options, directorMode: activeDirectorMode(), directorInvolvement: next };
   }
 
   function setImageProvider(provider: AiProvider): void {
@@ -244,8 +263,8 @@
       ? aiProfileRunOptionsFromSettings(settings.value, profileId)
       : aiProviderDefaultsFromSettings(settings.value);
     const profileImageProvider = profileOptions.imageProvider ?? profileOptions.provider ?? 'codex';
-    if (profileOptions.plannerMode === 'skip') return `Planner: Skip · Image: ${providerName(profileImageProvider)}`;
-    return `Planner: ${plannerProviderName(profileOptions.plannerProvider)} · Image: ${providerName(profileImageProvider)}`;
+    if (profileOptions.directorMode === 'skip') return `Director: Off · Image: ${providerName(profileImageProvider)}`;
+    return `Director: ${directorProviderName(profileOptions.directorProvider)} · Image: ${providerName(profileImageProvider)}`;
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {
@@ -406,8 +425,9 @@
   $effect(() => {
     if (!open) return;
     submenu;
-    options.plannerMode;
-    options.plannerProvider;
+    options.directorMode;
+    options.directorProvider;
+    options.directorInvolvement;
     options.imageProvider;
     options.antigravitySafetyFiltering;
     options.claudeModel;
@@ -460,17 +480,35 @@
       {/if}
       <div class="separator"></div>
 
-        <div class="menu-title">Planner</div>
-        {#each plannerProviders as provider (provider.value)}
-          <button type="button" class:active={plannerEnabled && plannerProvider === provider.value} onclick={() => setPlannerProvider(provider.value)}>
+        <div class="menu-title">AI Director</div>
+        {#each directorProviders as provider (provider.value)}
+          <button type="button" class:active={directorEnabled && directorProvider === provider.value} onclick={() => setDirectorProvider(provider.value)}>
             <span>{provider.label}</span>
-            {#if plannerEnabled && plannerProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
+            {#if directorEnabled && directorProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
           </button>
         {/each}
-        <button type="button" class:active={!plannerEnabled} onclick={skipPlanner}>
+        <button type="button" class:active={!directorEnabled} onclick={skipDirector}>
           <span>Skip</span>
-          {#if !plannerEnabled}<Icon svg={Checkmark} size={15} />{/if}
+          {#if !directorEnabled}<Icon svg={Checkmark} size={15} />{/if}
         </button>
+
+        {#if directorEnabled}
+          <button type="button" onclick={() => (submenu = submenu === 'directorInvolvement' ? null : 'directorInvolvement')}>
+            <span>參與程度</span>
+            <span class="value">{directorInvolvementLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'directorInvolvement'}
+            <div class="subitems">
+              {#each directorInvolvementLevels as item (item.value)}
+                <button type="button" class:active={directorInvolvement === item.value} onclick={() => setDirectorInvolvement(item.value)}>
+                  <span>{item.label}</span>
+                  {#if directorInvolvement === item.value}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
 
         <div class="separator"></div>
         <div class="menu-title">Image Generator</div>
@@ -483,7 +521,7 @@
 
         {#if showCodexAgentOptions}
           <div class="separator"></div>
-          <div class="menu-title">{plannerEnabled ? 'Codex Planner' : 'Codex Request'}</div>
+          <div class="menu-title">{directorEnabled ? 'Codex Director' : 'Codex Request'}</div>
           <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
             <span>Autonomy</span>
             <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
@@ -548,7 +586,7 @@
 
         {#if showAntigravityAgentOptions}
           <div class="separator"></div>
-          <div class="menu-title">Antigravity Planner</div>
+          <div class="menu-title">Antigravity Director</div>
           <button type="button" onclick={() => (submenu = submenu === 'autonomy' ? null : 'autonomy')}>
             <span>Autonomy</span>
             <span class="value">{autonomyLevels.find((item) => item.value === options.autonomyLevel)?.label}</span>
@@ -596,9 +634,9 @@
           {/if}
         {/if}
 
-        {#if showClaudePlannerOptions}
+        {#if showClaudeDirectorOptions}
           <div class="separator"></div>
-          <div class="menu-title">Claude Planner</div>
+          <div class="menu-title">Claude Director</div>
           <button type="button" onclick={() => (submenu = submenu === 'claudeModel' ? null : 'claudeModel')}>
             <span>Model</span>
             <span class="value">{claudeModelLabel}</span>

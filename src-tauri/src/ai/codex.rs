@@ -49,17 +49,19 @@ use crate::ai::placement::{
     AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled,
-    apply_ai_cli_environment, clean_option, cleanup_project_agent_job, cleanup_project_job_enabled,
-    clear_ai_run_cancelled, codex_agent_message_text, command_failure, copy_png_candidate,
-    emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir,
-    output_tail, project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
+    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_restore_contract,
+    ai_job_project_dir, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
+    clean_option, cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
+    codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
+    emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir, output_tail,
+    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, safe_job_child_path, safe_png_source_file_name,
     should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
-    AgentRunResult, AiAutonomyLevel, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
-    DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, TempJobDir,
-    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, POLL_INTERVAL,
+    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, CLAUDE_RUNS_DIR,
+    CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -665,10 +667,10 @@ fn write_codex_imagegen_options(
         .map_err(|e| format!("Failed to write Codex image-generation options: {e}"))
 }
 
-fn codex_fill_planner_contract(autonomy: AiAutonomyLevel) -> &'static str {
+fn codex_fill_director_contract(autonomy: AiAutonomyLevel) -> &'static str {
     match autonomy {
         AiAutonomyLevel::Unmanaged => {
-            "Autonomy level: Unmanaged. Act only as a prompt planner for PaintNode's owned image-generation runner. Do not invoke image generation yourself."
+            "Autonomy level: Unmanaged. Act only as the AI Director for PaintNode's owned image-generation runner. Do not invoke image generation yourself."
         }
         AiAutonomyLevel::Open => {
             "Autonomy level: Open. You may inspect the attached images visually, but do not run tools, write scripts, or invoke image generation. PaintNode owns image synthesis, resizing, masking, validation, and import."
@@ -1074,7 +1076,7 @@ fn generative_fill_prompt(
     has_storyboard_draft: bool,
     reference_names: &[String],
 ) -> String {
-    let autonomy_contract = codex_fill_planner_contract(autonomy);
+    let autonomy_contract = codex_fill_director_contract(autonomy);
     let task_intro =
         "Plan one PaintNode-controlled generative fill image request from the attached frame.";
     let managed_method_requirements = if autonomy == AiAutonomyLevel::Unmanaged {
@@ -1459,6 +1461,8 @@ pub(crate) async fn generate_codex_image(
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_involvement: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -1479,6 +1483,8 @@ pub(crate) async fn generate_codex_image(
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _ = bin;
         let _ = autonomy_level;
+        let director_mode = ai_director_mode(director_mode);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("codex-{}", now_id())
         } else {
@@ -1565,6 +1571,8 @@ pub(crate) async fn generate_codex_image(
                     "Generated image restoration",
                     false,
                     true,
+                    director_mode,
+                    director_involvement,
                 )?;
                 bytes = restored.ok_or_else(|| {
                     "Generated image restoration did not return a composed result.".to_string()
@@ -2181,7 +2189,12 @@ fn run_codex_direct_edit_part(
     })
 }
 
-fn codex_direct_restore_prompt(geometry_note: &str) -> String {
+fn codex_direct_restore_prompt(
+    geometry_note: &str,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    let director_contract = ai_director_restore_contract(director_mode, director_involvement);
     format!(
         r#"Restore image detail for one PaintNode fixed-canvas region and return exactly one full-canvas PNG candidate.
 
@@ -2192,11 +2205,13 @@ Attached images:
 2. `mask.png` marks the editable area. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.
 
 {geometry_note}
+{director_contract}
 
 Restoration goal:
 - Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
 - Preserve composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
 - Match the color balance, tone, brightness, contrast, grain, and detail level of already-restored areas so the result joins them without visible seams.
+- Preserve intentional medium character such as film grain, scan texture, halation, bloom, lens softness, motion softness, slight overexposure, underexposure, or vintage color cast. Do not treat those traits as defects unless the user explicitly asked for cleanup, denoise, or restoration beyond upscale/detail recovery.
 - Do not add, remove, move, restyle, or reinterpret any content.
 - Do not change global brightness, contrast, or color balance.
 - If a detail is too blurred to identify, render plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
@@ -2223,6 +2238,8 @@ fn codex_restore_image_details(
     label: &str,
     upscale_layers: bool,
     return_composed: bool,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
 ) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
     let dimensions = png_dimensions_from_bytes(enlarged_png)
         .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
@@ -2290,7 +2307,8 @@ fn codex_restore_image_details(
         }
         write_codex_imagegen_options(&part_path, part.working.original_dimensions, options)?;
         let geometry_note = ai_part_geometry_note(&placement, part_index);
-        let prompt_text = codex_direct_restore_prompt(&geometry_note);
+        let prompt_text =
+            codex_direct_restore_prompt(&geometry_note, director_mode, director_involvement);
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
         emit_codex_part_progress(
             app,
@@ -3306,6 +3324,8 @@ pub(crate) async fn upscale_codex_image(
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_involvement: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
         return Err("AI upscale source is not a PNG image.".into());
@@ -3327,6 +3347,8 @@ pub(crate) async fn upscale_codex_image(
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _ = bin;
         let _ = autonomy_level;
+        let director_mode = ai_director_mode(director_mode);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("upscale-{}", now_id())
         } else {
@@ -3373,6 +3395,8 @@ pub(crate) async fn upscale_codex_image(
             "AI upscale",
             true,
             keep_composed_result,
+            director_mode,
+            director_involvement,
         )?;
         let data_url = png_data_url(composed_bytes.as_deref().unwrap_or(&enlarged_png))?;
         let mut assets = Vec::new();
@@ -3978,7 +4002,11 @@ mod tests {
                 &["references/reference-1-prop.png".to_string()],
                 TEST_GEOMETRY_NOTE,
             ),
-            codex_direct_restore_prompt(TEST_GEOMETRY_NOTE),
+            codex_direct_restore_prompt(
+                TEST_GEOMETRY_NOTE,
+                AiDirectorMode::Auto,
+                AiDirectorInvolvement::FullReview,
+            ),
             codex_direct_workflow_compose_prompt(
                 "girl holds apple by the water",
                 &[
@@ -3997,7 +4025,7 @@ mod tests {
     }
 
     #[test]
-    fn paintnode_owned_image_prompt_combines_planner_constraints() {
+    fn paintnode_owned_image_prompt_combines_director_constraints() {
         let request = PaintNodeImageRequest {
             prompt: "Extend the train bench and seaside view.".into(),
             constraints: vec!["Match the existing camera perspective.".into()],
@@ -4108,7 +4136,7 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_fill_planner_prompt_omits_method_guardrails() {
+    fn unmanaged_fill_director_prompt_omits_method_guardrails() {
         let fill = generative_fill_prompt(
             "extend photo",
             AiAutonomyLevel::Unmanaged,
@@ -4258,7 +4286,7 @@ mod tests {
     }
 
     #[test]
-    fn generative_fill_prompts_are_paintnode_planner_only() {
+    fn generative_fill_prompts_are_paintnode_director_only() {
         let prompts = [
             generative_fill_prompt(
                 "extend photo",
@@ -4371,10 +4399,16 @@ mod tests {
 
     #[test]
     fn codex_direct_restore_prompt_targets_detail_without_content_changes() {
-        let prompt = codex_direct_restore_prompt(TEST_GEOMETRY_NOTE);
+        let prompt = codex_direct_restore_prompt(
+            TEST_GEOMETRY_NOTE,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+        );
 
         assert!(prompt.contains("Restore image detail for one PaintNode fixed-canvas region"));
+        assert!(prompt.contains("AI Director participation: Full review"));
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
+        assert!(prompt.contains("Preserve intentional medium character such as film grain"));
         assert!(prompt.contains("the full PaintNode document"));
         assert!(prompt.contains("Critical registration rule"));
         assert!(prompt.contains("registered to `source.png`"));
@@ -4383,6 +4417,29 @@ mod tests {
         assert!(!prompt.contains("User retouch prompt"));
         assert!(!prompt.contains("$imagegen"));
         assert!(!prompt.contains("generated-images cache"));
+    }
+
+    #[test]
+    fn codex_direct_restore_prompt_honors_director_involvement() {
+        let plan_only = codex_direct_restore_prompt(
+            TEST_GEOMETRY_NOTE,
+            AiDirectorMode::Force,
+            AiDirectorInvolvement::PlanOnly,
+        );
+        let ensure_completion = codex_direct_restore_prompt(
+            TEST_GEOMETRY_NOTE,
+            AiDirectorMode::Force,
+            AiDirectorInvolvement::EnsureCompletion,
+        );
+        let skipped = codex_direct_restore_prompt(
+            TEST_GEOMETRY_NOTE,
+            AiDirectorMode::Skip,
+            AiDirectorInvolvement::FullReview,
+        );
+
+        assert!(plan_only.contains("AI Director participation: Plan only"));
+        assert!(ensure_completion.contains("AI Director participation: Ensure completion"));
+        assert!(!skipped.contains("AI Director participation:"));
     }
 
     #[test]

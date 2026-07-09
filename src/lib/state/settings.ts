@@ -88,8 +88,13 @@ export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
 export type AiProvider = 'codex' | 'antigravity';
-export type AiPlannerProvider = AiProvider | 'claude';
-export type AiPlannerMode = 'auto' | 'skip' | 'force';
+export type AiDirectorProvider = AiProvider | 'claude';
+export type AiDirectorMode = 'auto' | 'skip' | 'force';
+export type AiDirectorInvolvement = 'planOnly' | 'ensureCompletion' | 'fullReview';
+/** @deprecated Use AiDirectorMode. */
+export type AiPlannerMode = AiDirectorMode;
+/** @deprecated Use AiDirectorProvider. */
+export type AiPlannerProvider = AiDirectorProvider;
 export type AiExecutableMode = 'builtin' | 'custom';
 export type CanvasBackground = 'white' | 'transparent';
 /**
@@ -102,8 +107,13 @@ export type AiEditChecksLevel = 0 | 1 | 2 | 3;
 export interface AiRunOptions {
   /** @deprecated Use imageProvider. Kept so older task/profile records still hydrate safely. */
   provider: AiProvider;
-  plannerMode: AiPlannerMode;
-  plannerProvider: AiPlannerProvider;
+  directorMode: AiDirectorMode;
+  directorProvider: AiDirectorProvider;
+  directorInvolvement: AiDirectorInvolvement;
+  /** @deprecated Use directorMode. Older persisted task/profile records may still carry this. */
+  plannerMode?: AiDirectorMode;
+  /** @deprecated Use directorProvider. Older persisted task/profile records may still carry this. */
+  plannerProvider?: AiDirectorProvider;
   imageProvider: AiProvider;
   codexExecutableMode: AiExecutableMode;
   codexBin: string;
@@ -162,8 +172,9 @@ export interface PaintNodeSettings {
   ai: {
     /** @deprecated Use imageProvider. Kept for backward-compatible settings migration. */
     provider: AiProvider;
-    plannerMode: AiPlannerMode;
-    plannerProvider: AiPlannerProvider;
+    directorMode: AiDirectorMode;
+    directorProvider: AiDirectorProvider;
+    directorInvolvement: AiDirectorInvolvement;
     imageProvider: AiProvider;
     codexExecutableMode: AiExecutableMode;
     codexBin: string;
@@ -236,7 +247,8 @@ const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
 const IMAGE_QUALITIES = new Set<string>(['auto', 'low', 'medium', 'high']);
 const IMAGE_MODERATIONS = new Set<string>(['auto', 'low']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
-const AI_PLANNER_MODES = new Set<string>(['auto', 'skip', 'force']);
+const AI_DIRECTOR_MODES = new Set<string>(['auto', 'skip', 'force']);
+const AI_DIRECTOR_INVOLVEMENT = new Set<string>(['planOnly', 'ensureCompletion', 'fullReview']);
 const AI_EXECUTABLE_MODES = new Set<string>(['builtin', 'custom']);
 
 function normalizeAiProvider(value: unknown, fallback: AiProvider): AiProvider {
@@ -246,13 +258,17 @@ function normalizeAiProvider(value: unknown, fallback: AiProvider): AiProvider {
   return fallback;
 }
 
-function normalizeAiPlannerProvider(value: unknown, fallback: AiPlannerProvider): AiPlannerProvider {
+function normalizeAiDirectorProvider(value: unknown, fallback: AiDirectorProvider): AiDirectorProvider {
   if (String(value) === 'claude') return 'claude';
   return normalizeAiProvider(value, fallback === 'claude' ? 'codex' : fallback);
 }
 
-function normalizePlannerMode(value: unknown, fallback: AiPlannerMode): AiPlannerMode {
-  return AI_PLANNER_MODES.has(String(value)) ? (value as AiPlannerMode) : fallback;
+function normalizeDirectorMode(value: unknown, fallback: AiDirectorMode): AiDirectorMode {
+  return AI_DIRECTOR_MODES.has(String(value)) ? (value as AiDirectorMode) : fallback;
+}
+
+function normalizeDirectorInvolvement(value: unknown, fallback: AiDirectorInvolvement): AiDirectorInvolvement {
+  return AI_DIRECTOR_INVOLVEMENT.has(String(value)) ? (value as AiDirectorInvolvement) : fallback;
 }
 
 function normalizeExecutableMode(value: unknown, fallback: AiExecutableMode): AiExecutableMode {
@@ -281,8 +297,9 @@ export function defaultSettings(): PaintNodeSettings {
     },
     ai: {
       provider: 'codex',
-      plannerMode: 'auto',
-      plannerProvider: 'codex',
+      directorMode: 'auto',
+      directorProvider: 'codex',
+      directorInvolvement: 'fullReview',
       imageProvider: 'codex',
       codexExecutableMode: 'builtin',
       codexBin: '',
@@ -357,12 +374,13 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
   const value = isRecord(raw) ? raw : {};
   const provider = normalizeAiProvider(value.provider, fallback.provider);
   const imageProvider = normalizeAiProvider(value.imageProvider, provider);
-  const legacyPlannerMode: AiPlannerMode = provider === 'antigravity' ? 'skip' : fallback.plannerMode;
+  const legacyDirectorMode: AiDirectorMode = provider === 'antigravity' ? 'skip' : fallback.directorMode;
   const savedReasoningEffort = value.reasoningEffort === 'minimal' ? 'low' : value.reasoningEffort;
   return {
     provider: imageProvider,
-    plannerMode: normalizePlannerMode(value.plannerMode, legacyPlannerMode),
-    plannerProvider: normalizeAiPlannerProvider(value.plannerProvider, provider),
+    directorMode: normalizeDirectorMode(value.directorMode ?? value.plannerMode, legacyDirectorMode),
+    directorProvider: normalizeAiDirectorProvider(value.directorProvider ?? value.plannerProvider, provider),
+    directorInvolvement: normalizeDirectorInvolvement(value.directorInvolvement, fallback.directorInvolvement),
     imageProvider,
     claudeModel: CLAUDE_MODEL_IDS.has(String(value.claudeModel))
       ? (value.claudeModel as ClaudeModelId)
@@ -459,7 +477,7 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
 
   const provider = normalizeAiProvider(ai.provider, defaults.ai.provider);
   const imageProvider = normalizeAiProvider(ai.imageProvider, provider);
-  const legacyPlannerMode: AiPlannerMode = provider === 'antigravity' ? 'skip' : defaults.ai.plannerMode;
+  const legacyDirectorMode: AiDirectorMode = provider === 'antigravity' ? 'skip' : defaults.ai.directorMode;
   // Codex CLI retired the "minimal" reasoning effort; map old saves to the closest level.
   const savedReasoningEffort = ai.reasoningEffort === 'minimal' ? 'low' : ai.reasoningEffort;
   const savedAntigravityBin = ai.antigravityBin ?? ai.geminiBin;
@@ -467,8 +485,9 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const savedAntigravityApprovalMode = ai.antigravityApprovalMode ?? ai.geminiApprovalMode;
   const normalizedAiBase: Omit<PaintNodeSettings['ai'], 'profiles' | 'defaultProfileId'> = {
     provider: imageProvider,
-    plannerMode: normalizePlannerMode(ai.plannerMode, legacyPlannerMode),
-    plannerProvider: normalizeAiPlannerProvider(ai.plannerProvider, provider),
+    directorMode: normalizeDirectorMode(ai.directorMode ?? ai.plannerMode, legacyDirectorMode),
+    directorProvider: normalizeAiDirectorProvider(ai.directorProvider ?? ai.plannerProvider, provider),
+    directorInvolvement: normalizeDirectorInvolvement(ai.directorInvolvement, defaults.ai.directorInvolvement),
     imageProvider,
     codexExecutableMode: normalizeExecutableMode(ai.codexExecutableMode, defaults.ai.codexExecutableMode),
     codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
@@ -606,8 +625,9 @@ export function defaultAiRunOptions(): AiRunOptions {
   const ai = defaultSettings().ai;
   return {
     provider: ai.imageProvider,
-    plannerMode: ai.plannerMode,
-    plannerProvider: ai.plannerProvider,
+    directorMode: ai.directorMode,
+    directorProvider: ai.directorProvider,
+    directorInvolvement: ai.directorInvolvement,
     imageProvider: ai.imageProvider,
     codexExecutableMode: ai.codexExecutableMode,
     codexBin: ai.codexBin,
@@ -643,8 +663,9 @@ export function defaultAiRunOptions(): AiRunOptions {
 export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunOptions {
   return {
     provider: value.ai.imageProvider,
-    plannerMode: value.ai.plannerMode,
-    plannerProvider: value.ai.plannerProvider,
+    directorMode: value.ai.directorMode,
+    directorProvider: value.ai.directorProvider,
+    directorInvolvement: value.ai.directorInvolvement,
     imageProvider: value.ai.imageProvider,
     codexExecutableMode: value.ai.codexExecutableMode,
     codexBin: value.ai.codexBin,
@@ -716,8 +737,9 @@ export function aiRunOptionsFromSettings(value: PaintNodeSettings): AiRunOptions
 export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
   return {
     provider: options.imageProvider,
-    plannerMode: options.plannerMode,
-    plannerProvider: options.plannerProvider,
+    directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
+    directorProvider: options.directorProvider ?? options.plannerProvider ?? 'codex',
+    directorInvolvement: options.directorInvolvement ?? 'fullReview',
     imageProvider: options.imageProvider,
     codexExecutableMode: options.codexExecutableMode,
     codexBin: options.codexBin,

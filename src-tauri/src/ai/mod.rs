@@ -285,6 +285,20 @@ pub(crate) enum AiAutonomyLevel {
     Unmanaged,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AiDirectorMode {
+    Auto,
+    Skip,
+    Force,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AiDirectorInvolvement {
+    PlanOnly,
+    EnsureCompletion,
+    FullReview,
+}
+
 pub(crate) struct TempJobDir {
     path: PathBuf,
 }
@@ -1079,6 +1093,42 @@ pub(crate) fn ai_autonomy_level(value: Option<String>) -> AiAutonomyLevel {
         Some("open") => AiAutonomyLevel::Open,
         Some("unmanaged") => AiAutonomyLevel::Unmanaged,
         _ => AiAutonomyLevel::Low,
+    }
+}
+
+pub(crate) fn ai_director_mode(value: Option<String>) -> AiDirectorMode {
+    match clean_option(value).as_deref() {
+        Some("skip") => AiDirectorMode::Skip,
+        Some("force") => AiDirectorMode::Force,
+        _ => AiDirectorMode::Auto,
+    }
+}
+
+pub(crate) fn ai_director_involvement(value: Option<String>) -> AiDirectorInvolvement {
+    match clean_option(value).as_deref() {
+        Some("planOnly") => AiDirectorInvolvement::PlanOnly,
+        Some("ensureCompletion") => AiDirectorInvolvement::EnsureCompletion,
+        _ => AiDirectorInvolvement::FullReview,
+    }
+}
+
+pub(crate) fn ai_director_restore_contract(
+    mode: AiDirectorMode,
+    involvement: AiDirectorInvolvement,
+) -> &'static str {
+    if mode == AiDirectorMode::Skip {
+        return "";
+    }
+    match involvement {
+        AiDirectorInvolvement::PlanOnly => {
+            "AI Director participation: Plan only. Treat this prompt as the Director's preservation plan for the restore pass; do not run a separate review loop."
+        }
+        AiDirectorInvolvement::EnsureCompletion => {
+            "AI Director participation: Ensure completion. If a provider safety or quality issue blocks the exact wording, make the smallest compliant prompt adjustment while preserving the source image, intentional medium character, and upscale/detail-recovery intent."
+        }
+        AiDirectorInvolvement::FullReview => {
+            "AI Director participation: Full review. Before returning, compare the candidate against the source image and revise internally until content, framing, grain/texture, exposure character, and local detail remain faithful. Return only the final accepted PNG."
+        }
     }
 }
 

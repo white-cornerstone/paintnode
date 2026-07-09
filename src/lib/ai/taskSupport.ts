@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { editor } from '../state/editor.svelte';
-import type { AiPlannerMode, AiPlannerProvider, AiProvider, AiRunOptions } from '../state/settings';
+import type { AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiProvider, AiRunOptions } from '../state/settings';
 
 /** Shared support for the background AI tasks and their dialogs (Generate, Retouch, Extract Assets). */
 
@@ -17,7 +17,7 @@ export function providerLabel(provider: AiProvider): string {
   return 'Codex';
 }
 
-export function plannerProviderLabel(provider: AiPlannerProvider): string {
+export function directorProviderLabel(provider: AiDirectorProvider): string {
   if (provider === 'claude') return 'Claude';
   return providerLabel(provider);
 }
@@ -31,30 +31,50 @@ export function imageProviderFromRunOptions(options: Pick<AiRunOptions, 'imagePr
   return options.imageProvider ?? options.provider ?? 'codex';
 }
 
-export function plannerProviderFromRunOptions(options: Pick<AiRunOptions, 'plannerProvider'>): AiPlannerProvider {
-  return options.plannerProvider ?? 'codex';
+export function directorProviderFromRunOptions(
+  options: Pick<AiRunOptions, 'directorProvider'> & Pick<Partial<AiRunOptions>, 'plannerProvider'>,
+): AiDirectorProvider {
+  return options.directorProvider ?? options.plannerProvider ?? 'codex';
 }
 
-export function plannerModeFromRunOptions(options: Pick<AiRunOptions, 'plannerMode'>): AiPlannerMode {
-  return options.plannerMode ?? 'auto';
+export function directorModeFromRunOptions(
+  options: Pick<AiRunOptions, 'directorMode'> & Pick<Partial<AiRunOptions>, 'plannerMode'>,
+): AiDirectorMode {
+  return options.directorMode ?? options.plannerMode ?? 'auto';
 }
 
-export function plannerModeLabel(mode: AiPlannerMode): string {
-  if (mode === 'skip') return 'Skip planner';
-  if (mode === 'force') return 'Always plan';
-  return 'Auto plan';
+export function directorInvolvementFromRunOptions(
+  options: Pick<AiRunOptions, 'directorInvolvement'>,
+): AiDirectorInvolvement {
+  return options.directorInvolvement ?? 'fullReview';
 }
 
-export function aiRoleSummary(options: Pick<AiRunOptions, 'plannerMode' | 'plannerProvider' | 'imageProvider' | 'provider'>): string {
+export function directorModeLabel(mode: AiDirectorMode): string {
+  if (mode === 'skip') return 'Skip Director';
+  if (mode === 'force') return 'Always direct';
+  return 'Auto direct';
+}
+
+export function directorInvolvementLabel(involvement: AiDirectorInvolvement): string {
+  if (involvement === 'planOnly') return 'Plan only';
+  if (involvement === 'ensureCompletion') return 'Ensure completion';
+  return 'Full review';
+}
+
+export function aiRoleSummary(
+  options: Pick<AiRunOptions, 'directorMode' | 'directorProvider' | 'directorInvolvement' | 'imageProvider' | 'provider'> &
+    Pick<Partial<AiRunOptions>, 'plannerMode' | 'plannerProvider'>,
+): string {
   const imageProvider = imageProviderFromRunOptions(options);
-  const plannerMode = plannerModeFromRunOptions(options);
-  if (plannerMode === 'skip') return `Planner: Off · Image: ${providerLabel(imageProvider)}`;
-  const plannerLabel = plannerMode === 'force' ? 'Always' : 'Auto';
-  const plannerProvider = plannerProviderFromRunOptions(options);
-  if (plannerProvider === imageProvider) {
-    return `Planner: ${plannerLabel} · Image: ${providerLabel(imageProvider)}`;
+  const directorMode = directorModeFromRunOptions(options);
+  if (directorMode === 'skip') return `Director: Off · Image: ${providerLabel(imageProvider)}`;
+  const directorLabel = directorMode === 'force' ? 'Always' : 'Auto';
+  const directorProvider = directorProviderFromRunOptions(options);
+  const involvement = directorInvolvementLabel(directorInvolvementFromRunOptions(options));
+  if (directorProvider === imageProvider) {
+    return `Director: ${directorLabel}, ${involvement} · Image: ${providerLabel(imageProvider)}`;
   }
-  return `Planner: ${plannerLabel} ${plannerProviderLabel(plannerProvider)} · Image: ${providerLabel(imageProvider)}`;
+  return `Director: ${directorLabel} ${directorProviderLabel(directorProvider)}, ${involvement} · Image: ${providerLabel(imageProvider)}`;
 }
 
 export function aiRunningLabel(provider: AiProvider): string {

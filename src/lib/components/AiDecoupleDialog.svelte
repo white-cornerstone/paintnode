@@ -8,10 +8,10 @@
     aiRunningLabel,
     copyTextToClipboard,
     createRunId,
+    directorModeFromRunOptions,
+    directorProviderFromRunOptions,
     focusTaskDocument,
     imageProviderFromRunOptions,
-    plannerModeFromRunOptions,
-    plannerProviderFromRunOptions,
     providerLabel,
   } from '../ai/taskSupport';
   import { tooltip } from '../actions/tooltip';
@@ -64,11 +64,11 @@
   const currentBusy = $derived(task?.status === 'running' || busy);
   const currentNotes = $derived(taskDetail?.notes ?? notes);
   const decoupleProvider = $derived.by((): AiProvider => {
-    const plannerProvider = plannerProviderFromRunOptions(runOptions);
-    if (plannerModeFromRunOptions(runOptions) === 'skip' || plannerProvider === 'claude') {
+    const directorProvider = directorProviderFromRunOptions(runOptions);
+    if (directorModeFromRunOptions(runOptions) === 'skip' || directorProvider === 'claude') {
       return imageProviderFromRunOptions(runOptions);
     }
-    return plannerProvider;
+    return directorProvider;
   });
   const decoupleProviderLabel = $derived(providerLabel(decoupleProvider));
 

@@ -3,7 +3,9 @@ import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialo
 import type {
   AiRunOptions,
   AiAutonomyLevel,
-  AiPlannerProvider,
+  AiDirectorProvider,
+  AiDirectorInvolvement,
+  AiDirectorMode,
   AiProvider,
   ClaudeModelId,
   CodexModelId,
@@ -112,6 +114,10 @@ export interface CodexGeneratorConfig {
   imageModeration?: CodexImageModeration | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
+  /** Whether the AI Director participates in the workflow. */
+  directorMode?: AiDirectorMode | null;
+  /** How far the AI Director should stay involved after planning. */
+  directorInvolvement?: AiDirectorInvolvement | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
   /** Optional provider aspect-ratio override for mask-guided generative fill. */
@@ -164,6 +170,10 @@ export interface AntigravityGeneratorConfig {
   safetyDangerousContent?: AntigravitySafetyThreshold | null;
   /** How much deterministic tool-building autonomy the local agent may use for this run. */
   autonomyLevel?: AiAutonomyLevel | null;
+  /** Whether the AI Director participates in the workflow. */
+  directorMode?: AiDirectorMode | null;
+  /** How far the AI Director should stay involved after planning. */
+  directorInvolvement?: AiDirectorInvolvement | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
   /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
@@ -171,7 +181,7 @@ export interface AntigravityGeneratorConfig {
 }
 
 export interface PlannedFillImageConfig {
-  plannerProvider?: AiPlannerProvider;
+  plannerProvider?: AiDirectorProvider;
   claude?: ClaudePlannerConfig | null;
   imageProvider?: AiProvider;
   antigravity?: AntigravityGeneratorConfig | null;
@@ -357,6 +367,8 @@ export function codexConfigFromRunOptions(
     imageQuality: options.imageQuality,
     imageModeration: options.imageModeration,
     autonomyLevel: options.autonomyLevel,
+    directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
+    directorInvolvement: options.directorInvolvement ?? 'fullReview',
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };
@@ -396,6 +408,8 @@ export function antigravityConfigFromRunOptions(
     safetySexuallyExplicit: options.antigravitySafetySexuallyExplicit,
     safetyDangerousContent: options.antigravitySafetyDangerousContent,
     autonomyLevel: options.autonomyLevel,
+    directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
+    directorInvolvement: options.directorInvolvement ?? 'fullReview',
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };
@@ -455,6 +469,8 @@ export async function generateCodexImage(
     prompt,
     projectPath,
     runId,
+    directorMode: config.directorMode ?? 'auto',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
     targetWidth: targetDimensions?.width ?? null,
     targetHeight: targetDimensions?.height ?? null,
     referencePngs: references.map((source) => ({
@@ -576,6 +592,8 @@ export async function upscaleCodexImage(
     sourcePng: Array.from(sourcePng),
     scalePercent: Math.round(scalePercent),
     keepComposedResult,
+    directorMode: config.directorMode ?? 'auto',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
     runId,
   });
 }
@@ -641,6 +659,8 @@ export async function generateAntigravityImage(
     ...antigravityInvokeConfig({ ...config, runId }),
     prompt,
     runId,
+    directorMode: config.directorMode ?? 'auto',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
     targetWidth: targetDimensions?.width ?? null,
     targetHeight: targetDimensions?.height ?? null,
     referencePngs: references.map((source) => ({
@@ -727,6 +747,8 @@ export async function upscaleAntigravityImage(
     sourcePng: Array.from(sourcePng),
     scalePercent: Math.round(scalePercent),
     keepComposedResult,
+    directorMode: config.directorMode ?? 'auto',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
     runId,
   });
 }

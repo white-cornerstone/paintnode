@@ -154,8 +154,8 @@
         ai: {
           provider,
           imageProvider: provider,
-          plannerProvider: provider === 'codex' ? 'codex' : settings.value.ai.plannerProvider,
-          plannerMode: provider === 'antigravity' ? 'skip' : settings.value.ai.plannerMode === 'skip' ? 'auto' : settings.value.ai.plannerMode,
+          directorProvider: provider === 'codex' ? 'codex' : settings.value.ai.directorProvider,
+          directorMode: provider === 'antigravity' ? 'skip' : settings.value.ai.directorMode === 'skip' ? 'auto' : settings.value.ai.directorMode,
         },
       });
       manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;

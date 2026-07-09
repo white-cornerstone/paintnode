@@ -46,17 +46,18 @@ use crate::ai::placement::{
     AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_project_agent_job, clear_ai_run_cancelled,
-    command_failure_with_required_output, emit_codex_part_progress, emit_codex_progress,
-    emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract, now_id, output_tail,
-    project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
+    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_restore_contract,
+    ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
+    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure_with_required_output,
+    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
+    image_agent_autonomy_contract, now_id, output_tail, project_or_temp_job_path,
+    reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
     required_png_output_is_ready, safe_job_child_path, sanitize_progress_line, should_keep_job_dir,
     spawn_output_reader, synthesize_decouple_asset_manifest, validate_reference_pngs,
     watched_job_files, write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    POLL_INTERVAL,
+    AiDirectorInvolvement, AiDirectorMode, CodexDetectionResult, DecoupleImageResult,
+    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
+    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -2390,10 +2391,13 @@ fn prepare_antigravity_fill_storyboard(
 fn antigravity_restore_prompt(
     job_dir: &str,
     autonomy: AiAutonomyLevel,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
     geometry_note: &str,
     has_overview: bool,
 ) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_restore_contract(director_mode, director_involvement);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
@@ -2410,11 +2414,13 @@ Input files:
 - `{job_dir}/mask.png`: editable-area mask. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.{overview_note}
 
 {geometry_note}
+{director_contract}
 
 Restoration goal:
 - Re-render this exact image with crisp, natural, high-frequency detail: sharp edges and realistic texture for skin, hair, fabric, foliage, and surfaces.
 - Preserve the composition, framing, camera geometry, subjects, identities, poses, expressions, colors, lighting, and style exactly.
 - Match the color balance, tone, brightness, contrast, grain, and detail level of the already-restored areas exactly, so the result joins them without visible seams.
+- Preserve intentional medium character such as film grain, scan texture, halation, bloom, lens softness, motion softness, slight overexposure, underexposure, or vintage color cast. Do not treat those traits as defects unless the user explicitly asked for cleanup, denoise, or restoration beyond upscale/detail recovery.
 - Do not add, remove, move, restyle, or reinterpret any content.
 - Do not change global brightness, contrast, or color balance.
 - If a detail is too blurred to identify, render a plausible neutral texture instead of inventing new objects, readable text, faces, or logos.
@@ -2449,6 +2455,8 @@ fn antigravity_restore_image_details(
     label: &str,
     upscale_layers: bool,
     return_composed: bool,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
 ) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
     let dimensions = png_dimensions_from_bytes(enlarged_png)
         .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
@@ -2516,8 +2524,14 @@ fn antigravity_restore_image_details(
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
         let geometry_note = ai_part_geometry_note(&placement, part_index);
-        let prompt_text =
-            antigravity_restore_prompt(&job_dir, autonomy, &geometry_note, has_overview);
+        let prompt_text = antigravity_restore_prompt(
+            &job_dir,
+            autonomy,
+            director_mode,
+            director_involvement,
+            &geometry_note,
+            has_overview,
+        );
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
         emit_codex_part_progress(
             app,
@@ -2624,6 +2638,8 @@ pub(crate) async fn generate_antigravity_image(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_involvement: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -2652,6 +2668,8 @@ pub(crate) async fn generate_antigravity_image(
         );
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -2748,6 +2766,8 @@ pub(crate) async fn generate_antigravity_image(
                     "Generated image restoration",
                     false,
                     true,
+                    director_mode,
+                    director_involvement,
                 )?;
                 bytes = restored.ok_or_else(|| {
                     "Generated image restoration did not return a composed result.".to_string()
@@ -3678,6 +3698,8 @@ pub(crate) async fn upscale_antigravity_image(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_involvement: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
         return Err("AI upscale source is not a PNG image.".into());
@@ -3707,6 +3729,8 @@ pub(crate) async fn upscale_antigravity_image(
         );
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-upscale-{}", now_id())
         } else {
@@ -3762,6 +3786,8 @@ pub(crate) async fn upscale_antigravity_image(
             "AI upscale",
             true,
             keep_composed_result,
+            director_mode,
+            director_involvement,
         )?;
         let data_url = png_data_url(composed_bytes.as_deref().unwrap_or(&enlarged_png))?;
         let mut assets = Vec::new();
@@ -4794,12 +4820,16 @@ mod tests {
         let prompt = antigravity_restore_prompt(
             "paintnode/antigravity-runs/up-1/part-2",
             AiAutonomyLevel::Low,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
             "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.",
             true,
         );
         assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/source.png"));
         assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/overview.png"));
+        assert!(prompt.contains("AI Director participation: Full review"));
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
+        assert!(prompt.contains("Preserve intentional medium character such as film grain"));
         assert!(prompt.contains("highest output resolution"));
         assert!(prompt.contains("Return exactly one PNG image"));
         assert!(prompt.contains("a crop of a larger PaintNode document"));
