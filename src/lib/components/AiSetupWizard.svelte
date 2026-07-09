@@ -88,8 +88,11 @@
   const selectedDetect = $derived(provider === 'antigravity' ? agyDetect : codexDetect);
 
   if (desktop) {
-    void runDetection('codex', settings.value.ai.codexBin);
-    void runDetection('antigravity', settings.value.ai.antigravityBin);
+    void runDetection('codex', settings.value.ai.codexExecutableMode === 'custom' ? settings.value.ai.codexBin : '');
+    void runDetection(
+      'antigravity',
+      settings.value.ai.antigravityExecutableMode === 'custom' ? settings.value.ai.antigravityBin : '',
+    );
   }
 
   function textValue(event: Event): string {
@@ -102,7 +105,7 @@
     onClose();
   }
 
-  async function runDetection(target: WizardProvider, bin: string): Promise<void> {
+  async function runDetection(target: WizardProvider, bin: string, saveCustomPath = false): Promise<void> {
     const setState = (value: DetectState) => {
       if (target === 'antigravity') agyDetect = value;
       else codexDetect = value;
@@ -114,9 +117,12 @@
     setState({ status: 'checking', result: null });
     try {
       const result = target === 'antigravity' ? await detectAntigravity(bin) : await detectCodex(bin);
-      if (result.found && result.path) {
+      if (saveCustomPath && result.found && result.path) {
         settings.update({
-          ai: target === 'antigravity' ? { antigravityBin: result.path } : { codexBin: result.path },
+          ai:
+            target === 'antigravity'
+              ? { antigravityExecutableMode: 'custom', antigravityBin: result.path }
+              : { codexExecutableMode: 'custom', codexBin: result.path },
         });
       }
       setState({ status: result.found ? 'found' : 'missing', result });
@@ -273,8 +279,12 @@
         <div class="result ok">
           <span class="result-icon"><Icon svg={CheckmarkCircle} size={20} /></span>
           <div>
-            <strong>{selectedDetect.result?.version || providerName} is connected!</strong>
-            <small>Saved <code>{selectedDetect.result?.path}</code> to your settings.</small>
+            <strong>{selectedDetect.result?.version || providerName} is available.</strong>
+            <small>
+              {selectedDetect.result?.path
+                ? `PaintNode found ${selectedDetect.result.path}; custom paths stay optional.`
+                : 'PaintNode will use the built-in connector for this provider.'}
+            </small>
           </div>
         </div>
 
@@ -381,7 +391,7 @@
               spellcheck="false"
             />
           </label>
-          <button type="button" onclick={() => void runDetection(provider, manualBin)}>Try again</button>
+          <button type="button" onclick={() => void runDetection(provider, manualBin, true)}>Try again</button>
         </div>
       {/if}
 

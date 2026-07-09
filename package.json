@@ -2,7 +2,7 @@
   "name": "paintnode",
   "version": "0.1.6",
   "private": true,
-  "description": "Use Codex CLI and Antigravity to generate and edit image layers with your existing CLI login.",
+  "description": "Use Codex, Claude, and Antigravity local AI tools to plan, generate, and edit image layers with your existing CLI login.",
   "homepage": "https://paintnode.com",
   "repository": {
     "type": "git",
@@ -35,6 +35,7 @@
     "vitest": "^4.1.9"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.205",
     "@fluentui/svg-icons": "^1.1.331",
     "@openai/codex-sdk": "^0.142.5",
     "@tauri-apps/api": "^2.11.1",

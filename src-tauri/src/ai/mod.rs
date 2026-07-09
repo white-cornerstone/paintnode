@@ -2,6 +2,7 @@
 
 pub(crate) mod antigravity;
 pub(crate) mod canvas;
+pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod fill_storyboard;
 pub(crate) mod placement;
@@ -78,6 +79,7 @@ const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 
 pub(crate) const PAINTNODE_WORK_DIR: &str = "paintnode";
 pub(crate) const CODEX_RUNS_DIR: &str = "codex-runs";
+pub(crate) const CLAUDE_RUNS_DIR: &str = "claude-runs";
 pub(crate) const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
 
 fn ai_cli_path() -> String {
@@ -329,6 +331,8 @@ pub(crate) fn now_id() -> u128 {
 pub(crate) fn ensure_agent_run_dirs(project_path: &Path) -> Result<(), String> {
     fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join(CODEX_RUNS_DIR))
         .map_err(|e| format!("Failed to create Codex runs folder: {e}"))?;
+    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join(CLAUDE_RUNS_DIR))
+        .map_err(|e| format!("Failed to create Claude runs folder: {e}"))?;
     fs::create_dir_all(
         project_path
             .join(PAINTNODE_WORK_DIR)
