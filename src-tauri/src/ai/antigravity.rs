@@ -3211,6 +3211,7 @@ pub(crate) async fn generate_antigravity_image(
                     DirectorLoopSpec {
                         provider_label: director_provider.label(),
                         involvement: director_involvement,
+                        keep_debug_artifacts: options.keep_debug_artifacts,
                         legacy_request_file: "paintnode-image-request.json",
                         base_prompt_text: &prompt_text,
                         review_criteria: workflow_review_criteria("image_generation"),

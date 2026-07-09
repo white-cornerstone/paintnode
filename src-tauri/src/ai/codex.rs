@@ -2618,6 +2618,7 @@ fn run_agentic_fill_director_part(
         DirectorLoopSpec {
             provider_label: director_provider.label(),
             involvement: director_involvement,
+            keep_debug_artifacts: codex_options.keep_debug_artifacts,
             legacy_request_file: PAINTNODE_IMAGE_REQUEST_FILE,
             base_prompt_text,
             review_criteria: workflow_review_criteria("generative_fill"),
@@ -3123,6 +3124,7 @@ fn codex_restore_image_details(
                 DirectorLoopSpec {
                     provider_label: director_runner.label(),
                     involvement: director_involvement,
+                    keep_debug_artifacts: options.keep_debug_artifacts,
                     legacy_request_file: PAINTNODE_IMAGE_REQUEST_FILE,
                     base_prompt_text: &prompt_text,
                     review_criteria: workflow_review_criteria(workflow_name),
@@ -4122,6 +4124,7 @@ pub(crate) async fn generate_codex_retouch_image(
                     DirectorLoopSpec {
                         provider_label: director_runner.label(),
                         involvement: director_involvement,
+                        keep_debug_artifacts: codex_options.keep_debug_artifacts,
                         legacy_request_file: PAINTNODE_IMAGE_REQUEST_FILE,
                         base_prompt_text: &base_prompt_text,
                         review_criteria: workflow_review_criteria("retouch"),

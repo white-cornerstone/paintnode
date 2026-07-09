@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
@@ -124,10 +124,55 @@ pub(crate) struct DirectorCandidate<T> {
 pub(crate) struct DirectorLoopSpec<'a> {
     pub(crate) provider_label: &'a str,
     pub(crate) involvement: AiDirectorInvolvement,
+    pub(crate) keep_debug_artifacts: bool,
     pub(crate) legacy_request_file: &'a str,
     pub(crate) base_prompt_text: &'a str,
     pub(crate) review_criteria: &'a str,
     pub(crate) ensure_completion_acceptance_note: &'a str,
+}
+
+struct DirectorArtifactCleanup {
+    part_path: PathBuf,
+    enabled: bool,
+    accepted_candidate_file: Option<String>,
+}
+
+impl DirectorArtifactCleanup {
+    fn new(part_path: &Path, keep_debug_artifacts: bool) -> Self {
+        Self {
+            part_path: part_path.to_path_buf(),
+            enabled: !keep_debug_artifacts,
+            accepted_candidate_file: None,
+        }
+    }
+
+    fn accept(&mut self, candidate_file: &str) {
+        self.accepted_candidate_file = Some(candidate_file.to_string());
+    }
+}
+
+impl Drop for DirectorArtifactCleanup {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&self.part_path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("director-candidate-") {
+                continue;
+            }
+            if self.accepted_candidate_file.as_deref() == Some(file_name) {
+                continue;
+            }
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 pub(crate) fn director_uses_agentic_loop(
@@ -416,8 +461,9 @@ where
         AiDirectorInvolvement::PlanOnly => 1,
     };
     reset_director_loop_files(part_path);
+    let mut artifact_cleanup = DirectorArtifactCleanup::new(part_path, spec.keep_debug_artifacts);
 
-    let mut latest_result = None::<T>;
+    let mut candidates = Vec::<(String, T)>::new();
     let mut latest_candidate_file = None::<String>;
     let mut latest_candidate_review_file = None::<String>;
 
@@ -476,7 +522,7 @@ where
                         latest_candidate_review_file =
                             review_preview_file.or_else(|| Some(candidate.file_name.clone()));
                         latest_candidate_file = Some(candidate.file_name.clone());
-                        latest_result = Some(candidate.result);
+                        candidates.push((candidate.file_name, candidate.result));
                         if spec.involvement == AiDirectorInvolvement::EnsureCompletion {
                             write_director_final(
                                 part_path,
@@ -486,7 +532,12 @@ where
                                 latest_candidate_file.as_deref(),
                                 spec.ensure_completion_acceptance_note,
                             )?;
-                            return latest_result.take().ok_or_else(|| {
+                            artifact_cleanup.accept(
+                                latest_candidate_file
+                                    .as_deref()
+                                    .expect("generated candidate has a file name"),
+                            );
+                            return candidates.pop().map(|(_, result)| result).ok_or_else(|| {
                                 "PaintNode completed a candidate but could not return it."
                                     .to_string()
                             });
@@ -516,29 +567,39 @@ where
                 }
             }
             DirectorActionKind::AcceptResult => {
-                let accepted_candidate_file = action
+                let requested_candidate_file = action
                     .candidate
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty() && *value != "latest")
-                    .map(str::to_string)
-                    .or_else(|| latest_candidate_file.clone());
+                    .map(str::to_string);
                 let notes = action
                     .notes
                     .or(action.reason)
                     .unwrap_or_else(|| "Director accepted the latest candidate.".into());
-                let accepted = latest_result.take().ok_or_else(|| {
-                    "AI Director accepted a result before PaintNode generated a candidate."
-                        .to_string()
-                })?;
+                let accepted_index = if let Some(requested) = requested_candidate_file.as_deref() {
+                    candidates
+                        .iter()
+                        .position(|(file_name, _)| file_name == requested)
+                        .ok_or_else(|| {
+                            format!("AI Director accepted unknown candidate `{requested}`.")
+                        })?
+                } else {
+                    candidates.len().checked_sub(1).ok_or_else(|| {
+                        "AI Director accepted a result before PaintNode generated a candidate."
+                            .to_string()
+                    })?
+                };
+                let (accepted_candidate_file, accepted) = candidates.remove(accepted_index);
                 write_director_final(
                     part_path,
                     "accepted",
                     spec.provider_label,
                     spec.involvement,
-                    accepted_candidate_file.as_deref(),
+                    Some(&accepted_candidate_file),
                     &notes,
                 )?;
+                artifact_cleanup.accept(&accepted_candidate_file);
                 return Ok(accepted);
             }
             DirectorActionKind::Fail => {
@@ -623,7 +684,9 @@ pub(crate) fn workflow_review_criteria(workflow: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::fs;
+    use std::process::Output;
 
     use super::*;
     use crate::ai::TempJobDir;
@@ -758,5 +821,82 @@ mod tests {
         assert!(
             fs::metadata(preview_path).expect("preview metadata").len() < source_png.len() as u64
         );
+    }
+
+    #[test]
+    fn director_returns_the_explicitly_accepted_candidate() {
+        let job = TempJobDir::new("paintnode-director-candidate-selection-test").expect("temp dir");
+        let mut actions = VecDeque::from([
+            r#"{ "action": "generateCandidate", "prompt": "first" }"#,
+            r#"{ "action": "generateCandidate", "prompt": "second" }"#,
+            r#"{ "action": "acceptResult", "candidate": "director-candidate-1.png" }"#,
+        ]);
+
+        let accepted = run_candidate_director_loop(
+            job.path(),
+            DirectorLoopSpec {
+                provider_label: "Test Director",
+                involvement: AiDirectorInvolvement::FullReview,
+                keep_debug_artifacts: false,
+                legacy_request_file: "paintnode-image-request.json",
+                base_prompt_text: "direct the image",
+                review_criteria: "accept the intended candidate",
+                ensure_completion_acceptance_note: "completed",
+            },
+            |_, _, _| {
+                fs::write(
+                    job.path().join(PAINTNODE_DIRECTOR_ACTION_FILE),
+                    actions.pop_front().expect("next Director action"),
+                )
+                .expect("write Director action");
+                Ok(successful_agent_run())
+            },
+            |_| None,
+            |turn, _, _| {
+                let candidate_file = director_candidate_file(turn);
+                let candidate_png = crate::png::encode_rgba_png(
+                    image::RgbaImage::from_pixel(2, 2, image::Rgba([turn as u8, 0, 0, 255])),
+                    "Director candidate selection test",
+                )?;
+                fs::write(job.path().join(&candidate_file), candidate_png)
+                    .map_err(|error| error.to_string())?;
+                Ok(DirectorCandidate {
+                    result: turn,
+                    file_name: candidate_file,
+                })
+            },
+        )
+        .expect("accepted candidate");
+
+        assert_eq!(accepted, 1);
+        assert!(job.path().join("director-candidate-1.png").exists());
+        assert!(!job.path().join("director-candidate-2.png").exists());
+        assert!(!job.path().join("director-candidate-1-preview.jpg").exists());
+        assert!(!job.path().join("director-candidate-2-preview.jpg").exists());
+        let final_record = fs::read_to_string(job.path().join(PAINTNODE_DIRECTOR_FINAL_FILE))
+            .expect("Director final record");
+        assert!(final_record.contains("director-candidate-1.png"));
+    }
+
+    fn successful_agent_run() -> AgentRunResult {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        };
+        AgentRunResult {
+            output: Output {
+                status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            thread_id: None,
+            satisfied_required_output: true,
+        }
     }
 }
