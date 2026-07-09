@@ -650,7 +650,7 @@ pub(crate) fn fill_storyboard_master_prompt(
         r#"Create a master draft-and-refinement plan for a PaintNode split generative fill. Save the JSON plan as `{storyboard_path}` and a rough visual draft as `{draft_path}`.
 
 Role:
-- You are the master image editor and draft planner for the selected {provider_label} image-fill session.
+- You are the master image editor and AI Director for the selected {provider_label} image-fill session.
 - This is spatial extension of one still image into white mask areas. It is not story continuation, time progression, a new shot, a zoom-out, an alternate view, or a new camera angle.
 - Keep the same moment, camera position, perspective, horizon, lighting, subject scale, and texture scale across the final composed image.
 - Use image generation only once to create the low-resolution draft plate. Do not create `result.png`; the part agents create final pixels later.

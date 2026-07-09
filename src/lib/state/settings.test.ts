@@ -144,8 +144,9 @@ describe('settings normalization', () => {
   it('keeps Codex as the default provider and exposes Antigravity model defaults', () => {
     const defaults = defaultSettings();
     expect(defaults.ai.provider).toBe('codex');
-    expect(defaults.ai.plannerMode).toBe('auto');
-    expect(defaults.ai.plannerProvider).toBe('codex');
+    expect(defaults.ai.directorMode).toBe('auto');
+    expect(defaults.ai.directorProvider).toBe('codex');
+    expect(defaults.ai.directorInvolvement).toBe('fullReview');
     expect(defaults.ai.imageProvider).toBe('codex');
     expect(defaults.ai.codexExecutableMode).toBe('builtin');
     expect(defaults.ai.claudeExecutableMode).toBe('builtin');
@@ -215,8 +216,8 @@ describe('settings normalization', () => {
     });
 
     expect(normalized.ai.provider).toBe('antigravity');
-    expect(normalized.ai.plannerMode).toBe('skip');
-    expect(normalized.ai.plannerProvider).toBe('antigravity');
+    expect(normalized.ai.directorMode).toBe('skip');
+    expect(normalized.ai.directorProvider).toBe('antigravity');
     expect(normalized.ai.imageProvider).toBe('antigravity');
     expect(normalized.ai.autonomyLevel).toBe('low');
     expect(normalized.ai.antigravityModel).toBe('auto');
@@ -256,14 +257,35 @@ describe('settings normalization', () => {
     });
 
     expect(normalized.ai.provider).toBe('antigravity');
-    expect(normalized.ai.plannerMode).toBe('skip');
+    expect(normalized.ai.directorMode).toBe('skip');
     expect(normalized.ai.imageProvider).toBe('antigravity');
     expect(normalized.ai.antigravityBin).toBe('/bin/gemini');
     expect(normalized.ai.antigravityModel).toBe('Gemini 3.5 Flash (Medium)');
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
   });
 
-  it('normalizes split planner and image providers independently', () => {
+  it('normalizes split Director and image providers independently', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        provider: 'codex',
+        directorMode: 'force',
+        directorProvider: 'codex',
+        imageProvider: 'antigravity',
+      },
+    });
+
+    expect(normalized.ai.provider).toBe('antigravity');
+    expect(normalized.ai.directorMode).toBe('force');
+    expect(normalized.ai.directorProvider).toBe('codex');
+    expect(normalized.ai.imageProvider).toBe('antigravity');
+    const runOptions = aiRunOptionsFromSettings(normalized);
+    expect(runOptions.provider).toBe('antigravity');
+    expect(runOptions.directorProvider).toBe('codex');
+    expect(runOptions.imageProvider).toBe('antigravity');
+    expect(runOptions.directorInvolvement).toBe('fullReview');
+  });
+
+  it('migrates legacy planner fields to AI Director settings', () => {
     const normalized = normalizeSettings({
       ai: {
         provider: 'codex',
@@ -273,17 +295,12 @@ describe('settings normalization', () => {
       },
     });
 
-    expect(normalized.ai.provider).toBe('antigravity');
-    expect(normalized.ai.plannerMode).toBe('force');
-    expect(normalized.ai.plannerProvider).toBe('codex');
-    expect(normalized.ai.imageProvider).toBe('antigravity');
-    const runOptions = aiRunOptionsFromSettings(normalized);
-    expect(runOptions.provider).toBe('antigravity');
-    expect(runOptions.plannerProvider).toBe('codex');
-    expect(runOptions.imageProvider).toBe('antigravity');
+    expect(normalized.ai.directorMode).toBe('force');
+    expect(normalized.ai.directorProvider).toBe('codex');
+    expect(normalized.ai.directorInvolvement).toBe('fullReview');
   });
 
-  it('allows Claude as a planner provider without allowing it as an image provider', () => {
+  it('allows Claude as a Director provider without allowing it as an image provider', () => {
     const normalized = normalizeSettings({
       ai: {
         provider: 'claude',
@@ -297,11 +314,11 @@ describe('settings normalization', () => {
 
     expect(normalized.ai.provider).toBe('codex');
     expect(normalized.ai.imageProvider).toBe('codex');
-    expect(normalized.ai.plannerProvider).toBe('claude');
+    expect(normalized.ai.directorProvider).toBe('claude');
     expect(normalized.ai.claudeBin).toBe('/bin/claude');
     expect(normalized.ai.claudeModel).toBe('sonnet');
     const runOptions = aiRunOptionsFromSettings(normalized);
-    expect(runOptions.plannerProvider).toBe('claude');
+    expect(runOptions.directorProvider).toBe('claude');
     expect(runOptions.imageProvider).toBe('codex');
   });
 
@@ -398,8 +415,8 @@ describe('settings normalization', () => {
             name: ' Final pass ',
             options: {
               provider: 'antigravity',
-              plannerMode: 'force',
-              plannerProvider: 'codex',
+              directorMode: 'force',
+              directorProvider: 'codex',
               imageProvider: 'antigravity',
               model: 'gpt-5.4-mini',
               reasoningEffort: 'high',
@@ -420,8 +437,8 @@ describe('settings normalization', () => {
     expect(value.ai.profiles[0].name).toBe('Final pass');
     expect(value.ai.defaultProfileId).toBe('final-pass');
     expect(runOptions.provider).toBe('antigravity');
-    expect(runOptions.plannerMode).toBe('force');
-    expect(runOptions.plannerProvider).toBe('codex');
+    expect(runOptions.directorMode).toBe('force');
+    expect(runOptions.directorProvider).toBe('codex');
     expect(runOptions.imageProvider).toBe('antigravity');
     expect(runOptions.antigravityImageSize).toBe('2K');
     expect(runOptions.antigravitySafetyFiltering).toBe('custom');
@@ -431,7 +448,7 @@ describe('settings normalization', () => {
     expect(runOptions.antigravityBin).toBe('/new/agy');
   });
 
-  it('stores profile presets with independent planner and image-generator settings', () => {
+  it('stores profile presets with independent Director and image-generator settings', () => {
     const value = normalizeSettings({
       ai: {
         profiles: [
@@ -440,8 +457,9 @@ describe('settings normalization', () => {
             name: 'High quality',
             options: {
               provider: 'codex',
-              plannerMode: 'force',
-              plannerProvider: 'claude',
+              directorMode: 'force',
+              directorProvider: 'claude',
+              directorInvolvement: 'ensureCompletion',
               imageProvider: 'codex',
               claudeModel: 'opus',
               model: 'gpt-5.5',
@@ -453,8 +471,8 @@ describe('settings normalization', () => {
             name: 'Fast draft',
             options: {
               provider: 'antigravity',
-              plannerMode: 'skip',
-              plannerProvider: 'codex',
+              directorMode: 'skip',
+              directorProvider: 'codex',
               imageProvider: 'antigravity',
               antigravityImageModel: 'gemini-3.1-flash-image',
               antigravityImageSize: '1K',
@@ -465,14 +483,15 @@ describe('settings normalization', () => {
     });
 
     const highQuality = aiProfileRunOptionsFromSettings(value, 'high-quality');
-    expect(highQuality.plannerMode).toBe('force');
-    expect(highQuality.plannerProvider).toBe('claude');
+    expect(highQuality.directorMode).toBe('force');
+    expect(highQuality.directorProvider).toBe('claude');
+    expect(highQuality.directorInvolvement).toBe('ensureCompletion');
     expect(highQuality.imageProvider).toBe('codex');
     expect(highQuality.claudeModel).toBe('opus');
     expect(highQuality.imageQuality).toBe('high');
 
     const fastDraft = aiProfileRunOptionsFromSettings(value, 'fast-draft');
-    expect(fastDraft.plannerMode).toBe('skip');
+    expect(fastDraft.directorMode).toBe('skip');
     expect(fastDraft.imageProvider).toBe('antigravity');
     expect(fastDraft.antigravityImageModel).toBe('gemini-3.1-flash-image');
     expect(fastDraft.antigravityImageSize).toBe('1K');
@@ -481,8 +500,8 @@ describe('settings normalization', () => {
   it('stores profile presets without machine-local executable overrides', () => {
     const value = normalizeSettings({
       ai: {
-        plannerMode: 'force',
-        plannerProvider: 'claude',
+        directorMode: 'force',
+        directorProvider: 'claude',
         imageProvider: 'codex',
         provider: 'codex',
         claudeExecutableMode: 'custom',
@@ -497,7 +516,7 @@ describe('settings normalization', () => {
 
     const stored = aiProfileOptionsFromRunOptions(aiRunOptionsFromSettings(value)) as Record<string, unknown>;
 
-    expect(stored.plannerProvider).toBe('claude');
+    expect(stored.directorProvider).toBe('claude');
     expect(stored.imageProvider).toBe('codex');
     expect(stored.codexExecutableMode).toBeUndefined();
     expect(stored.codexBin).toBeUndefined();
@@ -544,7 +563,7 @@ describe('settings normalization', () => {
             options: {
               provider: 'antigravity',
               imageProvider: 'antigravity',
-              plannerMode: 'skip',
+              directorMode: 'skip',
               antigravityImageSize: '1K',
             },
           },

@@ -16,8 +16,9 @@
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
     ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
-    type AiPlannerMode,
-    type AiPlannerProvider,
+    type AiDirectorProvider,
+    type AiDirectorInvolvement,
+    type AiDirectorMode,
     type AiProvider,
     type AiRunOptions,
     type AiAutonomyLevel,
@@ -112,17 +113,17 @@
         {
           id: 'ai-provider-codex',
           label: 'Codex',
-          description: 'Codex planner, image-generation, and local connection defaults.',
+          description: 'Codex Director, image-generation, and local connection defaults.',
         },
         {
           id: 'ai-provider-claude',
           label: 'Claude',
-          description: 'Claude planner and local connection defaults.',
+          description: 'Claude Director and local connection defaults.',
         },
         {
           id: 'ai-provider-antigravity',
           label: 'Antigravity',
-          description: 'Antigravity planner, image-generation, safety, and local connection defaults.',
+          description: 'Antigravity Director, image-generation, safety, and local connection defaults.',
         },
         {
           id: 'ai-profiles',
@@ -164,7 +165,7 @@
     { value: 'low', label: 'Low', hint: 'Use the image API low moderation mode when the owned runner supports it.' },
   ];
   const autonomyLevels: { value: AiAutonomyLevel; label: string; hint: string }[] = [
-    { value: 'low', label: 'Low', hint: 'Keep planner/tool use conservative.' },
+    { value: 'low', label: 'Low', hint: 'Keep Director/tool use conservative.' },
     { value: 'guided', label: 'Guided', hint: 'Allow focused tool use while staying close to the prompt.' },
     { value: 'open', label: 'Open', hint: 'Allow broader investigation and planning.' },
     { value: 'unmanaged', label: 'Unmanaged', hint: 'Let the agent decide how much autonomy the task needs.' },
@@ -254,14 +255,14 @@
     return provider === 'antigravity' ? 'Antigravity' : 'Codex';
   }
 
-  function plannerProviderLabel(provider: AiPlannerProvider): string {
+  function directorProviderLabel(provider: AiDirectorProvider): string {
     return provider === 'claude' ? 'Claude' : providerLabel(provider);
   }
 
   function profileSummary(options: AiRunOptions): string {
     const imageProvider = options.imageProvider ?? options.provider;
-    if (options.plannerMode === 'skip') return `Planner: Skip · Image: ${providerLabel(imageProvider)}`;
-    return `Planner: ${plannerProviderLabel(options.plannerProvider)} · Image: ${providerLabel(imageProvider)}`;
+    if (options.directorMode === 'skip') return `Director: Off · Image: ${providerLabel(imageProvider)}`;
+    return `Director: ${directorProviderLabel(options.directorProvider)} · Image: ${providerLabel(imageProvider)}`;
   }
 
   function profileDetail(options: AiRunOptions): string {
@@ -270,9 +271,9 @@
       imageProvider === 'codex'
         ? `${imageQualities.find((option) => option.value === options.imageQuality)?.label ?? 'Auto'} quality`
         : `${ANTIGRAVITY_IMAGE_SIZE_OPTIONS.find((option) => option.id === options.antigravityImageSize)?.label ?? 'Auto'} size`;
-    if (options.plannerMode === 'skip') return `No planner. ${providerLabel(imageProvider)} image generator, ${imageDetail}.`;
-    const mode = options.plannerMode === 'force' ? 'Always plan' : 'Auto planning';
-    return `${mode} with ${plannerProviderLabel(options.plannerProvider)}. ${providerLabel(imageProvider)} image generator, ${imageDetail}.`;
+    if (options.directorMode === 'skip') return `No Director. ${providerLabel(imageProvider)} image generator, ${imageDetail}.`;
+    const mode = options.directorMode === 'force' ? 'Always direct' : 'Auto direct';
+    return `${mode} with ${directorProviderLabel(options.directorProvider)}. ${providerLabel(imageProvider)} image generator, ${imageDetail}.`;
   }
 
   function savedProfileSummary(profileId: string): string {
@@ -631,53 +632,59 @@
           </button>
         </div>
 
-        <label class="settings-row">
-          <span>
-            <strong>Planner mode</strong>
-            <small>Decide when PaintNode asks a reasoning agent to plan a generation.</small>
-          </span>
-          <select
-            value={settings.value.ai.plannerMode}
-            onchange={(event) => settings.update({ ai: { plannerMode: textValue(event) as AiPlannerMode } })}
-          >
-            <option value="auto">Auto by task</option>
-            <option value="skip">Skip planner</option>
-            <option value="force">Always plan</option>
-          </select>
-        </label>
+        <div class="grid-3">
+          <label class="field">
+            <span>AI Director mode</span>
+            <select
+              value={settings.value.ai.directorMode}
+              onchange={(event) => settings.update({ ai: { directorMode: textValue(event) as AiDirectorMode } })}
+            >
+              <option value="auto">Auto by task</option>
+              <option value="skip">Skip Director</option>
+              <option value="force">Always direct</option>
+            </select>
+          </label>
 
-        <label class="settings-row">
-          <span>
-            <strong>Planner provider</strong>
-            <small>Used for reasoning and request planning; can be different from the image generator.</small>
-          </span>
-          <select
-            value={settings.value.ai.plannerProvider}
-            disabled={settings.value.ai.plannerMode === 'skip'}
-            onchange={(event) => settings.update({ ai: { plannerProvider: textValue(event) as AiPlannerProvider } })}
-          >
-            <option value="codex">Codex</option>
-            <option value="antigravity">Antigravity</option>
-            <option value="claude">Claude</option>
-          </select>
-        </label>
+          <label class="field">
+            <span>AI Director provider</span>
+            <select
+              value={settings.value.ai.directorProvider}
+              disabled={settings.value.ai.directorMode === 'skip'}
+              onchange={(event) => settings.update({ ai: { directorProvider: textValue(event) as AiDirectorProvider } })}
+            >
+              <option value="codex">Codex</option>
+              <option value="antigravity">Antigravity</option>
+              <option value="claude">Claude</option>
+            </select>
+          </label>
 
-        <label class="settings-row">
-          <span>
-            <strong>Image generator</strong>
-            <small>Used for pixels and image edits; Claude is not available for this role.</small>
-          </span>
-          <select
-            value={settings.value.ai.imageProvider}
-            onchange={(event) => {
-              const provider = textValue(event) as AiProvider;
-              settings.update({ ai: { provider, imageProvider: provider } });
-            }}
-          >
-            <option value="codex">Codex image generator</option>
-            <option value="antigravity">Antigravity image generator</option>
-          </select>
-        </label>
+          <label class="field">
+            <span>AI Director 參與程度</span>
+            <select
+              value={settings.value.ai.directorInvolvement}
+              disabled={settings.value.ai.directorMode === 'skip'}
+              onchange={(event) => settings.update({ ai: { directorInvolvement: textValue(event) as AiDirectorInvolvement } })}
+            >
+              <option value="planOnly">Plan only</option>
+              <option value="ensureCompletion">Ensure completion</option>
+              <option value="fullReview">Full review</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Image generator</span>
+            <select
+              value={settings.value.ai.imageProvider}
+              onchange={(event) => {
+                const provider = textValue(event) as AiProvider;
+                settings.update({ ai: { provider, imageProvider: provider } });
+              }}
+            >
+              <option value="codex">Codex image generator</option>
+              <option value="antigravity">Antigravity image generator</option>
+            </select>
+          </label>
+        </div>
 
       {:else if selectedSection === 'ai-provider-codex'}
         <div class="subsection-title">
@@ -747,8 +754,8 @@
         {/if}
 
         <div class="subsection-title">
-          <h3>Planner</h3>
-          <span>Used only when Codex is selected as the planner provider.</span>
+          <h3>AI Director</h3>
+          <span>Used only when Codex is selected as the Director provider.</span>
         </div>
 
         <div class="grid-2">
@@ -895,12 +902,12 @@
         {/if}
 
         <div class="subsection-title">
-          <h3>Planner</h3>
-          <span>Used only when Claude is selected as the planner provider.</span>
+          <h3>AI Director</h3>
+          <span>Used only when Claude is selected as the Director provider.</span>
         </div>
 
         <label class="field">
-          <span>Planner model</span>
+          <span>Director model</span>
           <select
             value={settings.value.ai.claudeModel}
             onchange={(event) => settings.update({ ai: { claudeModel: textValue(event) as ClaudeModelId } })}
@@ -989,13 +996,13 @@
         {/if}
 
         <div class="subsection-title">
-          <h3>Planner</h3>
-          <span>Used only when Antigravity is selected as the planner provider.</span>
+          <h3>AI Director</h3>
+          <span>Used only when Antigravity is selected as the Director provider.</span>
         </div>
 
         <div class="grid-2">
           <label class="field">
-            <span>Planner model</span>
+            <span>Director model</span>
             <select
               value={settings.value.ai.antigravityModel}
               onchange={(event) =>
@@ -1222,78 +1229,91 @@
 
                 <div class="profile-section">
                   <div class="subsection-title">
-                    <h3>Planner</h3>
+                    <h3>AI Director</h3>
                     <span>Saved into this profile and loaded from AI dialogs.</span>
                   </div>
 
-                  <div class="segmented" role="radiogroup" aria-label="Planner mode">
+                  <div class="segmented" role="radiogroup" aria-label="AI Director mode">
                     <label>
                       <input
                         type="radio"
-                        name="profile-planner-mode"
+                        name="profile-director-mode"
                         value="auto"
-                        checked={profileDraftOptions.plannerMode === 'auto'}
-                        onchange={() => updateProfileDraftOptions({ plannerMode: 'auto' })}
+                        checked={profileDraftOptions.directorMode === 'auto'}
+                        onchange={() => updateProfileDraftOptions({ directorMode: 'auto' })}
                       />
                       <span>Auto</span>
                     </label>
                     <label>
                       <input
                         type="radio"
-                        name="profile-planner-mode"
+                        name="profile-director-mode"
                         value="force"
-                        checked={profileDraftOptions.plannerMode === 'force'}
-                        onchange={() => updateProfileDraftOptions({ plannerMode: 'force' })}
+                        checked={profileDraftOptions.directorMode === 'force'}
+                        onchange={() => updateProfileDraftOptions({ directorMode: 'force' })}
                       />
-                      <span>Always plan</span>
+                      <span>Always direct</span>
                     </label>
                     <label>
                       <input
                         type="radio"
-                        name="profile-planner-mode"
+                        name="profile-director-mode"
                         value="skip"
-                        checked={profileDraftOptions.plannerMode === 'skip'}
-                        onchange={() => updateProfileDraftOptions({ plannerMode: 'skip' })}
+                        checked={profileDraftOptions.directorMode === 'skip'}
+                        onchange={() => updateProfileDraftOptions({ directorMode: 'skip' })}
                       />
                       <span>Skip</span>
                     </label>
                   </div>
 
-                  {#if profileDraftOptions.plannerMode !== 'skip'}
-                    <div class="segmented" role="radiogroup" aria-label="Planner provider">
+                  {#if profileDraftOptions.directorMode !== 'skip'}
+                    <div class="segmented" role="radiogroup" aria-label="AI Director provider">
                       <label>
                         <input
                           type="radio"
-                          name="profile-planner-provider"
+                          name="profile-director-provider"
                           value="codex"
-                          checked={profileDraftOptions.plannerProvider === 'codex'}
-                          onchange={() => updateProfileDraftOptions({ plannerProvider: 'codex' })}
+                          checked={profileDraftOptions.directorProvider === 'codex'}
+                          onchange={() => updateProfileDraftOptions({ directorProvider: 'codex' })}
                         />
                         <span>Codex</span>
                       </label>
                       <label>
                         <input
                           type="radio"
-                          name="profile-planner-provider"
+                          name="profile-director-provider"
                           value="antigravity"
-                          checked={profileDraftOptions.plannerProvider === 'antigravity'}
-                          onchange={() => updateProfileDraftOptions({ plannerProvider: 'antigravity' })}
+                          checked={profileDraftOptions.directorProvider === 'antigravity'}
+                          onchange={() => updateProfileDraftOptions({ directorProvider: 'antigravity' })}
                         />
                         <span>Antigravity</span>
                       </label>
                       <label>
                         <input
                           type="radio"
-                          name="profile-planner-provider"
+                          name="profile-director-provider"
                           value="claude"
-                          checked={profileDraftOptions.plannerProvider === 'claude'}
-                          onchange={() => updateProfileDraftOptions({ plannerProvider: 'claude' })}
+                          checked={profileDraftOptions.directorProvider === 'claude'}
+                          onchange={() => updateProfileDraftOptions({ directorProvider: 'claude' })}
                         />
                         <span>Claude</span>
                       </label>
                     </div>
 
-                    {#if profileDraftOptions.plannerProvider === 'codex'}
+                    <label class="field">
+                      <span>參與程度</span>
+                      <select
+                        value={profileDraftOptions.directorInvolvement}
+                        onchange={(event) =>
+                          updateProfileDraftOptions({ directorInvolvement: textValue(event) as AiDirectorInvolvement })}
+                      >
+                        <option value="planOnly">Plan only</option>
+                        <option value="ensureCompletion">Ensure completion</option>
+                        <option value="fullReview">Full review</option>
+                      </select>
+                    </label>
+
+                    {#if profileDraftOptions.directorProvider === 'codex'}
                       <div class="grid-2">
                         <label class="field">
                           <span>Model</span>
@@ -1350,10 +1370,10 @@
                           <small>{serviceTiers.find((option) => option.value === profileDraftOptions.serviceTier)?.hint}</small>
                         </label>
                       </div>
-                    {:else if profileDraftOptions.plannerProvider === 'antigravity'}
+                    {:else if profileDraftOptions.directorProvider === 'antigravity'}
                       <div class="grid-2">
                         <label class="field">
-                          <span>Planner model</span>
+                          <span>Director model</span>
                           <select
                             value={profileDraftOptions.antigravityModel}
                             onchange={(event) =>
@@ -1395,7 +1415,7 @@
                       </label>
                     {:else}
                       <label class="field">
-                        <span>Planner model</span>
+                        <span>Director model</span>
                         <select
                           value={profileDraftOptions.claudeModel}
                           onchange={(event) =>
@@ -1911,8 +1931,7 @@
     align-items: center;
     min-height: 42px;
   }
-  .settings-row > div,
-  .settings-row > span {
+  .settings-row > div {
     min-width: 0;
   }
   .settings-row strong {
@@ -1927,7 +1946,6 @@
     font-size: 11px;
     line-height: 1.35;
   }
-  .settings-row select,
   .settings-row button {
     width: 100%;
   }
@@ -2288,7 +2306,6 @@
       grid-template-columns: minmax(0, 1fr);
       align-items: stretch;
     }
-    .settings-row select,
     .settings-row button,
     .detect-row button,
     .profile-list-head button,
