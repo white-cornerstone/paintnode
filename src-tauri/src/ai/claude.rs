@@ -100,6 +100,15 @@ pub(crate) fn build_generative_fill_claude_command(
     build_claude_agent_command(options, job_path, prompt_text, &image_paths)
 }
 
+pub(crate) fn build_director_claude_command(
+    options: &ClaudeCommandOptions,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+) -> Command {
+    build_claude_agent_command(options, job_path, prompt_text, image_paths)
+}
+
 pub(crate) fn run_claude_with_progress(
     command: &mut Command,
     app: AppHandle,
