@@ -1,4 +1,4 @@
-//! Claude planner provider: uses the Claude Agent SDK only to write PaintNode request files.
+//! Claude Director provider: uses the Claude Agent SDK to write PaintNode request files.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -10,8 +10,8 @@ use tauri::AppHandle;
 
 use crate::ai::{
     ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled, codex_agent_message_text,
-    emit_codex_progress, output_tail, spawn_output_reader, AgentRunResult, CodexDetectionResult,
-    AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    output_tail, spawn_output_reader, AgentRunResult, CodexDetectionResult, AI_RUN_STOPPED_MESSAGE,
+    POLL_INTERVAL,
 };
 
 #[derive(Debug)]
@@ -307,12 +307,4 @@ pub(crate) async fn detect_claude(bin: Option<String>) -> Result<CodexDetectionR
     })
     .await
     .map_err(|e| format!("Claude detection task failed: {e}"))
-}
-
-pub(crate) fn emit_claude_no_storyboard(app: &AppHandle, run_id: &str) {
-    emit_codex_progress(
-        app,
-        run_id,
-        "Skipping visual storyboard draft; Claude planner does not generate images",
-    );
 }

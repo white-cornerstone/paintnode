@@ -293,6 +293,23 @@ pub(crate) enum AiDirectorMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AiDirectorProvider {
+    Codex,
+    Antigravity,
+    Claude,
+}
+
+impl AiDirectorProvider {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Antigravity => "Antigravity",
+            Self::Claude => "Claude",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiDirectorInvolvement {
     PlanOnly,
     EnsureCompletion,
@@ -1104,6 +1121,18 @@ pub(crate) fn ai_director_mode(value: Option<String>) -> AiDirectorMode {
     }
 }
 
+pub(crate) fn ai_director_provider(value: Option<String>) -> AiDirectorProvider {
+    match clean_option(value)
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("antigravity") | Some("agy") | Some("gemini") => AiDirectorProvider::Antigravity,
+        Some("claude") => AiDirectorProvider::Claude,
+        _ => AiDirectorProvider::Codex,
+    }
+}
+
 pub(crate) fn ai_director_involvement(value: Option<String>) -> AiDirectorInvolvement {
     match clean_option(value).as_deref() {
         Some("planOnly") => AiDirectorInvolvement::PlanOnly,
@@ -1113,22 +1142,33 @@ pub(crate) fn ai_director_involvement(value: Option<String>) -> AiDirectorInvolv
 }
 
 pub(crate) fn ai_director_restore_contract(
+    provider: AiDirectorProvider,
     mode: AiDirectorMode,
     involvement: AiDirectorInvolvement,
-) -> &'static str {
+) -> String {
+    ai_director_workflow_contract(provider, mode, involvement, "detail restoration")
+}
+
+pub(crate) fn ai_director_workflow_contract(
+    provider: AiDirectorProvider,
+    mode: AiDirectorMode,
+    involvement: AiDirectorInvolvement,
+    workflow: &str,
+) -> String {
     if mode == AiDirectorMode::Skip {
-        return "";
+        return String::new();
     }
+    let label = provider.label();
     match involvement {
-        AiDirectorInvolvement::PlanOnly => {
-            "AI Director participation: Plan only. Treat this prompt as the Director's preservation plan for the restore pass; do not run a separate review loop."
-        }
-        AiDirectorInvolvement::EnsureCompletion => {
-            "AI Director participation: Ensure completion. If a provider safety or quality issue blocks the exact wording, make the smallest compliant prompt adjustment while preserving the source image, intentional medium character, and upscale/detail-recovery intent."
-        }
-        AiDirectorInvolvement::FullReview => {
-            "AI Director participation: Full review. Before returning, compare the candidate against the source image and revise internally until content, framing, grain/texture, exposure character, and local detail remain faithful. Return only the final accepted PNG."
-        }
+        AiDirectorInvolvement::PlanOnly => format!(
+            "AI Director provider: {label}.\nAI Director participation: Plan only. Treat this prompt as the Director's plan for the {workflow} workflow; do not run a separate blocked-prompt or quality-review loop."
+        ),
+        AiDirectorInvolvement::EnsureCompletion => format!(
+            "AI Director provider: {label}.\nAI Director participation: Ensure completion. If a provider safety or quality issue blocks the exact wording during the {workflow} workflow, make the smallest compliant prompt adjustment while preserving the user's intent, source-image facts, protected areas, and intentional medium character."
+        ),
+        AiDirectorInvolvement::FullReview => format!(
+            "AI Director provider: {label}.\nAI Director participation: Full review. Supervise the {workflow} workflow from planning through completion: preserve the user's intent, recover from blocked wording with the smallest faithful prompt adjustment, and before returning compare the candidate against the source/task requirements. Revise internally until content, framing, grain/texture, exposure character, local detail, and protected areas remain faithful. Return only the final accepted result."
+        ),
     }
 }
 

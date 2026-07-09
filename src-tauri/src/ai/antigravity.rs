@@ -46,18 +46,19 @@ use crate::ai::placement::{
     AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
-    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_restore_contract,
-    ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
-    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure_with_required_output,
-    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
-    image_agent_autonomy_contract, now_id, output_tail, project_or_temp_job_path,
-    reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
-    required_png_output_is_ready, safe_job_child_path, sanitize_progress_line, should_keep_job_dir,
-    spawn_output_reader, synthesize_decouple_asset_manifest, validate_reference_pngs,
-    watched_job_files, write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    AiDirectorInvolvement, AiDirectorMode, CodexDetectionResult, DecoupleImageResult,
-    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
-    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
+    ai_director_restore_contract, ai_director_workflow_contract, ai_retouch_asset_name,
+    ai_run_cancelled, apply_ai_cli_environment, clean_option, cleanup_project_agent_job,
+    clear_ai_run_cancelled, command_failure_with_required_output, emit_codex_part_progress,
+    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, image_agent_autonomy_contract,
+    now_id, output_tail, project_or_temp_job_path, reference_prompt_note,
+    remove_legacy_generative_fill_agent_inputs, required_png_output_is_ready, safe_job_child_path,
+    sanitize_progress_line, should_keep_job_dir, spawn_output_reader,
+    synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
+    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
+    AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -1676,14 +1677,41 @@ fn antigravity_result_path(job_dir: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn antigravity_generate_prompt(
     user_prompt: &str,
     job_dir: &str,
     autonomy: AiAutonomyLevel,
     reference_names: &[String],
 ) -> String {
+    antigravity_generate_director_prompt(
+        user_prompt,
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        reference_names,
+    )
+}
+
+pub(crate) fn antigravity_generate_director_prompt(
+    user_prompt: &str,
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    reference_names: &[String],
+) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "image generation",
+    );
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -1704,6 +1732,8 @@ User image prompt:
 {user_prompt}
 
 {reference_note}
+
+{director_contract}
 
 {autonomy_contract}
 
@@ -1730,6 +1760,7 @@ fn antigravity_storyboard_draft_note(_job_dir: &str, _has_storyboard_draft: bool
     String::new()
 }
 
+#[cfg(test)]
 fn antigravity_fill_prompt(
     prompt: &str,
     job_dir: &str,
@@ -1744,8 +1775,50 @@ fn antigravity_fill_prompt(
     reference_names: &[String],
     working: &AiWorkingCanvas,
 ) -> String {
+    antigravity_fill_director_prompt(
+        prompt,
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        geometry_note,
+        storyboard_note,
+        storyboard_anchor,
+        storyboard_fallback,
+        has_overview,
+        has_storyboard_draft,
+        continuation,
+        reference_names,
+        working,
+    )
+}
+
+fn antigravity_fill_director_prompt(
+    prompt: &str,
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    geometry_note: &str,
+    storyboard_note: &str,
+    storyboard_anchor: bool,
+    storyboard_fallback: bool,
+    has_overview: bool,
+    has_storyboard_draft: bool,
+    continuation: bool,
+    reference_names: &[String],
+    working: &AiWorkingCanvas,
+) -> String {
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "generative fill",
+    );
     let has_storyboard = !storyboard_note.trim().is_empty();
     let tool_call_note = antigravity_fill_image_tool_call_note(
         job_dir,
@@ -1775,6 +1848,8 @@ Input files:
 - `{job_dir}/source.png`: PaintNode edit frame to enhance. It already contains the orchestrator's rough low-detail visual draft.{overview_note}
 
 {geometry_note}
+
+{director_contract}
 
 Task:
 - This is an image enhancement/restoration pass at the same size, not a new composition, new generative fill, outpaint, story continuation, or scene redesign.
@@ -1826,6 +1901,8 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 {storyboard_note}{fallback_prompt}
 
 {autonomy_contract}
@@ -1855,6 +1932,8 @@ Input files:
 
 {geometry_note}
 
+{director_contract}
+
 {storyboard_note}
 
 {user_prompt_heading}
@@ -1878,6 +1957,7 @@ Final response should be one short sentence confirming `{result_path}` was creat
     )
 }
 
+#[cfg(test)]
 fn antigravity_retouch_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -1885,6 +1965,38 @@ fn antigravity_retouch_prompt(
     reference_names: &[String],
     job_dir: &str,
     autonomy: AiAutonomyLevel,
+    geometry_note: &str,
+    has_overview: bool,
+    continuation: bool,
+    working: &AiWorkingCanvas,
+) -> String {
+    antigravity_retouch_director_prompt(
+        prompt,
+        has_annotated_source,
+        has_reference,
+        reference_names,
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        AiDirectorMode::Auto,
+        AiDirectorInvolvement::FullReview,
+        geometry_note,
+        has_overview,
+        continuation,
+        working,
+    )
+}
+
+fn antigravity_retouch_director_prompt(
+    prompt: &str,
+    has_annotated_source: bool,
+    has_reference: bool,
+    reference_names: &[String],
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
     geometry_note: &str,
     has_overview: bool,
     continuation: bool,
@@ -1908,6 +2020,12 @@ fn antigravity_retouch_prompt(
     let extra_reference_note = reference_prompt_note(reference_names, &reference_prefix);
     let result_path = antigravity_result_path(job_dir);
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "AI retouch",
+    );
     let tool_call_note =
         antigravity_image_tool_call_note(job_dir, working, continuation, false, false, false);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
@@ -1938,6 +2056,8 @@ Input files:
 {extra_reference_note}
 
 {geometry_note}
+
+{director_contract}
 
 User retouch prompt:
 {prompt}
@@ -2141,12 +2261,26 @@ PaintNode will do after `{result_path}` exists:
     )
 }
 
-fn antigravity_decouple_prompt(prompt: &str, job_dir: &str) -> String {
+fn antigravity_decouple_director_prompt(
+    prompt: &str,
+    job_dir: &str,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    let director_contract = ai_director_workflow_contract(
+        director_provider,
+        director_mode,
+        director_involvement,
+        "asset decoupling",
+    );
     format!(
         r#"Extract reusable visual assets from `{job_dir}/source.png` for PaintNode.
 
 User guidance:
 {prompt}
+
+{director_contract}
 
 Required output:
 - Work only inside `{job_dir}`.
@@ -2277,6 +2411,36 @@ fn run_antigravity(
     .map_err(|e| format!("Failed to run Antigravity at '{antigravity_bin}': {e}"))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_antigravity_director_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    approval_mode: Option<String>,
+    keep_debug_artifacts: bool,
+    workspace_path: &Path,
+    job_path: &Path,
+    prompt: &str,
+    new_project: bool,
+    required_output: &str,
+) -> Result<AgentRunResult, String> {
+    let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
+    let mut options = antigravity_command_options(model, approval_mode);
+    options.keep_debug_artifacts = keep_debug_artifacts;
+    run_antigravity(
+        &antigravity_bin,
+        workspace_path,
+        job_path,
+        prompt,
+        &options,
+        new_project,
+        app.clone(),
+        run_id.to_string(),
+        Some(required_output),
+    )
+}
+
 fn write_antigravity_storyboard_draft_guides(
     job_path: &Path,
     placement: &AiEditPlacement,
@@ -2388,6 +2552,7 @@ fn prepare_antigravity_fill_storyboard(
     Ok(Some(fallback))
 }
 
+#[cfg(test)]
 fn antigravity_restore_prompt(
     job_dir: &str,
     autonomy: AiAutonomyLevel,
@@ -2396,8 +2561,29 @@ fn antigravity_restore_prompt(
     geometry_note: &str,
     has_overview: bool,
 ) -> String {
+    antigravity_restore_director_prompt(
+        job_dir,
+        autonomy,
+        AiDirectorProvider::Antigravity,
+        director_mode,
+        director_involvement,
+        geometry_note,
+        has_overview,
+    )
+}
+
+fn antigravity_restore_director_prompt(
+    job_dir: &str,
+    autonomy: AiAutonomyLevel,
+    director_provider: AiDirectorProvider,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+    geometry_note: &str,
+    has_overview: bool,
+) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
-    let director_contract = ai_director_restore_contract(director_mode, director_involvement);
+    let director_contract =
+        ai_director_restore_contract(director_provider, director_mode, director_involvement);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
@@ -2455,6 +2641,7 @@ fn antigravity_restore_image_details(
     label: &str,
     upscale_layers: bool,
     return_composed: bool,
+    director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
 ) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
@@ -2524,9 +2711,10 @@ fn antigravity_restore_image_details(
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
         let geometry_note = ai_part_geometry_note(&placement, part_index);
-        let prompt_text = antigravity_restore_prompt(
+        let prompt_text = antigravity_restore_director_prompt(
             &job_dir,
             autonomy,
+            director_provider,
             director_mode,
             director_involvement,
             &geometry_note,
@@ -2639,6 +2827,7 @@ pub(crate) async fn generate_antigravity_image(
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     director_mode: Option<String>,
+    director_provider: Option<String>,
     director_involvement: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
@@ -2669,6 +2858,7 @@ pub(crate) async fn generate_antigravity_image(
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
         let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
@@ -2688,8 +2878,15 @@ pub(crate) async fn generate_antigravity_image(
         let job_dir = antigravity_job_dir_label(&workspace_path, &job_path);
         let (reference_paths, reference_names) =
             write_reference_pngs(&job_path, &reference_pngs, "Generate image")?;
-        let prompt_text =
-            antigravity_generate_prompt(prompt.trim(), &job_dir, autonomy, &reference_names);
+        let prompt_text = antigravity_generate_director_prompt(
+            prompt.trim(),
+            &job_dir,
+            autonomy,
+            director_provider,
+            director_mode,
+            director_involvement,
+            &reference_names,
+        );
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity image generation")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
@@ -2766,6 +2963,7 @@ pub(crate) async fn generate_antigravity_image(
                     "Generated image restoration",
                     false,
                     true,
+                    director_provider,
                     director_mode,
                     director_involvement,
                 )?;
@@ -2842,6 +3040,9 @@ pub(crate) async fn generate_antigravity_fill_image(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
     edit_checks_level: Option<u8>,
     fill_aspect_ratio: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
@@ -2882,6 +3083,9 @@ pub(crate) async fn generate_antigravity_fill_image(
         );
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let _checks_level = ai_edit_checks_level(edit_checks_level);
         let fill_aspect_ratio = fill_aspect_ratio
             .as_deref()
@@ -3099,10 +3303,13 @@ pub(crate) async fn generate_antigravity_fill_image(
                 .as_ref()
                 .map(|storyboard| storyboard.fallback)
                 .unwrap_or(false);
-            let base_prompt_text = antigravity_fill_prompt(
+            let base_prompt_text = antigravity_fill_director_prompt(
                 prompt.trim(),
                 &job_dir,
                 autonomy,
+                director_provider,
+                director_mode,
+                director_involvement,
                 &geometry_note,
                 &storyboard_note,
                 storyboard_anchor,
@@ -3332,6 +3539,9 @@ pub(crate) async fn generate_antigravity_retouch_image(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
     edit_checks_level: Option<u8>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
@@ -3371,6 +3581,9 @@ pub(crate) async fn generate_antigravity_retouch_image(
         );
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-retouch-{}", now_id())
@@ -3475,13 +3688,16 @@ pub(crate) async fn generate_antigravity_retouch_image(
             .map_err(|e| format!("Failed to write AI retouch PaintNode contract: {e}"))?;
             let (reference_paths, reference_names) =
                 write_reference_pngs(&part_path, &reference_pngs, "AI retouch")?;
-            let base_prompt_text = antigravity_retouch_prompt(
+            let base_prompt_text = antigravity_retouch_director_prompt(
                 prompt.trim(),
                 has_annotated_source,
                 has_reference,
                 &reference_names,
                 &job_dir,
                 autonomy,
+                director_provider,
+                director_mode,
+                director_involvement,
                 &geometry_note,
                 has_overview,
                 placement.is_split() && part_index > 0,
@@ -3699,6 +3915,7 @@ pub(crate) async fn upscale_antigravity_image(
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
     director_mode: Option<String>,
+    director_provider: Option<String>,
     director_involvement: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
@@ -3730,6 +3947,7 @@ pub(crate) async fn upscale_antigravity_image(
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let autonomy = ai_autonomy_level(autonomy_level);
         let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-upscale-{}", now_id())
@@ -3786,6 +4004,7 @@ pub(crate) async fn upscale_antigravity_image(
             "AI upscale",
             true,
             keep_composed_result,
+            director_provider,
             director_mode,
             director_involvement,
         )?;
@@ -3842,6 +4061,9 @@ pub(crate) async fn decouple_antigravity_image(
     model: Option<String>,
     approval_mode: Option<String>,
     autonomy_level: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
 ) -> Result<DecoupleImageResult, String> {
     if !is_png(&source_png) {
         return Err("Asset extraction source must be a PNG image.".into());
@@ -3852,6 +4074,9 @@ pub(crate) async fn decouple_antigravity_image(
         let mut options = antigravity_command_options(model, approval_mode);
         options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let _autonomy = ai_autonomy_level(autonomy_level);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-decouple-{}", now_id())
         } else {
@@ -3883,7 +4108,13 @@ pub(crate) async fn decouple_antigravity_image(
         } else {
             prompt.trim()
         };
-        let prompt_text = antigravity_decouple_prompt(user_prompt, &job_dir);
+        let prompt_text = antigravity_decouple_director_prompt(
+            user_prompt,
+            &job_dir,
+            director_provider,
+            director_mode,
+            director_involvement,
+        );
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity asset extraction")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
