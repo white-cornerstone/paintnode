@@ -65,9 +65,10 @@ use crate::ai::{
     should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
     AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
-    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageLayerResult, GeneratedImageResult, TempJobDir, WorkflowSourceImage,
-    AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, POLL_INTERVAL,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -644,6 +645,151 @@ fn codex_sdk_runner_script() -> PathBuf {
         .parent()
         .map(|root| root.join("scripts").join("codex-sdk-runner.mjs"))
         .unwrap_or_else(|| PathBuf::from("scripts").join("codex-sdk-runner.mjs"))
+}
+
+fn codex_capabilities_runner_script() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .map(|root| root.join("scripts").join("codex-capabilities.mjs"))
+        .unwrap_or_else(|| PathBuf::from("scripts").join("codex-capabilities.mjs"))
+}
+
+fn fallback_codex_capabilities(warning: Option<String>) -> AiProviderCapabilitiesResult {
+    let efforts = || {
+        [
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("xhigh", "Extra High"),
+        ]
+        .into_iter()
+        .map(|(value, label)| AiReasoningCapability {
+            value: value.into(),
+            label: label.into(),
+        })
+        .collect()
+    };
+    AiProviderCapabilitiesResult {
+        models: [
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4-Mini"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, label))| AiModelCapability {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            supported_reasoning_efforts: efforts(),
+            default_reasoning_effort: Some("medium".into()),
+            is_default: index == 0,
+        })
+        .collect(),
+        source: "fallback".into(),
+        warning,
+    }
+}
+
+fn parse_codex_capabilities(output: &Output) -> Result<AiProviderCapabilitiesResult, String> {
+    if !output.status.success() {
+        return Err(command_failure("Codex capability discovery", output));
+    }
+    parse_codex_capabilities_payload(&output.stdout)
+}
+
+fn parse_codex_capabilities_payload(bytes: &[u8]) -> Result<AiProviderCapabilitiesResult, String> {
+    let payload: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Codex returned invalid capability data: {error}"))?;
+    let data = payload
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Codex capability data did not include a model list.".to_string())?;
+    let mut models = Vec::new();
+    for item in data {
+        if item.get("hidden").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+        let id = item
+            .get("model")
+            .or_else(|| item.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Codex returned a model without an id.".to_string())?;
+        let supports_images = item
+            .get("inputModalities")
+            .and_then(serde_json::Value::as_array)
+            .map(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("image"))
+            })
+            .unwrap_or(true);
+        if !supports_images {
+            continue;
+        }
+        let label = item
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(id);
+        let supported_reasoning_efforts = item
+            .get("supportedReasoningEfforts")
+            .and_then(serde_json::Value::as_array)
+            .map(|efforts| {
+                efforts
+                    .iter()
+                    .filter_map(|effort| {
+                        let value = effort
+                            .get("reasoningEffort")
+                            .and_then(serde_json::Value::as_str)?;
+                        Some(AiReasoningCapability {
+                            value: value.into(),
+                            label: codex_reasoning_effort_label(value),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.push(AiModelCapability {
+            id: id.into(),
+            label: label.into(),
+            description: item
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            supported_reasoning_efforts,
+            default_reasoning_effort: item
+                .get("defaultReasoningEffort")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            is_default: item
+                .get("isDefault")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    if models.is_empty() {
+        return Err("Codex did not advertise any available models.".into());
+    }
+    Ok(AiProviderCapabilitiesResult {
+        models,
+        source: "appServer".into(),
+        warning: None,
+    })
+}
+
+fn codex_reasoning_effort_label(value: &str) -> String {
+    match value {
+        "none" => "None".into(),
+        "minimal" => "Minimal".into(),
+        "low" => "Low".into(),
+        "medium" => "Medium".into(),
+        "high" => "High".into(),
+        "xhigh" => "Extra High".into(),
+        other => other.into(),
+    }
 }
 
 fn build_codex_sdk_command(
@@ -1778,6 +1924,31 @@ pub(crate) async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionRe
     .map_err(|e| format!("Task error: {e}"))
 }
 
+#[tauri::command]
+pub(crate) async fn discover_codex_capabilities(
+    bin: Option<String>,
+) -> Result<AiProviderCapabilitiesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut command = Command::new("node");
+        apply_ai_cli_environment(&mut command).arg(codex_capabilities_runner_script());
+        if let Some(bin) = configured_codex_bin(bin) {
+            command.arg("--codex-path").arg(bin);
+        }
+        command
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY");
+        match command.output() {
+            Ok(output) => parse_codex_capabilities(&output)
+                .unwrap_or_else(|error| fallback_codex_capabilities(Some(error))),
+            Err(error) => fallback_codex_capabilities(Some(format!(
+                "Failed to launch Codex capability discovery: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|error| format!("Task error: {error}"))
+}
+
 /// Run local Codex headlessly to generate an image into a temp job folder.
 ///
 /// Auth is intentionally left to the user's local Codex installation. This command never reads
@@ -2862,7 +3033,7 @@ fn codex_restore_image_details(
     };
     let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
     let director_runner = PaintNodeDirectorProvider::from_director_provider(director_provider);
-    let claude_options = claude_command_options(None, None);
+    let claude_options = claude_command_options(None, None, None);
     let image_options = codex_image_provider_options(options.keep_debug_artifacts);
     let workflow_name = if upscale_layers { "upscale" } else { "restore" };
     let mut composer = AiEditComposer::new_full_coverage(enlarged_png, label)?;
@@ -3086,6 +3257,7 @@ pub(crate) async fn generate_codex_fill_image(
     planner_provider: Option<String>,
     claude_bin: Option<String>,
     claude_model: Option<String>,
+    claude_effort: Option<String>,
     image_provider: Option<String>,
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
@@ -3145,7 +3317,7 @@ pub(crate) async fn generate_codex_fill_image(
             PaintNodeDirectorProvider::from_options(director_provider, planner_provider);
         let director_mode = ai_director_mode(director_mode);
         let director_involvement = ai_director_involvement(director_involvement);
-        let claude_options = claude_command_options(claude_bin, claude_model);
+        let claude_options = claude_command_options(claude_bin, claude_model, claude_effort);
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
         let image_options = PaintNodeImageProviderOptions {
             provider: PaintNodeImageProvider::from_option(image_provider),
@@ -3760,7 +3932,7 @@ pub(crate) async fn generate_codex_retouch_image(
         let director_runner = PaintNodeDirectorProvider::from_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
-        let claude_options = claude_command_options(None, None);
+        let claude_options = claude_command_options(None, None, None);
         let image_options = codex_image_provider_options(codex_options.keep_debug_artifacts);
         let checks_level = ai_edit_checks_level(edit_checks_level);
         let run_id = if run_id.trim().is_empty() {
@@ -4702,6 +4874,27 @@ mod tests {
                 .expect("service tier flag should be present");
             assert_eq!(args[service_tier_idx + 1], "fast");
         }
+    }
+
+    #[test]
+    fn capability_parser_keeps_image_models_and_advertised_effort_order() {
+        let capabilities = parse_codex_capabilities_payload(br#"{"data":[{"model":"vision-a","displayName":"Vision A","inputModalities":["text","image"],"supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"},{"reasoningEffort":"high","description":"Deep"}],"defaultReasoningEffort":"high","isDefault":true},{"model":"text-only","displayName":"Text only","inputModalities":["text"],"supportedReasoningEfforts":[],"isDefault":false}]}"#)
+            .expect("capabilities");
+        assert_eq!(capabilities.source, "appServer");
+        assert_eq!(capabilities.models.len(), 1);
+        assert_eq!(capabilities.models[0].id, "vision-a");
+        assert_eq!(
+            capabilities.models[0].supported_reasoning_efforts[0].value,
+            "medium"
+        );
+        assert_eq!(
+            capabilities.models[0].supported_reasoning_efforts[1].value,
+            "high"
+        );
+        assert_eq!(
+            capabilities.models[0].default_reasoning_effort.as_deref(),
+            Some("high")
+        );
     }
 
     #[test]

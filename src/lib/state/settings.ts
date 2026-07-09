@@ -71,9 +71,9 @@ export const ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS = [
   { id: 'antigravitySafetyDangerousContent', label: 'Dangerous content' },
 ] as const;
 
-export type CodexModelId = (typeof CODEX_MODEL_OPTIONS)[number]['id'];
-export type AntigravityModelId = (typeof ANTIGRAVITY_MODEL_OPTIONS)[number]['id'];
-export type ClaudeModelId = (typeof CLAUDE_MODEL_OPTIONS)[number]['id'];
+export type CodexModelId = string;
+export type AntigravityModelId = string;
+export type ClaudeModelId = string;
 export type AntigravityImageModelId = (typeof ANTIGRAVITY_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageSize = (typeof ANTIGRAVITY_IMAGE_SIZE_OPTIONS)[number]['id'];
 export type AntigravityPersonGeneration = (typeof ANTIGRAVITY_PERSON_GENERATION_OPTIONS)[number]['id'];
@@ -81,7 +81,8 @@ export type AntigravityProminentPeople = (typeof ANTIGRAVITY_PROMINENT_PEOPLE_OP
 export type AntigravitySafetyFiltering = (typeof ANTIGRAVITY_SAFETY_FILTERING_OPTIONS)[number]['id'];
 export type AntigravitySafetyThreshold = (typeof ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS)[number]['id'];
 export type AntigravitySafetyCategorySetting = (typeof ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS)[number]['id'];
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ClaudeEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ServiceTier = 'default' | 'fast';
 export type CodexImageQuality = 'auto' | 'low' | 'medium' | 'high';
 export type CodexImageModeration = 'auto' | 'low';
@@ -120,6 +121,7 @@ export interface AiRunOptions {
   claudeExecutableMode: AiExecutableMode;
   claudeBin: string;
   claudeModel: ClaudeModelId;
+  claudeEffort: ClaudeEffort;
   model: CodexModelId;
   reasoningEffort: ReasoningEffort;
   serviceTier: ServiceTier;
@@ -181,6 +183,7 @@ export interface PaintNodeSettings {
     claudeExecutableMode: AiExecutableMode;
     claudeBin: string;
     claudeModel: ClaudeModelId;
+    claudeEffort: ClaudeEffort;
     model: CodexModelId;
     reasoningEffort: ReasoningEffort;
     serviceTier: ServiceTier;
@@ -225,9 +228,6 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
   { value: 300_000, label: 'Every 5 minutes' },
 ] as const;
 
-const MODEL_IDS = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id));
-const ANTIGRAVITY_MODEL_IDS = new Set<string>(ANTIGRAVITY_MODEL_OPTIONS.map((option) => option.id));
-const CLAUDE_MODEL_IDS = new Set<string>(CLAUDE_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_MODEL_IDS = new Set<string>(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_SIZE_IDS = new Set<string>(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_PERSON_GENERATION_IDS = new Set<string>(
@@ -243,7 +243,8 @@ const ANTIGRAVITY_SAFETY_THRESHOLD_IDS = new Set<string>(
   ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.map((option) => option.id),
 );
 const AUTOSAVE_INTERVALS = new Set<number>(AUTOSAVE_INTERVAL_OPTIONS.map((option) => option.value));
-const REASONING_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
+const REASONING_EFFORTS = new Set<string>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const CLAUDE_EFFORTS = new Set<string>(['auto', 'low', 'medium', 'high', 'xhigh', 'max']);
 const IMAGE_QUALITIES = new Set<string>(['auto', 'low', 'medium', 'high']);
 const IMAGE_MODERATIONS = new Set<string>(['auto', 'low']);
 const AI_AUTONOMY_LEVELS = new Set<string>(['low', 'guided', 'open', 'unmanaged']);
@@ -306,6 +307,7 @@ export function defaultSettings(): PaintNodeSettings {
       claudeExecutableMode: 'builtin',
       claudeBin: '',
       claudeModel: 'default',
+      claudeEffort: 'auto',
       model: 'gpt-5.5',
       reasoningEffort: 'medium',
       serviceTier: 'default',
@@ -375,17 +377,18 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
   const provider = normalizeAiProvider(value.provider, fallback.provider);
   const imageProvider = normalizeAiProvider(value.imageProvider, provider);
   const legacyDirectorMode: AiDirectorMode = provider === 'antigravity' ? 'skip' : fallback.directorMode;
-  const savedReasoningEffort = value.reasoningEffort === 'minimal' ? 'low' : value.reasoningEffort;
+  const savedReasoningEffort = value.reasoningEffort;
   return {
     provider: imageProvider,
     directorMode: normalizeDirectorMode(value.directorMode ?? value.plannerMode, legacyDirectorMode),
     directorProvider: normalizeAiDirectorProvider(value.directorProvider ?? value.plannerProvider, provider),
     directorInvolvement: normalizeDirectorInvolvement(value.directorInvolvement, fallback.directorInvolvement),
     imageProvider,
-    claudeModel: CLAUDE_MODEL_IDS.has(String(value.claudeModel))
-      ? (value.claudeModel as ClaudeModelId)
-      : fallback.claudeModel,
-    model: MODEL_IDS.has(String(value.model)) ? (value.model as CodexModelId) : fallback.model,
+    claudeModel: stringOrDefault(value.claudeModel, fallback.claudeModel),
+    claudeEffort: CLAUDE_EFFORTS.has(String(value.claudeEffort))
+      ? (value.claudeEffort as ClaudeEffort)
+      : fallback.claudeEffort,
+    model: stringOrDefault(value.model, fallback.model),
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
       ? (savedReasoningEffort as ReasoningEffort)
       : fallback.reasoningEffort,
@@ -399,9 +402,7 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
     autonomyLevel: AI_AUTONOMY_LEVELS.has(String(value.autonomyLevel))
       ? (value.autonomyLevel as AiAutonomyLevel)
       : fallback.autonomyLevel,
-    antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(value.antigravityModel))
-      ? (value.antigravityModel as AntigravityModelId)
-      : fallback.antigravityModel,
+    antigravityModel: stringOrDefault(value.antigravityModel, fallback.antigravityModel),
     antigravityApprovalMode:
       value.antigravityApprovalMode === 'default' || value.antigravityApprovalMode === 'skipPermissions'
         ? (value.antigravityApprovalMode as AntigravityApprovalMode)
@@ -478,8 +479,7 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
   const provider = normalizeAiProvider(ai.provider, defaults.ai.provider);
   const imageProvider = normalizeAiProvider(ai.imageProvider, provider);
   const legacyDirectorMode: AiDirectorMode = provider === 'antigravity' ? 'skip' : defaults.ai.directorMode;
-  // Codex CLI retired the "minimal" reasoning effort; map old saves to the closest level.
-  const savedReasoningEffort = ai.reasoningEffort === 'minimal' ? 'low' : ai.reasoningEffort;
+  const savedReasoningEffort = ai.reasoningEffort;
   const savedAntigravityBin = ai.antigravityBin ?? ai.geminiBin;
   const savedAntigravityModel = ai.antigravityModel ?? ai.geminiModel;
   const savedAntigravityApprovalMode = ai.antigravityApprovalMode ?? ai.geminiApprovalMode;
@@ -493,10 +493,11 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
     codexBin: stringOrDefault(ai.codexBin, defaults.ai.codexBin),
     claudeExecutableMode: normalizeExecutableMode(ai.claudeExecutableMode, defaults.ai.claudeExecutableMode),
     claudeBin: stringOrDefault(ai.claudeBin, defaults.ai.claudeBin),
-    claudeModel: CLAUDE_MODEL_IDS.has(String(ai.claudeModel))
-      ? (ai.claudeModel as ClaudeModelId)
-      : defaults.ai.claudeModel,
-    model: MODEL_IDS.has(String(ai.model)) ? (ai.model as CodexModelId) : defaults.ai.model,
+    claudeModel: stringOrDefault(ai.claudeModel, defaults.ai.claudeModel),
+    claudeEffort: CLAUDE_EFFORTS.has(String(ai.claudeEffort))
+      ? (ai.claudeEffort as ClaudeEffort)
+      : defaults.ai.claudeEffort,
+    model: stringOrDefault(ai.model, defaults.ai.model),
     reasoningEffort: REASONING_EFFORTS.has(String(savedReasoningEffort))
       ? (savedReasoningEffort as ReasoningEffort)
       : defaults.ai.reasoningEffort,
@@ -515,9 +516,7 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
       defaults.ai.antigravityExecutableMode,
     ),
     antigravityBin: stringOrDefault(savedAntigravityBin, defaults.ai.antigravityBin),
-    antigravityModel: ANTIGRAVITY_MODEL_IDS.has(String(savedAntigravityModel))
-      ? (savedAntigravityModel as AntigravityModelId)
-      : defaults.ai.antigravityModel,
+    antigravityModel: stringOrDefault(savedAntigravityModel, defaults.ai.antigravityModel),
     antigravityApprovalMode:
       savedAntigravityApprovalMode === 'default' ? 'default' : defaults.ai.antigravityApprovalMode,
     antigravityImageModel: ANTIGRAVITY_IMAGE_MODEL_IDS.has(String(ai.antigravityImageModel))
@@ -634,6 +633,7 @@ export function defaultAiRunOptions(): AiRunOptions {
     claudeExecutableMode: ai.claudeExecutableMode,
     claudeBin: ai.claudeBin,
     claudeModel: ai.claudeModel,
+    claudeEffort: ai.claudeEffort,
     model: ai.model,
     reasoningEffort: ai.reasoningEffort,
     serviceTier: ai.serviceTier,
@@ -672,6 +672,7 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
     claudeExecutableMode: value.ai.claudeExecutableMode,
     claudeBin: value.ai.claudeBin,
     claudeModel: value.ai.claudeModel,
+    claudeEffort: value.ai.claudeEffort,
     model: value.ai.model,
     reasoningEffort: value.ai.reasoningEffort,
     serviceTier: value.ai.serviceTier,
@@ -746,6 +747,7 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
     claudeExecutableMode: options.claudeExecutableMode,
     claudeBin: options.claudeBin,
     claudeModel: options.claudeModel,
+    claudeEffort: options.claudeEffort,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     serviceTier: options.serviceTier,

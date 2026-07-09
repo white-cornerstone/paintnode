@@ -66,10 +66,10 @@ use crate::ai::{
     sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
     write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
-    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
-    CodexDetectionResult, DecoupleImageResult, DecoupleManifest, DecoupledLayerResult,
-    GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    POLL_INTERVAL,
+    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
+    AiProviderCapabilitiesResult, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
+    DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage,
+    AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -2516,6 +2516,97 @@ pub(crate) async fn detect_antigravity(
     .map_err(|e| format!("Task error: {e}"))
 }
 
+fn fallback_antigravity_capabilities(warning: Option<String>) -> AiProviderCapabilitiesResult {
+    let models = [
+        ("auto", "Auto"),
+        ("Gemini 3.5 Flash (High)", "Gemini 3.5 Flash High"),
+        ("Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash Medium"),
+        ("Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash Low"),
+        ("Gemini 3.1 Pro (High)", "Gemini 3.1 Pro High"),
+        ("Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro Low"),
+        ("Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6 Thinking"),
+        ("Claude Opus 4.6 (Thinking)", "Claude Opus 4.6 Thinking"),
+        ("GPT-OSS 120B (Medium)", "GPT-OSS 120B Medium"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (id, label))| AiModelCapability {
+        id: id.into(),
+        label: label.into(),
+        description: None,
+        supported_reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
+        is_default: index == 0,
+    })
+    .collect();
+    AiProviderCapabilitiesResult {
+        models,
+        source: "fallback".into(),
+        warning,
+    }
+}
+
+fn parse_antigravity_capabilities(text: &str) -> Result<AiProviderCapabilitiesResult, String> {
+    let mut models = vec![AiModelCapability {
+        id: "auto".into(),
+        label: "Auto".into(),
+        description: None,
+        supported_reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
+        is_default: true,
+    }];
+    models.extend(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| AiModelCapability {
+                id: line.into(),
+                label: line.replace(" (", " ").trim_end_matches(')').to_string(),
+                description: None,
+                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+                is_default: false,
+            }),
+    );
+    if models.len() == 1 {
+        return Err("Antigravity did not advertise any available models.".into());
+    }
+    Ok(AiProviderCapabilitiesResult {
+        models,
+        source: "cli".into(),
+        warning: None,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn discover_antigravity_capabilities(
+    bin: Option<String>,
+) -> Result<AiProviderCapabilitiesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let antigravity_bin = match configured_or_default_antigravity_bin(bin) {
+            Ok(bin) => bin,
+            Err(error) => return fallback_antigravity_capabilities(Some(error)),
+        };
+        let mut command = Command::new(&antigravity_bin);
+        apply_ai_cli_environment(&mut command).arg("models");
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                parse_antigravity_capabilities(&String::from_utf8_lossy(&output.stdout))
+                    .unwrap_or_else(|error| fallback_antigravity_capabilities(Some(error)))
+            }
+            Ok(output) => fallback_antigravity_capabilities(Some(antigravity_command_failure(
+                "Antigravity capability discovery",
+                &output,
+            ))),
+            Err(error) => fallback_antigravity_capabilities(Some(format!(
+                "Failed to launch Antigravity capability discovery: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|error| format!("Antigravity capability task failed: {error}"))
+}
+
 fn run_antigravity(
     antigravity_bin: &str,
     workspace_path: &Path,
@@ -2972,6 +3063,7 @@ pub(crate) async fn generate_antigravity_image(
     codex_service_tier: Option<String>,
     claude_bin: Option<String>,
     claude_model: Option<String>,
+    claude_effort: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -3004,7 +3096,11 @@ pub(crate) async fn generate_antigravity_image(
         let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
         let agentic_director_loop = director_uses_agentic_loop(director_mode, director_involvement);
-        let claude_options = claude_command_options(claude_bin.clone(), claude_model.clone());
+        let claude_options = claude_command_options(
+            claude_bin.clone(),
+            claude_model.clone(),
+            claude_effort.clone(),
+        );
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -3049,7 +3145,8 @@ pub(crate) async fn generate_antigravity_image(
                     },
                     "claude": {
                         "bin": claude_bin,
-                        "model": claude_model
+                        "model": claude_model,
+                        "effort": claude_effort
                     },
                     "antigravity": {
                         "bin": antigravity_bin,
@@ -4750,6 +4847,19 @@ mod tests {
     use crate::ai::ANTIGRAVITY_RUNS_DIR;
     use crate::ai::{TempJobDir, PAINTNODE_WORK_DIR};
     use crate::test_util::test_rgba_png;
+
+    #[test]
+    fn capability_parser_preserves_cli_model_order() {
+        let result = parse_antigravity_capabilities(
+            "Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Opus 4.6 (Thinking)\n",
+        )
+        .expect("Antigravity capabilities");
+        assert_eq!(result.source, "cli");
+        assert_eq!(result.models[0].id, "auto");
+        assert_eq!(result.models[1].id, "Gemini 3.5 Flash (Medium)");
+        assert_eq!(result.models[2].id, "Gemini 3.5 Flash (High)");
+        assert_eq!(result.models[3].label, "Claude Opus 4.6 Thinking");
+    }
 
     #[test]
     fn parses_antigravity_keychain_token_envelope() {

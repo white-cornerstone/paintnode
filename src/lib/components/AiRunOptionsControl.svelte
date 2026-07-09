@@ -3,11 +3,8 @@
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import {
-    CODEX_MODEL_OPTIONS,
-    CLAUDE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
-    ANTIGRAVITY_MODEL_OPTIONS,
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
     ANTIGRAVITY_PROMINENT_PEOPLE_OPTIONS,
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
@@ -22,6 +19,7 @@
     type CodexImageQuality,
     type CodexModelId,
     type ClaudeModelId,
+    type ClaudeEffort,
     type AntigravityApprovalMode,
     type AntigravityImageModelId,
     type AntigravityImageSize,
@@ -38,6 +36,20 @@
     aiProviderDefaultsFromSettings,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
+  import {
+    FALLBACK_CODEX_CAPABILITIES,
+    FALLBACK_CLAUDE_CAPABILITIES,
+    FALLBACK_ANTIGRAVITY_CAPABILITIES,
+    claudeEffortForModel,
+    claudeReasoningOptions,
+    codexEffortForModel,
+    codexModelOptions,
+    codexReasoningOptions,
+    loadCodexCapabilities,
+    loadClaudeCapabilities,
+    loadAntigravityCapabilities,
+    providerModelOptions,
+  } from '../ai/providerCapabilities';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
 
   type AntigravityModelScope = 'all' | 'image';
@@ -48,12 +60,6 @@
     antigravityModelScope = 'image',
   }: { options: AiRunOptions; disabled?: boolean; antigravityModelScope?: AntigravityModelScope } = $props();
 
-  const reasoningEfforts: { value: ReasoningEffort; label: string; short: string }[] = [
-    { value: 'low', label: 'Light', short: 'Light' },
-    { value: 'medium', label: 'Medium', short: 'Med' },
-    { value: 'high', label: 'High', short: 'High' },
-    { value: 'xhigh', label: 'Extra High', short: 'XHigh' },
-  ];
   const serviceTiers: { value: ServiceTier; label: string }[] = [
     { value: 'default', label: 'Default speed' },
     { value: 'fast', label: 'Fast' },
@@ -93,6 +99,9 @@
     { value: 'claude', label: 'Claude' },
   ];
   let open = $state(false);
+  let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
+  let claudeCapabilities = $state(FALLBACK_CLAUDE_CAPABILITIES);
+  let antigravityCapabilities = $state(FALLBACK_ANTIGRAVITY_CAPABILITIES);
   let submenu = $state<
     | 'autonomy'
     | 'imageProvider'
@@ -100,6 +109,7 @@
     | 'reasoning'
     | 'model'
     | 'claudeModel'
+    | 'claudeEffort'
     | 'speed'
     | 'quality'
     | 'moderation'
@@ -139,13 +149,22 @@
       (!directorEnabled && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
   );
   const showClaudeDirectorOptions = $derived(directorEnabled && directorProvider === 'claude');
-  const reasoningShort = $derived(reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.short ?? options.reasoningEffort);
+  const availableCodexModels = $derived(codexModelOptions(codexCapabilities, options.model));
+  const availableReasoningEfforts = $derived(
+    codexReasoningOptions(codexCapabilities, options.model, options.reasoningEffort),
+  );
+  const reasoningShort = $derived(
+    options.reasoningEffort === 'xhigh'
+      ? 'XHigh'
+      : (availableReasoningEfforts.find((item) => item.value === options.reasoningEffort)?.label ?? options.reasoningEffort),
+  );
   const autonomyShort = $derived(autonomyLevels.find((item) => item.value === options.autonomyLevel)?.short ?? options.autonomyLevel);
   const imageQualityShort = $derived(
     imageQualities.find((item) => item.value === options.imageQuality)?.short ?? 'AutoQ',
   );
-  const antigravityUsesAgent = $derived(showAntigravityAgentOptions);
-  const antigravityModelOptions = $derived(ANTIGRAVITY_MODEL_OPTIONS);
+  const antigravityModelOptions = $derived(
+    providerModelOptions(antigravityCapabilities, options.antigravityModel),
+  );
   const antigravityModelTitle = $derived('Agent model');
   const antigravityModelLabel = $derived(
     antigravityModelOptions.find((item) => item.id === options.antigravityModel)?.label ?? 'Auto',
@@ -177,9 +196,17 @@
   const antigravitySafetyDangerousContentLabel = $derived(
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS.find((item) => item.id === options.antigravitySafetyDangerousContent)?.label ?? 'API default',
   );
-  const claudeModelLabel = $derived(
-    CLAUDE_MODEL_OPTIONS.find((item) => item.id === options.claudeModel)?.label ?? 'Default',
+  const claudeModelOptions = $derived(providerModelOptions(claudeCapabilities, options.claudeModel));
+  const claudeEffortOptions = $derived(
+    claudeReasoningOptions(claudeCapabilities, options.claudeModel, options.claudeEffort),
   );
+  const claudeModelLabel = $derived(
+    claudeModelOptions.find((item) => item.id === options.claudeModel)?.label ?? options.claudeModel,
+  );
+  const claudeEffortLabel = $derived(
+    claudeEffortOptions.find((item) => item.value === options.claudeEffort)?.label ?? options.claudeEffort,
+  );
+
   const summary = $derived.by(() => {
     const imageName = providerName(imageProvider);
     if (!directorEnabled) return `Director: Off · Image: ${imageName}`;
@@ -195,7 +222,7 @@
     const directorDetail = directorProvider === 'codex'
       ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Codex, ${reasoningShort} reasoning`
       : directorProvider === 'claude'
-        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Claude, ${claudeModelLabel}`
+        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Claude, ${claudeModelLabel}, ${claudeEffortLabel} effort`
       : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
     return `${directorDetail}. ${imageDetail}`;
   });
@@ -272,11 +299,23 @@
   }
 
   function setCodexModel(model: CodexModelId): void {
-    options = { ...options, model };
+    options = {
+      ...options,
+      model,
+      reasoningEffort: codexEffortForModel(codexCapabilities, model, options.reasoningEffort),
+    };
   }
 
   function setClaudeModel(claudeModel: ClaudeModelId): void {
-    options = { ...options, claudeModel };
+    options = {
+      ...options,
+      claudeModel,
+      claudeEffort: claudeEffortForModel(claudeCapabilities, claudeModel, options.claudeEffort),
+    };
+  }
+
+  function setClaudeEffort(claudeEffort: ClaudeEffort): void {
+    options = { ...options, claudeEffort };
   }
 
   function setServiceTier(serviceTier: ServiceTier): void {
@@ -423,6 +462,33 @@
   }
 
   $effect(() => {
+    if (!showCodexAgentOptions) return;
+    void loadCodexCapabilities(
+      options.codexExecutableMode === 'custom' ? options.codexBin : '',
+    ).then((capabilities) => {
+      codexCapabilities = capabilities;
+    });
+  });
+
+  $effect(() => {
+    if (!showClaudeDirectorOptions) return;
+    void loadClaudeCapabilities(
+      options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
+    ).then((capabilities) => {
+      claudeCapabilities = capabilities;
+    });
+  });
+
+  $effect(() => {
+    if (!showAntigravityAgentOptions) return;
+    void loadAntigravityCapabilities(
+      options.antigravityExecutableMode === 'custom' ? options.antigravityBin : '',
+    ).then((capabilities) => {
+      antigravityCapabilities = capabilities;
+    });
+  });
+
+  $effect(() => {
     if (!open) return;
     submenu;
     options.directorMode;
@@ -432,12 +498,6 @@
     options.antigravitySafetyFiltering;
     options.claudeModel;
     void updateMenuPosition();
-  });
-
-  $effect(() => {
-    if (!antigravityUsesAgent) return;
-    if (antigravityModelOptions.some((item) => item.id === options.antigravityModel)) return;
-    options = { ...options, antigravityModel: 'auto' };
   });
 
   $effect(() => {
@@ -539,13 +599,13 @@
           {/if}
           <button type="button" onclick={() => (submenu = submenu === 'reasoning' ? null : 'reasoning')}>
             <span>Reasoning</span>
-            <span class="value">{reasoningEfforts.find((item) => item.value === options.reasoningEffort)?.label}</span>
+            <span class="value">{availableReasoningEfforts.find((item) => item.value === options.reasoningEffort)?.label}</span>
             <Icon svg={ChevronRight} size={14} />
           </button>
           {#if submenu === 'reasoning'}
             <div class="subitems">
-              {#each reasoningEfforts as item (item.value)}
-                <button type="button" class:active={options.reasoningEffort === item.value} onclick={() => setReasoning(item.value)}>
+              {#each availableReasoningEfforts as item (item.value)}
+                <button type="button" class:active={options.reasoningEffort === item.value} onclick={() => setReasoning(item.value as ReasoningEffort)}>
                   <span>{item.label}</span>
                   {#if options.reasoningEffort === item.value}<Icon svg={Checkmark} size={15} />{/if}
                 </button>
@@ -554,12 +614,12 @@
           {/if}
           <button type="button" onclick={() => (submenu = submenu === 'model' ? null : 'model')}>
             <span>Model</span>
-            <span class="value">{CODEX_MODEL_OPTIONS.find((item) => item.id === options.model)?.label}</span>
+            <span class="value">{availableCodexModels.find((item) => item.id === options.model)?.label}</span>
             <Icon svg={ChevronRight} size={14} />
           </button>
           {#if submenu === 'model'}
             <div class="subitems">
-              {#each CODEX_MODEL_OPTIONS as item (item.id)}
+              {#each availableCodexModels as item (item.id)}
                 <button type="button" class:active={options.model === item.id} onclick={() => setCodexModel(item.id)}>
                   <span>{item.label}</span>
                   {#if options.model === item.id}<Icon svg={Checkmark} size={15} />{/if}
@@ -644,10 +704,25 @@
           </button>
           {#if submenu === 'claudeModel'}
             <div class="subitems">
-              {#each CLAUDE_MODEL_OPTIONS as item (item.id)}
+              {#each claudeModelOptions as item (item.id)}
                 <button type="button" class:active={options.claudeModel === item.id} onclick={() => setClaudeModel(item.id)}>
                   <span>{item.label}</span>
                   {#if options.claudeModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'claudeEffort' ? null : 'claudeEffort')}>
+            <span>Effort</span>
+            <span class="value">{claudeEffortLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'claudeEffort'}
+            <div class="subitems">
+              {#each claudeEffortOptions as item (item.value)}
+                <button type="button" class:active={options.claudeEffort === item.value} onclick={() => setClaudeEffort(item.value as ClaudeEffort)}>
+                  <span>{item.label}</span>
+                  {#if options.claudeEffort === item.value}<Icon svg={Checkmark} size={15} />{/if}
                 </button>
               {/each}
             </div>

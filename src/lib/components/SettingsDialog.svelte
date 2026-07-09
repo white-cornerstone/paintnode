@@ -6,9 +6,6 @@
   import { ChevronDown, ChevronRight, Delete, Edit } from '../icons';
   import {
     AUTOSAVE_INTERVAL_OPTIONS,
-    CODEX_MODEL_OPTIONS,
-    CLAUDE_MODEL_OPTIONS,
-    ANTIGRAVITY_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
@@ -28,6 +25,7 @@
     type CodexImageQuality,
     type CodexModelId,
     type ClaudeModelId,
+    type ClaudeEffort,
     type AntigravityApprovalMode,
     type AntigravityModelId,
     type AntigravityImageModelId,
@@ -45,6 +43,21 @@
     cloneAiRunOptions,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
+  import {
+    FALLBACK_CODEX_CAPABILITIES,
+    FALLBACK_CLAUDE_CAPABILITIES,
+    FALLBACK_ANTIGRAVITY_CAPABILITIES,
+    claudeEffortForModel,
+    claudeReasoningOptions,
+    codexEffortForModel,
+    codexModelOptions,
+    codexReasoningOptions,
+    loadCodexCapabilities,
+    loadClaudeCapabilities,
+    loadAntigravityCapabilities,
+    providerModelOptions,
+  } from '../ai/providerCapabilities';
+  import { providerDetectionSuccessMessage } from '../ai/providerDetectionMessage';
   import { ui } from '../state/ui.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -144,12 +157,6 @@
   );
 
   const desktop = isDesktop();
-  const reasoningEfforts: { value: ReasoningEffort; label: string }[] = [
-    { value: 'low', label: 'Low' },
-    { value: 'medium', label: 'Medium' },
-    { value: 'high', label: 'High' },
-    { value: 'xhigh', label: 'Extra High' },
-  ];
   const serviceTiers: { value: ServiceTier; label: string; hint: string }[] = [
     { value: 'default', label: 'Default', hint: 'Use normal Codex speed.' },
     { value: 'fast', label: 'Fast', hint: 'Ask Codex to use fast mode for AI runs.' },
@@ -182,6 +189,9 @@
   let codexDetection = $state<CodexDetectionResult | null>(null);
   let claudeDetection = $state<CodexDetectionResult | null>(null);
   let antigravityDetection = $state<CodexDetectionResult | null>(null);
+  let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
+  let claudeCapabilities = $state(FALLBACK_CLAUDE_CAPABILITIES);
+  let antigravityCapabilities = $state(FALLBACK_ANTIGRAVITY_CAPABILITIES);
   const initialProfileId = settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '';
   let profileEditorMode = $state<'none' | 'new' | 'existing'>('none');
   let selectedProfileId = $state(initialProfileId);
@@ -190,9 +200,49 @@
   let profileAdvancedOpen = $state(false);
   let antigravityGlobalAdvancedOpen = $state(false);
   let profileDeleteTargetId = $state<string | null>(null);
+  const availableCodexModels = $derived(codexModelOptions(codexCapabilities, settings.value.ai.model));
+  const availableCodexReasoningEfforts = $derived(
+    codexReasoningOptions(codexCapabilities, settings.value.ai.model, settings.value.ai.reasoningEffort),
+  );
+  const profileCodexModels = $derived(codexModelOptions(codexCapabilities, profileDraftOptions.model));
+  const profileCodexReasoningEfforts = $derived(
+    codexReasoningOptions(codexCapabilities, profileDraftOptions.model, profileDraftOptions.reasoningEffort),
+  );
+  const availableClaudeModels = $derived(
+    providerModelOptions(claudeCapabilities, settings.value.ai.claudeModel),
+  );
+  const availableClaudeEfforts = $derived(
+    claudeReasoningOptions(claudeCapabilities, settings.value.ai.claudeModel, settings.value.ai.claudeEffort),
+  );
+  const availableAntigravityModels = $derived(
+    providerModelOptions(antigravityCapabilities, settings.value.ai.antigravityModel),
+  );
+  const profileClaudeModels = $derived(providerModelOptions(claudeCapabilities, profileDraftOptions.claudeModel));
+  const profileClaudeEfforts = $derived(
+    claudeReasoningOptions(claudeCapabilities, profileDraftOptions.claudeModel, profileDraftOptions.claudeEffort),
+  );
+  const profileAntigravityModels = $derived(
+    providerModelOptions(antigravityCapabilities, profileDraftOptions.antigravityModel),
+  );
   const profileDeleteTarget = $derived(
     settings.value.ai.profiles.find((profile) => profile.id === profileDeleteTargetId) ?? null,
   );
+
+  void loadCodexCapabilities(
+    settings.value.ai.codexExecutableMode === 'custom' ? settings.value.ai.codexBin : '',
+  ).then((capabilities) => {
+    codexCapabilities = capabilities;
+  });
+  void loadClaudeCapabilities(
+    settings.value.ai.claudeExecutableMode === 'custom' ? settings.value.ai.claudeBin : '',
+  ).then((capabilities) => {
+    claudeCapabilities = capabilities;
+  });
+  void loadAntigravityCapabilities(
+    settings.value.ai.antigravityExecutableMode === 'custom' ? settings.value.ai.antigravityBin : '',
+  ).then((capabilities) => {
+    antigravityCapabilities = capabilities;
+  });
 
   function sectionMeta(id: SettingsSectionId): SettingsSection {
     return SECTION_BY_ID.get(id) ?? SETTINGS_GROUPS[0].sections[0];
@@ -323,6 +373,54 @@
     profileDraftOptions = { ...profileDraftOptions, ...patch };
   }
 
+  function setCodexModel(model: CodexModelId): void {
+    settings.update({
+      ai: {
+        model,
+        reasoningEffort: codexEffortForModel(
+          codexCapabilities,
+          model,
+          settings.value.ai.reasoningEffort,
+        ),
+      },
+    });
+  }
+
+  function setProfileCodexModel(model: CodexModelId): void {
+    updateProfileDraftOptions({
+      model,
+      reasoningEffort: codexEffortForModel(
+        codexCapabilities,
+        model,
+        profileDraftOptions.reasoningEffort,
+      ),
+    });
+  }
+
+  function setClaudeModel(claudeModel: ClaudeModelId): void {
+    settings.update({
+      ai: {
+        claudeModel,
+        claudeEffort: claudeEffortForModel(
+          claudeCapabilities,
+          claudeModel,
+          settings.value.ai.claudeEffort,
+        ),
+      },
+    });
+  }
+
+  function setProfileClaudeModel(claudeModel: ClaudeModelId): void {
+    updateProfileDraftOptions({
+      claudeModel,
+      claudeEffort: claudeEffortForModel(
+        claudeCapabilities,
+        claudeModel,
+        profileDraftOptions.claudeEffort,
+      ),
+    });
+  }
+
   function saveProfileDraft(): void {
     const name = profileDraftName.trim();
     if (!name) return;
@@ -442,6 +540,12 @@
       if (providerUsesCustomExecutable('codex') && result.found && result.path) {
         settings.update({ ai: { codexBin: result.path } });
       }
+      if (result.found) {
+        codexCapabilities = await loadCodexCapabilities(
+          providerUsesCustomExecutable('codex') ? (result.path ?? settings.value.ai.codexBin) : '',
+          true,
+        );
+      }
     } catch (error) {
       codexDetection = {
         found: false,
@@ -471,6 +575,12 @@
       claudeDetection = result;
       if (providerUsesCustomExecutable('claude') && result.found && result.path) {
         settings.update({ ai: { claudeBin: result.path } });
+      }
+      if (result.found) {
+        claudeCapabilities = await loadClaudeCapabilities(
+          providerUsesCustomExecutable('claude') ? (result.path ?? settings.value.ai.claudeBin) : '',
+          true,
+        );
       }
     } catch (error) {
       claudeDetection = {
@@ -503,6 +613,12 @@
       antigravityDetection = result;
       if (providerUsesCustomExecutable('antigravity') && result.found && result.path) {
         settings.update({ ai: { antigravityBin: result.path } });
+      }
+      if (result.found) {
+        antigravityCapabilities = await loadAntigravityCapabilities(
+          providerUsesCustomExecutable('antigravity') ? (result.path ?? settings.value.ai.antigravityBin) : '',
+          true,
+        );
       }
     } catch (error) {
       antigravityDetection = {
@@ -744,9 +860,7 @@
         {#if codexDetection}
           <p class:ok={codexDetection.found} class:error={!codexDetection.found} class="status-line">
             {#if codexDetection.found}
-              {settings.value.ai.codexExecutableMode === 'custom'
-                ? `Found ${codexDetection.version || 'Codex'} at ${codexDetection.path}`
-                : `${codexDetection.version || 'Codex'} is available through the bundled SDK.`}
+              {providerDetectionSuccessMessage('codex', codexDetection, settings.value.ai.codexExecutableMode)}
             {:else}
               {codexDetection.error || 'Codex was not found.'}
             {/if}
@@ -763,9 +877,9 @@
             <span>Model</span>
             <select
               value={settings.value.ai.model}
-              onchange={(event) => settings.update({ ai: { model: textValue(event) as CodexModelId } })}
+              onchange={(event) => setCodexModel(textValue(event) as CodexModelId)}
             >
-              {#each CODEX_MODEL_OPTIONS as option (option.id)}
+              {#each availableCodexModels as option (option.id)}
                 <option value={option.id}>{option.label}</option>
               {/each}
             </select>
@@ -778,7 +892,7 @@
               onchange={(event) =>
                 settings.update({ ai: { reasoningEffort: textValue(event) as ReasoningEffort } })}
             >
-              {#each reasoningEfforts as option (option.value)}
+              {#each availableCodexReasoningEfforts as option (option.value)}
                 <option value={option.value}>{option.label}</option>
               {/each}
             </select>
@@ -892,9 +1006,7 @@
         {#if claudeDetection}
           <p class:ok={claudeDetection.found} class:error={!claudeDetection.found} class="status-line">
             {#if claudeDetection.found}
-              {settings.value.ai.claudeExecutableMode === 'custom'
-                ? `Found ${claudeDetection.version || 'Claude'} at ${claudeDetection.path}`
-                : `${claudeDetection.version || 'Claude'} is available through the bundled Agent SDK.`}
+              {providerDetectionSuccessMessage('claude', claudeDetection, settings.value.ai.claudeExecutableMode)}
             {:else}
               {claudeDetection.error || 'Claude Code was not found.'}
             {/if}
@@ -906,18 +1018,27 @@
           <span>Used only when Claude is selected as the Director provider.</span>
         </div>
 
-        <label class="field">
-          <span>Director model</span>
-          <select
-            value={settings.value.ai.claudeModel}
-            onchange={(event) => settings.update({ ai: { claudeModel: textValue(event) as ClaudeModelId } })}
-          >
-            {#each CLAUDE_MODEL_OPTIONS as option (option.id)}
-              <option value={option.id}>{option.label}</option>
-            {/each}
-          </select>
-          <small>Claude plans PaintNode image requests only; image generation stays with Codex or Antigravity.</small>
-        </label>
+        <div class="grid-2">
+          <label class="field">
+            <span>Director model</span>
+            <select value={settings.value.ai.claudeModel} onchange={(event) => setClaudeModel(textValue(event))}>
+              {#each availableClaudeModels as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="field">
+            <span>Effort</span>
+            <select
+              value={settings.value.ai.claudeEffort}
+              onchange={(event) => settings.update({ ai: { claudeEffort: textValue(event) as ClaudeEffort } })}
+            >
+              {#each availableClaudeEfforts as option (option.value)}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
 
         <div class="subsection-title">
           <h3>Image Generator</h3>
@@ -925,7 +1046,7 @@
         </div>
 
         <p class="section-note">
-          Choose Codex or Antigravity as the image generator in AI &gt; General. Claude can still plan the request.
+          Choose Codex or Antigravity as the image generator in AI &gt; General. Claude can still direct the workflow.
         </p>
 
       {:else if selectedSection === 'ai-provider-antigravity'}
@@ -986,9 +1107,11 @@
         {#if antigravityDetection}
           <p class:ok={antigravityDetection.found} class:error={!antigravityDetection.found} class="status-line">
             {#if antigravityDetection.found}
-              {settings.value.ai.antigravityExecutableMode === 'custom'
-                ? `Found ${antigravityDetection.version || 'Antigravity'} at ${antigravityDetection.path}`
-                : `${antigravityDetection.version || 'Antigravity'} models check succeeded.`}
+              {providerDetectionSuccessMessage(
+                'antigravity',
+                antigravityDetection,
+                settings.value.ai.antigravityExecutableMode,
+              )}
             {:else}
               {antigravityDetection.error || 'Antigravity CLI was not found.'}
             {/if}
@@ -1008,7 +1131,7 @@
               onchange={(event) =>
                 settings.update({ ai: { antigravityModel: textValue(event) as AntigravityModelId } })}
             >
-              {#each ANTIGRAVITY_MODEL_OPTIONS as option (option.id)}
+              {#each availableAntigravityModels as option (option.id)}
                 <option value={option.id}>{option.label}</option>
               {/each}
             </select>
@@ -1319,9 +1442,9 @@
                           <span>Model</span>
                           <select
                             value={profileDraftOptions.model}
-                            onchange={(event) => updateProfileDraftOptions({ model: textValue(event) as CodexModelId })}
+                            onchange={(event) => setProfileCodexModel(textValue(event) as CodexModelId)}
                           >
-                            {#each CODEX_MODEL_OPTIONS as option (option.id)}
+                            {#each profileCodexModels as option (option.id)}
                               <option value={option.id}>{option.label}</option>
                             {/each}
                           </select>
@@ -1334,7 +1457,7 @@
                             onchange={(event) =>
                               updateProfileDraftOptions({ reasoningEffort: textValue(event) as ReasoningEffort })}
                           >
-                            {#each reasoningEfforts as option (option.value)}
+                            {#each profileCodexReasoningEfforts as option (option.value)}
                               <option value={option.value}>{option.label}</option>
                             {/each}
                           </select>
@@ -1379,7 +1502,7 @@
                             onchange={(event) =>
                               updateProfileDraftOptions({ antigravityModel: textValue(event) as AntigravityModelId })}
                           >
-                            {#each ANTIGRAVITY_MODEL_OPTIONS as option (option.id)}
+                            {#each profileAntigravityModels as option (option.id)}
                               <option value={option.id}>{option.label}</option>
                             {/each}
                           </select>
@@ -1414,19 +1537,31 @@
                         <small>{autonomyLevels.find((option) => option.value === profileDraftOptions.autonomyLevel)?.hint}</small>
                       </label>
                     {:else}
-                      <label class="field">
-                        <span>Director model</span>
-                        <select
-                          value={profileDraftOptions.claudeModel}
-                          onchange={(event) =>
-                            updateProfileDraftOptions({ claudeModel: textValue(event) as ClaudeModelId })}
-                        >
-                          {#each CLAUDE_MODEL_OPTIONS as option (option.id)}
-                            <option value={option.id}>{option.label}</option>
-                          {/each}
-                        </select>
-                        <small>Claude plans requests only; image generation stays with Codex or Antigravity.</small>
-                      </label>
+                      <div class="grid-2">
+                        <label class="field">
+                          <span>Director model</span>
+                          <select
+                            value={profileDraftOptions.claudeModel}
+                            onchange={(event) => setProfileClaudeModel(textValue(event))}
+                          >
+                            {#each profileClaudeModels as option (option.id)}
+                              <option value={option.id}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                        <label class="field">
+                          <span>Effort</span>
+                          <select
+                            value={profileDraftOptions.claudeEffort}
+                            onchange={(event) =>
+                              updateProfileDraftOptions({ claudeEffort: textValue(event) as ClaudeEffort })}
+                          >
+                            {#each profileClaudeEfforts as option (option.value)}
+                              <option value={option.value}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                      </div>
                     {/if}
                   {/if}
                 </div>

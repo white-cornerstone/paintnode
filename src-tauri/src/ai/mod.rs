@@ -153,6 +153,32 @@ pub(crate) struct CodexDetectionResult {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AiReasoningCapability {
+    value: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiModelCapability {
+    id: String,
+    label: String,
+    description: Option<String>,
+    supported_reasoning_efforts: Vec<AiReasoningCapability>,
+    default_reasoning_effort: Option<String>,
+    is_default: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiProviderCapabilitiesResult {
+    models: Vec<AiModelCapability>,
+    source: String,
+    warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DecoupledLayerResult {
     name: String,
     data_url: String,
