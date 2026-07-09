@@ -436,7 +436,7 @@ fn final_codex_agent_message_from_text(stdout: &str, stderr: &str) -> Option<Str
     }
 }
 
-fn final_codex_agent_message(output: &Output) -> Option<String> {
+pub(crate) fn final_codex_agent_message(output: &Output) -> Option<String> {
     final_codex_agent_message_from_text(
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
@@ -523,6 +523,40 @@ fn run_codex_with_progress(
         thread_id,
         satisfied_required_output: false,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_director_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    keep_debug_artifacts: bool,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let mut options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    options.keep_debug_artifacts = keep_debug_artifacts;
+    let mut command =
+        build_codex_sdk_command(&codex_bin, job_path, prompt_text, image_paths, &options);
+    let run =
+        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+            format!(
+                "Failed to run Codex at '{}': {e}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!("Codex Director failed.\n\n{message}"))
+    } else {
+        Err(command_failure("Codex Director", &run.output))
+    }
 }
 
 fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String> {

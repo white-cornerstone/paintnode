@@ -181,6 +181,18 @@ export interface AntigravityGeneratorConfig {
   directorProvider?: AiDirectorProvider | null;
   /** How far the AI Director should stay involved after planning. */
   directorInvolvement?: AiDirectorInvolvement | null;
+  /** Codex executable used when Codex is selected as AI Director. */
+  codexBin?: string | null;
+  /** Codex reasoning model used when Codex is selected as AI Director. */
+  codexModel?: CodexModelId | null;
+  /** Codex reasoning effort used when Codex is selected as AI Director. */
+  codexReasoningEffort?: ReasoningEffort | null;
+  /** Codex service tier used when Codex is selected as AI Director. */
+  codexServiceTier?: ServiceTier | null;
+  /** Claude executable used when Claude is selected as AI Director. */
+  claudeBin?: string | null;
+  /** Claude model used when Claude is selected as AI Director. */
+  claudeModel?: ClaudeModelId | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
   /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
@@ -343,6 +355,13 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig, includeImag
     directorProvider: config.directorProvider ?? 'antigravity',
     directorMode: config.directorMode ?? 'auto',
     directorInvolvement: config.directorInvolvement ?? 'fullReview',
+    codexBin: config.codexBin?.trim() ? config.codexBin.trim() : null,
+    codexModel: config.codexModel ?? null,
+    codexReasoningEffort:
+      (config.codexReasoningEffort as string) === 'minimal' ? 'low' : (config.codexReasoningEffort ?? null),
+    codexServiceTier: config.codexServiceTier ?? 'default',
+    claudeBin: config.claudeBin?.trim() ? config.claudeBin.trim() : null,
+    claudeModel: config.claudeModel && config.claudeModel !== 'default' ? config.claudeModel : null,
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
@@ -427,6 +446,12 @@ export function antigravityConfigFromRunOptions(
     directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
     directorProvider: options.directorProvider ?? options.plannerProvider ?? 'antigravity',
     directorInvolvement: options.directorInvolvement ?? 'fullReview',
+    codexBin: options.codexExecutableMode === 'custom' ? options.codexBin : '',
+    codexModel: options.model,
+    codexReasoningEffort: options.reasoningEffort,
+    codexServiceTier: options.serviceTier,
+    claudeBin: options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
+    claudeModel: options.claudeModel,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };

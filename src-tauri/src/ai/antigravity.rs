@@ -28,6 +28,11 @@ use crate::ai::canvas::{
     validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
     AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
+use crate::ai::claude::{
+    build_director_claude_command, claude_command_failure, claude_command_label,
+    claude_command_options, final_claude_agent_message, run_claude_with_progress,
+};
+use crate::ai::codex::{final_codex_agent_message, run_codex_director_request};
 use crate::ai::director::{
     director_candidate_file, director_uses_agentic_loop, image_request_prompt,
     run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorLoopSpec,
@@ -1718,8 +1723,7 @@ pub(crate) fn antigravity_generate_director_prompt(
         director_involvement,
         "image generation",
     );
-    let agentic_tool_loop = director_provider == AiDirectorProvider::Antigravity
-        && director_uses_agentic_loop(director_mode, director_involvement);
+    let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -2881,6 +2885,12 @@ pub(crate) async fn generate_antigravity_image(
     director_mode: Option<String>,
     director_provider: Option<String>,
     director_involvement: Option<String>,
+    codex_bin: Option<String>,
+    codex_model: Option<String>,
+    codex_reasoning_effort: Option<String>,
+    codex_service_tier: Option<String>,
+    claude_bin: Option<String>,
+    claude_model: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -2912,8 +2922,8 @@ pub(crate) async fn generate_antigravity_image(
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
-        let agentic_director_loop = director_provider == AiDirectorProvider::Antigravity
-            && director_uses_agentic_loop(director_mode, director_involvement);
+        let agentic_director_loop = director_uses_agentic_loop(director_mode, director_involvement);
+        let claude_options = claude_command_options(claude_bin.clone(), claude_model.clone());
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-{}", now_id())
         } else {
@@ -2949,7 +2959,22 @@ pub(crate) async fn generate_antigravity_image(
                 "director": {
                     "provider": director_provider.label(),
                     "mode": director_mode.label(),
-                    "involvement": director_involvement.label()
+                    "involvement": director_involvement.label(),
+                    "codex": {
+                        "bin": codex_bin,
+                        "model": codex_model,
+                        "reasoningEffort": codex_reasoning_effort,
+                        "serviceTier": codex_service_tier
+                    },
+                    "claude": {
+                        "bin": claude_bin,
+                        "model": claude_model
+                    },
+                    "antigravity": {
+                        "bin": antigravity_bin,
+                        "model": options.model,
+                        "approvalMode": options.approval_mode
+                    }
                 },
                 "imageGenerator": {
                     "provider": "Antigravity",
@@ -3006,7 +3031,7 @@ pub(crate) async fn generate_antigravity_image(
                 run_candidate_director_loop(
                     &job_path,
                     DirectorLoopSpec {
-                        provider_label: "Antigravity",
+                        provider_label: director_provider.label(),
                         involvement: director_involvement,
                         legacy_request_file: "paintnode-image-request.json",
                         base_prompt_text: &prompt_text,
@@ -3014,20 +3039,70 @@ pub(crate) async fn generate_antigravity_image(
                         ensure_completion_acceptance_note:
                             "Candidate completed; ensure-completion mode does not run a separate quality review.",
                     },
-                    |_, turn_prompt_text, _candidate_path| {
-                        run_antigravity(
-                            &antigravity_bin,
-                            &workspace_path,
-                            &job_path,
-                            turn_prompt_text,
-                            &options,
-                            true,
-                            app.clone(),
-                            run_id.clone(),
-                            Some(PAINTNODE_DIRECTOR_ACTION_FILE),
-                        )
+                    |_, turn_prompt_text, candidate_path| {
+                        let mut turn_image_paths = reference_paths.clone();
+                        if let Some(candidate_path) = candidate_path {
+                            turn_image_paths.push(candidate_path.to_path_buf());
+                        }
+                        match director_provider {
+                            AiDirectorProvider::Codex => run_codex_director_request(
+                                &app,
+                                &run_id,
+                                codex_bin.clone(),
+                                codex_model.clone(),
+                                codex_reasoning_effort.clone(),
+                                codex_service_tier.clone(),
+                                options.keep_debug_artifacts,
+                                &job_path,
+                                turn_prompt_text,
+                                &turn_image_paths,
+                            ),
+                            AiDirectorProvider::Claude => {
+                                let mut command = build_director_claude_command(
+                                    &claude_options,
+                                    &job_path,
+                                    turn_prompt_text,
+                                    &turn_image_paths,
+                                );
+                                let run = run_claude_with_progress(
+                                    &mut command,
+                                    app.clone(),
+                                    run_id.clone(),
+                                )
+                                .map_err(|e| {
+                                    format!(
+                                        "Failed to run Claude at '{}': {e}",
+                                        claude_command_label(&claude_options)
+                                    )
+                                })?;
+                                if run.output.status.success() {
+                                    Ok(run)
+                                } else if let Some(message) =
+                                    final_claude_agent_message(&run.output)
+                                {
+                                    Err(format!("Claude Director failed.\n\n{message}"))
+                                } else {
+                                    Err(claude_command_failure("Claude Director", &run.output))
+                                }
+                            }
+                            AiDirectorProvider::Antigravity => run_antigravity(
+                                &antigravity_bin,
+                                &workspace_path,
+                                &job_path,
+                                turn_prompt_text,
+                                &options,
+                                true,
+                                app.clone(),
+                                run_id.clone(),
+                                Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                            ),
+                        }
                     },
-                    |_| None,
+                    |run| match director_provider {
+                        AiDirectorProvider::Codex => final_codex_agent_message(&run.output),
+                        AiDirectorProvider::Claude => final_claude_agent_message(&run.output),
+                        AiDirectorProvider::Antigravity => None,
+                    },
                     |turn, request, candidate_prompt| {
                         let candidate_file = director_candidate_file(turn);
                         let candidate = run_antigravity_direct_image(
@@ -5241,6 +5316,32 @@ mod tests {
         assert!(active.contains("Director review criteria"));
         assert!(!active.contains("Save the final image as"));
         assert!(!active.contains("Do not create `result.png`.\n- PNG only"));
+
+        let codex_director = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Codex,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+            &[],
+        );
+        assert!(codex_director.contains("AI Director provider: Codex"));
+        assert!(codex_director.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(!codex_director.contains("Save the final image as"));
+
+        let claude_director = antigravity_generate_director_prompt(
+            "sunlit beach photo",
+            "paintnode/antigravity-runs/job-1",
+            AiAutonomyLevel::Low,
+            AiDirectorProvider::Claude,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+            &[],
+        );
+        assert!(claude_director.contains("AI Director provider: Claude"));
+        assert!(claude_director.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(!claude_director.contains("Save the final image as"));
 
         let plan_only = antigravity_generate_director_prompt(
             "sunlit beach photo",
