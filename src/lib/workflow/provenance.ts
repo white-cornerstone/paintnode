@@ -2,6 +2,7 @@ import { createWorkflowCacheKey, type WorkflowCacheHash } from './execution';
 import { hash as sha256 } from 'fast-sha256';
 import type {
   WorkflowGraphV2,
+  WorkflowCandidateLineageV1,
   WorkflowRunExecutor,
   WorkflowRunOutput,
   WorkflowRunProvider,
@@ -42,6 +43,7 @@ export interface WorkflowRunRecordDraft {
   startedAt: number;
   finishedAt: number | null;
   outputs: WorkflowRunOutput[];
+  candidate?: WorkflowCandidateLineageV1;
   retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
@@ -199,17 +201,31 @@ export function createWorkflowRunRecord(
     if (prior.status !== 'failed' && prior.status !== 'cancelled') {
       throw new Error('Retry run ID must reference a failed or cancelled attempt.');
     }
+    if (!draft.candidate && prior.candidate) {
+      throw new Error('A normal run cannot retry a candidate branch attempt.');
+    }
+    if (draft.candidate && (
+      !prior.candidate
+      || prior.candidate.candidateId !== draft.candidate.candidateId
+      || prior.candidate.branchGroupId !== draft.candidate.branchGroupId
+    )) throw new Error('Retry run ID must reference the same candidate branch.');
+    if (draft.candidate && draft.candidate.attempt !== prior.candidate!.attempt + 1) {
+      throw new Error('Candidate retry attempt must immediately follow the linked candidate attempt.');
+    }
     const latestTerminal = draft.graph.nodes.find((candidate) => candidate.id === draft.nodeId)?.runRecordIds
       .map((id) => draft.graph.runRecords.find((record) => record.id === id))
       .filter((record): record is WorkflowRunRecordV1 => Boolean(
-        record && isFullWorkflowRunRecord(record) && record.status !== 'running',
+        record && isFullWorkflowRunRecord(record) && record.status !== 'running'
+        && (!draft.candidate || record.candidate?.candidateId === draft.candidate.candidateId),
       ))
       .at(-1);
     if (latestTerminal?.id !== prior.id) {
       throw new Error('Retry run ID must reference the latest terminal attempt.');
     }
-    if (draft.attempt !== prior.attempt + 1) {
-      throw new Error('Retry attempt must immediately follow the linked attempt.');
+    if (draft.candidate ? draft.attempt <= prior.attempt : draft.attempt !== prior.attempt + 1) {
+      throw new Error(draft.candidate
+        ? 'Candidate retry attempt must follow the linked attempt.'
+        : 'Retry attempt must immediately follow the linked attempt.');
     }
   }
   if (draft.debugArtifactReference) {
@@ -271,6 +287,7 @@ export function createWorkflowRunRecord(
     startedAt: draft.startedAt,
     finishedAt: draft.finishedAt,
     outputs: structuredClone(draft.outputs),
+    ...(draft.candidate ? { candidate: structuredClone(draft.candidate) } : {}),
     ...(draft.retryOfRunId !== undefined ? { retryOfRunId: draft.retryOfRunId } : {}),
     ...(draft.failure ? { failure: sanitizeWorkflowFailure(draft.failure) } : {}),
     ...(draft.projectTaskId ? { projectTaskId: draft.projectTaskId } : {}),
@@ -300,7 +317,9 @@ export function deriveWorkflowNodeRunState(
   if (!node) return deepFreeze({ state: 'idle' as const, latestRun: null, acceptedOutputs: [] });
   const records = node.runRecordIds
     .map((id) => graph.runRecords.find((record) => record.id === id))
-    .filter((record): record is WorkflowRunRecordV1 => Boolean(record && isFullWorkflowRunRecord(record)));
+    .filter((record): record is WorkflowRunRecordV1 => Boolean(
+      record && isFullWorkflowRunRecord(record) && !record.candidate,
+    ));
   const latestRun = records.at(-1) ? structuredClone(records.at(-1)!) : null;
   const acceptedOutputs = records.flatMap((record) => record.outputs
     .filter((output): output is WorkflowRunOutput & { acceptedAt: number } => typeof output.acceptedAt === 'number'))

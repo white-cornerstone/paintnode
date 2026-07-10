@@ -33,4 +33,16 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('JSON.stringify(runOptions)');
     expect(boardSource).toContain('invalidateSelectivePreview');
   });
+
+  it('communicates provider-neutral candidate branch count, state, lineage, and retry', () => {
+    expect(boardSource).toContain('Generate branches');
+    expect(boardSource).toContain('workflow.runCandidateBranches');
+    expect(boardSource).toContain('workflow.retryCandidateBranch');
+    expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
+    expect(boardSource).toContain('data-candidate-state={candidate.status}');
+    expect(boardSource).toContain('Lineage:');
+    expect(boardSource).toContain('aria-label="Candidate count"');
+    expect(boardSource).toContain('aria-label="Candidate concurrency"');
+    expect(boardSource).toContain('Branches / candidate 2 fails once');
+  });
 });

@@ -285,6 +285,7 @@ function linkedSuccessfulRuns(graph: WorkflowGraphV2, node: WorkflowNodeV2): Wor
       record
       && isFullWorkflowRunRecord(record)
       && record.nodeId === node.id
+      && !record.candidate
       && record.status === 'succeeded'
       && record.outputs.length > 0,
     ));

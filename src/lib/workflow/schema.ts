@@ -131,6 +131,16 @@ export interface WorkflowRunTarget {
   height: number;
 }
 
+export interface WorkflowCandidateLineageV1 {
+  version: 1;
+  branchGroupId: string;
+  candidateId: string;
+  ordinal: number;
+  requestedCount: number;
+  sourceNodeId: string;
+  attempt: number;
+}
+
 export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
   recordVersion: 1;
   status: WorkflowRunStatus;
@@ -146,6 +156,7 @@ export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
   startedAt: number;
   finishedAt: number | null;
   outputs: WorkflowRunOutput[];
+  candidate?: WorkflowCandidateLineageV1;
   retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
@@ -499,6 +510,38 @@ function parseRunTarget(value: unknown, path: string, issues: WorkflowValidation
   };
 }
 
+function parseCandidateLineage(
+  value: unknown,
+  path: string,
+  issues: WorkflowValidationIssue[],
+): WorkflowCandidateLineageV1 | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+    return undefined;
+  }
+  const candidate: WorkflowCandidateLineageV1 = {
+    version: 1,
+    branchGroupId: readString(value, 'branchGroupId', `${path}.branchGroupId`, issues),
+    candidateId: readString(value, 'candidateId', `${path}.candidateId`, issues),
+    ordinal: readNonnegativeInteger(value, 'ordinal', `${path}.ordinal`, issues),
+    requestedCount: readNonnegativeInteger(value, 'requestedCount', `${path}.requestedCount`, issues),
+    sourceNodeId: readString(value, 'sourceNodeId', `${path}.sourceNodeId`, issues),
+    attempt: readNonnegativeInteger(value, 'attempt', `${path}.attempt`, issues),
+  };
+  if (value.version !== 1) issues.push({ path: `${path}.version`, message: `${path}.version must be 1`, severity: 'error' });
+  if (candidate.requestedCount < 2 || candidate.requestedCount > 6) {
+    issues.push({ path: `${path}.requestedCount`, message: `${path}.requestedCount must be between 2 and 6`, severity: 'error' });
+  }
+  if (candidate.ordinal < 1 || candidate.ordinal > candidate.requestedCount) {
+    issues.push({ path: `${path}.ordinal`, message: `${path}.ordinal must identify a requested candidate`, severity: 'error' });
+  }
+  if (candidate.attempt < 1) {
+    issues.push({ path: `${path}.attempt`, message: `${path}.attempt must start at 1`, severity: 'error' });
+  }
+  return candidate;
+}
+
 function parseRunReference(value: unknown, index: number, issues: WorkflowValidationIssue[]): WorkflowRunReference {
   const path = `runRecords[${index}]`;
   if (!isRecord(value)) {
@@ -570,6 +613,7 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     code: readString(failure, 'code', `${path}.failure.code`, issues),
     message: readString(failure, 'message', `${path}.failure.message`, issues),
   } : undefined;
+  const parsedCandidate = parseCandidateLineage(value.candidate, `${path}.candidate`, issues);
   if (finishedAt !== null && finishedAt < startedAt) {
     issues.push({ path: `${path}.finishedAt`, message: `${path}.finishedAt cannot precede startedAt`, severity: 'error' });
   }
@@ -659,6 +703,7 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     startedAt,
     finishedAt,
     outputs: parsedOutputs,
+    ...(parsedCandidate ? { candidate: parsedCandidate } : {}),
     ...(typeof value.retryOfRunId === 'string' ? { retryOfRunId: value.retryOfRunId } : {}),
     ...(parsedFailure ? { failure: parsedFailure } : {}),
     ...(typeof value.projectTaskId === 'string' ? { projectTaskId: value.projectTaskId } : {}),
@@ -689,6 +734,10 @@ function validateRunRetryLinks(graph: WorkflowGraphV2, issues: WorkflowValidatio
       issues.push({ path, message: `${path} must reference a failed or cancelled attempt`, severity: 'error' });
       continue;
     }
+    if (!reference.candidate && prior.candidate) {
+      issues.push({ path, message: `${path} normal runs cannot retry candidate branch attempts`, severity: 'error' });
+      continue;
+    }
     const node = graph.nodes.find((candidate) => candidate.id === reference.nodeId);
     const currentIndex = node?.runRecordIds.indexOf(reference.id) ?? -1;
     const priorIndex = node?.runRecordIds.indexOf(prior.id) ?? -1;
@@ -696,18 +745,114 @@ function validateRunRetryLinks(graph: WorkflowGraphV2, issues: WorkflowValidatio
       issues.push({ path, message: `${path} must reference an earlier linked attempt on the same node`, severity: 'error' });
       continue;
     }
+    if (reference.candidate && (
+      !prior.candidate
+      || prior.candidate.candidateId !== reference.candidate.candidateId
+      || prior.candidate.branchGroupId !== reference.candidate.branchGroupId
+    )) {
+      issues.push({ path, message: `${path} must reference the same candidate branch`, severity: 'error' });
+      continue;
+    }
     const latestTerminal = node?.runRecordIds
       .slice(0, currentIndex)
       .map((id) => graph.runRecords.find((candidate) => candidate.id === id))
       .filter((candidate): candidate is WorkflowRunRecordV1 => Boolean(
-        candidate && 'recordVersion' in candidate && candidate.recordVersion === 1 && candidate.status !== 'running',
+        candidate && 'recordVersion' in candidate && candidate.recordVersion === 1 && candidate.status !== 'running'
+        && (!reference.candidate || candidate.candidate?.candidateId === reference.candidate.candidateId),
       ))
       .at(-1);
     if (latestTerminal?.id !== prior.id) {
       issues.push({ path, message: `${path} must reference the latest terminal attempt`, severity: 'error' });
     }
-    if (reference.attempt !== prior.attempt + 1) {
-      issues.push({ path, message: `${path} retry attempt must immediately follow the linked attempt`, severity: 'error' });
+    if (reference.candidate && reference.candidate.attempt !== prior.candidate!.attempt + 1) {
+      issues.push({ path, message: `${path} candidate attempt must immediately follow the linked candidate attempt`, severity: 'error' });
+    }
+    if (reference.candidate ? reference.attempt <= prior.attempt : reference.attempt !== prior.attempt + 1) {
+      issues.push({
+        path,
+        message: reference.candidate
+          ? `${path} candidate retry attempt must follow the linked attempt`
+          : `${path} retry attempt must immediately follow the linked attempt`,
+        severity: 'error',
+      });
+    }
+  }
+}
+
+function validateCandidateBranchGroups(graph: WorkflowGraphV2, issues: WorkflowValidationIssue[]): void {
+  const groups = new Map<string, WorkflowRunRecordV1[]>();
+  for (const node of graph.nodes) {
+    let previousAttempt = 0;
+    const attempts = new Set<number>();
+    for (const runId of node.runRecordIds) {
+      const record = graph.runRecords.find((candidate) => candidate.id === runId);
+      if (!record || !('recordVersion' in record) || record.recordVersion !== 1) continue;
+      if (record.candidate) {
+        if (attempts.has(record.attempt) || record.attempt <= previousAttempt) {
+          issues.push({
+            path: `runRecords.${record.id}.attempt`,
+            message: 'Candidate run attempts must be unique and node-global monotonic.',
+            severity: 'error',
+          });
+        }
+        attempts.add(record.attempt);
+        previousAttempt = record.attempt;
+        const records = groups.get(record.candidate.branchGroupId) ?? [];
+        records.push(record);
+        groups.set(record.candidate.branchGroupId, records);
+      } else {
+        attempts.add(record.attempt);
+        previousAttempt = Math.max(previousAttempt, record.attempt);
+      }
+    }
+  }
+  for (const [groupId, records] of groups) {
+    const first = records[0];
+    const expectedSnapshot = JSON.stringify(stableValue({
+      nodeId: first.nodeId,
+      materialKey: first.materialKey,
+      sourceAssets: first.sourceAssets,
+      prompt: first.prompt,
+      provider: first.provider,
+      executor: first.executor,
+      target: first.target,
+    }));
+    const ordinals = new Map<number, string>();
+    const candidateIds = new Map<string, number>();
+    const candidateAttempts = new Map<string, number>();
+    for (const record of records) {
+      const lineage = record.candidate!;
+      const path = `runRecords.${record.id}.candidate`;
+      if (lineage.branchGroupId !== groupId
+        || lineage.sourceNodeId !== first.nodeId
+        || lineage.requestedCount !== first.candidate!.requestedCount) {
+        issues.push({ path, message: 'Candidate branch group lineage must use one node and requested count.', severity: 'error' });
+      }
+      const snapshot = JSON.stringify(stableValue({
+        nodeId: record.nodeId,
+        materialKey: record.materialKey,
+        sourceAssets: record.sourceAssets,
+        prompt: record.prompt,
+        provider: record.provider,
+        executor: record.executor,
+        target: record.target,
+      }));
+      if (snapshot !== expectedSnapshot) {
+        issues.push({ path, message: 'Candidate branch group must share one exact material and provider snapshot.', severity: 'error' });
+      }
+      const ordinalOwner = ordinals.get(lineage.ordinal);
+      const idOrdinal = candidateIds.get(lineage.candidateId);
+      if ((ordinalOwner && ordinalOwner !== lineage.candidateId)
+        || (idOrdinal !== undefined && idOrdinal !== lineage.ordinal)) {
+        issues.push({ path, message: 'Candidate branch ordinals and IDs must have a stable one-to-one mapping.', severity: 'error' });
+      }
+      ordinals.set(lineage.ordinal, lineage.candidateId);
+      candidateIds.set(lineage.candidateId, lineage.ordinal);
+      const priorCandidateAttempt = candidateAttempts.get(lineage.candidateId) ?? 0;
+      if (lineage.attempt !== priorCandidateAttempt + 1) {
+        issues.push({ path, message: 'Candidate attempts must be contiguous and start at 1.', severity: 'error' });
+      }
+      candidateAttempts.set(lineage.candidateId, lineage.attempt);
     }
   }
 }
@@ -807,6 +952,7 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
   };
 
   validateRunRetryLinks(value, issues);
+  validateCandidateBranchGroups(value, issues);
 
   if (issues.some((issue) => issue.severity === 'error')) return { ok: false, issues };
   return { ok: true, value, issues };

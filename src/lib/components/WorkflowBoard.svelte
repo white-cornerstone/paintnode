@@ -107,6 +107,9 @@
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
   let qaModeResolved = $state(!desktop);
   let qaScenario = $state<ProviderFreeQaScenario>('success');
+  let candidateCount = $state(3);
+  let candidateConcurrency = $state(2);
+  let activeCandidateController: AbortController | null = null;
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
@@ -1787,7 +1790,84 @@
     }
   }
 
+  function outputForTransform(nodeId: string): WorkflowOutputNode | null {
+    const outputId = workflow.outgoing(nodeId)
+      .find((connection) => connection.sourcePortId === 'result')?.to ?? null;
+    return outputId ? workflow.outputNode(outputId) ?? null : null;
+  }
+
+  async function generateCandidateBranches(nodeId: string): Promise<void> {
+    const output = outputForTransform(nodeId);
+    if (!output) {
+      error = 'Connect this Transform to an Output before generating candidate branches.';
+      return;
+    }
+    if (!providerSelection.ready || !providerSelection.provider) {
+      error = 'Wait for native QA mode detection before generating candidate branches.';
+      return;
+    }
+    busy = true;
+    error = '';
+    progress = `Generating ${candidateCount} independent candidates…`;
+    const controller = new AbortController();
+    activeCandidateController = controller;
+    const context = createWorkflowExecutionContext(createRunId());
+    try {
+      const outcome = await workflow.runCandidateBranches(output.id, {
+        ...context.options,
+        signal: controller.signal,
+      }, {
+        branchGroupId: `branch-${createRunId()}`,
+        count: candidateCount,
+        maxConcurrency: Math.min(candidateConcurrency, candidateCount),
+      });
+      if (!outcome.committed) error = outcome.commitMessage;
+      else {
+        if (context.runProjectPath) await project.refresh(context.runProjectPath);
+        editor.flash(outcome.commitMessage);
+      }
+    } catch (cause) {
+      error = (cause as Error)?.message ?? String(cause);
+    } finally {
+      if (activeCandidateController === controller) activeCandidateController = null;
+      busy = false;
+      progress = '';
+    }
+  }
+
+  async function retryCandidate(candidateId: string): Promise<void> {
+    if (!providerSelection.ready || !providerSelection.provider) return;
+    busy = true;
+    error = '';
+    progress = 'Retrying one candidate while preserving its siblings…';
+    const controller = new AbortController();
+    activeCandidateController = controller;
+    const context = createWorkflowExecutionContext(createRunId());
+    try {
+      const outcome = await workflow.retryCandidateBranch(candidateId, {
+        ...context.options,
+        signal: controller.signal,
+      });
+      if (!outcome.committed) error = outcome.commitMessage;
+      else {
+        if (context.runProjectPath) await project.refresh(context.runProjectPath);
+        editor.flash(outcome.commitMessage);
+      }
+    } catch (cause) {
+      error = (cause as Error)?.message ?? String(cause);
+    } finally {
+      if (activeCandidateController === controller) activeCandidateController = null;
+      busy = false;
+      progress = '';
+    }
+  }
+
   async function cancelGenerate(): Promise<void> {
+    if (activeCandidateController) {
+      progress = 'Cancelling candidate branches…';
+      activeCandidateController.abort();
+      return;
+    }
     if (activeWorkflowTaskId) {
       await aiTasks.cancel(activeWorkflowTaskId);
       return;
@@ -2198,6 +2278,7 @@
                 </div>
               {/if}
               {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+                {@const branchGroups = workflow.candidateBranchGroups(node.id)}
                 {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
                   <p
                     class="selective-running-state"
@@ -2248,6 +2329,56 @@
                     {/if}
                   </div>
                 {/if}
+                <section class="candidate-branches" aria-label={`${node.name} concept branches`} aria-live="polite">
+                  <div class="candidate-branch-head">
+                    <strong>Concept branches</strong>
+                    <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
+                  </div>
+                  <div class="candidate-branch-controls" role="group" aria-label="Generate concept branches">
+                    <label>
+                      <span>Count</span>
+                      <select bind:value={candidateCount} disabled={busy} aria-label="Candidate count">
+                        <option value={2}>2</option>
+                        <option value={3}>3</option>
+                        <option value={4}>4</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Parallel</span>
+                      <select bind:value={candidateConcurrency} disabled={busy} aria-label="Candidate concurrency">
+                        <option value={1}>1</option>
+                        <option value={2}>2</option>
+                        <option value={3}>3</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={busy || !providerSelection.ready || !outputForTransform(node.id)}
+                      onclick={() => void generateCandidateBranches(node.id)}
+                    >Generate branches</button>
+                  </div>
+                  {#each branchGroups as group (group.id)}
+                    <div class="candidate-group">
+                      <p><strong>{group.candidates.length} branches</strong> from {group.sourceNodeId}</p>
+                      <ol>
+                        {#each group.candidates as candidate (candidate.candidateId)}
+                          <li data-candidate-state={candidate.status}>
+                            <span><b>Candidate {candidate.ordinal}</b> · {candidate.status}</span>
+                            <small>
+                              Lineage: {candidate.sourceAssetIds.length} sources · material {candidate.materialKey.slice(-10)} · run {candidate.latestRunId}
+                            </small>
+                            {#if candidate.failure}<small>{candidate.failure.message}</small>{/if}
+                            {#if candidate.status === 'failed' || candidate.status === 'cancelled'}
+                              <button type="button" disabled={busy} onclick={() => void retryCandidate(candidate.candidateId)}>
+                                Retry candidate
+                              </button>
+                            {/if}
+                          </li>
+                        {/each}
+                      </ol>
+                    </div>
+                  {/each}
+                </section>
               {:else if node.type === 'transform' && definition.executor.status === 'available'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>
                   Only the Generate capability is executable in this slice. Configure this Transform as Generate to run it.
@@ -2468,6 +2599,7 @@
                     <option value="success">Success</option>
                     <option value="slow-success">Slow / cancellable</option>
                     <option value="failure">Failure / retry</option>
+                    <option value="branch-one-failure">Branches / candidate 2 fails once</option>
                   </select>
                 </label>
               </div>
@@ -3122,6 +3254,87 @@
   }
   .selective-preview .selective-error {
     color: #ffb0b0;
+  }
+  .candidate-branches {
+    display: grid;
+    gap: 6px;
+    padding: 7px;
+    border-top: 1px solid #4b4d52;
+    background: #292a2e;
+  }
+  .candidate-branch-head,
+  .candidate-branch-controls,
+  .candidate-branch-controls label,
+  .candidate-group li {
+    display: flex;
+    align-items: center;
+  }
+  .candidate-branch-head {
+    justify-content: space-between;
+    color: var(--text-bright);
+    font-size: 10px;
+  }
+  .candidate-branch-head span,
+  .candidate-group small {
+    color: var(--text-dim);
+  }
+  .candidate-branch-controls {
+    gap: 5px;
+  }
+  .candidate-branch-controls label {
+    gap: 3px;
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .candidate-branch-controls select {
+    width: 42px;
+    min-width: 42px;
+    height: 24px;
+    padding: 2px;
+    font-size: 10px;
+  }
+  .candidate-branch-controls button,
+  .candidate-group button {
+    min-width: 0;
+    padding: 4px 6px;
+    font-size: 10px;
+  }
+  .candidate-group {
+    display: grid;
+    gap: 4px;
+    padding: 5px;
+    border: 1px solid #45474c;
+    border-radius: 4px;
+    background: #252629;
+  }
+  .candidate-group p,
+  .candidate-group ol {
+    margin: 0;
+  }
+  .candidate-group p {
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .candidate-group ol {
+    display: grid;
+    gap: 4px;
+    padding: 0;
+    list-style: none;
+  }
+  .candidate-group li {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    border-left: 2px solid #777b84;
+    font-size: 9px;
+  }
+  .candidate-group li[data-candidate-state='succeeded'] {
+    border-left-color: #70bd8b;
+  }
+  .candidate-group li[data-candidate-state='failed'],
+  .candidate-group li[data-candidate-state='cancelled'] {
+    border-left-color: #d28b78;
   }
   .selective-running-state {
     display: grid;

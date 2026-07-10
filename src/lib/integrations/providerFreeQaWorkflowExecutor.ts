@@ -7,7 +7,7 @@ import {
 import { raceWorkflowCancellation, throwIfWorkflowCancelled } from '../workflow/runControl';
 
 export type ProviderFreeQaPngLoader = () => Promise<Uint8Array>;
-export type ProviderFreeQaScenario = 'success' | 'slow-success' | 'failure';
+export type ProviderFreeQaScenario = 'success' | 'slow-success' | 'failure' | 'branch-one-failure';
 
 export interface ProviderFreeQaWorkflowExecutorOptions {
   scenario?: ProviderFreeQaScenario;
@@ -42,6 +42,11 @@ export function createProviderFreeQaWorkflowExecutor(
     if (scenario === 'failure') {
       context.reportProgress({ message: 'QA Fake is simulating a safe provider failure.' });
       throw new Error('QA Fake simulated a provider failure. Review the workflow inputs, then retry Generate.');
+    }
+    if (scenario === 'branch-one-failure'
+      && /candidate-2-[a-f0-9]+-attempt-1$/.test(context.identity.runId)) {
+      context.reportProgress({ message: 'QA Fake is failing candidate 2 so its retry can be validated.' });
+      throw new Error('QA Fake candidate 2 failed safely. Retry this candidate to preserve its siblings.');
     }
     if (scenario === 'slow-success') {
       for (let step = 1; step <= progressSteps; step += 1) {
