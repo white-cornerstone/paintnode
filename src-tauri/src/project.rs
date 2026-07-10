@@ -14,6 +14,7 @@ use std::time::SystemTime;
 use base64::Engine;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tauri::Manager;
 
@@ -49,6 +50,8 @@ pub(crate) struct ProjectAsset {
     width: Option<u32>,
     height: Option<u32>,
     mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash: Option<String>,
 }
 
 impl ProjectAsset {
@@ -70,6 +73,7 @@ impl ProjectAsset {
             width: None,
             height: None,
             mime: Some("image/png".into()),
+            content_hash: None,
         }
     }
 
@@ -202,6 +206,33 @@ fn save_manifest(project_path: &Path, manifest: &ProjectManifest) -> Result<(), 
             path.display()
         )
     })
+}
+
+fn sha256_content_hash(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn project_asset_content_hash(project_path: &Path, relative_path: &str) -> Option<String> {
+    fs::read(project_path.join(relative_path))
+        .ok()
+        .map(|bytes| sha256_content_hash(&bytes))
+}
+
+fn backfill_project_asset_content_hashes(
+    project_path: &Path,
+    manifest: &mut ProjectManifest,
+) -> bool {
+    let mut backfilled = false;
+    for asset in &mut manifest.assets {
+        if asset.content_hash.is_some() {
+            continue;
+        }
+        asset.content_hash = project_asset_content_hash(project_path, &asset.relative_path);
+        backfilled |= asset.content_hash.is_some();
+    }
+    backfilled
 }
 
 pub(crate) fn safe_stem(name: &str) -> String {
@@ -531,7 +562,10 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
 }
 
 fn project_state(project_path: &Path) -> Result<ProjectState, String> {
-    let manifest = load_manifest(project_path)?;
+    let mut manifest = load_manifest(project_path)?;
+    if backfill_project_asset_content_hashes(project_path, &mut manifest) {
+        save_manifest(project_path, &manifest)?;
+    }
     let mut assets = manifest
         .assets
         .into_iter()
@@ -751,8 +785,11 @@ fn safe_project_relative_path(relative_path: &str) -> Result<PathBuf, String> {
 
 pub(crate) fn add_asset(
     project_path: &Path,
-    asset: ProjectAsset,
+    mut asset: ProjectAsset,
 ) -> Result<ProjectAssetView, String> {
+    if asset.content_hash.is_none() {
+        asset.content_hash = project_asset_content_hash(project_path, &asset.relative_path);
+    }
     let mut manifest = load_manifest(project_path)?;
     manifest.assets.retain(|existing| existing.id != asset.id);
     manifest.assets.push(asset.clone());
@@ -822,6 +859,7 @@ pub(crate) async fn project_store_asset_bytes(
             width,
             height,
             mime: mime.or_else(|| mime_for_path(Path::new(&format!("asset.{ext}")))),
+            content_hash: Some(sha256_content_hash(&bytes)),
         };
         let asset = add_asset(&project_dir, asset)?;
         let path = project_dir.join(&asset.asset.relative_path);
@@ -1093,6 +1131,70 @@ mod tests {
     use super::*;
     use crate::png::file_has_png_signature;
     use crate::test_util::{png_dimensions_from_data_url, ONE_PIXEL_PNG};
+
+    #[test]
+    fn project_asset_content_hash_is_stable_sha256() {
+        assert_eq!(
+            sha256_content_hash(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(sha256_content_hash(b"abc"), sha256_content_hash(b"abd"));
+    }
+
+    #[test]
+    fn project_state_backfills_missing_asset_hash_once() {
+        let project = TempJobDir::new("paintnode-project-hash-backfill").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative_path = "assets/imported/legacy.png";
+        fs::write(project.path().join(relative_path), ONE_PIXEL_PNG).expect("legacy asset");
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(ProjectAsset {
+            id: "legacy".into(),
+            kind: "imported".into(),
+            name: "Legacy.png".into(),
+            relative_path: relative_path.into(),
+            created_at: 1,
+            prompt: None,
+            source_file_name: Some("Legacy.png".into()),
+            width: Some(1),
+            height: Some(1),
+            mime: Some("image/png".into()),
+            content_hash: None,
+        });
+        save_manifest(project.path(), &manifest).expect("legacy manifest");
+
+        let mut first = load_manifest(project.path()).expect("legacy manifest");
+        assert!(backfill_project_asset_content_hashes(
+            project.path(),
+            &mut first
+        ));
+        save_manifest(project.path(), &first).expect("persist backfill");
+        let expected = sha256_content_hash(ONE_PIXEL_PNG);
+        assert_eq!(
+            first.assets[0].content_hash.as_deref(),
+            Some(expected.as_str())
+        );
+        let persisted = load_manifest(project.path()).expect("persisted manifest");
+        assert_eq!(
+            persisted.assets[0].content_hash.as_deref(),
+            Some(expected.as_str())
+        );
+        let updated_at = persisted.updated_at;
+
+        let mut second = load_manifest(project.path()).expect("already backfilled project");
+        assert!(!backfill_project_asset_content_hashes(
+            project.path(),
+            &mut second
+        ));
+        assert_eq!(
+            second.assets[0].content_hash.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            load_manifest(project.path()).expect("manifest").updated_at,
+            updated_at
+        );
+    }
 
     #[test]
     fn project_file_preview_uses_cached_thumbnail() {
