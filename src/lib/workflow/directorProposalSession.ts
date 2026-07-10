@@ -22,6 +22,7 @@ export interface WorkflowDirectorProposalTarget {
 export interface WorkflowDirectorProposalPreview {
   readonly result: WorkflowDirectorProposalResult;
   readonly session: WorkflowDirectorSessionToken;
+  readonly requestKey: string;
 }
 
 export interface WorkflowDirectorUiSelection {
@@ -30,6 +31,13 @@ export interface WorkflowDirectorUiSelection {
   qaFake: boolean;
   label: string;
   reason: string | null;
+}
+
+export function workflowDirectorRequestKey(
+  context: WorkflowDirectorContext,
+  requestSource: string,
+): string {
+  return JSON.stringify({ requestSource, context });
 }
 
 function providerLabel(provider: AiDirectorProvider): string {
@@ -75,11 +83,12 @@ export async function requestDirectorProposalPreview(
   director: WorkflowDirector,
   context: WorkflowDirectorContext,
   target: WorkflowDirectorProposalTarget,
-  options: { graphId?: string } = {},
+  options: { graphId?: string; requestSource?: string } = {},
 ): Promise<WorkflowDirectorProposalPreview> {
   const session = target.captureDirectorSession();
   const result = await draftWorkflowWithDirector(director, context, options);
-  return Object.freeze({ result, session });
+  const requestKey = workflowDirectorRequestKey(context, options.requestSource ?? 'injected-director');
+  return Object.freeze({ result, session, requestKey });
 }
 
 export function rejectDirectorProposalPreview(
@@ -91,7 +100,11 @@ export function rejectDirectorProposalPreview(
 export function acceptDirectorProposalPreview(
   preview: WorkflowDirectorProposalPreview,
   target: WorkflowDirectorProposalTarget,
+  currentRequestKey: string = preview.requestKey,
 ): void {
+  if (preview.requestKey !== currentRequestKey) {
+    throw new Error('The AI Director request changed after this proposal was drafted. Draft again before accepting.');
+  }
   if (!preview.result.proposal?.canAccept) {
     throw new Error('This AI Director proposal cannot be accepted because validation did not pass.');
   }

@@ -17,6 +17,7 @@
     rejectDirectorProposalPreview,
     requestDirectorProposalPreview,
     workflowDirectorProviderSelection,
+    workflowDirectorRequestKey,
     type WorkflowDirectorAssetInput,
     type WorkflowDirectorProposalPreview,
     type WorkflowDirectorRequestedOutput,
@@ -88,6 +89,40 @@
     return outputs.filter((output) => outputEnabled[output.id]);
   }
 
+  function directorRequestSource(): string {
+    return `${selection.provider}:${qaMode ?? 'standard'}`;
+  }
+
+  function directorContext() {
+    return buildWorkflowDirectorContext({
+      brief,
+      assets: assets.map((asset) => directorAssetMetadata(asset)),
+      requestedOutputs: selectedOutputs(),
+      capabilities: [
+        {
+          id: 'generate',
+          available: selection.qaFake || imageCapabilityAvailable,
+          reason: selection.qaFake || imageCapabilityAvailable
+            ? null
+            : imageCapabilityReason ?? 'No configured image executor is available for Generate.',
+        },
+        {
+          id: 'candidate-review',
+          available: false,
+          reason: 'AI candidate review is not executable in this milestone.',
+        },
+      ],
+    });
+  }
+
+  const liveRequestKey = $derived(workflowDirectorRequestKey(directorContext(), directorRequestSource()));
+
+  $effect(() => {
+    if (!preview || preview.requestKey === liveRequestKey) return;
+    preview = null;
+    error = 'The Director request changed. Draft a fresh proposal before accepting.';
+  });
+
   function chooseProvider(provider: AiDirectorProvider): void {
     localRunOptions = { ...localRunOptions, directorProvider: provider };
     preview = null;
@@ -108,25 +143,7 @@
       error = selection.reason ?? 'The selected Director is unavailable.';
       return;
     }
-    const context = buildWorkflowDirectorContext({
-      brief,
-      assets: assets.map((asset) => directorAssetMetadata(asset)),
-      requestedOutputs,
-      capabilities: [
-        {
-          id: 'generate',
-          available: selection.qaFake || imageCapabilityAvailable,
-          reason: selection.qaFake || imageCapabilityAvailable
-            ? null
-            : imageCapabilityReason ?? 'No configured image executor is available for Generate.',
-        },
-        {
-          id: 'candidate-review',
-          available: false,
-          reason: 'AI candidate review is not executable in this milestone.',
-        },
-      ],
-    });
+    const context = directorContext();
     const director = selection.qaFake
       ? createProviderFreeWorkflowDirector()
       : createConfiguredWorkflowDirector(localRunOptions);
@@ -136,7 +153,9 @@
     preview = null;
     error = '';
     try {
-      const result = await requestDirectorProposalPreview(director, context, workflow);
+      const result = await requestDirectorProposalPreview(director, context, workflow, {
+        requestSource: directorRequestSource(),
+      });
       if (epoch === requestEpoch) preview = result;
     } catch (caught) {
       if (epoch === requestEpoch) error = caught instanceof Error ? caught.message : String(caught);
@@ -157,7 +176,7 @@
   function acceptProposal(): void {
     if (!preview) return;
     try {
-      acceptDirectorProposalPreview(preview, workflow);
+      acceptDirectorProposalPreview(preview, workflow, liveRequestKey);
       preview = null;
       onClose();
     } catch (caught) {

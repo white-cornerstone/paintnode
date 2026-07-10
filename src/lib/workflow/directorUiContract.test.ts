@@ -33,4 +33,11 @@ describe('Workflow Director UI contract', () => {
     expect(dialogSource).not.toContain('previewDataUrl: asset.previewDataUrl');
     expect(dialogSource).not.toContain('prompt: asset.prompt');
   });
+
+  it('invalidates preview and independently guards accept when any live request context changes', () => {
+    expect(dialogSource).toContain('workflowDirectorRequestKey');
+    expect(dialogSource).toContain('liveRequestKey');
+    expect(dialogSource).toContain('preview.requestKey === liveRequestKey');
+    expect(dialogSource).toContain('acceptDirectorProposalPreview(preview, workflow, liveRequestKey)');
+  });
 });

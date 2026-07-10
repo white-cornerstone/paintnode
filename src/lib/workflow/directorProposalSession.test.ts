@@ -7,6 +7,7 @@ import {
   acceptDirectorProposalPreview,
   rejectDirectorProposalPreview,
   requestDirectorProposalPreview,
+  workflowDirectorRequestKey,
   workflowDirectorProviderSelection,
 } from './directorProposalSession';
 
@@ -113,6 +114,46 @@ describe('Workflow Director proposal session', () => {
       preview.result.proposal!.graph,
       instantiateWorkflowTemplate('campaign-composer', { graphId: 'supported-campaign' }),
     )).toEqual({ equivalent: true, differences: [] });
+  });
+
+  it.each([
+    ['brief', {
+      ...campaignContext,
+      brief: 'A changed brief.',
+    }, 'qa-fake'],
+    ['outputs', {
+      ...campaignContext,
+      requestedOutputs: campaignContext.requestedOutputs.slice(0, 1),
+    }, 'qa-fake'],
+    ['asset metadata', {
+      ...campaignContext,
+      assets: [{
+        id: 'new-product', name: 'New.png', kind: 'imported', mime: 'image/png',
+        width: 1000, height: 1000, available: true,
+      }],
+    }, 'qa-fake'],
+    ['capabilities', {
+      ...campaignContext,
+      capabilities: [{ id: 'generate', available: false, reason: 'Executor unavailable.' }],
+    }, 'qa-fake'],
+    ['provider', campaignContext, 'codex'],
+  ])('rejects acceptance after the Director request %s changes', async (_change, currentContext, currentSource) => {
+    const store = new WorkflowStore();
+    store.newFromTemplate('asset-composition');
+    const before = JSON.stringify(store.serialize());
+    const preview = await requestDirectorProposalPreview(
+      createProviderFreeWorkflowDirector(),
+      campaignContext,
+      store,
+      { requestSource: 'qa-fake' },
+    );
+
+    expect(() => acceptDirectorProposalPreview(
+      preview,
+      store,
+      workflowDirectorRequestKey(currentContext, currentSource),
+    )).toThrow(/request changed/i);
+    expect(JSON.stringify(store.serialize())).toBe(before);
   });
 });
 
