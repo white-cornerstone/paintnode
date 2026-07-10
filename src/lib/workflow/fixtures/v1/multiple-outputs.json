@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "name": "Campaign Outputs",
+  "prompt": "Create a consistent campaign family.",
+  "compositionName": "Campaign direction",
+  "promptX": 420,
+  "promptY": 70,
+  "outputName": "Square",
+  "outputWidth": 210,
+  "outputHeight": 232,
+  "outputColor": "#3a3c42",
+  "outputX": 850,
+  "outputY": 90,
+  "storyboardDataUrl": null,
+  "nodes": [],
+  "outputNodes": [
+    {
+      "id": "output",
+      "name": "Square",
+      "x": 850,
+      "y": 90,
+      "width": 210,
+      "height": 232,
+      "color": "#3a3c42",
+      "finalWidth": 1024,
+      "finalHeight": 1024,
+      "outputAssetId": "square-asset",
+      "outputRelativePath": "generated/campaign-square.png"
+    },
+    {
+      "id": "output-story",
+      "name": "Story",
+      "x": 1120,
+      "y": 90,
+      "width": 210,
+      "height": 280,
+      "color": "#5b4f7a",
+      "finalWidth": 768,
+      "finalHeight": 1376,
+      "outputAssetId": "story-asset",
+      "outputRelativePath": "generated/campaign-story.png"
+    }
+  ],
+  "connections": [
+    {
+      "id": "connection-square",
+      "from": "composition",
+      "to": "output"
+    },
+    {
+      "id": "connection-story",
+      "from": "composition",
+      "to": "output-story"
+    }
+  ],
+  "outputAssetId": "square-asset",
+  "outputRelativePath": "generated/campaign-square.png"
+}

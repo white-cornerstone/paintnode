@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "name": "Annotated Storyboard",
+  "prompt": "Follow every regional instruction.",
+  "promptX": 400,
+  "promptY": 60,
+  "outputX": 850,
+  "outputY": 90,
+  "storyboardDataUrl": "data:image/png;base64,YW5ub3RhdGlvbnM=",
+  "storyboardWidth": 1024,
+  "storyboardHeight": 768,
+  "storyboardAnnotations": [
+    "at 25% x, 40% y (callout): keep this area empty",
+    "at 75% x, 60% y (arrow): place the product here"
+  ],
+  "storyboardAnnotationItems": [
+    {
+      "id": "annotation-1",
+      "kind": "callout",
+      "x": 196,
+      "y": 264,
+      "width": 120,
+      "height": 48,
+      "rotation": 0,
+      "flipX": false,
+      "flipY": false,
+      "text": "keep this area empty",
+      "color": "#ff0000",
+      "visible": true
+    },
+    {
+      "id": "annotation-2",
+      "kind": "arrow",
+      "x": 708,
+      "y": 444,
+      "width": 120,
+      "height": 34,
+      "rotation": 0.35,
+      "flipX": false,
+      "flipY": false,
+      "text": "place the product here",
+      "color": "#00aaff",
+      "visible": true
+    }
+  ],
+  "storyboardAnnotationsVisible": false,
+  "nodes": [],
+  "connections": [
+    {
+      "id": "connection-output",
+      "from": "composition",
+      "to": "output"
+    }
+  ],
+  "outputAssetId": null,
+  "outputRelativePath": null
+}

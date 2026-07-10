@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "name": "Beach Campaign",
+  "prompt": "Create a summer campaign image.",
+  "compositionName": "Beach art direction",
+  "compositionWidth": 420,
+  "compositionHeight": 520,
+  "compositionColor": "#3e4f7a",
+  "promptX": 460,
+  "promptY": 80,
+  "outputX": 980,
+  "outputY": 110,
+  "panX": -120,
+  "panY": 35,
+  "zoom": 0.85,
+  "storyboardDataUrl": "data:image/png;base64,c3Rvcnlib2FyZA==",
+  "storyboardWidth": 1200,
+  "storyboardHeight": 896,
+  "storyboardOraPath": "storyboards/beach.ora",
+  "storyboardAnnotations": [
+    "Place the product in the lower right"
+  ],
+  "storyboardAnnotationsVisible": true,
+  "nodes": [
+    {
+      "id": "asset-product",
+      "assetId": "project-product",
+      "name": "Product",
+      "relativePath": "assets/product.png",
+      "x": 60,
+      "y": 100,
+      "width": 220,
+      "height": 210,
+      "color": "#3e6b57",
+      "included": true,
+      "note": "Hero product; preserve label and proportions"
+    },
+    {
+      "id": "asset-style",
+      "assetId": "project-style",
+      "name": "Style reference",
+      "relativePath": "assets/style.jpg",
+      "x": 60,
+      "y": 360,
+      "width": 205,
+      "height": 190,
+      "color": "#70435f",
+      "included": false,
+      "note": "Use the lighting and palette only"
+    }
+  ],
+  "connections": [
+    {
+      "id": "connection-product",
+      "from": "asset-product",
+      "to": "composition"
+    },
+    {
+      "id": "connection-output",
+      "from": "composition",
+      "to": "output"
+    }
+  ],
+  "outputAssetId": "generated-square",
+  "outputRelativePath": "generated/beach-square.png"
+}
