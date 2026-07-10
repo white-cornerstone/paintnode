@@ -47,6 +47,7 @@
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
     createWorkflowBoardRunIdGenerator,
+    createWorkflowReviewRefreshIdentity,
     findOpenCreatorNodePlacement,
     resolveWorkflowBoardProjectAsset,
     resolveWorkflowStoryboardRead,
@@ -61,6 +62,7 @@
     type WorkflowSelectiveExecutionOutcome,
     type WorkflowSelectiveRunMode,
     type WorkflowStoryboardDescriptor,
+    WorkflowReviewRefreshGate,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
@@ -112,6 +114,7 @@
   let candidateConcurrency = $state(2);
   let selectedReviewCandidates = $state<Record<string, string>>({});
   let reviewVerificationEpoch = 0;
+  const reviewRefreshGate = new WorkflowReviewRefreshGate();
   let activeCandidateController: AbortController | null = null;
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
@@ -1649,13 +1652,26 @@
   $effect(() => {
     workflow.rev;
     project.identity;
-    const assetIdentity = assets.map((asset) => [asset.id, asset.relativePath, asset.exists]);
+    const workflowId = workflow.graphSnapshot().id;
+    const assetIdentity = assets.map((asset) => [asset.id, asset.relativePath, asset.exists] as const);
+    const executionOptionsIdentity = workflowExecutionOptionsIdentity();
     const reviewNodeIds = workflow.graphSnapshot().nodes
       .filter((node) => node.type === 'review')
       .map((node) => node.id);
     const ready = providerSelection.ready && Boolean(providerSelection.provider);
+    if (!ready || reviewNodeIds.length === 0) {
+      reviewVerificationEpoch += 1;
+      return;
+    }
+    const refreshIdentity = createWorkflowReviewRefreshIdentity({
+      workflowId,
+      workflowRevision: workflow.rev,
+      projectIdentity: project.identity,
+      executionOptionsIdentity,
+      assetIdentity,
+    });
+    if (!reviewRefreshGate.shouldRefresh(refreshIdentity)) return;
     const epoch = ++reviewVerificationEpoch;
-    if (!ready || reviewNodeIds.length === 0) return;
     void (async () => {
       const context = untrack(() => createWorkflowExecutionContext(createRunId()));
       void assetIdentity;
