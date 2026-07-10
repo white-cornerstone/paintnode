@@ -20,6 +20,8 @@ import type {
   AntigravityProminentPeople,
   AntigravitySafetyFiltering,
   AntigravitySafetyThreshold,
+  GrokModelId,
+  GrokImageModelId,
   ReasoningEffort,
   ServiceTier,
 } from '../state/settings';
@@ -360,6 +362,49 @@ export interface NativeDroppedFile {
   size: number;
   modifiedAt: number;
   mime?: string | null;
+}
+
+export interface GrokGeneratorConfig {
+  /** Optional `grok` binary override. Empty resolves the binary from PATH. */
+  bin?: string;
+  /** Optional PaintNode project folder. Generated output is saved there when present. */
+  projectPath?: string | null;
+  /** Keep the provider job folder for inspecting exact inputs. */
+  keepJobDir?: boolean;
+  /** Preserve large provider request/response debug artifacts in job folders. */
+  keepDebugArtifacts?: boolean;
+  /** Per-request id used to filter Grok progress events. */
+  runId?: string;
+  /** Fixed xAI Imagine image model. */
+  imageModel?: GrokImageModelId;
+}
+
+function grokInvokeConfig(config: GrokGeneratorConfig) {
+  return {
+    bin: config.bin?.trim() ? config.bin.trim() : null,
+    projectPath: config.projectPath?.trim() ? config.projectPath.trim() : null,
+    keepJobDir: config.keepJobDir ?? false,
+    keepDebugArtifacts: config.keepDebugArtifacts ?? false,
+    runId: config.runId?.trim() ? config.runId.trim() : null,
+    imageModel: config.imageModel ?? 'grok-imagine-image-quality',
+  };
+}
+
+export function grokConfigFromRunOptions(
+  options: AiRunOptions,
+  projectPath?: string | null,
+  runId?: string,
+  keepJobDir = false,
+  keepDebugArtifacts = false,
+): GrokGeneratorConfig {
+  return {
+    bin: options.grokExecutableMode === 'custom' ? options.grokBin : '',
+    projectPath,
+    keepJobDir,
+    keepDebugArtifacts,
+    runId,
+    imageModel: options.grokImageModel,
+  };
 }
 
 function codexInvokeConfig(config: CodexGeneratorConfig) {
@@ -791,6 +836,51 @@ export async function generateAntigravityImage(
     runId,
     directorMode: config.directorMode ?? 'auto',
     directorInvolvement: config.directorInvolvement ?? 'fullReview',
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
+  });
+}
+
+export async function detectGrok(bin?: string): Promise<CodexDetectionResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok detection is only available in the desktop app.');
+  }
+  return invoke<CodexDetectionResult>('detect_grok', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+export async function discoverGrokCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok capability discovery is only available in the desktop app.');
+  }
+  return invoke<AiProviderCapabilitiesResult>('discover_grok_capabilities', {
+    bin: bin?.trim() ? bin.trim() : null,
+  });
+}
+
+/**
+ * Decoupled Grok (xAI Imagine) text-to-image generation. Reference images and
+ * image editing are not yet supported (see docs/grok-future-expansion.md).
+ */
+export async function generateGrokImage(
+  config: GrokGeneratorConfig,
+  prompt: string,
+  targetDimensions?: TargetDimensions | null,
+  references: WorkflowSourceImage[] = [],
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok image generation is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_grok_image', {
+    ...grokInvokeConfig({ ...config, runId }),
+    prompt,
+    runId,
     targetWidth: targetDimensions?.width ?? null,
     targetHeight: targetDimensions?.height ?? null,
     referencePngs: references.map((source) => ({

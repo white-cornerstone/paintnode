@@ -17,6 +17,7 @@ export type CodexProgressPayload = {
 
 export function providerLabel(provider: AiProvider): string {
   if (provider === 'antigravity') return 'Antigravity';
+  if (provider === 'grok') return 'Grok';
   return 'Codex';
 }
 
@@ -27,6 +28,7 @@ export function directorProviderLabel(provider: AiDirectorProvider): string {
 
 export function providerRunDir(provider: AiProvider): string {
   if (provider === 'antigravity') return 'antigravity-runs';
+  if (provider === 'grok') return 'grok-runs';
   return 'codex-runs';
 }
 
@@ -81,7 +83,7 @@ export function aiRoleSummary(
 }
 
 export function aiRunningLabel(provider: AiProvider): string {
-  return provider === 'antigravity' ? 'Antigravity is running...' : 'Codex is running...';
+  return `${providerLabel(provider)} is running...`;
 }
 
 export function createRunId(prefix: string): string {

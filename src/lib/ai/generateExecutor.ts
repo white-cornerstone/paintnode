@@ -6,6 +6,8 @@ import {
   generateCodexImage,
   generateAntigravityFillImage,
   generateAntigravityImage,
+  grokConfigFromRunOptions,
+  generateGrokImage,
   type ProjectAsset,
   type TargetDimensions,
 } from '../integrations/desktop';
@@ -107,6 +109,11 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
       );
     }
     const useAgentDirectorForFill = !!fillEdit && directorMode !== 'skip';
+    if (imageProvider === 'grok' && fillEdit) {
+      throw new Error(
+        'Grok generative fill is coming soon. Switch the image generator to Codex or Antigravity for fills, or clear the selection to generate a fresh image with Grok.',
+      );
+    }
     const generated =
       useAgentDirectorForFill
         ? await generateCodexFillImage(
@@ -148,6 +155,13 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
               generationTarget,
               references,
             )
+        : imageProvider === 'grok'
+        ? await generateGrokImage(
+            grokConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
+            generationPrompt,
+            generationTarget,
+            references,
+          )
         : fillEdit
           ? await generateAntigravityFillImage(
               antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts),

@@ -4,7 +4,7 @@ type Capabilities = typeof capabilities;
 
 export const imageModelCapabilities: Capabilities = capabilities;
 
-type AiImageProvider = 'codex' | 'antigravity';
+type AiImageProvider = 'codex' | 'antigravity' | 'grok';
 
 export interface FillFrameRatioOption {
   label: string;
@@ -71,15 +71,18 @@ export function fillFrameSummary(
   const safeDocumentHeight = normalizedDimension(documentHeight);
   const safeSelectionWidth = normalizedDimension(selectionWidth);
   const safeSelectionHeight = normalizedDimension(selectionHeight);
-  return provider === 'antigravity'
-    ? antigravityFillFrameSummary(
-        safeDocumentWidth,
-        safeDocumentHeight,
-        safeSelectionWidth,
-        safeSelectionHeight,
-        antigravityRatioOverride,
-      )
-    : codexFillFrameSummary(safeDocumentWidth, safeDocumentHeight, safeSelectionWidth, safeSelectionHeight);
+  if (provider === 'antigravity' || provider === 'grok') {
+    return ratioGridFillFrameSummary(
+      provider,
+      imageModelCapabilities.providers[provider].aspectRatios,
+      safeDocumentWidth,
+      safeDocumentHeight,
+      safeSelectionWidth,
+      safeSelectionHeight,
+      antigravityRatioOverride,
+    );
+  }
+  return codexFillFrameSummary(safeDocumentWidth, safeDocumentHeight, safeSelectionWidth, safeSelectionHeight);
 }
 
 function codexFillFrameSummary(
@@ -111,14 +114,16 @@ function codexFillFrameSummary(
   };
 }
 
-function antigravityFillFrameSummary(
+function ratioGridFillFrameSummary(
+  provider: 'antigravity' | 'grok',
+  aspectRatios: readonly FillFrameRatioOption[],
   documentWidth: number,
   documentHeight: number,
   selectionWidth: number,
   selectionHeight: number,
   ratioOverride: string | null,
 ): FillFrameSummary {
-  const choices = imageModelCapabilities.providers.antigravity.aspectRatios.map((ratio) => ({
+  const choices = aspectRatios.map((ratio) => ({
     label: ratio.label,
     width: ratio.width,
     height: ratio.height,
@@ -135,7 +140,7 @@ function antigravityFillFrameSummary(
   const scale = Math.min(1, frame.width / documentWidth, frame.height / documentHeight);
   const error = aspectLogError(targetAspect, closest.width / Math.max(1, closest.height));
   return {
-    provider: 'antigravity',
+    provider,
     selectionLabel: `${selectionWidth} x ${selectionHeight}`,
     ratioLabel: selected.label,
     frameLabel: `${frame.width} x ${frame.height}`,

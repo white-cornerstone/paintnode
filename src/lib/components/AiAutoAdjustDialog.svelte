@@ -169,6 +169,11 @@
       try {
         const sourcePng = await canvasToPngBytes(source);
         const maskPng = await canvasToPngBytes(mask);
+        if (imageProvider === 'grok') {
+          throw new Error(
+            'Grok auto-adjust is coming soon. Switch the image generator to Codex or Antigravity for auto-adjust.',
+          );
+        }
         const generated =
           imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(

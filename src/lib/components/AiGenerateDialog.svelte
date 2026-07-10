@@ -217,8 +217,8 @@
             <strong>{fillFrame.selectionLabel}</strong>
           </div>
           <div>
-            <span>{imageProvider === 'antigravity' ? 'Ratio' : 'Frame'}</span>
-            <strong>{imageProvider === 'antigravity' ? fillFrame.ratioLabel : fillFrame.frameLabel}</strong>
+            <span>{imageProvider === 'codex' ? 'Frame' : 'Ratio'}</span>
+            <strong>{imageProvider === 'codex' ? fillFrame.frameLabel : fillFrame.ratioLabel}</strong>
           </div>
           <div>
             <span>Scale</span>

@@ -69,8 +69,9 @@ use crate::ai::{
     AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult, DecoupleImageResult,
     DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
     TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
-    CODEX_RUNS_DIR, POLL_INTERVAL,
+    CODEX_RUNS_DIR, GROK_RUNS_DIR, POLL_INTERVAL,
 };
+use crate::ai::grok::{final_grok_agent_message, run_grok_director_request};
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
 };
@@ -124,6 +125,7 @@ enum PaintNodeDirectorProvider {
     Codex,
     Antigravity,
     Claude,
+    Grok,
 }
 
 impl PaintNodeDirectorProvider {
@@ -137,6 +139,7 @@ impl PaintNodeDirectorProvider {
             AiDirectorProvider::Codex => Self::Codex,
             AiDirectorProvider::Antigravity => Self::Antigravity,
             AiDirectorProvider::Claude => Self::Claude,
+            AiDirectorProvider::Grok => Self::Grok,
         }
     }
 
@@ -145,6 +148,7 @@ impl PaintNodeDirectorProvider {
             Self::Codex => AiDirectorProvider::Codex,
             Self::Antigravity => AiDirectorProvider::Antigravity,
             Self::Claude => AiDirectorProvider::Claude,
+            Self::Grok => AiDirectorProvider::Grok,
         }
     }
 
@@ -153,6 +157,7 @@ impl PaintNodeDirectorProvider {
             Self::Codex => "Codex",
             Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
+            Self::Grok => "Grok",
         }
     }
 
@@ -161,6 +166,7 @@ impl PaintNodeDirectorProvider {
             Self::Codex => CODEX_RUNS_DIR,
             Self::Antigravity => ANTIGRAVITY_RUNS_DIR,
             Self::Claude => CLAUDE_RUNS_DIR,
+            Self::Grok => GROK_RUNS_DIR,
         }
     }
 }
@@ -2580,6 +2586,7 @@ fn director_final_agent_message(
 ) -> Option<String> {
     match provider {
         PaintNodeDirectorProvider::Claude => final_claude_agent_message(output),
+        PaintNodeDirectorProvider::Grok => final_grok_agent_message(output),
         PaintNodeDirectorProvider::Codex | PaintNodeDirectorProvider::Antigravity => {
             final_codex_agent_message(output)
         }
@@ -2661,6 +2668,19 @@ fn run_director_provider_action_turn(
             prompt_text,
             true,
             PAINTNODE_DIRECTOR_ACTION_FILE,
+            session_id,
+        ),
+        // Grok Director drives the local `grok` CLI. Its bin/model use defaults
+        // for now (not yet threaded through the image commands); the CLI writes
+        // the shared director-action file from the job folder.
+        PaintNodeDirectorProvider::Grok => run_grok_director_request(
+            app,
+            run_id,
+            None,
+            None,
+            image_options.keep_debug_artifacts,
+            part_path,
+            prompt_text,
             session_id,
         ),
     }
@@ -3502,7 +3522,9 @@ pub(crate) async fn generate_codex_fill_image(
                     prompt.trim(),
                     &reference_pngs,
                 )?,
-                PaintNodeDirectorProvider::Antigravity | PaintNodeDirectorProvider::Claude => {
+                PaintNodeDirectorProvider::Antigravity
+                | PaintNodeDirectorProvider::Claude
+                | PaintNodeDirectorProvider::Grok => {
                     emit_codex_progress(
                         &app,
                         &run_id,
@@ -3769,6 +3791,12 @@ pub(crate) async fn generate_codex_fill_image(
                         has_overview,
                         &reference_paths,
                         &part.working,
+                    ),
+                    // Grok-directed generative fill needs the Grok image-edit path
+                    // (see docs/grok-future-expansion.md); not yet implemented.
+                    PaintNodeDirectorProvider::Grok => Err(
+                        "Grok Director for generative fill is coming soon. Use Codex, Antigravity, or Claude as the fill Director for now."
+                            .to_string(),
                     ),
                 }
             }

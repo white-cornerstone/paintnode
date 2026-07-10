@@ -225,6 +225,11 @@
 
       try {
         const sourcePng = await canvasPngBytes(sourceLayer.canvas);
+        if (decoupleProvider === 'grok') {
+          throw new Error(
+            'Grok asset extraction is coming soon. Switch the image generator to Codex or Antigravity to extract assets.',
+          );
+        }
         const result =
           decoupleProvider === 'antigravity'
             ? await decoupleAntigravityImage(

@@ -33,6 +33,7 @@ use crate::ai::claude::{
     claude_command_options, final_claude_agent_message, run_claude_with_progress,
 };
 use crate::ai::codex::{final_codex_agent_message, run_codex_director_request};
+use crate::ai::grok::{final_grok_agent_message, run_grok_director_request};
 use crate::ai::director::{
     director_candidate_file, director_uses_agentic_loop, image_request_prompt,
     run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorLoopSpec,
@@ -3253,12 +3254,23 @@ pub(crate) async fn generate_antigravity_image(
                                 Some(PAINTNODE_DIRECTOR_ACTION_FILE),
                                 session_id,
                             ),
+                            AiDirectorProvider::Grok => run_grok_director_request(
+                                &app,
+                                &run_id,
+                                None,
+                                None,
+                                options.keep_debug_artifacts,
+                                &job_path,
+                                turn_prompt_text,
+                                session_id,
+                            ),
                         }
                     },
                     |run| match director_provider {
                         AiDirectorProvider::Codex => final_codex_agent_message(&run.output),
                         AiDirectorProvider::Claude => final_claude_agent_message(&run.output),
                         AiDirectorProvider::Antigravity => None,
+                        AiDirectorProvider::Grok => final_grok_agent_message(&run.output),
                     },
                     |turn, question, options, allow_custom| {
                         request_ai_director_input(

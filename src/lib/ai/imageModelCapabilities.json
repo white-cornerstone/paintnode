@@ -25,6 +25,18 @@
         { "label": "21:9", "width": 1584, "height": 672 }
       ],
       "restoreTileSide": 1344
+    },
+    "grok": {
+      "aspectRatios": [
+        { "label": "1:1", "width": 1024, "height": 1024 },
+        { "label": "2:3", "width": 832, "height": 1248 },
+        { "label": "3:2", "width": 1248, "height": 832 },
+        { "label": "3:4", "width": 864, "height": 1152 },
+        { "label": "4:3", "width": 1152, "height": 864 },
+        { "label": "9:16", "width": 768, "height": 1344 },
+        { "label": "16:9", "width": 1344, "height": 768 }
+      ],
+      "restoreTileSide": 1024
     }
   }
 }

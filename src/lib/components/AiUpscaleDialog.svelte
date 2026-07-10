@@ -153,6 +153,11 @@
 
       try {
         const sourcePng = await canvasToPngBytes(source);
+        if (imageProvider === 'grok') {
+          throw new Error(
+            'Grok upscale is coming soon. Switch the image generator to Codex or Antigravity for upscaling.',
+          );
+        }
         const generated =
           imageProvider === 'antigravity'
             ? await upscaleAntigravityImage(

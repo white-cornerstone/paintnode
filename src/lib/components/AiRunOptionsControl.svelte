@@ -92,11 +92,13 @@
   const providers: { value: AiProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
+    { value: 'grok', label: 'Grok' },
   ];
   const directorProviders: { value: AiDirectorProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
     { value: 'claude', label: 'Claude' },
+    { value: 'grok', label: 'Grok' },
   ];
   let open = $state(false);
   let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
@@ -217,18 +219,24 @@
   const detailedSummary = $derived.by(() => {
     const imageDetail = imageProvider === 'codex'
       ? `Image: Codex, ${imageQualityShort} quality`
-      : `Image: Antigravity, ${antigravityImageSizeLabel}`;
+      : imageProvider === 'grok'
+        ? 'Image: Grok'
+        : `Image: Antigravity, ${antigravityImageSizeLabel}`;
     if (!directorEnabled) return `Director: Off. ${imageDetail}`;
     const directorDetail = directorProvider === 'codex'
       ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Codex, ${reasoningShort} reasoning`
       : directorProvider === 'claude'
         ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Claude, ${claudeModelLabel}, ${claudeEffortLabel} effort`
-      : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
+      : directorProvider === 'grok'
+        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Grok`
+        : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
     return `${directorDetail}. ${imageDetail}`;
   });
 
   function providerName(provider: AiProvider): string {
-    return provider === 'antigravity' ? 'Antigravity' : 'Codex';
+    if (provider === 'antigravity') return 'Antigravity';
+    if (provider === 'grok') return 'Grok';
+    return 'Codex';
   }
 
   function directorProviderName(provider: AiDirectorProvider): string {
@@ -242,7 +250,14 @@
 
   function setDirectorProvider(provider: AiDirectorProvider): void {
     options = { ...options, directorMode: activeDirectorMode(), directorProvider: provider, directorInvolvement };
-    submenu = provider === 'codex' ? 'reasoning' : provider === 'claude' ? 'claudeModel' : 'antigravityModel';
+    submenu =
+      provider === 'codex'
+        ? 'reasoning'
+        : provider === 'claude'
+          ? 'claudeModel'
+          : provider === 'grok'
+            ? null
+            : 'antigravityModel';
   }
 
   function skipDirector(): void {
@@ -256,7 +271,7 @@
 
   function setImageProvider(provider: AiProvider): void {
     options = { ...options, provider, imageProvider: provider };
-    submenu = provider === 'codex' ? 'quality' : 'antigravityImageModel';
+    submenu = provider === 'codex' ? 'quality' : provider === 'grok' ? null : 'antigravityImageModel';
   }
 
   function applyProfile(profileId: string): void {

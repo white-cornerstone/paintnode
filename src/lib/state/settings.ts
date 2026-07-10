@@ -24,6 +24,16 @@ export const CLAUDE_MODEL_OPTIONS = [
   { id: 'opus', label: 'Opus' },
 ] as const;
 
+export const GROK_MODEL_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'grok-4.5', label: 'Grok 4.5' },
+  { id: 'grok-composer-2.5-fast', label: 'Composer 2.5' },
+] as const;
+
+export const GROK_IMAGE_MODEL_OPTIONS = [
+  { id: 'grok-imagine-image-quality', label: 'Grok Imagine (Quality)' },
+] as const;
+
 export const ANTIGRAVITY_IMAGE_MODEL_OPTIONS = [
   { id: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' },
   { id: 'auto', label: 'Auto' },
@@ -74,6 +84,8 @@ export const ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS = [
 export type CodexModelId = string;
 export type AntigravityModelId = string;
 export type ClaudeModelId = string;
+export type GrokModelId = string;
+export type GrokImageModelId = (typeof GROK_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageModelId = (typeof ANTIGRAVITY_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageSize = (typeof ANTIGRAVITY_IMAGE_SIZE_OPTIONS)[number]['id'];
 export type AntigravityPersonGeneration = (typeof ANTIGRAVITY_PERSON_GENERATION_OPTIONS)[number]['id'];
@@ -88,7 +100,7 @@ export type CodexImageQuality = 'auto' | 'low' | 'medium' | 'high';
 export type CodexImageModeration = 'auto' | 'low';
 export type AntigravityApprovalMode = 'default' | 'skipPermissions';
 export type AiAutonomyLevel = 'low' | 'guided' | 'open' | 'unmanaged';
-export type AiProvider = 'codex' | 'antigravity';
+export type AiProvider = 'codex' | 'antigravity' | 'grok';
 export type AiDirectorProvider = AiProvider | 'claude';
 export type AiDirectorMode = 'auto' | 'skip' | 'force';
 export type AiDirectorInvolvement = 'planOnly' | 'ensureCompletion' | 'fullReview';
@@ -143,6 +155,10 @@ export interface AiRunOptions {
   antigravitySafetyHateSpeech: AntigravitySafetyThreshold;
   antigravitySafetySexuallyExplicit: AntigravitySafetyThreshold;
   antigravitySafetyDangerousContent: AntigravitySafetyThreshold;
+  grokExecutableMode: AiExecutableMode;
+  grokBin: string;
+  grokModel: GrokModelId;
+  grokImageModel: GrokImageModelId;
   editChecksLevel: AiEditChecksLevel;
   fillAspectRatio?: string | null;
 }
@@ -155,6 +171,8 @@ export type AiProfileOptions = Omit<
   | 'claudeBin'
   | 'antigravityExecutableMode'
   | 'antigravityBin'
+  | 'grokExecutableMode'
+  | 'grokBin'
   | 'fillAspectRatio'
 >;
 
@@ -205,6 +223,10 @@ export interface PaintNodeSettings {
     antigravitySafetyHateSpeech: AntigravitySafetyThreshold;
     antigravitySafetySexuallyExplicit: AntigravitySafetyThreshold;
     antigravitySafetyDangerousContent: AntigravitySafetyThreshold;
+    grokExecutableMode: AiExecutableMode;
+    grokBin: string;
+    grokModel: GrokModelId;
+    grokImageModel: GrokImageModelId;
     editChecksLevel: AiEditChecksLevel;
     profiles: AiSettingsProfile[];
     defaultProfileId: string | null;
@@ -229,6 +251,7 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
 ] as const;
 
 const ANTIGRAVITY_IMAGE_MODEL_IDS = new Set<string>(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id));
+const GROK_IMAGE_MODEL_IDS = new Set<string>(GROK_IMAGE_MODEL_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_SIZE_IDS = new Set<string>(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_PERSON_GENERATION_IDS = new Set<string>(
   ANTIGRAVITY_PERSON_GENERATION_OPTIONS.map((option) => option.id),
@@ -256,6 +279,7 @@ function normalizeAiProvider(value: unknown, fallback: AiProvider): AiProvider {
   const text = String(value);
   if (text === 'antigravity' || text === 'gemini') return 'antigravity';
   if (text === 'codex') return 'codex';
+  if (text === 'grok' || text === 'xai') return 'grok';
   return fallback;
 }
 
@@ -329,6 +353,10 @@ export function defaultSettings(): PaintNodeSettings {
       antigravitySafetyHateSpeech: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
       antigravitySafetySexuallyExplicit: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
       antigravitySafetyDangerousContent: 'HARM_BLOCK_THRESHOLD_UNSPECIFIED',
+      grokExecutableMode: 'builtin',
+      grokBin: '',
+      grokModel: 'auto',
+      grokImageModel: 'grok-imagine-image-quality',
       editChecksLevel: 1,
       profiles: [],
       defaultProfileId: null,
@@ -444,6 +472,10 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
       value.antigravitySafetyDangerousContent,
       fallback.antigravitySafetyDangerousContent,
     ),
+    grokModel: stringOrDefault(value.grokModel, fallback.grokModel),
+    grokImageModel: GROK_IMAGE_MODEL_IDS.has(String(value.grokImageModel))
+      ? (value.grokImageModel as GrokImageModelId)
+      : fallback.grokImageModel,
     editChecksLevel: clampInt(value.editChecksLevel, fallback.editChecksLevel, 0, 3) as AiEditChecksLevel,
   };
 }
@@ -556,6 +588,12 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
       ai.antigravitySafetyDangerousContent,
       defaults.ai.antigravitySafetyDangerousContent,
     ),
+    grokExecutableMode: normalizeExecutableMode(ai.grokExecutableMode, defaults.ai.grokExecutableMode),
+    grokBin: stringOrDefault(ai.grokBin, defaults.ai.grokBin),
+    grokModel: stringOrDefault(ai.grokModel, defaults.ai.grokModel),
+    grokImageModel: GROK_IMAGE_MODEL_IDS.has(String(ai.grokImageModel))
+      ? (ai.grokImageModel as GrokImageModelId)
+      : defaults.ai.grokImageModel,
     editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
   };
   const profileFallback = { ...normalizedAiBase, profiles: [], defaultProfileId: null };
@@ -655,6 +693,10 @@ export function defaultAiRunOptions(): AiRunOptions {
     antigravitySafetyHateSpeech: ai.antigravitySafetyHateSpeech,
     antigravitySafetySexuallyExplicit: ai.antigravitySafetySexuallyExplicit,
     antigravitySafetyDangerousContent: ai.antigravitySafetyDangerousContent,
+    grokExecutableMode: ai.grokExecutableMode,
+    grokBin: ai.grokBin,
+    grokModel: ai.grokModel,
+    grokImageModel: ai.grokImageModel,
     editChecksLevel: ai.editChecksLevel,
     fillAspectRatio: null,
   };
@@ -694,6 +736,10 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
     antigravitySafetyHateSpeech: value.ai.antigravitySafetyHateSpeech,
     antigravitySafetySexuallyExplicit: value.ai.antigravitySafetySexuallyExplicit,
     antigravitySafetyDangerousContent: value.ai.antigravitySafetyDangerousContent,
+    grokExecutableMode: value.ai.grokExecutableMode,
+    grokBin: value.ai.grokBin,
+    grokModel: value.ai.grokModel,
+    grokImageModel: value.ai.grokImageModel,
     editChecksLevel: value.ai.editChecksLevel,
     fillAspectRatio: null,
   };
@@ -707,6 +753,8 @@ export function aiProfileOptionsFromRunOptions(options: AiRunOptions): AiProfile
     claudeBin: _claudeBin,
     antigravityExecutableMode: _antigravityExecutableMode,
     antigravityBin: _antigravityBin,
+    grokExecutableMode: _grokExecutableMode,
+    grokBin: _grokBin,
     fillAspectRatio: _fillAspectRatio,
     ...profileOptions
   } = options;
@@ -769,6 +817,10 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
     antigravitySafetyHateSpeech: options.antigravitySafetyHateSpeech,
     antigravitySafetySexuallyExplicit: options.antigravitySafetySexuallyExplicit,
     antigravitySafetyDangerousContent: options.antigravitySafetyDangerousContent,
+    grokExecutableMode: options.grokExecutableMode,
+    grokBin: options.grokBin,
+    grokModel: options.grokModel,
+    grokImageModel: options.grokImageModel,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };

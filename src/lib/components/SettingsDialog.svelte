@@ -303,7 +303,9 @@
   }
 
   function providerLabel(provider: AiProvider): string {
-    return provider === 'antigravity' ? 'Antigravity' : 'Codex';
+    if (provider === 'antigravity') return 'Antigravity';
+    if (provider === 'grok') return 'Grok';
+    return 'Codex';
   }
 
   function directorProviderLabel(provider: AiDirectorProvider): string {
@@ -772,6 +774,7 @@
               <option value="codex">Codex</option>
               <option value="antigravity">Antigravity</option>
               <option value="claude">Claude</option>
+              <option value="grok">Grok</option>
             </select>
           </label>
 
@@ -799,6 +802,7 @@
             >
               <option value="codex">Codex image generator</option>
               <option value="antigravity">Antigravity image generator</option>
+              <option value="grok">Grok image generator</option>
             </select>
           </label>
         </div>
@@ -1428,6 +1432,16 @@
                         />
                         <span>Claude</span>
                       </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="profile-director-provider"
+                          value="grok"
+                          checked={profileDraftOptions.directorProvider === 'grok'}
+                          onchange={() => updateProfileDraftOptions({ directorProvider: 'grok' })}
+                        />
+                        <span>Grok</span>
+                      </label>
                     </div>
 
                     <label class="field">
@@ -1600,6 +1614,16 @@
                           updateProfileDraftOptions({ provider: 'antigravity', imageProvider: 'antigravity' })}
                       />
                       <span>Antigravity</span>
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="profile-image-provider"
+                        value="grok"
+                        checked={profileDraftOptions.imageProvider === 'grok'}
+                        onchange={() => updateProfileDraftOptions({ provider: 'grok', imageProvider: 'grok' })}
+                      />
+                      <span>Grok</span>
                     </label>
                   </div>
 

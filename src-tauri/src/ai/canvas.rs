@@ -41,6 +41,7 @@ struct ImageModelCapabilities {
 struct ImageProviderCapabilities {
     codex: CodexImageCapability,
     antigravity: AntigravityImageCapability,
+    grok: AntigravityImageCapability,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -122,6 +123,10 @@ pub(crate) fn ai_codex_image_capability() -> &'static CodexImageCapability {
 
 pub(crate) fn ai_antigravity_image_capability() -> &'static AntigravityImageCapability {
     &ai_image_model_capabilities().providers.antigravity
+}
+
+pub(crate) fn ai_grok_image_capability() -> &'static AntigravityImageCapability {
+    &ai_image_model_capabilities().providers.grok
 }
 
 pub(crate) fn ai_exact_working_canvas(

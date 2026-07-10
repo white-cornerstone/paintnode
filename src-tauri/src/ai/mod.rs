@@ -6,6 +6,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod director;
 pub(crate) mod fill_storyboard;
+pub(crate) mod grok;
 pub(crate) mod placement;
 
 use std::collections::HashMap;
@@ -229,6 +230,7 @@ pub(crate) const PAINTNODE_WORK_DIR: &str = "paintnode";
 pub(crate) const CODEX_RUNS_DIR: &str = "codex-runs";
 pub(crate) const CLAUDE_RUNS_DIR: &str = "claude-runs";
 pub(crate) const ANTIGRAVITY_RUNS_DIR: &str = "antigravity-runs";
+pub(crate) const GROK_RUNS_DIR: &str = "grok-runs";
 
 fn ai_cli_path() -> String {
     let mut entries: Vec<String> = std::env::var_os("PATH")
@@ -510,6 +512,7 @@ pub(crate) enum AiDirectorProvider {
     Codex,
     Antigravity,
     Claude,
+    Grok,
 }
 
 impl AiDirectorProvider {
@@ -518,6 +521,7 @@ impl AiDirectorProvider {
             Self::Codex => "Codex",
             Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
+            Self::Grok => "Grok",
         }
     }
 }
@@ -550,6 +554,15 @@ pub(crate) fn ai_provider_features(provider: AiDirectorProvider) -> AiProviderFe
             autonomous_subagents: true,
             managed_subagents: false,
             structured_progress: false,
+        },
+        AiDirectorProvider::Grok => AiProviderFeatureCapabilities {
+            transport: "cli".into(),
+            session_reuse: true,
+            structured_output: true,
+            app_mediated_user_input: false,
+            autonomous_subagents: true,
+            managed_subagents: false,
+            structured_progress: true,
         },
     }
 }
@@ -625,6 +638,8 @@ pub(crate) fn ensure_agent_run_dirs(project_path: &Path) -> Result<(), String> {
             .join(ANTIGRAVITY_RUNS_DIR),
     )
     .map_err(|e| format!("Failed to create Antigravity runs folder: {e}"))?;
+    fs::create_dir_all(project_path.join(PAINTNODE_WORK_DIR).join(GROK_RUNS_DIR))
+        .map_err(|e| format!("Failed to create Grok runs folder: {e}"))?;
     Ok(())
 }
 
@@ -887,9 +902,14 @@ pub(crate) fn sanitize_progress_line(line: &str) -> Option<String> {
 }
 
 fn normalize_progress_run_dir_references(text: String) -> String {
-    [CODEX_RUNS_DIR, CLAUDE_RUNS_DIR, ANTIGRAVITY_RUNS_DIR]
-        .into_iter()
-        .fold(text, |current, dir| {
+    [
+        CODEX_RUNS_DIR,
+        CLAUDE_RUNS_DIR,
+        ANTIGRAVITY_RUNS_DIR,
+        GROK_RUNS_DIR,
+    ]
+    .into_iter()
+    .fold(text, |current, dir| {
             [
                 (format!("`{dir}` directory"), "job folder"),
                 (format!("`{dir}` folder"), "job folder"),
@@ -1546,6 +1566,7 @@ pub(crate) fn ai_director_provider(value: Option<String>) -> AiDirectorProvider 
     {
         Some("antigravity") | Some("agy") | Some("gemini") => AiDirectorProvider::Antigravity,
         Some("claude") => AiDirectorProvider::Claude,
+        Some("grok") | Some("xai") => AiDirectorProvider::Grok,
         _ => AiDirectorProvider::Codex,
     }
 }
