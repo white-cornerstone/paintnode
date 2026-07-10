@@ -156,6 +156,12 @@ Square result is a separate editor action and reports success only when the
 editor returns a real inserted layer identifier; an absent active document is
 surfaced as a recovery action rather than a false success.
 
+Progress observation must not delay that baseline capture. The board starts
+listener registration, invokes the store run synchronously before awaiting the
+listener, and disposes the listener after the run even when registration
+resolves late. Target, assets, provider adapters and options, project path, and
+project identity are therefore snapshots of the click that started the run.
+
 ## WorkflowGraph v2
 
 The persisted graph should contain:

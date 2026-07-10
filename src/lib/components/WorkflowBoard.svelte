@@ -42,6 +42,7 @@
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
     findOpenCreatorNodePlacement,
+    runWithAsyncObserver,
     workflowReadiness,
     type CreatorNodeType,
     type WorkflowNodePort,
@@ -126,6 +127,7 @@
   let storyboardAnnotationDraft = $state<AnnotationItem | null>(null);
   let storyboardAnnotationDragStart: { x: number; y: number } | null = null;
   let stopProgress: UnlistenFn | null = null;
+  let boardDestroyed = false;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
   let handledFocusRequest = 0;
@@ -185,6 +187,7 @@
   });
 
   onDestroy(() => {
+    boardDestroyed = true;
     endStoryboardEditSession();
     stopProgress?.();
     if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
@@ -1507,57 +1510,72 @@
     progress = 'Preparing workflow assets...';
     const runId = createRunId();
     const runProjectPath = project.path;
+    const runProvider = imageProvider;
+    const runAssets = assets.map((asset) => ({ ...asset }));
+    const executors = [
+      createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
+        runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+      )),
+      createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+        runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+      )),
+    ];
     stopProgress?.();
     stopProgress = null;
-    try {
-      stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-        if (event.payload.runId === runId && event.payload.message.trim()) {
-          progress = event.payload.message.trim();
-        }
-      });
-    } catch {
-      progress = aiRunningLabel(imageProvider);
-    }
 
     try {
-      const executors = [
-        createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
-          runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-        )),
-        createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
-          runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-        )),
-      ];
-      const outcome = await workflow.runCampaignGenerate(targetOutput.id, {
-        projectPath: runProjectPath,
-        provider: imageProvider,
-        executors,
-        assets,
-        currentProjectIdentity: () => project.identity,
-        readAsset: (asset) => {
-          if (!runProjectPath) throw new Error('No project is open.');
-          return readProjectFile(runProjectPath, asset.relativePath);
+      const outcome = await runWithAsyncObserver({
+        register: async () => {
+          const unlisten = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
+            if (event.payload.runId === runId && event.payload.message.trim()) {
+              progress = event.payload.message.trim();
+            }
+          });
+          let disposed = false;
+          const dispose = () => {
+            if (disposed) return;
+            disposed = true;
+            if (stopProgress === dispose) stopProgress = null;
+            unlisten();
+          };
+          if (boardDestroyed) dispose();
+          else stopProgress = dispose;
+          return dispose;
         },
-        readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
-          if (storyboard.dataUrl) {
-            return new Uint8Array(await (await fetch(storyboard.dataUrl)).arrayBuffer());
-          }
-          if (!storyboard.oraPath) return null;
-          if (!runProjectPath) throw new Error('No project is open.');
-          const bytes = await readProjectFile(runProjectPath, storyboard.oraPath);
-          const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-          return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
+        onRegistrationError: () => {
+          progress = aiRunningLabel(runProvider);
         },
-        storeAsset: async (artifact) => (await storeProjectAssetBytes({
-          projectPath: artifact.projectPath,
-          name: artifact.name,
-          bytes: artifact.bytes,
-          kind: 'generated',
-          prompt: artifact.prompt,
-          width: artifact.width,
-          height: artifact.height,
-          mime: artifact.mime,
-        })).asset,
+        run: () => workflow.runCampaignGenerate(targetOutput.id, {
+          projectPath: runProjectPath,
+          provider: runProvider,
+          executors,
+          assets: runAssets,
+          currentProjectIdentity: () => project.identity,
+          readAsset: (asset) => {
+            if (!runProjectPath) throw new Error('No project is open.');
+            return readProjectFile(runProjectPath, asset.relativePath);
+          },
+          readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
+            if (storyboard.dataUrl) {
+              return new Uint8Array(await (await fetch(storyboard.dataUrl)).arrayBuffer());
+            }
+            if (!storyboard.oraPath) return null;
+            if (!runProjectPath) throw new Error('No project is open.');
+            const bytes = await readProjectFile(runProjectPath, storyboard.oraPath);
+            const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+            return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
+          },
+          storeAsset: async (artifact) => (await storeProjectAssetBytes({
+            projectPath: artifact.projectPath,
+            name: artifact.name,
+            bytes: artifact.bytes,
+            kind: 'generated',
+            prompt: artifact.prompt,
+            width: artifact.width,
+            height: artifact.height,
+            mime: artifact.mime,
+          })).asset,
+        }),
       });
       if (!outcome.committed) {
         if (project.path === runProjectPath) await project.refresh(runProjectPath);
@@ -1572,8 +1590,6 @@
     } finally {
       busy = false;
       progress = '';
-      stopProgress?.();
-      stopProgress = null;
     }
   }
 </script>
