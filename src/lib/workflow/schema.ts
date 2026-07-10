@@ -5,7 +5,7 @@ import {
   safeWorkflowIdentifier,
   safeWorkflowModel,
   safeWorkflowProviderOptions,
-  sanitizeWorkflowFailure,
+  validateWorkflowRunRecordSafety,
 } from './provenanceSafety';
 
 export type WorkflowNodeType =
@@ -543,10 +543,10 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     : readNonnegativeInteger(value, 'finishedAt', `${path}.finishedAt`, issues);
   const startedAt = readNonnegativeInteger(value, 'startedAt', `${path}.startedAt`, issues);
   const parsedOutputs = outputs.map((output, outputIndex) => parseRunOutput(output, `${path}.outputs[${outputIndex}]`, issues));
-  const parsedFailure = failure ? sanitizeWorkflowFailure({
+  const parsedFailure = failure ? {
     code: readString(failure, 'code', `${path}.failure.code`, issues),
     message: readString(failure, 'message', `${path}.failure.message`, issues),
-  }) : undefined;
+  } : undefined;
   if (finishedAt !== null && finishedAt < startedAt) {
     issues.push({ path: `${path}.finishedAt`, message: `${path}.finishedAt cannot precede startedAt`, severity: 'error' });
   }
@@ -637,6 +637,11 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     ...(typeof value.projectTaskId === 'string' ? { projectTaskId: value.projectTaskId } : {}),
     ...(typeof value.debugArtifactReference === 'string' ? { debugArtifactReference: value.debugArtifactReference } : {}),
   };
+  try {
+    validateWorkflowRunRecordSafety(parsed);
+  } catch (error) {
+    issues.push({ path, message: (error as Error).message, severity: 'error' });
+  }
   return parsed;
 }
 
