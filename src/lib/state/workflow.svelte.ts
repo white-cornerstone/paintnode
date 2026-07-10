@@ -298,6 +298,20 @@ export class WorkflowStore {
     return this.pendingDirectorPatchReview?.proposal ?? null;
   }
 
+  get canUndoDirectorPatch(): boolean {
+    const transaction = this.directorPatchUndoStack.at(-1);
+    return transaction !== undefined
+      && transaction.sessionIdentity === this.workflowSessionIdentity
+      && this.matchesDirectorPatchSnapshot(transaction.after);
+  }
+
+  get canRedoDirectorPatch(): boolean {
+    const transaction = this.directorPatchRedoStack.at(-1);
+    return transaction !== undefined
+      && transaction.sessionIdentity === this.workflowSessionIdentity
+      && this.matchesDirectorPatchSnapshot(transaction.before);
+  }
+
   captureDirectorSession(): WorkflowDirectorSessionToken {
     return Object.freeze({
       sessionIdentity: this.workflowSessionIdentity,

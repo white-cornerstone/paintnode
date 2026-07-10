@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import dialogSource from '../components/WorkflowDirectorDialog.svelte?raw';
+import revisionDialogSource from '../components/WorkflowDirectorRevisionDialog.svelte?raw';
 import boardSource from '../components/WorkflowBoard.svelte?raw';
+import providerFreeRevisionSource from '../integrations/providerFreeWorkflowRevision.ts?raw';
 
 describe('Workflow Director UI contract', () => {
   it('opens an explicit proposal dialog from the workflow board', () => {
@@ -39,5 +41,42 @@ describe('Workflow Director UI contract', () => {
     expect(dialogSource).toContain('liveRequestKey');
     expect(dialogSource).toContain('preview.requestKey === liveRequestKey');
     expect(dialogSource).toContain('acceptDirectorProposalPreview(preview, workflow, liveRequestKey)');
+  });
+
+  it('opens a dedicated current-workflow revision dialog separately from fresh Draft replacement', () => {
+    expect(boardSource).toContain('WorkflowDirectorRevisionDialog');
+    expect(boardSource).toContain('Revise current workflow');
+    expect(boardSource).toContain("qaMode === 'provider-free'");
+    expect(revisionDialogSource).toContain('Revise current workflow');
+    expect(revisionDialogSource).not.toContain('applyDirectorProposal');
+    expect(revisionDialogSource).not.toContain('Accept and replace workflow');
+  });
+
+  it('shows QA Fake revision operations and all patch impact categories before guarded acceptance', () => {
+    expect(revisionDialogSource).toContain('QA Fake');
+    expect(revisionDialogSource).toContain('No discovery, sign-in, AI provider, or image execution');
+    expect(revisionDialogSource).toContain('view.operations');
+    expect(revisionDialogSource).toContain('view.nodeChanges');
+    expect(revisionDialogSource).toContain('view.connectionChanges');
+    expect(revisionDialogSource).toContain('view.requirementChanges');
+    expect(revisionDialogSource).toContain('view.downstreamStaleness');
+    expect(revisionDialogSource).toContain('view.validationIssues');
+    expect(revisionDialogSource).toContain('rejectWorkflowDirectorRevisionPreview');
+    expect(revisionDialogSource).toContain('acceptWorkflowDirectorRevisionPreview');
+  });
+
+  it('cancels in-flight injected revision work and exposes transaction undo and redo status', () => {
+    expect(revisionDialogSource).toContain('AbortController');
+    expect(revisionDialogSource).toContain('controller?.abort()');
+    expect(revisionDialogSource).toContain('workflow.canUndoDirectorPatch');
+    expect(revisionDialogSource).toContain('workflow.canRedoDirectorPatch');
+    expect(revisionDialogSource).toContain('workflow.undoDirectorPatch()');
+    expect(revisionDialogSource).toContain('workflow.redoDirectorPatch()');
+  });
+
+  it('keeps the revision fixture provider-free with no discovery, auth, provider, or image execution calls', () => {
+    expect(revisionDialogSource).toContain('createProviderFreeWorkflowRevisionRequester');
+    expect(revisionDialogSource).not.toContain('createConfiguredWorkflowDirector');
+    expect(providerFreeRevisionSource).not.toMatch(/\b(discover\w*|authenticate\w*|login\w*|execute\w*|generate\w*)\s*\(/i);
   });
 });

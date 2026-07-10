@@ -63,6 +63,7 @@
   } from '../integrations/workflowCompositionExecutors';
   import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
   import WorkflowDirectorDialog from './WorkflowDirectorDialog.svelte';
+  import WorkflowDirectorRevisionDialog from './WorkflowDirectorRevisionDialog.svelte';
 
   type CodexProgressPayload = {
     runId: string;
@@ -114,6 +115,7 @@
   let paletteButton = $state<HTMLButtonElement>();
   let paletteOpen = $state(false);
   let directorOpen = $state(false);
+  let revisionDirectorOpen = $state(false);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -1641,6 +1643,17 @@
       <div class="tray-head node-library">
         <span>Nodes</span>
         <div class="tray-head-actions">
+          {#if qaModeResolved && qaMode === 'provider-free'}
+            <button
+              type="button"
+              aria-label="Revise current workflow"
+              aria-haspopup="dialog"
+              use:tooltip={{ text: 'Revise current workflow · QA Fake', placement: 'right' }}
+              onclick={() => (revisionDirectorOpen = true)}
+            >
+              <Icon svg={ArrowSync} size={14} />
+            </button>
+          {/if}
           <button
             type="button"
             aria-label="Draft with AI Director"
@@ -2370,6 +2383,10 @@
     imageCapabilityReason={providerSelection.ready ? null : providerSelection.label}
     onClose={() => (directorOpen = false)}
   />
+{/if}
+
+{#if revisionDirectorOpen}
+  <WorkflowDirectorRevisionDialog onClose={() => (revisionDirectorOpen = false)} />
 {/if}
 
 <style>
