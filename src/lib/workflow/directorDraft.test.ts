@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createCreatorNode, creatorNodeDefinition } from './registry';
 import { instantiateWorkflowTemplate } from './templates';
+import { workflowReadiness } from './readiness';
 import {
   buildWorkflowDirectorContext,
   createWorkflowDirectorProposal,
@@ -283,6 +284,35 @@ describe('Workflow Director orchestration', () => {
 });
 
 describe('Campaign requirements equivalence', () => {
+  it('treats a strict nine-node Director Campaign with only Product assigned as ready and template-equivalent', () => {
+    const proposal = createWorkflowDirectorProposal(campaignDraft(), context(), { graphId: 'campaign-ready' }).proposal!;
+    const template = instantiateWorkflowTemplate('campaign-composer', { graphId: 'campaign-template' });
+    const readiness = workflowReadiness(proposal.graph, {
+      desktop: true,
+      projectPath: '/virtual/project',
+      assets: [{ id: 'asset-product', relativePath: 'imports/Bottle.png', exists: true }],
+      provider: 'fake',
+      supportedProviders: ['fake'],
+      targetNodeId: 'square',
+    });
+
+    expect(proposal.graph.nodes.filter((node) => node.type === 'input').map((node) => [
+      node.title,
+      node.config.required,
+      node.config.templateRole,
+    ])).toEqual([
+      ['Product', true, undefined],
+      ['Subject', false, undefined],
+      ['Style', false, undefined],
+    ]);
+    expect(isCampaignRequirementsEquivalent(proposal.graph, template)).toEqual({ equivalent: true, differences: [] });
+    expect(readiness.ready).toBe(true);
+    expect(readiness.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'complete',
+      message: '1 required visual input is ready.',
+    });
+  });
+
   it('compares creator requirements, topology, typed named ports, and supported capability semantics—not geometry', () => {
     const proposal = createWorkflowDirectorProposal(campaignDraft(), context(), { graphId: 'campaign-equivalent' }).proposal!;
     const template = instantiateWorkflowTemplate('campaign-composer', { graphId: 'campaign-template' });

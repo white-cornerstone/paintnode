@@ -76,7 +76,7 @@ function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOption
   const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
   for (const slot of slots) {
     const binding = assetBinding(graph, slot);
-    const required = templateSlots.length === 0 || slot.config.required === true;
+    const required = slot.config.required !== false;
     if (required && !binding) {
       return blocked(
         'required-assets',
@@ -112,7 +112,7 @@ function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOption
       );
     }
   }
-  const requiredCount = slots.filter((node) => templateSlots.length === 0 || node.config.required === true).length;
+  const requiredCount = slots.filter((node) => node.config.required !== false).length;
   if (requiredCount === 0 && slots.length === 0) {
     return blocked('required-assets', 'Visual inputs', 'Add at least one visual input before Generate can run.', 'Add a visual input');
   }
