@@ -5,12 +5,68 @@ import {
   type CodexGeneratorConfig,
   type GeneratedImageResult,
 } from './desktop';
+import { listen } from '@tauri-apps/api/event';
 import {
   createWorkflowCompositionExecutor,
   WorkflowTransformExecutionError,
+  type WorkflowNodeExecutionContext,
   type WorkflowNodeExecutor,
   type WorkflowTransformExecutionRequest,
 } from '../workflow/transformExecutor';
+import { runWithAsyncObserver } from '../workflow/runObserver';
+import { WorkflowRunCancelledError } from '../workflow/runControl';
+
+type ProviderProgressPayload = {
+  runId: string;
+  message: string;
+  completed?: number;
+  total?: number;
+};
+
+export interface WorkflowCompositionAdapterDependencies {
+  observeProgress?: (
+    runId: string,
+    report: (payload: Readonly<ProviderProgressPayload>) => void,
+  ) => Promise<() => void>;
+}
+
+async function observeDesktopProgress(
+  runId: string,
+  report: (payload: Readonly<ProviderProgressPayload>) => void,
+): Promise<() => void> {
+  if (!('__TAURI_INTERNALS__' in globalThis)) return () => undefined;
+  return listen<ProviderProgressPayload>('codex-generation-progress', (event) => {
+    if (event.payload.runId === runId) report(event.payload);
+  });
+}
+
+async function executeObservedProvider<T>(
+  runId: string | undefined,
+  context: Readonly<WorkflowNodeExecutionContext>,
+  operation: () => Promise<T>,
+  dependencies: WorkflowCompositionAdapterDependencies,
+): Promise<T> {
+  const execute = async (): Promise<T> => {
+    try {
+      return await operation();
+    } catch (error) {
+      if ((error as Error)?.message === 'The task was stopped.') throw new WorkflowRunCancelledError();
+      throw error;
+    }
+  };
+  if (!runId) return execute();
+  return runWithAsyncObserver({
+    register: () => (dependencies.observeProgress ?? observeDesktopProgress)(runId, (payload) => {
+      if (payload.runId !== runId) return;
+      context.reportProgress({
+        message: payload.message,
+        ...(payload.completed !== undefined ? { completed: payload.completed } : {}),
+        ...(payload.total !== undefined ? { total: payload.total } : {}),
+      });
+    }),
+    run: execute,
+  });
+}
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -106,14 +162,17 @@ async function resultAsset(result: GeneratedImageResult) {
   return { kind: 'project-asset' as const, asset, bytes };
 }
 
-export function createCodexWorkflowTransformExecutor(config: CodexGeneratorConfig): WorkflowNodeExecutor {
-  return createWorkflowCompositionExecutor('codex', async (request) => resultAsset(
-    await composeCodexWorkflow(
+export function createCodexWorkflowTransformExecutor(
+  config: CodexGeneratorConfig,
+  dependencies: WorkflowCompositionAdapterDependencies = {},
+): WorkflowNodeExecutor {
+  return createWorkflowCompositionExecutor('codex', async (request, context) => resultAsset(
+    await executeObservedProvider(config.runId, context, () => composeCodexWorkflow(
       codexConfigForRequest(config, request),
       request.prompt,
       providerSources(request),
       request.output,
-    ),
+    ), dependencies),
   ), {
     executor: { id: 'paintnode-codex-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
@@ -134,14 +193,17 @@ export function createCodexWorkflowTransformExecutor(config: CodexGeneratorConfi
   });
 }
 
-export function createAntigravityWorkflowTransformExecutor(config: AntigravityGeneratorConfig): WorkflowNodeExecutor {
-  return createWorkflowCompositionExecutor('antigravity', async (request) => resultAsset(
-    await composeAntigravityWorkflow(
+export function createAntigravityWorkflowTransformExecutor(
+  config: AntigravityGeneratorConfig,
+  dependencies: WorkflowCompositionAdapterDependencies = {},
+): WorkflowNodeExecutor {
+  return createWorkflowCompositionExecutor('antigravity', async (request, context) => resultAsset(
+    await executeObservedProvider(config.runId, context, () => composeAntigravityWorkflow(
       antigravityConfigForRequest(config, request),
       request.prompt,
       providerSources(request),
       request.output,
-    ),
+    ), dependencies),
   ), {
     executor: { id: 'paintnode-antigravity-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {

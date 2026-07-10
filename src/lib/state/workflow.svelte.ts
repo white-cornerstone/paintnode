@@ -60,6 +60,8 @@ interface ActiveWorkflowTransformRun {
   stopProgress: (() => void) | null;
   progressOpen: boolean;
   cancellation: Promise<WorkflowCancellationResult> | null;
+  completion: Promise<void>;
+  resolveCompletion: () => void;
 }
 
 export interface WorkflowAssetNode {
@@ -246,6 +248,7 @@ export class WorkflowStore {
   private transformRunSequence = 0;
   private workflowSessionIdentity = 0;
   private readonly activeTransformRuns = new Map<string, ActiveWorkflowTransformRun>();
+  private readonly transformStartQueues = new Map<string, Promise<void>>();
   private readonly latestTransformRunSequences = new Map<string, number>();
   private readonly progressRouter = new WorkflowRunProgressRouter();
 
@@ -958,15 +961,46 @@ export class WorkflowStore {
     outputNodeId: string,
     options: WorkflowStoreRunOptions,
   ): Promise<WorkflowTransformStoreOutcome> {
+    const requestedSessionIdentity = this.workflowSessionIdentity;
+    const initialGraph = this.serialize();
+    const outputEdge = initialGraph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
+    const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
+    const previousStart = this.transformStartQueues.get(transformNodeId);
+    let releaseStart!: () => void;
+    const startHeld = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const currentStart = previousStart
+      ? previousStart.catch(() => undefined).then(() => startHeld)
+      : startHeld;
+    this.transformStartQueues.set(transformNodeId, currentStart);
+    const finishStart = (): void => {
+      releaseStart();
+      if (this.transformStartQueues.get(transformNodeId) === currentStart) {
+        this.transformStartQueues.delete(transformNodeId);
+      }
+    };
+    if (previousStart) await previousStart.catch(() => undefined);
+    if (this.workflowSessionIdentity !== requestedSessionIdentity) {
+      finishStart();
+      throw new WorkflowTransformExecutionError(
+        'CANCELLED',
+        'The workflow session changed before Generate could start.',
+        'Run Generate again',
+      );
+    }
+    const superseded = this.activeTransformRuns.get(transformNodeId);
+    if (superseded) {
+      const cancellation = this.cancelActiveTransformRun(superseded);
+      await Promise.all([superseded.completion, cancellation]);
+    }
     const graph = this.serialize();
     const sessionIdentity = this.workflowSessionIdentity;
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
-    const outputEdge = graph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
-    const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
     const sequence = ++this.transformRunSequence;
     const controller = new AbortController();
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
     const activeRun: ActiveWorkflowTransformRun = {
       sequence,
       sessionIdentity,
@@ -977,6 +1011,8 @@ export class WorkflowStore {
       stopProgress: null,
       progressOpen: true,
       cancellation: null,
+      completion,
+      resolveCompletion,
     };
     const externalSignal = options.signal;
     const abortFromExternal = () => controller.abort();
@@ -997,10 +1033,9 @@ export class WorkflowStore {
       }
       return '';
     };
-    const superseded = this.activeTransformRuns.get(transformNodeId);
-    if (superseded) void this.cancelActiveTransformRun(superseded);
     this.latestTransformRunSequences.set(transformNodeId, sequence);
     this.activeTransformRuns.set(transformNodeId, activeRun);
+    finishStart();
     this.transformExecutions = {
       ...this.transformExecutions,
       [transformNodeId]: { state: 'running', message: 'Preparing workflow execution…', assetId: null },
@@ -1092,6 +1127,7 @@ export class WorkflowStore {
       if (this.activeTransformRuns.get(transformNodeId) === activeRun) {
         this.activeTransformRuns.delete(transformNodeId);
       }
+      activeRun.resolveCompletion();
     }
   }
 
@@ -1149,7 +1185,7 @@ export class WorkflowStore {
     this.graphDomain = new WorkflowGraphDomain(result.graph, { idGenerator: this.graphIdGenerator });
     this.projectedGraphRevision = this.graphDomain.revision;
     this.syncReactiveGraph(this.graphDomain, legacyProjection);
-    this.rev = 0;
+    this.rev = result.normalizedInterruptedRuns ? 1 : 0;
     this.savedRev = 0;
   }
 
@@ -1235,6 +1271,7 @@ export class WorkflowStore {
     this.workflowSessionIdentity += 1;
     this.transformExecutions = {};
     this.activeTransformRuns.clear();
+    this.transformStartQueues.clear();
     this.latestTransformRunSequences.clear();
     this.progressRouter.clear();
   }

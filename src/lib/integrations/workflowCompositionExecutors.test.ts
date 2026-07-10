@@ -144,4 +144,41 @@ describe('desktop workflow composition adapters', () => {
     });
     expect(JSON.stringify(provenance)).not.toMatch(/projectPath|antigravityBin|advancedJson|runId|debug|transcript/i);
   });
+
+  it('routes matching native progress through the exact workflow context and disposes the observer', async () => {
+    const dispose = vi.fn();
+    const reportProgress = vi.fn();
+    const observeProgress = vi.fn(async (runId, report) => {
+      expect(runId).toBe('native-run');
+      report({ runId: 'other-run', message: 'adapter receives only filtered events' });
+      report({ runId: 'native-run', message: '/tmp/private-output.png' });
+      return dispose;
+    });
+    const executor = createCodexWorkflowTransformExecutor({
+      model: 'codex-model', projectPath: '/virtual/project', runId: 'native-run',
+    } satisfies CodexGeneratorConfig, { observeProgress });
+
+    await executor.execute(request({ provider: 'codex' }), {
+      identity: {
+        workflowSessionId: 'session-1', workflowId: 'workflow-test',
+        runId: 'native-run', nodeId: 'transform-generate-square',
+      },
+      reportProgress,
+    });
+
+    expect(reportProgress).not.toHaveBeenCalledWith({ message: 'adapter receives only filtered events' });
+    expect(reportProgress).toHaveBeenCalledWith({ message: '/tmp/private-output.png' });
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each(['codex', 'antigravity'] as const)('normalizes exact native stop completion for %s', async (provider) => {
+    services[provider].mockRejectedValueOnce(new Error('The task was stopped.'));
+    const executor = provider === 'codex'
+      ? createCodexWorkflowTransformExecutor({ model: 'codex-model', projectPath: '/virtual/project' } satisfies CodexGeneratorConfig)
+      : createAntigravityWorkflowTransformExecutor({ model: 'agent-model', projectPath: '/virtual/project' } satisfies AntigravityGeneratorConfig);
+
+    await expect(executor.execute(request({ provider }))).rejects.toMatchObject({
+      name: 'WorkflowRunCancelledError',
+    });
+  });
 });

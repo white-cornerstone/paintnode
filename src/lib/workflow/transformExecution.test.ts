@@ -300,7 +300,7 @@ describe('Campaign Composer Generate Transform execution', () => {
     const progress: Array<{ stage: string; message: string; runId: string; nodeId: string }> = [];
     const storeAsset = vi.fn();
     const service = vi.fn(async (_request, context) => {
-      context.reportProgress({ stage: 'running', message: 'Provider working' });
+      context.reportProgress({ message: 'Provider working' });
       providerStarted();
       await gate;
       return {
@@ -350,6 +350,37 @@ describe('Campaign Composer Generate Transform execution', () => {
     await Promise.resolve();
     expect(storeAsset).not.toHaveBeenCalled();
     expect(progress.at(-1)?.stage).toBe('cancelled');
+  });
+
+  it('keeps terminal progress stages under orchestrator ownership', async () => {
+    const progress: Array<{ stage: string; message: string }> = [];
+    const service = vi.fn(async (_request, context) => {
+      context.reportProgress({ stage: 'succeeded', message: 'provider claimed completion' } as never);
+      return {
+        kind: 'project-asset' as const,
+        asset: {
+          id: 'result', name: 'Result.png', relativePath: 'generated/result.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([1, 2, 3]),
+      };
+    });
+
+    await executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', service)],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: vi.fn(),
+      onProgress: (event) => progress.push(event),
+    });
+
+    expect(progress.map(({ stage, message }) => ({ stage, message }))).toEqual([
+      { stage: 'queued', message: 'Queued for execution.' },
+      { stage: 'running', message: 'Execution started.' },
+      { stage: 'running', message: 'provider claimed completion' },
+      { stage: 'succeeded', message: 'Execution completed.' },
+    ]);
   });
 
   it('links a retry to the latest failed attempt while preserving its history', async () => {

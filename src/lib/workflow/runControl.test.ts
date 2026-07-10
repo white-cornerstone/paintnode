@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   resolveWorkflowCancellation,
+  sanitizeWorkflowProgressMessage,
   WorkflowRunProgressRouter,
   type WorkflowRunIdentity,
   type WorkflowRunProgressEvent,
@@ -84,5 +85,24 @@ describe('workflow run control', () => {
       disposition: 'detached',
       message: 'Provider termination was not confirmed; late results will be ignored.',
     });
+    await expect(resolveWorkflowCancellation(async () => undefined, 50)).resolves.toMatchObject({
+      disposition: 'detached',
+    });
+    await expect(resolveWorkflowCancellation(async () => ({ disposition: 'unexpected' } as never), 50))
+      .resolves.toMatchObject({ disposition: 'detached' });
+    await expect(resolveWorkflowCancellation(async () => ({ disposition: 'terminated' }), 50))
+      .resolves.toMatchObject({ disposition: 'terminated' });
+  });
+
+  it.each([
+    '/home/person/private.png',
+    '/var/folders/job/output.png',
+    'file:///Users/person/result.png',
+    String.raw`\\server\share\secret.png`,
+    '../private/result.png',
+    '%2e%2e%2fprivate%2fresult.png',
+    '%252e%252e%252fprivate%252fresult.png',
+  ])('redacts unsafe provider progress paths: %s', (message) => {
+    expect(sanitizeWorkflowProgressMessage(`Writing ${message}`)).toBe('Provider reported progress.');
   });
 });

@@ -27,7 +27,6 @@ import {
   WorkflowRunCancelledError,
   type WorkflowRunIdentity,
   type WorkflowRunProgressEvent,
-  type WorkflowRunProgressUpdate,
 } from './runControl';
 
 export interface WorkflowProjectAsset {
@@ -104,7 +103,11 @@ export interface WorkflowTransformExecutionRequest {
 export interface WorkflowNodeExecutionContext {
   identity: Readonly<WorkflowRunIdentity>;
   signal?: AbortSignal;
-  reportProgress(update: WorkflowRunProgressUpdate): void;
+  reportProgress(update: Readonly<{
+    message: string;
+    completed?: number;
+    total?: number;
+  }>): void;
 }
 
 export interface WorkflowBytesArtifact {
@@ -655,7 +658,12 @@ export async function executeCampaignGenerateTransform(
     nodeId: transform.id,
   });
   let progressSequence = 0;
-  const reportProgress = (update: WorkflowRunProgressUpdate): void => {
+  const reportProgress = (update: {
+    stage: WorkflowRunProgressEvent['stage'];
+    message: string;
+    completed?: number;
+    total?: number;
+  }): void => {
     if (!['queued', 'running', 'cancelling', 'cancelled', 'failed', 'succeeded'].includes(update.stage)) return;
     const message = sanitizeWorkflowProgressMessage(update.message);
     if (update.completed !== undefined && (!Number.isSafeInteger(update.completed) || update.completed < 0)) return;
@@ -678,7 +686,9 @@ export async function executeCampaignGenerateTransform(
   const context: Readonly<WorkflowNodeExecutionContext> = Object.freeze({
     identity,
     signal: options.signal,
-    reportProgress,
+    reportProgress: (update: Parameters<WorkflowNodeExecutionContext['reportProgress']>[0]) => (
+      reportProgress({ ...update, stage: 'running' })
+    ),
   });
   createWorkflowRunRecord({
     id: runId,

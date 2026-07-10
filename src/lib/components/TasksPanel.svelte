@@ -121,7 +121,17 @@
                 <span class="task-progress">{task.progress || task.subtitle}</span>
               </span>
             </button>
-            {#if task.status === 'completed'}
+            {#if task.status === 'running' && aiTasks.canCancel(task)}
+              <button
+                class="task-action"
+                type="button"
+                aria-label={`Cancel ${task.title}`}
+                use:tooltip={{ text: 'Cancel task', placement: 'left' }}
+                onclick={() => void aiTasks.cancel(task.id)}
+              >
+                <Icon svg={Dismiss} size={13} />
+              </button>
+            {:else if task.status === 'completed'}
               <button
                 class="task-action"
                 type="button"

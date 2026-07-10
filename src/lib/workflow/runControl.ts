@@ -34,7 +34,7 @@ export interface WorkflowCancellationResult {
 }
 
 export type WorkflowCancellationHandler = () => Promise<
-  void | Pick<WorkflowCancellationResult, 'disposition'>
+  unknown
 >;
 
 const DETACHED_CANCELLATION: WorkflowCancellationResult = {
@@ -48,8 +48,19 @@ const PROGRESS_STAGES = new Set<WorkflowRunProgressStage>([
 export function sanitizeWorkflowProgressMessage(value: unknown): string {
   if (typeof value !== 'string') return 'Provider reported progress.';
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  let decoded = normalized;
+  for (let depth = 0; depth < 2; depth += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
   if (!normalized || /(?:bearer|access[_-]?token|api[_-]?key|authorization|cookie|secret)/i.test(normalized)
-    || /(?:^|\s)(?:\/Users\/|\/Volumes\/|\/private\/|\/tmp\/|~\/|[A-Za-z]:\\)/.test(normalized)) {
+    || /(?:^|\s)(?:file:|\/Users\/|\/Volumes\/|\/private\/|\/tmp\/|\/home\/|\/var\/|~\/|[A-Za-z]:\\|\\\\)/i.test(decoded)
+    || /(?:^|[\s\\/])\.\.(?:[\\/]|$)/.test(decoded)) {
     return 'Provider reported progress.';
   }
   return normalized.slice(0, 500);
@@ -150,9 +161,12 @@ export async function resolveWorkflowCancellation(
   });
   const cancellation = Promise.resolve()
     .then(cancel)
-    .then((result): WorkflowCancellationResult => result?.disposition === 'detached'
-      ? { ...DETACHED_CANCELLATION }
-      : { disposition: 'terminated', message: 'Provider termination was requested.' })
+    .then((result): WorkflowCancellationResult => (
+      typeof result === 'object' && result !== null
+      && (result as { disposition?: unknown }).disposition === 'terminated'
+        ? { disposition: 'terminated', message: 'Provider termination was acknowledged.' }
+        : { ...DETACHED_CANCELLATION }
+    ))
     .catch(() => ({ ...DETACHED_CANCELLATION }));
   try {
     return await Promise.race([cancellation, timeout]);

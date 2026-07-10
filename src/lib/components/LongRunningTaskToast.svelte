@@ -32,11 +32,12 @@
   const minutes = $derived(task ? Math.max(1, Math.round((now - task.startedAt) / 60_000)) : 0);
 
   async function stopTask(target: AiTask): Promise<void> {
-    if (!target.runId || stopping[target.id]) return;
+    if ((!target.runId && !aiTasks.canCancel(target)) || stopping[target.id]) return;
     stopping = { ...stopping, [target.id]: true };
     aiTasks.setProgress(target.id, 'Stopping...');
     try {
-      await cancelAiRun(target.runId);
+      if (aiTasks.canCancel(target)) await aiTasks.cancel(target.id);
+      else if (target.runId) await cancelAiRun(target.runId);
     } catch (error) {
       aiTasks.setProgress(target.id, 'Stop failed: ' + ((error as Error)?.message ?? String(error)));
       const { [target.id]: _, ...rest } = stopping;
@@ -50,7 +51,7 @@
     <span class="message">
       “{task.title}” has been running for {minutes} min — longer than usual.
     </span>
-    {#if task.runId}
+    {#if task.runId || aiTasks.canCancel(task)}
       <button
         type="button"
         class="stop"

@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
@@ -8,6 +7,7 @@
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
+    cancelAiRun,
     isDesktop,
     providerQaMode,
     readProjectFile,
@@ -29,8 +29,9 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { aiRunningLabel, imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import {
     workflow,
     type WorkflowAssetNode,
@@ -44,7 +45,6 @@
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
     findOpenCreatorNodePlacement,
-    runWithAsyncObserver,
     resolveWorkflowStoryboardRead,
     workflowSha256Text,
     workflowProviderSelection,
@@ -66,13 +66,6 @@
   } from '../integrations/workflowCompositionExecutors';
   import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
 
-  type CodexProgressPayload = {
-    runId: string;
-    message: string;
-    kind?: string;
-    provider?: string;
-    detail?: string;
-  };
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {
@@ -135,7 +128,8 @@
   let storyboardLast = { x: 0, y: 0 };
   let storyboardAnnotationDraft = $state<AnnotationItem | null>(null);
   let storyboardAnnotationDragStart: { x: number; y: number } | null = null;
-  let stopProgress: UnlistenFn | null = null;
+  let activeTransformNodeId = $state<string | null>(null);
+  let activeWorkflowTaskId = $state<string | null>(null);
   let boardDestroyed = false;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
@@ -198,7 +192,6 @@
   onDestroy(() => {
     boardDestroyed = true;
     endStoryboardEditSession();
-    stopProgress?.();
     if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
@@ -1550,39 +1543,41 @@
             runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
           )),
         ];
-    stopProgress?.();
-    stopProgress = null;
-
     try {
-      const outcome = await runWithAsyncObserver({
-        register: async () => {
-          const unlisten = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-            if (event.payload.runId === runId && event.payload.message.trim()) {
-              progress = event.payload.message.trim();
-            }
-          });
-          let disposed = false;
-          const dispose = () => {
-            if (disposed) return;
-            disposed = true;
-            if (stopProgress === dispose) stopProgress = null;
-            unlisten();
-          };
-          if (boardDestroyed) dispose();
-          else stopProgress = dispose;
-          return dispose;
+      activeTransformNodeId = workflow.incoming(targetOutput.id)
+        .find((connection) => connection.targetPortId === 'source')?.from ?? null;
+      const task = aiTasks.create({
+        projectPath: runProjectPath,
+        kind: 'workflow',
+        title: `Workflow: ${targetOutput.name || 'Generate output'}`,
+        subtitle: runProvider,
+        progress,
+        runId,
+        detail: {
+          kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
         },
-        onRegistrationError: () => {
-          progress = runSelection.qaFake
-            ? 'Running deterministic QA Fake output…'
-            : aiRunningLabel(runProvider as 'codex' | 'antigravity');
-        },
-        run: () => workflow.runCampaignGenerate(targetOutput.id, {
+      });
+      activeWorkflowTaskId = task.id;
+      aiTasks.setCancel(task.id, async () => {
+        if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
+      });
+      const outcome = await workflow.runCampaignGenerate(targetOutput.id, {
           projectPath: runProjectPath,
           provider: runProvider,
           executors,
           assets: runAssets,
           currentProjectIdentity: () => project.identity,
+          runIdGenerator: () => runId,
+          ...(runSelection.qaFake ? {} : {
+            cancelExecution: async () => {
+              await cancelAiRun(runId);
+              return { disposition: 'detached' as const };
+            },
+          }),
+          onProgress: (event) => {
+            progress = event.message;
+            aiTasks.setProgress(task.id, event.message);
+          },
           resolveAsset: async (asset) => {
             if (!runProjectPath) throw new Error('No project is open.');
             if (runSelection.qaFake) {
@@ -1617,22 +1612,40 @@
             height: artifact.height,
             mime: artifact.mime,
           })).asset,
-        }),
       });
       if (!outcome.committed) {
         if (project.path === runProjectPath) await project.refresh(runProjectPath);
         error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
         return;
       }
       await project.refresh();
+      aiTasks.complete(task.id, 'Workflow generation completed');
       editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
+      if (activeWorkflowTaskId) {
+        if ((e as { code?: unknown })?.code === 'CANCELLED') aiTasks.complete(activeWorkflowTaskId, 'Cancelled');
+        else aiTasks.fail(activeWorkflowTaskId, error);
+      }
       editor.flash('Workflow generation failed');
     } finally {
+      if (activeWorkflowTaskId) aiTasks.setCancel(activeWorkflowTaskId, null);
       busy = false;
+      activeTransformNodeId = null;
+      activeWorkflowTaskId = null;
       progress = '';
     }
+  }
+
+  async function cancelGenerate(): Promise<void> {
+    if (activeWorkflowTaskId) {
+      await aiTasks.cancel(activeWorkflowTaskId);
+      return;
+    }
+    if (!activeTransformNodeId) return;
+    progress = 'Cancelling…';
+    await workflow.cancelCampaignGenerate(activeTransformNodeId);
   }
 </script>
 
@@ -2272,7 +2285,12 @@
               </div>
             {/each}
           </div>
-          {#if busy}<p class="progress">{progress}</p>{/if}
+          {#if busy}
+            <p class="progress">
+              {progress}
+              <button type="button" onclick={() => void cancelGenerate()}>Cancel</button>
+            </p>
+          {/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
 

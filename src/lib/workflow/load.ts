@@ -13,6 +13,7 @@ export interface WorkflowReadResult {
   graph?: WorkflowGraphV2;
   sourceVersion: number | null;
   requiresExplicitSave: boolean;
+  normalizedInterruptedRuns: boolean;
   issues: WorkflowValidationIssue[];
 }
 
@@ -56,12 +57,15 @@ function validateLoadedGraph(
   issues: WorkflowValidationIssue[] = [],
 ): WorkflowReadResult {
   try {
-    const domain = new WorkflowGraphDomain(normalizeInterruptedWorkflowRuns(graph));
+    const normalizedGraph = normalizeInterruptedWorkflowRuns(graph);
+    const normalizedInterruptedRuns = normalizedGraph !== graph;
+    const domain = new WorkflowGraphDomain(normalizedGraph);
     return {
       ok: true,
       graph: domain.graph,
       sourceVersion,
-      requiresExplicitSave,
+      requiresExplicitSave: requiresExplicitSave || normalizedInterruptedRuns,
+      normalizedInterruptedRuns,
       issues,
     };
   } catch (error) {
@@ -70,6 +74,7 @@ function validateLoadedGraph(
       ok: false,
       sourceVersion,
       requiresExplicitSave: false,
+      normalizedInterruptedRuns: false,
       issues: [...issues, domainIssue(error, graph)],
     };
   }
@@ -88,6 +93,7 @@ export function readWorkflowGraph(input: unknown): WorkflowReadResult {
         ok: false,
         sourceVersion,
         requiresExplicitSave: false,
+        normalizedInterruptedRuns: false,
         issues: [{ path: migrationError.path, message: migrationError.message, severity: 'error' }],
       };
     }
@@ -102,6 +108,7 @@ export function readWorkflowGraph(input: unknown): WorkflowReadResult {
       ok: false,
       sourceVersion,
       requiresExplicitSave: false,
+      normalizedInterruptedRuns: false,
       issues: parsed.issues,
     };
   }
@@ -110,6 +117,7 @@ export function readWorkflowGraph(input: unknown): WorkflowReadResult {
     ok: false,
     sourceVersion,
     requiresExplicitSave: false,
+    normalizedInterruptedRuns: false,
     issues: [{
       path: 'version',
       message: sourceVersion === null

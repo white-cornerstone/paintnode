@@ -179,7 +179,7 @@ describe('WorkflowStore graph adapter', () => {
     const run = store.runCampaignGenerate('output-square', {
       projectPath: '/virtual/project', provider: 'fake',
       executors: [createWorkflowCompositionExecutor('fake', async (_request, context) => {
-        reportLateProgress = () => context.reportProgress({ stage: 'running', message: 'late provider progress' });
+        reportLateProgress = () => context.reportProgress({ message: 'late provider progress' });
         providerStarted();
         await gate;
         return {
@@ -262,13 +262,21 @@ describe('WorkflowStore graph adapter', () => {
     });
 
     const reopened = new WorkflowStore({ idGenerator: ids() });
-    reopened.openFromBytes(new TextEncoder().encode(JSON.stringify(legacyGraph)), null, 'Campaign');
+    reopened.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(legacyGraph)),
+      'workflows/campaign.cxflow.json',
+      'Campaign',
+    );
     const normalized = reopened.graphSnapshot();
     expect(normalized.runRecords.at(-1)).toMatchObject({
       id: 'legacy-running-run', status: 'failed', finishedAt: 200,
       failure: { code: 'INTERRUPTED', message: 'The attempt was interrupted before it completed.' },
     });
     expect(normalized.runRecords.some((record) => record.status === 'running')).toBe(false);
+    expect(reopened.requiresExplicitSave).toBe(true);
+    expect(reopened.savedPath).toBeNull();
+    expect(reopened.migrationSourcePath).toBe('workflows/campaign.cxflow.json');
+    expect(reopened.dirty).toBe(true);
     expect(reopened.transformExecution(interrupted.nodeId)).toMatchObject({
       state: 'failed', message: 'The attempt was interrupted before it completed.',
     });
@@ -303,14 +311,66 @@ describe('WorkflowStore graph adapter', () => {
     };
     const older = store.runCampaignGenerate('output-square', options);
     void older.catch(() => undefined);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
     const newer = store.runCampaignGenerate('output-square', options);
-    await Promise.resolve();
-    expect(resolvers).toHaveLength(1);
-    resolvers[0]('newer');
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[1]('newer');
     expect((await newer).committed).toBe(true);
     await expect(older).rejects.toMatchObject({ code: 'CANCELLED' });
     expect(store.outputNode('output-square')?.outputAssetId).toBe('newer');
     expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded', assetId: 'newer' });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({ attempt: 2, status: 'succeeded' }),
+    ]);
+    const records = store.serialize().runRecords.filter(isFullWorkflowRunRecord);
+    expect(records[0].retryOfRunId).toBeUndefined();
+    expect(records[1].retryOfRunId).toBe(records[0].id);
+  });
+
+  it('serializes three same-node starts into durable cancelled retry history', async () => {
+    const store = campaignStore();
+    const cancelExecution = vi.fn(() => new Promise<never>(() => undefined));
+    const resolvers: Array<(assetId: string) => void> = [];
+    const executor = createWorkflowCompositionExecutor('fake', () => new Promise((resolve) => {
+      resolvers.push((assetId) => resolve({
+        kind: 'project-asset',
+        asset: {
+          id: assetId, name: `${assetId}.png`, relativePath: `generated/${assetId}.png`,
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([7, 8, 9]),
+      }));
+    }));
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: (_nodeId: string, attempt: number) => `run-${attempt}`,
+      cancelExecution,
+      cancellationTimeoutMs: 5,
+    };
+
+    const first = store.runCampaignGenerate('output-square', options);
+    void first.catch(() => undefined);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    const second = store.runCampaignGenerate('output-square', options);
+    void second.catch(() => undefined);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    const third = store.runCampaignGenerate('output-square', options);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+    resolvers[2]('third');
+
+    await expect(first).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(second).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(third).resolves.toMatchObject({ committed: true });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ id: 'run-1', attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({ id: 'run-2', attempt: 2, status: 'cancelled', retryOfRunId: 'run-1' }),
+      expect.objectContaining({ id: 'run-3', attempt: 3, status: 'succeeded', retryOfRunId: 'run-2' }),
+    ]);
+    expect(store.serialize().runRecords.filter(isFullWorkflowRunRecord)[0].retryOfRunId).toBeUndefined();
+    expect(cancelExecution).toHaveBeenCalledTimes(2);
   });
 
   it('does not overwrite workflow edits made while a Transform is running', async () => {
@@ -356,7 +416,7 @@ describe('WorkflowStore graph adapter', () => {
     const run = store.runCampaignGenerate('output-square', {
       projectPath: '/virtual/project', provider: 'fake',
       executors: [createWorkflowCompositionExecutor('fake', async (_request, context) => {
-        reportLate = () => context.reportProgress({ stage: 'running', message: 'late store progress' });
+        reportLate = () => context.reportProgress({ message: 'late store progress' });
         return {
           kind: 'bytes' as const,
           name: 'pending.png', bytes: new Uint8Array([1, 2, 3]), mime: 'image/png',
