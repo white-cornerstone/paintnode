@@ -143,7 +143,7 @@ describe('WorkflowStore graph adapter', () => {
     const reopened = new WorkflowStore({ idGenerator: ids() });
     reopened.openFromBytes(store.toBytes(), null, 'Campaign');
     expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
-      state: 'failed', message: 'The provider could not complete this attempt.', assetId: null,
+      state: 'failed', message: 'The provider could not complete this attempt. Retry Generate.', assetId: null,
     });
   });
 
@@ -278,7 +278,7 @@ describe('WorkflowStore graph adapter', () => {
     expect(reopened.migrationSourcePath).toBe('workflows/campaign.cxflow.json');
     expect(reopened.dirty).toBe(true);
     expect(reopened.transformExecution(interrupted.nodeId)).toMatchObject({
-      state: 'failed', message: 'The attempt was interrupted before it completed.',
+      state: 'failed', message: 'The attempt was interrupted before it completed. Retry Generate.',
     });
     expect(deriveWorkflowNodeRunState(normalized, interrupted.nodeId).acceptedOutputs).toEqual([
       expect.objectContaining({ assetId: 'accepted-result' }),

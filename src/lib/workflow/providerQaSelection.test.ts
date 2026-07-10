@@ -39,6 +39,7 @@ describe('workflow provider QA selection', () => {
     expect(boardSource).toContain('aria-label="QA Fake scenario"');
     expect(boardSource).toContain('<option value="slow-success">Slow / cancellable</option>');
     expect(boardSource).toContain('<option value="failure">Failure / retry</option>');
+    expect(boardSource).toContain("editor.flash(cancelled ? 'Workflow generation cancelled' : 'Workflow generation failed')");
     expect(boardSource).toContain("providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'");
     expect(boardSource).toMatch(/const executors = runSelection\.qaFake\s*\?/);
   });

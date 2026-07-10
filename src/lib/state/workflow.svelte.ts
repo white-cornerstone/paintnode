@@ -1126,8 +1126,9 @@ export class WorkflowStore {
     if (latest.status === 'cancelled') {
       return { state: 'cancelled', message: latest.failure?.message ?? 'The attempt was cancelled.', assetId: null };
     }
+    const failureMessage = latest.failure?.message ?? 'The latest generation attempt did not complete.';
     return {
-      state: 'failed', message: latest.failure?.message ?? 'The latest generation attempt did not complete.', assetId: null,
+      state: 'failed', message: `${failureMessage} Retry Generate.`, assetId: null,
     };
   }
 

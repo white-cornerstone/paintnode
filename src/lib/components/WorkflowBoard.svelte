@@ -1791,11 +1791,12 @@
       editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
+      const cancelled = (e as { code?: unknown })?.code === 'CANCELLED';
       if (activeWorkflowTaskId) {
-        if ((e as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(activeWorkflowTaskId);
+        if (cancelled) aiTasks.markCancelled(activeWorkflowTaskId);
         else aiTasks.fail(activeWorkflowTaskId, error);
       }
-      editor.flash('Workflow generation failed');
+      editor.flash(cancelled ? 'Workflow generation cancelled' : 'Workflow generation failed');
     } finally {
       if (activeWorkflowTaskId) aiTasks.setCancel(activeWorkflowTaskId, null);
       busy = false;
