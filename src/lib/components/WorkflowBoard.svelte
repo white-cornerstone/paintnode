@@ -34,6 +34,7 @@
   import { Add, ArrowSync, CommentNote, Delete, Dismiss, DocumentSave, Edit, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
+  import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
 
   type CodexProgressPayload = {
@@ -733,6 +734,7 @@
   function startConnection(event: PointerEvent, from: WorkflowNodeId): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     const point = boardPoint(event);
+    workflow.connectionError = null;
     connecting = { from, x: point.x, y: point.y };
     event.stopPropagation();
   }
@@ -742,10 +744,6 @@
     workflow.connect(connecting.from, to);
     connecting = null;
     event.stopPropagation();
-  }
-
-  function portTitle(kind: 'input' | 'output', nodeName: string): string {
-    return kind === 'input' ? `Input for ${nodeName}` : `Output from ${nodeName}`;
   }
 
   function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
@@ -1570,6 +1568,9 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
       onpointerup={stopDrag}
       onpointercancel={stopDrag}
     >
+      {#if workflow.connectionError}
+        <p class="connection-error" role="status" aria-live="polite">{workflow.connectionError}</p>
+      {/if}
       <div class="board-world" style={`transform:translate(${workflow.panX + overscrollX}px, ${workflow.panY + overscrollY}px) scale(${workflow.zoom})`}>
         <svg class="links" aria-label="Workflow connections">
           {#each graphConnections as connection (connection.id)}
@@ -1618,19 +1619,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               event.stopPropagation();
             }}
           >
-            <button
-              class="node-port input"
-              aria-label={portTitle('input', node.name)}
-              use:tooltip={{ text: 'Input', placement: 'left' }}
-              onpointerdown={(event) => event.stopPropagation()}
-              onpointerup={(event) => finishConnection(event, node.id)}
-            ></button>
-            <button
-              class="node-port output"
-              aria-label={portTitle('output', node.name)}
-              use:tooltip={{ text: 'Output', placement: 'right' }}
-              onpointerdown={(event) => startConnection(event, node.id)}
-            ></button>
+            <WorkflowNodePorts title={node.name} onStart={(event) => startConnection(event, node.id)} onFinish={(event) => finishConnection(event, node.id)} />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>{assetTitle(node)}</span>
               <div class="node-tools">
@@ -1683,19 +1672,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             event.stopPropagation();
           }}
         >
-          <button
-            class="node-port input"
-            aria-label={portTitle('input', compositionTitle())}
-            use:tooltip={{ text: 'Input', placement: 'left' }}
-            onpointerdown={(event) => event.stopPropagation()}
-            onpointerup={(event) => finishConnection(event, 'composition')}
-          ></button>
-          <button
-            class="node-port output"
-            aria-label={portTitle('output', compositionTitle())}
-            use:tooltip={{ text: 'Output', placement: 'right' }}
-            onpointerdown={(event) => startConnection(event, 'composition')}
-          ></button>
+          <WorkflowNodePorts title={compositionTitle()} onStart={(event) => startConnection(event, 'composition')} onFinish={(event) => finishConnection(event, 'composition')} />
           <div class="node-head">
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
             <div class="node-tools">
@@ -1845,19 +1822,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               event.stopPropagation();
             }}
           >
-            <button
-              class="node-port input"
-              aria-label={portTitle('input', outputTitle(outputNode))}
-              use:tooltip={{ text: 'Input', placement: 'left' }}
-              onpointerdown={(event) => event.stopPropagation()}
-              onpointerup={(event) => finishConnection(event, outputNode.id)}
-            ></button>
-            <button
-              class="node-port output"
-              aria-label={portTitle('output', outputTitle(outputNode))}
-              use:tooltip={{ text: 'Output', placement: 'right' }}
-              onpointerdown={(event) => startConnection(event, outputNode.id)}
-            ></button>
+            <WorkflowNodePorts title={outputTitle(outputNode)} onStart={(event) => startConnection(event, outputNode.id)} onFinish={(event) => finishConnection(event, outputNode.id)} />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
               <div class="node-tools">
@@ -2188,35 +2153,22 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .node-drag-region:active {
     cursor: grabbing;
   }
-  .node-port {
+  .connection-error {
     position: absolute;
-    top: var(--port-y, 50%);
-    z-index: 8;
-    display: grid;
-    place-items: center;
-    width: 13px;
-    height: 13px;
-    padding: 0;
-    border: 2px solid #a6aab2;
-    border-radius: 50%;
-    background: #202123;
-    box-shadow:
-      0 0 0 2px rgba(0, 0, 0, 0.36),
-      0 2px 8px rgba(0, 0, 0, 0.36);
-    transform: translateY(-50%);
-  }
-  .node-port.input {
-    left: -7px;
-    cursor: default;
-  }
-  .node-port.output {
-    right: -7px;
-    cursor: crosshair;
-  }
-  .node-port:hover,
-  .node-port:focus-visible {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 22%, #202123);
+    top: 10px;
+    left: 50%;
+    z-index: 20;
+    max-width: min(520px, calc(100% - 32px));
+    margin: 0;
+    padding: 6px 9px;
+    border: 1px solid color-mix(in srgb, #ffb0b0 45%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, #3b2527 92%, transparent);
+    color: #ffcccc;
+    font-size: 11px;
+    line-height: 1.35;
+    transform: translateX(-50%);
+    pointer-events: none;
   }
   .node-tools {
     display: flex;
