@@ -1290,6 +1290,19 @@ export class WorkflowStore {
     return verification;
   }
 
+  invalidateReviewState(reviewNodeIds: readonly string[]): void {
+    if (reviewNodeIds.length === 0) return;
+    const invalidated = new Set(reviewNodeIds);
+    for (const reviewNodeId of invalidated) {
+      const sequence = (this.reviewVerificationSequences.get(reviewNodeId) ?? 0) + 1;
+      this.reviewVerificationSequences.set(reviewNodeId, sequence);
+    }
+    this.reviewVerifications = Object.fromEntries(
+      Object.entries(this.reviewVerifications)
+        .filter(([reviewNodeId]) => !invalidated.has(reviewNodeId)),
+    );
+  }
+
   async promoteCandidate(
     reviewNodeId: string,
     candidateId: string,

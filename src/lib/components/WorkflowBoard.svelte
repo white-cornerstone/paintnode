@@ -1659,7 +1659,14 @@
       .filter((node) => node.type === 'review')
       .map((node) => node.id);
     const ready = providerSelection.ready && Boolean(providerSelection.provider);
-    if (!ready || reviewNodeIds.length === 0) {
+    if (!ready) {
+      untrack(() => workflow.invalidateReviewState(reviewNodeIds));
+      reviewRefreshGate.reset();
+      reviewVerificationEpoch += 1;
+      return;
+    }
+    if (reviewNodeIds.length === 0) {
+      reviewRefreshGate.reset();
       reviewVerificationEpoch += 1;
       return;
     }

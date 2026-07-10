@@ -34,6 +34,10 @@ export class WorkflowReviewRefreshGate {
     this.#identity = identity;
     return true;
   }
+
+  reset(): void {
+    this.#identity = null;
+  }
 }
 
 export async function resolveWorkflowBoardProjectAsset(

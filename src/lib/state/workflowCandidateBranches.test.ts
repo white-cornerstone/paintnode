@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectAsset } from '../integrations/desktop';
-import { createWorkflowCompositionExecutor, workflowSha256Bytes } from '../workflow';
+import {
+  createWorkflowCompositionExecutor,
+  WorkflowReviewRefreshGate,
+  workflowSha256Bytes,
+} from '../workflow';
 import { WorkflowStore, type WorkflowStoreRunOptions } from './workflow.svelte';
 
 const productBytes = new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]);
@@ -143,6 +147,41 @@ describe('WorkflowStore candidate branches', () => {
     expect(workflow.serialize().reviewPromotions).toHaveLength(1);
     await workflow.refreshReviewState(reviewId, runOptions);
     expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('eligible');
+    expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
+
+    let releaseUnreadyVerification!: () => void;
+    let unreadyVerificationStarted!: () => void;
+    const unreadyStarted = new Promise<void>((resolve) => { unreadyVerificationStarted = resolve; });
+    const unreadyPause = new Promise<void>((resolve) => { releaseUnreadyVerification = resolve; });
+    const unreadyOptions: WorkflowStoreRunOptions = {
+      ...runOptions,
+      resolveAsset: async (asset) => {
+        if (asset.id === generated.id) {
+          unreadyVerificationStarted();
+          await unreadyPause;
+        }
+        return runOptions.resolveAsset(asset);
+      },
+    };
+    const refreshGate = new WorkflowReviewRefreshGate();
+    let refreshCalls = 0;
+    const scheduleRefresh = (refreshOptions: WorkflowStoreRunOptions) => {
+      if (!refreshGate.shouldRefresh('same-ready-context')) return null;
+      refreshCalls += 1;
+      return workflow.refreshReviewState(reviewId, refreshOptions);
+    };
+    const pausedVerification = scheduleRefresh(unreadyOptions)!;
+    await unreadyStarted;
+    workflow.invalidateReviewState([reviewId]);
+    refreshGate.reset();
+    expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('blocked');
+    releaseUnreadyVerification();
+    await expect(pausedVerification).rejects.toThrow(/superseded/i);
+    expect(workflow.reviewVerifications[reviewId]).toBeUndefined();
+    const freshVerification = scheduleRefresh(runOptions)!;
+    expect(scheduleRefresh(runOptions)).toBeNull();
+    await freshVerification;
+    expect(refreshCalls).toBe(2);
     expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
 
     let releaseConcurrentVerification!: () => void;
