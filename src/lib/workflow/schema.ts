@@ -71,11 +71,69 @@ export interface WorkflowAssetReference {
   relativePath: string | null;
 }
 
-export interface WorkflowRunReference {
+export type WorkflowRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface WorkflowMinimalRunReference {
   id: string;
   nodeId: string;
   status?: string;
 }
+
+export interface WorkflowRunSourceAsset {
+  nodeId: string;
+  assetId: string;
+  relativePath: string;
+  contentHash: string;
+}
+
+export interface WorkflowRunPrompt {
+  brief: string;
+  artDirection: string;
+  instructions: string;
+  constraints: string[];
+  effectivePromptHash: string;
+}
+
+export interface WorkflowRunProvider {
+  id: string;
+  model: string | null;
+  effectiveOptions: Record<string, unknown>;
+}
+
+export interface WorkflowRunExecutor {
+  id: string;
+  version: string;
+  requestSchemaVersion: string;
+}
+
+export interface WorkflowRunOutput {
+  assetReferenceId: string;
+  assetId: string;
+  relativePath: string;
+  contentHash: string;
+  acceptedAt?: number;
+}
+
+export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
+  recordVersion: 1;
+  status: WorkflowRunStatus;
+  attempt: number;
+  workflowRevision: string;
+  nodeRevision: string;
+  materialKey: string;
+  sourceAssets: WorkflowRunSourceAsset[];
+  prompt: WorkflowRunPrompt;
+  provider: WorkflowRunProvider;
+  executor: WorkflowRunExecutor;
+  startedAt: number;
+  finishedAt: number | null;
+  outputs: WorkflowRunOutput[];
+  failure?: { code: string; message: string };
+  projectTaskId?: string;
+  debugArtifactReference?: string;
+}
+
+export type WorkflowRunReference = WorkflowMinimalRunReference | WorkflowRunRecordV1;
 
 export interface WorkflowMigrationRecord {
   from: number;
@@ -332,16 +390,132 @@ function parseAssetReference(
   };
 }
 
+function parseRunSourceAsset(value: unknown, path: string, issues: WorkflowValidationIssue[]): WorkflowRunSourceAsset {
+  if (!isRecord(value)) {
+    issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+    return { nodeId: '', assetId: '', relativePath: '', contentHash: '' };
+  }
+  return {
+    nodeId: readString(value, 'nodeId', `${path}.nodeId`, issues),
+    assetId: readString(value, 'assetId', `${path}.assetId`, issues),
+    relativePath: readString(value, 'relativePath', `${path}.relativePath`, issues),
+    contentHash: readString(value, 'contentHash', `${path}.contentHash`, issues),
+  };
+}
+
+function parseRunOutput(value: unknown, path: string, issues: WorkflowValidationIssue[]): WorkflowRunOutput {
+  if (!isRecord(value)) {
+    issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+    return { assetReferenceId: '', assetId: '', relativePath: '', contentHash: '' };
+  }
+  return {
+    assetReferenceId: readString(value, 'assetReferenceId', `${path}.assetReferenceId`, issues),
+    assetId: readString(value, 'assetId', `${path}.assetId`, issues),
+    relativePath: readString(value, 'relativePath', `${path}.relativePath`, issues),
+    contentHash: readString(value, 'contentHash', `${path}.contentHash`, issues),
+    ...(typeof value.acceptedAt === 'number' && Number.isFinite(value.acceptedAt)
+      ? { acceptedAt: value.acceptedAt }
+      : {}),
+  };
+}
+
 function parseRunReference(value: unknown, index: number, issues: WorkflowValidationIssue[]): WorkflowRunReference {
   const path = `runRecords[${index}]`;
   if (!isRecord(value)) {
     issues.push({ path, message: `${path} must be an object`, severity: 'error' });
     return { id: '', nodeId: '' };
   }
-  return {
+  const minimal: WorkflowMinimalRunReference = {
     id: readString(value, 'id', `${path}.id`, issues),
     nodeId: readString(value, 'nodeId', `${path}.nodeId`, issues),
     ...(typeof value.status === 'string' ? { status: value.status } : {}),
+  };
+  if (value.recordVersion === undefined) return minimal;
+  if (value.recordVersion !== 1) {
+    issues.push({ path: `${path}.recordVersion`, message: `${path}.recordVersion must be 1`, severity: 'error' });
+  }
+  const statuses = new Set<WorkflowRunStatus>(['running', 'succeeded', 'failed', 'cancelled']);
+  const status = typeof value.status === 'string' && statuses.has(value.status as WorkflowRunStatus)
+    ? value.status as WorkflowRunStatus
+    : 'failed';
+  if (status !== value.status) {
+    issues.push({ path: `${path}.status`, message: `${path}.status is not supported`, severity: 'error' });
+  }
+  const sourceAssets = Array.isArray(value.sourceAssets) ? value.sourceAssets : [];
+  if (!Array.isArray(value.sourceAssets)) {
+    issues.push({ path: `${path}.sourceAssets`, message: `${path}.sourceAssets must be an array`, severity: 'error' });
+  }
+  const outputs = Array.isArray(value.outputs) ? value.outputs : [];
+  if (!Array.isArray(value.outputs)) {
+    issues.push({ path: `${path}.outputs`, message: `${path}.outputs must be an array`, severity: 'error' });
+  }
+  const prompt = isRecord(value.prompt) ? value.prompt : {};
+  if (!isRecord(value.prompt)) {
+    issues.push({ path: `${path}.prompt`, message: `${path}.prompt must be an object`, severity: 'error' });
+  }
+  const constraints = Array.isArray(prompt.constraints)
+    ? prompt.constraints.filter((item): item is string => typeof item === 'string')
+    : [];
+  if (!Array.isArray(prompt.constraints) || constraints.length !== prompt.constraints.length) {
+    issues.push({ path: `${path}.prompt.constraints`, message: `${path}.prompt.constraints must contain strings`, severity: 'error' });
+  }
+  const provider = isRecord(value.provider) ? value.provider : {};
+  if (!isRecord(value.provider)) {
+    issues.push({ path: `${path}.provider`, message: `${path}.provider must be an object`, severity: 'error' });
+  }
+  const effectiveOptions = isRecord(provider.effectiveOptions) ? clonePersistedValue(provider.effectiveOptions) : {};
+  if (!isRecord(provider.effectiveOptions)) {
+    issues.push({ path: `${path}.provider.effectiveOptions`, message: `${path}.provider.effectiveOptions must be an object`, severity: 'error' });
+  }
+  const executor = isRecord(value.executor) ? value.executor : {};
+  if (!isRecord(value.executor)) {
+    issues.push({ path: `${path}.executor`, message: `${path}.executor must be an object`, severity: 'error' });
+  }
+  const failure = value.failure === undefined ? undefined : isRecord(value.failure) ? value.failure : {};
+  if (value.failure !== undefined && !isRecord(value.failure)) {
+    issues.push({ path: `${path}.failure`, message: `${path}.failure must be an object`, severity: 'error' });
+  }
+  const finishedAt = value.finishedAt === null
+    ? null
+    : readNumber(value, 'finishedAt', `${path}.finishedAt`, issues);
+  return {
+    recordVersion: 1,
+    id: minimal.id,
+    nodeId: minimal.nodeId,
+    status,
+    attempt: readNumber(value, 'attempt', `${path}.attempt`, issues),
+    workflowRevision: readString(value, 'workflowRevision', `${path}.workflowRevision`, issues),
+    nodeRevision: readString(value, 'nodeRevision', `${path}.nodeRevision`, issues),
+    materialKey: readString(value, 'materialKey', `${path}.materialKey`, issues),
+    sourceAssets: sourceAssets.map((asset, sourceIndex) => parseRunSourceAsset(asset, `${path}.sourceAssets[${sourceIndex}]`, issues)),
+    prompt: {
+      brief: readString(prompt, 'brief', `${path}.prompt.brief`, issues),
+      artDirection: readString(prompt, 'artDirection', `${path}.prompt.artDirection`, issues),
+      instructions: readString(prompt, 'instructions', `${path}.prompt.instructions`, issues),
+      constraints,
+      effectivePromptHash: readString(prompt, 'effectivePromptHash', `${path}.prompt.effectivePromptHash`, issues),
+    },
+    provider: {
+      id: readString(provider, 'id', `${path}.provider.id`, issues),
+      model: provider.model === null || typeof provider.model === 'string' ? provider.model : null,
+      effectiveOptions,
+    },
+    executor: {
+      id: readString(executor, 'id', `${path}.executor.id`, issues),
+      version: readString(executor, 'version', `${path}.executor.version`, issues),
+      requestSchemaVersion: readString(executor, 'requestSchemaVersion', `${path}.executor.requestSchemaVersion`, issues),
+    },
+    startedAt: readNumber(value, 'startedAt', `${path}.startedAt`, issues),
+    finishedAt,
+    outputs: outputs.map((output, outputIndex) => parseRunOutput(output, `${path}.outputs[${outputIndex}]`, issues)),
+    ...(failure ? {
+      failure: {
+        code: readString(failure, 'code', `${path}.failure.code`, issues),
+        message: readString(failure, 'message', `${path}.failure.message`, issues),
+      },
+    } : {}),
+    ...(typeof value.projectTaskId === 'string' ? { projectTaskId: value.projectTaskId } : {}),
+    ...(typeof value.debugArtifactReference === 'string' ? { debugArtifactReference: value.debugArtifactReference } : {}),
   };
 }
 

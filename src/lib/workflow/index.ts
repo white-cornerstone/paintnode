@@ -13,3 +13,4 @@ export * from './providerQaSelection';
 export * from './directorDraft';
 export * from './directorProposalSession';
 export * from './directorPatch';
+export * from './provenance';

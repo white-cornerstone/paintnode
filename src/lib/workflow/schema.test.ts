@@ -126,4 +126,54 @@ describe('WorkflowGraph v2 schema', () => {
     expect(serializeWorkflowGraphV2(first)).toBe(serializeWorkflowGraphV2(second));
     expect(parseWorkflowGraphV2(JSON.parse(serializeWorkflowGraphV2(first))).value).toEqual(first);
   });
+
+  it('opens and reserializes legacy minimal v2 run references without data loss', () => {
+    const input = graph();
+    input.nodes[0].runRecordIds = ['legacy-run'];
+    input.runRecords = [{ id: 'legacy-run', nodeId: 'brief', status: 'succeeded' }];
+
+    const parsed = parseWorkflowGraphV2(input);
+
+    expect(parsed).toMatchObject({ ok: true, value: input });
+    expect(JSON.parse(serializeWorkflowGraphV2(parsed.value!)).runRecords).toEqual(input.runRecords);
+  });
+
+  it('strictly parses and canonically serializes a full additive v2 run record', () => {
+    const input = graph();
+    input.nodes[0].runRecordIds = ['run-1'];
+    input.runRecords = [{
+      recordVersion: 1,
+      id: 'run-1',
+      nodeId: 'brief',
+      status: 'succeeded',
+      attempt: 1,
+      workflowRevision: 'sha256:workflow',
+      nodeRevision: 'sha256:node',
+      materialKey: 'workflow-cache-v1:material',
+      sourceAssets: [{
+        nodeId: 'input-product', assetId: 'asset-product', relativePath: 'assets/product.png',
+        contentHash: 'sha256:product',
+      }],
+      prompt: {
+        brief: 'Launch campaign', artDirection: 'Keep the product left', instructions: 'Generate Square',
+        constraints: ['Keep logo readable'], effectivePromptHash: 'sha256:prompt',
+      },
+      provider: { id: 'qa-fake', model: null, effectiveOptions: { quality: 'fixture', nested: { b: 2, a: 1 } } },
+      executor: { id: 'campaign-generate', version: '1', requestSchemaVersion: '1' },
+      startedAt: 100,
+      finishedAt: 120,
+      outputs: [{
+        assetReferenceId: 'asset-ref-square', assetId: 'asset-square', relativePath: 'assets/square.png',
+        contentHash: 'sha256:square', acceptedAt: 120,
+      }],
+    }];
+
+    const parsed = parseWorkflowGraphV2(input);
+    expect(parsed).toMatchObject({ ok: true, value: input });
+    const first = serializeWorkflowGraphV2(parsed.value!);
+    const reordered = structuredClone(input);
+    const full = reordered.runRecords[0] as typeof input.runRecords[0] & { provider: { effectiveOptions: object } };
+    full.provider.effectiveOptions = { nested: { a: 1, b: 2 }, quality: 'fixture' };
+    expect(serializeWorkflowGraphV2(reordered)).toBe(first);
+  });
 });
