@@ -225,8 +225,14 @@ fn fetch_release_manifest(url: &str) -> Result<RuntimeReleaseManifest, String> {
             response.status()
         ));
     }
-    let manifest: RuntimeReleaseManifest = response
-        .json()
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("Could not read provider update manifest: {error}"))?;
+    parse_release_manifest(&bytes)
+}
+
+fn parse_release_manifest(bytes: &[u8]) -> Result<RuntimeReleaseManifest, String> {
+    let manifest: RuntimeReleaseManifest = serde_json::from_slice(bytes)
         .map_err(|error| format!("Provider update manifest is invalid: {error}"))?;
     if manifest.schema_version != 1 {
         return Err(format!(
@@ -656,5 +662,19 @@ mod tests {
     fn semver_compatibility_is_not_lexicographic() {
         assert!(version_at_least("0.10.0", "0.9.9"));
         assert!(!version_at_least("0.9.9", "0.10.0"));
+    }
+
+    #[test]
+    fn release_manifest_parses_json_bytes_without_a_json_content_type() {
+        let manifest = parse_release_manifest(
+            br#"{
+              "schemaVersion": 1,
+              "packages": []
+            }"#,
+        )
+        .expect("release manifest should parse from downloaded bytes");
+
+        assert_eq!(manifest.schema_version, 1);
+        assert!(manifest.packages.is_empty());
     }
 }
