@@ -144,6 +144,33 @@ describe('WorkflowStore candidate branches', () => {
     await workflow.refreshReviewState(reviewId, runOptions);
     expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('eligible');
     expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
+
+    let releaseProviderA!: () => void;
+    let providerAStarted!: () => void;
+    const providerAStartedPromise = new Promise<void>((resolve) => { providerAStarted = resolve; });
+    const providerAGate = new Promise<void>((resolve) => { releaseProviderA = resolve; });
+    const providerAOptions: WorkflowStoreRunOptions = {
+      ...runOptions,
+      selectiveExecutionIdentity: 'review-provider-a',
+      resolveAsset: async (asset) => {
+        if (asset.id === generated.id) {
+          providerAStarted();
+          await providerAGate;
+        }
+        return runOptions.resolveAsset(asset);
+      },
+    };
+    const providerARefresh = workflow.refreshReviewState(reviewId, providerAOptions);
+    await providerAStartedPromise;
+    const providerBOptions: WorkflowStoreRunOptions = {
+      ...runOptions,
+      selectiveExecutionIdentity: 'review-provider-b',
+    };
+    await workflow.refreshReviewState(reviewId, providerBOptions);
+    releaseProviderA();
+    await expect(providerARefresh).rejects.toThrow(/superseded/i);
+    expect(workflow.reviewVerifications[reviewId] as unknown as Record<string, unknown>)
+      .toMatchObject({ optionsIdentity: expect.stringContaining('review-provider-b') });
     const reopened = new WorkflowStore();
     reopened.openFromBytes(workflow.toBytes(), null, 'Reopened promotion');
     expect(reopened.reviewResolution(reviewId)).toMatchObject({

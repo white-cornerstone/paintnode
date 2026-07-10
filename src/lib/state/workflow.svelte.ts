@@ -136,6 +136,7 @@ interface WorkflowReviewVerification {
   assetFingerprint: string;
   materialKey: string;
   verifiedOutputIds: string[];
+  optionsIdentity: string;
 }
 
 export interface WorkflowAssetNode {
@@ -327,6 +328,7 @@ export class WorkflowStore {
   private readonly latestTransformRunSequences = new Map<string, number>();
   private readonly progressRouter = new WorkflowRunProgressRouter();
   private readonly selectivePreflightSnapshots = new WeakMap<object, WorkflowSelectivePreflightSnapshot>();
+  private readonly reviewVerificationSequences = new Map<string, number>();
   private activeSelectiveOperation: ActiveWorkflowSelectiveOperation | null = null;
   private selectiveLifecycleTail: Promise<void> = Promise.resolve();
 
@@ -1222,12 +1224,22 @@ export class WorkflowStore {
     });
   }
 
-  async refreshReviewState(reviewNodeId: string, options: WorkflowStoreRunOptions): Promise<void> {
+  async refreshReviewState(
+    reviewNodeId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<Readonly<WorkflowReviewVerification>> {
+    const sequence = (this.reviewVerificationSequences.get(reviewNodeId) ?? 0) + 1;
+    this.reviewVerificationSequences.set(reviewNodeId, sequence);
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
+    const optionsIdentity = this.reviewOptionsIdentity(options, projectIdentity);
+    if (this.reviewVerifications[reviewNodeId]?.optionsIdentity !== optionsIdentity) {
+      const { [reviewNodeId]: _stale, ...current } = this.reviewVerifications;
+      this.reviewVerifications = current;
+    }
     const graph = this.serialize();
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const sessionIdentity = this.workflowSessionIdentity;
-    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
     const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
     if (!topology.transformNodeId || !topology.outputNodeId) throw new Error('Review requires one unambiguous campaign path.');
     const prepared = await prepareCampaignGenerateTransform(graph, topology.outputNodeId, {
@@ -1255,21 +1267,27 @@ export class WorkflowStore {
         // Missing or unreadable candidate outputs remain recoverably unavailable.
       }
     }
+    if (this.reviewVerificationSequences.get(reviewNodeId) !== sequence) {
+      throw new Error('Review verification was superseded by newer execution options.');
+    }
     if (this.graphRevision !== graphRevision || this.rev !== storeRevision
       || this.workflowSessionIdentity !== sessionIdentity
       || (options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
       throw new Error('The workflow or project changed while Review state was being verified.');
     }
+    const verification = Object.freeze({
+      graphRevision,
+      projectIdentity,
+      assetFingerprint: this.reviewAssetFingerprint(options.assets),
+      materialKey: prepared.materialKey,
+      verifiedOutputIds: Object.freeze([...verifiedOutputIds]) as unknown as string[],
+      optionsIdentity,
+    });
     this.reviewVerifications = {
       ...this.reviewVerifications,
-      [reviewNodeId]: {
-        graphRevision,
-        projectIdentity,
-        assetFingerprint: this.reviewAssetFingerprint(options.assets),
-        materialKey: prepared.materialKey,
-        verifiedOutputIds,
-      },
+      [reviewNodeId]: verification,
     };
+    return verification;
   }
 
   async promoteCandidate(
@@ -1730,11 +1748,10 @@ export class WorkflowStore {
       candidate.type === 'review' && draft.requiredNodeIds.includes(candidate.id)
     ))) {
       try {
-        await this.refreshReviewState(review.id, options);
+        const verification = await this.refreshReviewState(review.id, options);
         this.requireCurrentSelectiveSnapshot(snapshot, options);
-        const verification = this.currentReviewVerification(review.id, options.assets);
         const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId: review.id });
-        if (verification && topology.transformNodeId) {
+        if (topology.transformNodeId) {
           reviewMaterialKeys[topology.transformNodeId] = verification.materialKey;
           materialKeys[topology.transformNodeId] = verification.materialKey;
           verification.verifiedOutputIds.forEach((id) => verifiedReviewOutputIds.add(id));
@@ -1956,6 +1973,25 @@ export class WorkflowStore {
     ]).sort(([left], [right]) => String(left).localeCompare(String(right))));
   }
 
+  private reviewOptionsIdentity(options: WorkflowStoreRunOptions, projectIdentity: string | null): string {
+    return JSON.stringify({
+      provider: options.provider,
+      callerIdentity: options.selectiveExecutionIdentity?.trim() || null,
+      projectIdentity,
+      assets: this.reviewAssetFingerprint(options.assets),
+      executors: options.executors.map((executor) => ({
+        provider: executor.provider,
+        capabilities: [...executor.capabilities].sort(),
+        materialization: executor.materialization ?? null,
+        executor: {
+          id: executor.executor.id,
+          version: executor.executor.version,
+          requestSchemaVersion: executor.executor.requestSchemaVersion,
+        },
+      })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    });
+  }
+
   private currentReviewVerification(
     reviewNodeId: string,
     assets?: readonly WorkflowProjectAsset[],
@@ -1975,6 +2011,7 @@ export class WorkflowStore {
     }
     this.workflowSessionIdentity += 1;
     this.transformExecutions = {};
+    this.reviewVerifications = {};
     this.activeTransformRuns.clear();
     this.transformStartQueues.clear();
     this.latestTransformRunSequences.clear();

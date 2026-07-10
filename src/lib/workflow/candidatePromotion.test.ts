@@ -12,6 +12,7 @@ import { executeWorkflowCandidateBranches } from './candidateBranches';
 import { createWorkflowCompositionExecutor, type ExecuteCampaignGenerateOptions } from './transformExecutor';
 import { createWorkflowRevision, workflowSha256Bytes } from './provenance';
 import { planSelectiveWorkflowExecution } from './selectiveExecution';
+import { workflowReadiness } from './readiness';
 
 const bytes = new Uint8Array([137, 80, 78, 71, 81]);
 const product = {
@@ -209,5 +210,29 @@ describe('workflow candidate promotion', () => {
     reconnected.edges.find((edge) => edge.id === 'edge-transform-review')!.source.nodeId = 'transform-replacement';
     expect(resolveWorkflowReviewTopology(reconnected, { reviewNodeId: 'review-concepts' }))
       .toMatchObject({ state: 'blocked', reason: { code: 'PROMOTED_LINEAGE_INVALID' } });
+  });
+
+  it('requires the Board readiness contract to use a verified Review resolution', async () => {
+    const graph = await reviewGraph();
+    const candidate = deriveWorkflowReviewCandidates(graph, 'review-concepts')[0];
+    const promoted = promoteWorkflowCandidate(graph, {
+      reviewNodeId: 'review-concepts', candidateId: candidate.candidateId,
+      id: 'promotion-readiness', promotedAt: 1100,
+    });
+    const baseOptions = {
+      desktop: true, projectPath: '/virtual/project', provider: 'fake', supportedProviders: ['fake'],
+      targetNodeId: 'output-square',
+      assets: [{ id: product.id, relativePath: product.relativePath, exists: true }],
+      requireVerifiedReview: true,
+    };
+    const unverified = workflowReadiness(promoted, baseOptions);
+    expect(unverified.items.find((item) => item.code === 'review')).toMatchObject({ status: 'blocked' });
+
+    const resolution = resolveWorkflowReviewTopology(promoted, { reviewNodeId: 'review-concepts' });
+    const verified = workflowReadiness(promoted, {
+      ...baseOptions,
+      reviewResolutions: { 'review-concepts': resolution },
+    });
+    expect(verified.items.find((item) => item.code === 'review')).toMatchObject({ status: 'complete' });
   });
 });

@@ -329,6 +329,15 @@ The latest decision is reusable only after the application boundary:
 4. confirms the workflow, project, and asset snapshot did not drift during
    verification.
 
+Verification is also scoped to an explicit execution-options identity:
+provider, caller identity, project, asset fingerprint, and sorted executor
+capability/version descriptors. Overlapping refreshes use a per-Review
+monotonic sequence. A superseded refresh cannot mutate shared Review state,
+and selective planning consumes the exact frozen snapshot returned by its own
+refresh rather than rereading a mutable global result. The Board checklist and
+Generate preflight use this same verified resolution and fail closed while no
+current snapshot exists.
+
 Until all checks pass, the Review reports a recoverable stale, missing, or
 unavailable state. Selective planning must not install the Review cached result,
 consume the asset, or schedule the upstream Transform as an implicit bypass.

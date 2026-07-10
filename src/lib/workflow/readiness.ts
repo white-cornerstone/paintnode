@@ -1,5 +1,9 @@
 import { WorkflowGraphDomain } from './domain';
-import { resolveWorkflowCampaignPath, resolveWorkflowReviewTopology } from './candidatePromotion';
+import {
+  resolveWorkflowCampaignPath,
+  resolveWorkflowReviewTopology,
+  type WorkflowReviewTopologyResolution,
+} from './candidatePromotion';
 import type { WorkflowGraphV2, WorkflowNodeV2 } from './schema';
 
 export type WorkflowReadinessCode =
@@ -27,6 +31,8 @@ export interface WorkflowReadinessOptions {
   supportedProviders?: readonly string[];
   targetNodeId?: string | null;
   allowUnpromotedReview?: boolean;
+  requireVerifiedReview?: boolean;
+  reviewResolutions?: Readonly<Record<string, WorkflowReviewTopologyResolution>>;
 }
 
 export interface WorkflowReadinessItem {
@@ -204,7 +210,20 @@ function reviewReadiness(
 ): WorkflowReadinessItem | null {
   const path = resolveWorkflowCampaignPath(graph, { outputNodeId: output.id });
   if (!path?.reviewNodeId || options.allowUnpromotedReview) return null;
-  const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: path.reviewNodeId });
+  const resolution = options.reviewResolutions?.[path.reviewNodeId]
+    ?? (options.requireVerifiedReview
+      ? {
+          state: 'blocked' as const,
+          reviewNodeId: path.reviewNodeId,
+          transformNodeId: path.transformNodeId,
+          outputNodeId: path.outputNodeId,
+          reason: {
+            code: 'PROMOTED_OUTPUT_UNAVAILABLE' as const,
+            message: 'The promoted candidate has not been verified against the current workflow and project.',
+            action: 'Wait for Review verification or inspect the Review node',
+          },
+        }
+      : resolveWorkflowReviewTopology(graph, { reviewNodeId: path.reviewNodeId }));
   return resolution.state === 'ready'
     ? complete('review', 'Concept review', 'A promoted candidate is ready for downstream use.')
     : blocked('review', 'Concept review', resolution.reason.message, resolution.reason.action);

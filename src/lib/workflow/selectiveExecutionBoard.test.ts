@@ -56,5 +56,7 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('aria-controls={`review-candidate-panel-${node.id}`}');
     expect(boardSource).toContain('aria-labelledby={`review-candidate-tab-${node.id}-${reviewCandidate.candidateId}`}');
     expect(boardSource).toContain('.focus()');
+    expect(boardSource).toContain('requireVerifiedReview: true');
+    expect(boardSource).toContain('reviewResolutions');
   });
 });

@@ -176,6 +176,14 @@
   );
   const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
+  function verifiedReviewResolutions() {
+    return Object.fromEntries(workflow.graphSnapshot().nodes
+      .filter((node) => node.type === 'review')
+      .map((node) => [
+        node.id,
+        workflow.reviewResolution(node.id, assets, true, project.identity),
+      ]));
+  }
   const readiness = $derived.by(() => {
     workflow.rev;
     project.current;
@@ -185,6 +193,8 @@
       assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
       provider: providerSelection.provider,
       supportedProviders: providerSelection.supportedProviders,
+      requireVerifiedReview: true,
+      reviewResolutions: verifiedReviewResolutions(),
     });
   });
 
@@ -196,6 +206,8 @@
       provider: providerSelection.provider,
       supportedProviders: providerSelection.supportedProviders,
       targetNodeId: outputNodeId,
+      requireVerifiedReview: true,
+      reviewResolutions: verifiedReviewResolutions(),
     });
   }
 
