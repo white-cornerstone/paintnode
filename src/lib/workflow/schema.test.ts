@@ -152,14 +152,15 @@ describe('WorkflowGraph v2 schema', () => {
       materialKey: 'workflow-cache-v1:material',
       sourceAssets: [{
         nodeId: 'input-product', assetId: 'asset-product', relativePath: 'assets/product.png',
-        contentHash: 'sha256:product',
+        contentHash: 'sha256:product', name: 'Product', role: 'Hero product',
       }],
       prompt: {
         brief: 'Launch campaign', artDirection: 'Keep the product left', instructions: 'Generate Square',
         constraints: ['Keep logo readable'], effectivePromptHash: 'sha256:prompt',
       },
-      provider: { id: 'qa-fake', model: null, effectiveOptions: { quality: 'fixture', nested: { b: 2, a: 1 } } },
+      provider: { id: 'qa-fake', model: null, effectiveOptions: { imageQuality: 'high', fixture: 'square' } },
       executor: { id: 'campaign-generate', version: '1', requestSchemaVersion: '1' },
+      target: { nodeId: 'output-square', title: 'Square 1:1', width: 1024, height: 1024 },
       startedAt: 100,
       finishedAt: 120,
       outputs: [{
@@ -173,7 +174,52 @@ describe('WorkflowGraph v2 schema', () => {
     const first = serializeWorkflowGraphV2(parsed.value!);
     const reordered = structuredClone(input);
     const full = reordered.runRecords[0] as typeof input.runRecords[0] & { provider: { effectiveOptions: object } };
-    full.provider.effectiveOptions = { nested: { a: 1, b: 2 }, quality: 'fixture' };
+    full.provider.effectiveOptions = { fixture: 'square', imageQuality: 'high' };
     expect(serializeWorkflowGraphV2(reordered)).toBe(first);
+  });
+
+  it.each([
+    ['fractional attempt', (run: Record<string, unknown>) => { run.attempt = 1.5; }],
+    ['negative timestamp', (run: Record<string, unknown>) => { run.startedAt = -1; }],
+    ['finished before start', (run: Record<string, unknown>) => { run.finishedAt = 99; }],
+    ['succeeded without output', (run: Record<string, unknown>) => { run.outputs = []; }],
+    ['failed without failure', (run: Record<string, unknown>) => { run.status = 'failed'; run.outputs = []; delete run.failure; }],
+    ['succeeded with failure', (run: Record<string, unknown>) => { run.failure = { code: 'BAD', message: 'Bad' }; }],
+    ['invalid accepted time', (run: Record<string, unknown>) => {
+      (run.outputs as Array<Record<string, unknown>>)[0].acceptedAt = 121;
+    }],
+    ['absolute output path', (run: Record<string, unknown>) => {
+      (run.outputs as Array<Record<string, unknown>>)[0].relativePath = '/tmp/output.png';
+    }],
+    ['unsafe provider option', (run: Record<string, unknown>) => {
+      (run.provider as { effectiveOptions: Record<string, unknown> }).effectiveOptions = { token: 'secret' };
+    }],
+    ['invalid debug reference', (run: Record<string, unknown>) => { run.debugArtifactReference = '../raw.jsonl'; }],
+  ])('rejects full record invariant: %s', (_label, mutate) => {
+    const input = graph();
+    input.nodes[0].runRecordIds = ['run-1'];
+    const run: Record<string, unknown> = {
+      recordVersion: 1, id: 'run-1', nodeId: 'brief', status: 'succeeded', attempt: 1,
+      workflowRevision: 'sha256:workflow', nodeRevision: 'sha256:node', materialKey: 'workflow-cache-v1:key',
+      sourceAssets: [{
+        nodeId: 'input', assetId: 'asset', relativePath: 'assets/input.png', contentHash: 'sha256:input',
+        name: 'Input', role: 'Product',
+      }],
+      prompt: {
+        brief: 'Brief', artDirection: 'Direction', instructions: 'Generate', constraints: [],
+        effectivePromptHash: 'sha256:prompt',
+      },
+      provider: { id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' } },
+      executor: { id: 'campaign-generate', version: '1', requestSchemaVersion: '1' },
+      target: { nodeId: 'output-square', title: 'Square 1:1', width: 1024, height: 1024 },
+      startedAt: 100, finishedAt: 120,
+      outputs: [{
+        assetReferenceId: 'ref', assetId: 'out', relativePath: 'assets/out.png', contentHash: 'sha256:out', acceptedAt: 120,
+      }],
+    };
+    mutate(run);
+    input.runRecords = [run as never];
+
+    expect(parseWorkflowGraphV2(input).ok).toBe(false);
   });
 });
