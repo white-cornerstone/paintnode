@@ -144,14 +144,31 @@ connect Art Direction directly to an Output continue to validate, serialize,
 and reopen, but that legacy direct edge cannot invoke the new Transform
 executor.
 
-The UI store owns transient `running`, `succeeded`, and `failed` presentation
-and commits a successful returned graph atomically. Per-Transform run tokens
-prevent an older overlapping run from overwriting a newer result. Before
+The UI store owns transient queued/running progress and commits terminal
+cancelled, failed, or successful run records atomically. Progress events are
+runtime-only, sanitized, strictly sequenced, and routed by the complete
+workflow-session, workflow, run, and node identity; they are never serialized.
+Per-Transform run tokens prevent an older overlapping run from overwriting a
+newer result. Before
 binding, the store rechecks the workflow session identity, domain and reactive
 graph revisions, active run token, and project identity captured at start. A
 workflow edit, open/new/close action, project switch, or newer run makes the
 result non-committable; the current graph is preserved and the board cannot
-announce success. Placing the
+announce success.
+
+Cancellation aborts the executor signal synchronously and closes progress
+routing before asking the provider to terminate. Provider termination is
+hard-bounded; failure or timeout becomes a safe detach, and the detached
+promise's late progress, output, or failure is ignored. Opening a different
+workflow or starting a newer attempt applies the same abort-and-detach rule.
+Retry creates a new attempt linked to the latest failed or cancelled attempt on
+the same node and preserves all earlier accepted outputs. A legacy persisted
+`running` record is normalized on load or serialization to a stable failed
+attempt with the creator-safe `INTERRUPTED` recovery message. New executions do
+not persist a running record, so saving during execution cannot reopen into a
+permanent spinner.
+
+Placing the
 Square result is a separate editor action and reports success only when the
 editor returns a real inserted layer identifier; an absent active document is
 surfaced as a recovery action rather than a false success.

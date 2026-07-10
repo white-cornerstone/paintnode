@@ -187,7 +187,7 @@ export function createWorkflowRunRecord(
     )) throw new Error('Accepted output time must fall within a successful run.');
   }
   if (draft.projectTaskId) safeWorkflowIdentifier(draft.projectTaskId, 'Project task ID');
-  if (draft.retryOfRunId) {
+  if (draft.retryOfRunId !== undefined) {
     safeWorkflowIdentifier(draft.retryOfRunId, 'Retry run ID');
     const prior = draft.graph.runRecords.find((record) => record.id === draft.retryOfRunId);
     if (!prior || !isFullWorkflowRunRecord(prior)) {
@@ -271,7 +271,7 @@ export function createWorkflowRunRecord(
     startedAt: draft.startedAt,
     finishedAt: draft.finishedAt,
     outputs: structuredClone(draft.outputs),
-    ...(draft.retryOfRunId ? { retryOfRunId: draft.retryOfRunId } : {}),
+    ...(draft.retryOfRunId !== undefined ? { retryOfRunId: draft.retryOfRunId } : {}),
     ...(draft.failure ? { failure: sanitizeWorkflowFailure(draft.failure) } : {}),
     ...(draft.projectTaskId ? { projectTaskId: draft.projectTaskId } : {}),
     ...(draft.debugArtifactReference ? { debugArtifactReference: draft.debugArtifactReference } : {}),

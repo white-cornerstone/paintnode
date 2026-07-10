@@ -1,9 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { WorkflowStore } from './workflow.svelte';
 import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
 import annotations from '../workflow/fixtures/v1/annotations.json';
 import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
-import { WORKFLOW_GRAPH_VERSION, workflowSha256Bytes, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
+import {
+  WORKFLOW_GRAPH_VERSION,
+  deriveWorkflowNodeRunState,
+  isFullWorkflowRunRecord,
+  serializeWorkflowGraphV2,
+  workflowSha256Bytes,
+  type WorkflowGraphV2,
+  type WorkflowIdGenerator,
+} from '../workflow';
 import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
@@ -160,6 +168,115 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.briefNodes[0].objective).toBe('Edited while failure was pending.');
   });
 
+  it('persists no transient running record and safely detaches a stuck cancellation before late completion', async () => {
+    const store = campaignStore();
+    let finishProvider!: () => void;
+    let providerStarted!: () => void;
+    let reportLateProgress!: () => void;
+    const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { finishProvider = resolve; });
+    const progress = vi.fn();
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async (_request, context) => {
+        reportLateProgress = () => context.reportProgress({ stage: 'running', message: 'late provider progress' });
+        providerStarted();
+        await gate;
+        return {
+          kind: 'project-asset' as const,
+          asset: {
+            id: 'late-result', name: 'Late.png', relativePath: 'generated/late.png',
+            width: 1024, height: 1024, mime: 'image/png',
+          },
+          bytes: new Uint8Array([1, 2, 3]),
+        };
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      cancelExecution: () => new Promise(() => undefined),
+      cancellationTimeoutMs: 5,
+      onProgress: progress,
+      runIdGenerator: () => 'cancel-store-run',
+      clock: () => 100,
+    });
+    void run.catch(() => undefined);
+    await started;
+    expect(store.graphSnapshot().runRecords).toEqual([]);
+
+    await expect(store.cancelCampaignGenerate('transform-generate-square')).resolves.toEqual({
+      disposition: 'detached',
+      message: 'Provider termination was not confirmed; late results will be ignored.',
+    });
+    const callsAfterCancel = progress.mock.calls.length;
+    reportLateProgress();
+    finishProvider();
+    await expect(run).rejects.toMatchObject({ code: 'CANCELLED' });
+    await Promise.resolve();
+
+    expect(progress).toHaveBeenCalled();
+    expect(progress.mock.calls).toHaveLength(callsAfterCancel);
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
+    expect(store.graphSnapshot().runRecords).toEqual([
+      expect.objectContaining({ id: 'cancel-store-run', status: 'cancelled' }),
+    ]);
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'cancelled',
+      message: 'Provider termination was not confirmed; late results will be ignored.',
+      assetId: null,
+    });
+  });
+
+  it('normalizes a legacy persisted running attempt to recoverable interrupted history on reopen', async () => {
+    const source = campaignStore();
+    await source.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'project-asset' as const,
+        asset: {
+          id: 'accepted-result', name: 'Accepted.png', relativePath: 'generated/accepted.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([1, 2, 3]),
+      }))],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: () => 'accepted-run', clock: () => 100,
+    });
+    const legacyGraph = structuredClone(source.graphSnapshot());
+    const accepted = legacyGraph.runRecords.find(isFullWorkflowRunRecord)!;
+    const interrupted = {
+      ...structuredClone(accepted),
+      id: 'legacy-running-run',
+      attempt: 2,
+      status: 'running' as const,
+      startedAt: 200,
+      finishedAt: null,
+      outputs: [],
+    };
+    legacyGraph.runRecords.push(interrupted);
+    legacyGraph.nodes.find((node) => node.id === interrupted.nodeId)!.runRecordIds.push(interrupted.id);
+    expect(JSON.parse(serializeWorkflowGraphV2(legacyGraph)).runRecords.at(-1)).toMatchObject({
+      status: 'failed', failure: { code: 'INTERRUPTED' },
+    });
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(new TextEncoder().encode(JSON.stringify(legacyGraph)), null, 'Campaign');
+    const normalized = reopened.graphSnapshot();
+    expect(normalized.runRecords.at(-1)).toMatchObject({
+      id: 'legacy-running-run', status: 'failed', finishedAt: 200,
+      failure: { code: 'INTERRUPTED', message: 'The attempt was interrupted before it completed.' },
+    });
+    expect(normalized.runRecords.some((record) => record.status === 'running')).toBe(false);
+    expect(reopened.transformExecution(interrupted.nodeId)).toMatchObject({
+      state: 'failed', message: 'The attempt was interrupted before it completed.',
+    });
+    expect(deriveWorkflowNodeRunState(normalized, interrupted.nodeId).acceptedOutputs).toEqual([
+      expect.objectContaining({ assetId: 'accepted-result' }),
+    ]);
+  });
+
   it('keeps the newest overlapping Transform result when an older run finishes late', async () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newFromTemplate('campaign-composer');
@@ -185,12 +302,13 @@ describe('WorkflowStore graph adapter', () => {
       storeAsset: async () => { throw new Error('unused'); },
     };
     const older = store.runCampaignGenerate('output-square', options);
+    void older.catch(() => undefined);
     const newer = store.runCampaignGenerate('output-square', options);
     await Promise.resolve();
-    resolvers[1]('newer');
+    expect(resolvers).toHaveLength(1);
+    resolvers[0]('newer');
     expect((await newer).committed).toBe(true);
-    resolvers[0]('older');
-    expect((await older).committed).toBe(false);
+    await expect(older).rejects.toMatchObject({ code: 'CANCELLED' });
     expect(store.outputNode('output-square')?.outputAssetId).toBe('newer');
     expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded', assetId: 'newer' });
   });
@@ -214,17 +332,65 @@ describe('WorkflowStore graph adapter', () => {
     const store = campaignStore();
     const originalBytes = store.toBytes();
     const deferred = deferredCampaignRun(store);
+    void deferred.run.catch(() => undefined);
     if (action === 'new') store.newFromTemplate('campaign-composer', 'New session');
     else if (action === 'open') store.openFromBytes(originalBytes, null, 'Reopened session');
     else store.close();
     deferred.finish();
-    const outcome = await deferred.run;
+    await expect(deferred.run).rejects.toMatchObject({ code: 'CANCELLED' });
 
-    expect(outcome.committed).toBe(false);
-    expect(outcome.commitMessage).toMatch(/session changed/i);
     expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
     if (action === 'new') expect(store.name).toBe('New session');
     if (action === 'close') expect(store.active).toBe(false);
+  });
+
+  it('aborts a session-switched store operation, closes progress, and starts bounded provider cancellation', async () => {
+    const store = campaignStore();
+    let finishStore!: (asset: ProjectAsset) => void;
+    let storeStarted!: () => void;
+    let reportLate!: () => void;
+    const started = new Promise<void>((resolve) => { storeStarted = resolve; });
+    const stored = new Promise<ProjectAsset>((resolve) => { finishStore = resolve; });
+    const progress = vi.fn();
+    const cancelExecution = vi.fn(async () => ({ disposition: 'terminated' as const }));
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async (_request, context) => {
+        reportLate = () => context.reportProgress({ stage: 'running', message: 'late store progress' });
+        return {
+          kind: 'bytes' as const,
+          name: 'pending.png', bytes: new Uint8Array([1, 2, 3]), mime: 'image/png',
+          width: 1024, height: 1024,
+        };
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => {
+        storeStarted();
+        return stored;
+      },
+      cancelExecution,
+      onProgress: progress,
+      runIdGenerator: () => 'session-switch-store',
+      clock: () => 100,
+    });
+    void run.catch(() => undefined);
+    await started;
+    const progressBeforeClose = progress.mock.calls.length;
+
+    store.close();
+    reportLate();
+    finishStore({
+      id: 'late-store-result', kind: 'generated', name: 'Late.png', relativePath: 'generated/late.png',
+      createdAt: 1, exists: true, width: 1024, height: 1024, mime: 'image/png',
+    });
+    await expect(run).rejects.toMatchObject({ code: 'CANCELLED' });
+    await Promise.resolve();
+
+    expect(cancelExecution).toHaveBeenCalledOnce();
+    expect(progress.mock.calls).toHaveLength(progressBeforeClose);
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
+    expect(store.active).toBe(false);
   });
 
   it('does not bind a late result after the active project identity changes', async () => {

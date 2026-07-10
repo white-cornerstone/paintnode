@@ -157,6 +157,9 @@ describe('workflow run provenance', () => {
     expect(() => createWorkflowRunRecord(draft({
       id: 'retry-other-workflow', attempt: 2, graph, retryOfRunId: 'missing-run',
     }), canonicalHash)).toThrow(/current workflow/i);
+    expect(() => createWorkflowRunRecord(draft({
+      id: 'retry-empty', attempt: 2, graph, retryOfRunId: '',
+    }), canonicalHash)).toThrow(/safe identifier/i);
 
     const secondFailure = createWorkflowRunRecord(draft({
       id: 'run-failed-2', attempt: 2, graph, status: 'failed', outputs: [], finishedAt: 220,

@@ -291,6 +291,108 @@ describe('Campaign Composer Generate Transform execution', () => {
     expect(service).not.toHaveBeenCalled();
   });
 
+  it('records cancellation and ignores a provider completion that arrives after abort', async () => {
+    const controller = new AbortController();
+    let finishProvider!: () => void;
+    let providerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { finishProvider = resolve; });
+    const progress: Array<{ stage: string; message: string; runId: string; nodeId: string }> = [];
+    const storeAsset = vi.fn();
+    const service = vi.fn(async (_request, context) => {
+      context.reportProgress({ stage: 'running', message: 'Provider working' });
+      providerStarted();
+      await gate;
+      return {
+        kind: 'bytes' as const,
+        name: 'late.png',
+        bytes: new Uint8Array([1, 2, 3]),
+        mime: 'image/png',
+        width: 1024,
+        height: 1024,
+      };
+    });
+    const operation = executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', service)],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset,
+      workflowSessionId: 'session-cancel',
+      runIdGenerator: () => 'run-cancelled',
+      signal: controller.signal,
+      onProgress: (event) => progress.push(event),
+      clock: (() => { let now = 100; return () => now += 10; })(),
+    });
+    void operation.catch(() => undefined);
+    await started;
+    controller.abort();
+
+    let cancellation: WorkflowTransformExecutionError | null = null;
+    try {
+      await operation;
+    } catch (error) {
+      cancellation = error as WorkflowTransformExecutionError;
+    }
+    expect(cancellation).toMatchObject({ code: 'CANCELLED' });
+    expect(cancellation?.failureGraph?.runRecords).toEqual([
+      expect.objectContaining({
+        id: 'run-cancelled', status: 'cancelled', outputs: [],
+        failure: { code: 'CANCELLED', message: 'The attempt was cancelled.' },
+      }),
+    ]);
+    expect(progress.map((event) => event.stage)).toEqual(['queued', 'running', 'running', 'cancelled']);
+    expect(progress.every((event) => event.runId === 'run-cancelled'
+      && event.nodeId === 'transform-generate-square')).toBe(true);
+
+    finishProvider();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(storeAsset).not.toHaveBeenCalled();
+    expect(progress.at(-1)?.stage).toBe('cancelled');
+  });
+
+  it('links a retry to the latest failed attempt while preserving its history', async () => {
+    let failedGraph = boundCampaign();
+    try {
+      await executeCampaignGenerateTransform(failedGraph, 'output-square', {
+        projectPath: '/virtual/project', provider: 'fake',
+        executors: [createWorkflowCompositionExecutor('fake', async () => { throw new Error('failed'); })],
+        assets: [productAsset],
+        resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+        storeAsset: vi.fn(),
+        runIdGenerator: () => 'run-failed',
+        clock: () => 100,
+      });
+    } catch (error) {
+      failedGraph = (error as WorkflowTransformExecutionError).failureGraph!;
+    }
+
+    const result = await executeCampaignGenerateTransform(failedGraph, 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'project-asset' as const,
+        asset: {
+          id: 'retry-result', name: 'Retry.png', relativePath: 'generated/retry.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([4, 5, 6]),
+      }))],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: vi.fn(),
+      retryOfRunId: 'run-failed',
+      runIdGenerator: () => 'run-retry',
+      clock: () => 200,
+    });
+
+    expect(result.graph.runRecords).toHaveLength(2);
+    expect(result.graph.runRecords[0]).toMatchObject({ id: 'run-failed', status: 'failed' });
+    expect(result.graph.runRecords[1]).toMatchObject({
+      id: 'run-retry', status: 'succeeded', retryOfRunId: 'run-failed',
+    });
+  });
+
   it('rejects malformed or wrong-sized results atomically and preserves an earlier output binding', async () => {
     const graph = boundCampaign();
     const square = graph.nodes.find((node) => node.id === 'output-square')!;
