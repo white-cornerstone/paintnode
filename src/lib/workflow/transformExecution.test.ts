@@ -439,7 +439,10 @@ describe('Campaign Composer Generate Transform execution', () => {
       storyboardAnnotationItems: [{ id: 'note-1', x: 0.2, y: 0.35, text: 'Keep the product left' }],
       storyboardAnnotationsVisible: true,
     };
-    const readStoryboard = vi.fn(async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    const readStoryboard = vi.fn(async () => ({
+      bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+      relativePath: 'storyboards/embedded-composition.png',
+    }));
     let seen!: WorkflowTransformExecutionRequest;
     const outcome = await executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
@@ -487,7 +490,7 @@ describe('Campaign Composer Generate Transform execution', () => {
     expect(outcome.graph.runRecords[0]).toMatchObject({
       sourceAssets: expect.arrayContaining([expect.objectContaining({
         nodeId: 'composition', assetId: 'storyboard-composition',
-        relativePath: 'storyboards/campaign.ora',
+        relativePath: 'storyboards/embedded-composition.png',
         contentHash: workflowSha256Bytes(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])),
       })]),
     });
@@ -504,7 +507,10 @@ describe('Campaign Composer Generate Transform execution', () => {
       }))],
       assets: [productAsset],
       resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
-      readStoryboard: async () => new Uint8Array([137, 80, 78, 71, 99, 98, 97, 96]),
+      readStoryboard: async () => ({
+        bytes: new Uint8Array([137, 80, 78, 71, 99, 98, 97, 96]),
+        relativePath: 'storyboards/embedded-composition.png',
+      }),
       storeAsset: vi.fn(),
       runIdGenerator: () => 'run-storyboard-changed',
     });
@@ -512,7 +518,7 @@ describe('Campaign Composer Generate Transform execution', () => {
     const changedRun = changedStoryboard.graph.runRecords.find(isFullWorkflowRunRecord)!;
     expect(changedRun.sourceAssets).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        relativePath: 'storyboards/campaign.ora',
+        relativePath: 'storyboards/embedded-composition.png',
         contentHash: workflowSha256Bytes(new Uint8Array([137, 80, 78, 71, 99, 98, 97, 96])),
       }),
     ]));

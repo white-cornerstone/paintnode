@@ -61,6 +61,11 @@ export interface WorkflowStoryboardMaterialization extends WorkflowStoryboardDes
   source: { name: string; bytes: Uint8Array } | null;
 }
 
+export interface WorkflowStoryboardRead {
+  bytes: Uint8Array;
+  relativePath: string;
+}
+
 export interface WorkflowTransformExecutionRequest {
   workflowId: string;
   nodeId: string;
@@ -128,7 +133,7 @@ export interface ExecuteCampaignGenerateOptions {
   executors: readonly WorkflowNodeExecutor[];
   assets: readonly WorkflowProjectAsset[];
   resolveAsset: (asset: Readonly<WorkflowProjectAsset>) => Promise<WorkflowAssetMaterial>;
-  readStoryboard?: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => Promise<Uint8Array | null>;
+  readStoryboard?: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => Promise<WorkflowStoryboardRead | null>;
   storeAsset: (request: Readonly<WorkflowAssetStoreRequest>) => Promise<WorkflowProjectAsset>;
   idGenerator?: () => string;
   runIdGenerator?: (nodeId: string, attempt: number) => string;
@@ -463,9 +468,12 @@ export async function executeCampaignGenerateTransform(
     ...storyboard.annotations,
     ...annotationItemConstraints(storyboard.annotationItems, storyboard.width, storyboard.height),
   ] : [];
-  const storyboardBytes = executor.materialization !== 'metadata-only'
+  const storyboardRead = executor.materialization !== 'metadata-only'
     && storyboard && (storyboard.dataUrl || storyboard.oraPath)
     ? await options.readStoryboard?.(deepFreeze(cloneValue(storyboard)) as Readonly<WorkflowStoryboardDescriptor>) ?? null
+    : null;
+  const storyboardBytes = storyboardRead?.bytes instanceof Uint8Array && storyboardRead.bytes.length > 0
+    ? new Uint8Array(storyboardRead.bytes)
     : null;
   const materializedStoryboard: WorkflowStoryboardMaterialization | null = storyboard ? {
     ...storyboard,
@@ -542,7 +550,7 @@ export async function executeCampaignGenerateTransform(
     provenanceSources.push({
       nodeId: artDirection.id,
       assetId: `storyboard-${artDirection.id}`,
-      relativePath: storyboard.oraPath ?? `storyboards/embedded-${artDirection.id}.png`,
+      relativePath: storyboardRead!.relativePath,
       contentHash: workflowSha256Bytes(storyboardBytes),
       name: 'Storyboard sketch',
       role: 'Mandatory layout guide used by the provider',

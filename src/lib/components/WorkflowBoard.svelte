@@ -44,6 +44,7 @@
     creatorNodeFitsPlacementBounds,
     findOpenCreatorNodePlacement,
     runWithAsyncObserver,
+    resolveWorkflowStoryboardRead,
     workflowSha256Bytes,
     workflowSha256Text,
     workflowProviderSelection,
@@ -1593,16 +1594,18 @@
             const bytes = await readProjectFile(runProjectPath, asset.relativePath);
             return { bytes, contentHash: workflowSha256Bytes(bytes) };
           },
-          readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
-            if (storyboard.dataUrl) {
-              return new Uint8Array(await (await fetch(storyboard.dataUrl)).arrayBuffer());
-            }
-            if (!storyboard.oraPath) return null;
-            if (!runProjectPath) throw new Error('No project is open.');
-            const bytes = await readProjectFile(runProjectPath, storyboard.oraPath);
-            const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-            return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
-          },
+          readStoryboard: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => resolveWorkflowStoryboardRead(
+            storyboard,
+            {
+              readEmbedded: async (dataUrl) => new Uint8Array(await (await fetch(dataUrl)).arrayBuffer()),
+              readOra: async (relativePath) => {
+                if (!runProjectPath) throw new Error('No project is open.');
+                const bytes = await readProjectFile(runProjectPath, relativePath);
+                const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+                return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
+              },
+            },
+          ),
           storeAsset: async (artifact) => (await storeProjectAssetBytes({
             projectPath: artifact.projectPath,
             name: artifact.name,
