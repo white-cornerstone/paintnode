@@ -21,6 +21,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Output;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -247,28 +248,105 @@ pub(crate) fn configure_ai_process_group(command: &mut Command) {
 }
 
 /// Force-stop an isolated provider process group and reap its direct child.
-pub(crate) fn terminate_ai_process_tree(child: &mut Child) -> Option<ExitStatus> {
-    let process_id = child.id();
+#[cfg(any(windows, test))]
+fn process_tree_command_result(success: bool, action: &str) -> Result<(), String> {
+    if success {
+        Ok(())
+    } else {
+        Err(format!("{action} did not stop the provider process tree."))
+    }
+}
+
+pub(crate) fn terminate_ai_process_group(process_id: u32) -> Result<(), String> {
     #[cfg(unix)]
     unsafe {
         // configure_ai_process_group makes the direct child the group leader,
-        // therefore its pid is also the process-group id.
-        let _ = libc::kill(-(process_id as i32), libc::SIGKILL);
+        // therefore its pid remains the process-group id after that child exits.
+        if libc::kill(-(process_id as i32), libc::SIGKILL) == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        return Err(format!(
+            "Could not stop provider process group {process_id}: {error}"
+        ));
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let status = Command::new("taskkill")
             .args(["/PID", &process_id.to_string(), "/T", "/F"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .status()
+            .map_err(|error| format!("Could not run taskkill for provider tree: {error}"))?;
+        process_tree_command_result(status.success(), "Windows taskkill")
     }
+}
+
+pub(crate) fn cleanup_ai_process_group_after_bridge_exit(process_id: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        terminate_ai_process_group(process_id)
+    }
+    #[cfg(windows)]
+    {
+        // taskkill cannot address a tree by a parent pid after that parent has
+        // exited. The bounded reader join below detects inherited handles and
+        // fails without hanging; active cancellation still uses checked /T /F.
+        let _ = process_id;
+        Ok(())
+    }
+}
+
+/// Force-stop an isolated provider process group and reap its direct child.
+pub(crate) fn terminate_ai_process_tree(child: &mut Child) -> Result<ExitStatus, String> {
+    let process_id = child.id();
+    let tree_result = terminate_ai_process_group(process_id);
     let _ = child.kill();
-    child.wait().ok()
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not reap provider bridge: {error}"))?;
+    tree_result?;
+    Ok(status)
+}
+
+/// Reader threads normally finish as soon as the isolated process group is
+/// gone. Keep a hard upper bound so an OS-level termination failure or an
+/// unexpected inherited pipe cannot hold the caller indefinitely.
+pub(crate) fn join_output_readers_bounded(
+    readers: Vec<thread::JoinHandle<()>>,
+    timeout: Duration,
+) -> Result<(), String> {
+    if readers.is_empty() {
+        return Ok(());
+    }
+    let count = readers.len();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    for reader in readers {
+        let finished_tx = finished_tx.clone();
+        thread::spawn(move || {
+            let _ = reader.join();
+            let _ = finished_tx.send(());
+        });
+    }
+    drop(finished_tx);
+    let deadline = Instant::now() + timeout;
+    for _ in 0..count {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || finished_rx.recv_timeout(remaining).is_err() {
+            return Err(
+                "Provider output reader cleanup timed out after process termination.".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const OUTPUT_READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 
@@ -1734,6 +1812,67 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_exit_still_kills_descendant_holding_inherited_output_pipe() {
+        let job = TempJobDir::new("paintnode-inherited-pipe-test").expect("temp dir");
+        let descendant_path = job.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$1\"; echo bridge-done")
+            .arg("paintnode-inherited-pipe-test")
+            .arg(&descendant_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        configure_ai_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn short-lived bridge");
+        let process_id = child.id();
+        let mut stream = child.stdout.take().expect("bridge stdout");
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll bridge") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = terminate_ai_process_tree(&mut child);
+                panic!("test bridge did not exit before its descendant");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success());
+        let descendant_id = fs::read_to_string(&descendant_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+
+        cleanup_ai_process_group_after_bridge_exit(process_id).expect("kill lingering group");
+        join_output_readers_bounded(vec![reader], Duration::from_secs(1))
+            .expect("inherited output pipe closed");
+        assert_ne!(unsafe { libc::kill(descendant_id, 0) }, 0);
+    }
+
+    #[test]
+    fn process_tree_command_failure_is_never_reported_as_success() {
+        assert!(process_tree_command_result(true, "Windows taskkill").is_ok());
+        let error = process_tree_command_result(false, "Windows taskkill").unwrap_err();
+        assert!(error.contains("did not stop the provider process tree"));
+    }
+
+    #[test]
+    fn output_reader_cleanup_has_a_hard_timeout() {
+        let reader = thread::spawn(|| thread::sleep(Duration::from_millis(100)));
+        let error = join_output_readers_bounded(vec![reader], Duration::from_millis(5))
+            .expect_err("reader cleanup should time out");
+        assert!(error.contains("cleanup timed out"));
     }
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::codex::codex_direct_generate_prompt;

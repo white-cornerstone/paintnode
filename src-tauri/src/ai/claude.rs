@@ -10,11 +10,12 @@ use tauri::AppHandle;
 
 use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 use crate::ai::{
-    ai_provider_features, ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled,
-    codex_agent_message_text, configure_ai_process_group, output_tail, spawn_output_reader,
+    ai_provider_features, ai_run_cancelled, apply_ai_cli_environment,
+    cleanup_ai_process_group_after_bridge_exit, clear_ai_run_cancelled, codex_agent_message_text,
+    configure_ai_process_group, join_output_readers_bounded, output_tail, spawn_output_reader,
     terminate_ai_process_tree, AgentRunResult, AiDirectorProvider, AiModelCapability,
     AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
-    AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
 
@@ -229,6 +230,7 @@ pub(crate) fn run_claude_with_progress(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
+    let process_id = child.id();
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -258,25 +260,35 @@ pub(crate) fn run_claude_with_progress(
         ));
     }
 
-    let status = loop {
+    let mut stopped = false;
+    let (status, tree_cleanup) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for command: {e}"))?
         {
-            break status;
+            break (
+                Ok(status),
+                cleanup_ai_process_group_after_bridge_exit(process_id),
+            );
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = terminate_ai_process_tree(&mut child);
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
+            stopped = true;
+            break (terminate_ai_process_tree(&mut child), Ok(()));
         }
 
         thread::sleep(POLL_INTERVAL);
     };
 
-    for reader in readers {
-        let _ = reader.join();
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    if stopped {
+        clear_ai_run_cancelled(&run_id);
+    }
+    tree_cleanup?;
+    reader_cleanup?;
+    let status = status?;
+    if stopped {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
 
     let stdout = stdout

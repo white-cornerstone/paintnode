@@ -57,10 +57,11 @@ use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
     ai_director_restore_contract, ai_director_workflow_contract, ai_job_project_dir,
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
-    codex_agent_message_text, command_failure, configure_ai_process_group, copy_png_candidate,
-    emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir,
-    output_tail, project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
+    clean_option, cleanup_ai_process_group_after_bridge_exit, cleanup_project_agent_job,
+    cleanup_project_job_enabled, clear_ai_run_cancelled, codex_agent_message_text, command_failure,
+    configure_ai_process_group, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
+    emit_kept_job_dir, join_output_readers_bounded, now_id, optional_project_dir, output_tail,
+    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
     safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, terminate_ai_process_tree, unique_child_path,
@@ -69,7 +70,7 @@ use crate::ai::{
     AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult, DecoupleImageResult,
     DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
     TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
-    CODEX_RUNS_DIR, POLL_INTERVAL,
+    CODEX_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -447,6 +448,7 @@ fn run_codex_with_progress(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
+    let process_id = child.id();
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -476,25 +478,35 @@ fn run_codex_with_progress(
         ));
     }
 
-    let status = loop {
+    let mut stopped = false;
+    let (status, tree_cleanup) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for command: {e}"))?
         {
-            break status;
+            break (
+                Ok(status),
+                cleanup_ai_process_group_after_bridge_exit(process_id),
+            );
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = terminate_ai_process_tree(&mut child);
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
+            stopped = true;
+            break (terminate_ai_process_tree(&mut child), Ok(()));
         }
 
         thread::sleep(POLL_INTERVAL);
     };
 
-    for reader in readers {
-        let _ = reader.join();
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    if stopped {
+        clear_ai_run_cancelled(&run_id);
+    }
+    tree_cleanup?;
+    reader_cleanup?;
+    let status = status?;
+    if stopped {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
 
     let stdout = stdout
