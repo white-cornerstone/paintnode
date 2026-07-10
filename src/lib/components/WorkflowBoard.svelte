@@ -10,6 +10,7 @@
     antigravityConfigFromRunOptions,
     isDesktop,
     providerQaMode,
+    readProjectAsset,
     readProjectFile,
     storeProjectAssetBytes,
     type ProjectAsset,
@@ -1580,9 +1581,10 @@
           executors,
           assets: runAssets,
           currentProjectIdentity: () => project.identity,
-          readAsset: (asset) => {
+          readAsset: async (asset) => {
             if (!runProjectPath) throw new Error('No project is open.');
-            return readProjectFile(runProjectPath, asset.relativePath);
+            const result = await readProjectAsset(runProjectPath, asset.id);
+            return new Uint8Array(await (await fetch(result.dataUrl)).arrayBuffer());
           },
           readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
             if (storyboard.dataUrl) {

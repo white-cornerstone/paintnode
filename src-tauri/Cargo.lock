@@ -2450,6 +2450,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "image",
+ "libc",
  "log",
  "reqwest",
  "semver",
