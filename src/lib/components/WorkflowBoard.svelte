@@ -1767,7 +1767,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             tabindex="-1"
             data-workflow-node={node.id}
             data-creator-node-type="input"
-            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; min-height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'asset', id: node.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'asset', id: node.id });
@@ -1815,33 +1815,35 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </button>
               </div>
             </div>
-            <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
-              {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+            <div class="specialized-node-body asset-node-body">
+              <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
+                {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+              </div>
+              <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
+                <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
+                <select
+                  aria-label={`Asset for ${node.name}`}
+                  data-workflow-required-slot={node.required ? '' : undefined}
+                  value={asset?.id ?? ''}
+                  onchange={(event) => workflow.assignAsset(
+                    node.id,
+                    assets.find((item) => item.id === event.currentTarget.value) ?? null,
+                  )}
+                >
+                  <option value="">Choose from project…</option>
+                  {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+                </select>
+              </label>
+              <textarea
+                aria-label={`Role for ${node.name}`}
+                placeholder={node.guidance || 'role in composition'}
+                value={node.note}
+                onpointerdown={(event) => event.stopPropagation()}
+                oninput={(event) => node.creatorInput
+                  ? workflow.configureCreatorNode(node.id, { role: event.currentTarget.value })
+                  : workflow.setNodeNote(node.id, event.currentTarget.value)}
+              ></textarea>
             </div>
-            <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
-              <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
-              <select
-                aria-label={`Asset for ${node.name}`}
-                data-workflow-required-slot={node.required ? '' : undefined}
-                value={asset?.id ?? ''}
-                onchange={(event) => workflow.assignAsset(
-                  node.id,
-                  assets.find((item) => item.id === event.currentTarget.value) ?? null,
-                )}
-              >
-                <option value="">Choose from project…</option>
-                {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
-              </select>
-            </label>
-            <textarea
-              aria-label={`Role for ${node.name}`}
-              placeholder={node.guidance || 'role in composition'}
-              value={node.note}
-              onpointerdown={(event) => event.stopPropagation()}
-              oninput={(event) => node.creatorInput
-                ? workflow.configureCreatorNode(node.id, { role: event.currentTarget.value })
-                : workflow.setNodeNote(node.id, event.currentTarget.value)}
-            ></textarea>
           </article>
         {/each}
 
@@ -1853,7 +1855,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             tabindex="-1"
             data-workflow-node={brief.id}
             data-creator-node-type="brief"
-            style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; min-height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
+            style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'creator', id: brief.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'creator', id: brief.id });
@@ -1872,13 +1874,15 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
               <small>{briefCreatorDefinition.label}</small>
             </div>
-            <p>{brief.guidance}</p>
-            <textarea
-              aria-label={`${brief.name} objective`}
-              placeholder="Outcome, audience, and non-negotiables…"
-              value={brief.objective}
-              oninput={(event) => workflow.setBriefObjective(brief.id, event.currentTarget.value)}
-            ></textarea>
+            <div class="specialized-node-body brief-node-body">
+              <p>{brief.guidance}</p>
+              <textarea
+                aria-label={`${brief.name} objective`}
+                placeholder="Outcome, audience, and non-negotiables…"
+                value={brief.objective}
+                oninput={(event) => workflow.setBriefObjective(brief.id, event.currentTarget.value)}
+              ></textarea>
+            </div>
           </article>
         {/each}
 
@@ -2219,7 +2223,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             tabindex="-1"
             data-workflow-node={outputNode.id}
             data-creator-node-type="output"
-            style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
+            style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; height:${outputNode.height}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'output', id: outputNode.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'output', id: outputNode.id });
@@ -2250,39 +2254,41 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 ><Icon svg={Delete} size={13} /></button>
               </div>
             </div>
-            <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
-              {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
-            </div>
-            <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
-              <label>
-                Width
-                <input type="number" min="64" step="1" value={outputNode.finalWidth} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, event.currentTarget.valueAsNumber, outputNode.finalHeight)} />
-              </label>
-              <label>
-                Height
-                <input type="number" min="64" step="1" value={outputNode.finalHeight} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, outputNode.finalWidth, event.currentTarget.valueAsNumber)} />
-              </label>
-              <div class="preset-row">
-                <button type="button" onclick={() => applyOutputPreset(outputNode, 1024, 1024)}>1:1</button>
-                <button type="button" onclick={() => applyOutputPreset(outputNode, 1792, 1024)}>Banner</button>
-                <button type="button" onclick={() => applyOutputPreset(outputNode, 1080, 1920)}>IG</button>
+            <div class="specialized-node-body output-node-body">
+              <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
+                {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
               </div>
+              <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+                <label>
+                  Width
+                  <input type="number" min="64" step="1" value={outputNode.finalWidth} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, event.currentTarget.valueAsNumber, outputNode.finalHeight)} />
+                </label>
+                <label>
+                  Height
+                  <input type="number" min="64" step="1" value={outputNode.finalHeight} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, outputNode.finalWidth, event.currentTarget.valueAsNumber)} />
+                </label>
+                <div class="preset-row">
+                  <button type="button" onclick={() => applyOutputPreset(outputNode, 1024, 1024)}>1:1</button>
+                  <button type="button" onclick={() => applyOutputPreset(outputNode, 1792, 1024)}>Banner</button>
+                  <button type="button" onclick={() => applyOutputPreset(outputNode, 1080, 1920)}>IG</button>
+                </div>
+              </div>
+              <div class="output-actions">
+                <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
+                  <Icon svg={PaintBrush} size={14} />
+                  Generate
+                </button>
+                <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
+                  <Icon svg={Open} size={14} />
+                  Place
+                </button>
+              </div>
+              {#if !readiness.ready && readiness.nextAction}
+                <p class="generate-block" id={`generate-block-${outputNode.id}`}>
+                  {readiness.nextAction.action}
+                </p>
+              {/if}
             </div>
-            <div class="output-actions">
-              <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
-                <Icon svg={PaintBrush} size={14} />
-                Generate
-              </button>
-              <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
-                <Icon svg={Open} size={14} />
-                Place
-              </button>
-            </div>
-            {#if !readiness.ready && readiness.nextAction}
-              <p class="generate-block" id={`generate-block-${outputNode.id}`}>
-                {readiness.nextAction.action}
-              </p>
-            {/if}
           </article>
         {/each}
       </div>
@@ -2557,8 +2563,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .creator-node {
     width: 240px;
   }
+  .asset-node,
+  .brief-node,
   .creator-node,
-  .unsupported-node {
+  .unsupported-node,
+  .output-node {
     display: flex;
     flex-direction: column;
   }
@@ -2730,6 +2739,12 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     color: var(--text-dim);
     font-size: 10px;
   }
+  .specialized-node-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
   .creator-node-body > p {
     margin: 0;
     line-height: 1.35;
@@ -2752,6 +2767,10 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   }
   .creator-config-field textarea {
     min-height: 54px;
+    resize: none;
+  }
+  .asset-node textarea,
+  .brief-node textarea {
     resize: none;
   }
   .creator-port-list {
