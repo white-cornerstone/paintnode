@@ -150,6 +150,24 @@ describe('WorkflowStore graph adapter', () => {
     });
   });
 
+  it('does not display arbitrary resolver errors when source materialization fails immediately', async () => {
+    const store = campaignStore();
+    await expect(store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', vi.fn())],
+      assets: [campaignProduct],
+      resolveAsset: async () => { throw new Error('Bearer secret at /Users/alice/private/source.png'); },
+      storeAsset: async () => { throw new Error('unused'); },
+    })).rejects.toThrow(/Bearer secret/);
+
+    expect(store.transformExecution('transform-generate-square')).toEqual({
+      state: 'failed',
+      message: 'The workflow could not prepare this generation attempt. Retry Generate.',
+      assetId: null,
+    });
+    expect(store.transformExecution('transform-generate-square').message).not.toMatch(/alice|Bearer|private/i);
+  });
+
   it('does not persist a failed attempt after the workflow changes while it is running', async () => {
     const store = campaignStore();
     let finish!: () => void;

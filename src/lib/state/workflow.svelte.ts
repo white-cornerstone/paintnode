@@ -1289,7 +1289,8 @@ export class WorkflowStore {
       }
       return { ...outcome, committed: true, commitMessage: 'Generated result applied.' };
     } catch (error) {
-      const failureGraph = error instanceof WorkflowTransformExecutionError ? error.failureGraph : undefined;
+      const ownedFailure = error instanceof WorkflowTransformExecutionError ? error : null;
+      const failureGraph = ownedFailure?.failureGraph;
       if (failureGraph && !commitBlockReason()) {
         this.graphDomain = new WorkflowGraphDomain(failureGraph, { idGenerator: this.graphIdGenerator });
         this.projectedGraphRevision = this.graphDomain.revision;
@@ -1297,8 +1298,9 @@ export class WorkflowStore {
         this.bump();
       }
       if (this.activeTransformRuns.get(transformNodeId) === activeRun) {
-        const cancelled = error instanceof WorkflowTransformExecutionError && error.code === 'CANCELLED';
-        const failureMessage = (error as Error)?.message ?? String(error);
+        const cancelled = ownedFailure?.code === 'CANCELLED';
+        const failureMessage = ownedFailure?.message
+          ?? 'The workflow could not prepare this generation attempt.';
         this.transformExecutions = {
           ...this.transformExecutions,
           [transformNodeId]: {
