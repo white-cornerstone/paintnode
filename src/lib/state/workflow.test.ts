@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AiTaskStore } from './aiTasks.svelte';
 import { WorkflowStore } from './workflow.svelte';
 import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
 import annotations from '../workflow/fixtures/v1/annotations.json';
@@ -16,7 +17,10 @@ import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
-import { createWorkflowCompositionExecutor } from '../workflow/transformExecutor';
+import {
+  WorkflowTransformExecutionError,
+  createWorkflowCompositionExecutor,
+} from '../workflow/transformExecutor';
 
 const material = (bytes: Uint8Array) => ({
   assetId: 'product-asset',
@@ -150,15 +154,32 @@ describe('WorkflowStore graph adapter', () => {
     });
   });
 
-  it('does not display arbitrary resolver errors when source materialization fails immediately', async () => {
+  it('returns fixed safe errors to Board and task callers when source materialization fails immediately', async () => {
     const store = campaignStore();
-    await expect(store.runCampaignGenerate('output-square', {
+    const failure = await store.runCampaignGenerate('output-square', {
       projectPath: '/virtual/project', provider: 'fake',
       executors: [createWorkflowCompositionExecutor('fake', vi.fn())],
       assets: [campaignProduct],
       resolveAsset: async () => { throw new Error('Bearer secret at /Users/alice/private/source.png'); },
       storeAsset: async () => { throw new Error('unused'); },
-    })).rejects.toThrow(/Bearer secret/);
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(WorkflowTransformExecutionError);
+    expect(failure).toMatchObject({
+      code: 'EXECUTOR_ERROR',
+      message: 'The workflow could not prepare this generation attempt.',
+      nextAction: 'Retry Generate',
+    });
+    expect((failure as Error).message).not.toMatch(/alice|Bearer|private/i);
+
+    const tasks = new AiTaskStore();
+    const task = tasks.create({
+      kind: 'workflow', title: 'Workflow: Square', subtitle: 'fake', progress: 'Preparing',
+      detail: { kind: 'workflow', providerLabel: 'fake', outputName: 'Square' },
+    });
+    tasks.fail(task.id, (failure as Error).message);
+    expect(task.error).toBe('The workflow could not prepare this generation attempt.');
+    expect(task.error).not.toMatch(/alice|Bearer|private/i);
 
     expect(store.transformExecution('transform-generate-square')).toEqual({
       state: 'failed',
