@@ -134,6 +134,68 @@ async function seedAcceptedResult(store: WorkflowStore, run: ReturnType<typeof h
 }
 
 describe('WorkflowStore selective execution integration', () => {
+  it.each(['run-node', 'run-from-here'] as const)(
+    'previews Transform %s without provider work and executes only after explicit confirmation',
+    async (mode) => {
+      const store = campaignStore();
+      const run = harness();
+
+      const preflight = await store.preflightSelectiveExecution(
+        mode,
+        'transform-generate-square',
+        { ...run.options(), selectiveExecutionIdentity: 'provider=fake;quality=standard' },
+      );
+
+      expect(preflight.stateByNodeId['transform-generate-square']).toMatchObject({
+        state: 'planned', willExecute: true,
+      });
+      expect(run.providerCalls()).toBe(0);
+
+      const outcome = await store.runSelectiveExecution(
+        preflight,
+        { ...run.options(), selectiveExecutionIdentity: 'provider=fake;quality=standard' },
+      );
+
+      expect(outcome.executedNodeIds).toEqual(['transform-generate-square']);
+      expect(run.providerCalls()).toBe(1);
+    },
+  );
+
+  it.each([
+    ['provider', { provider: 'replacement', selectiveExecutionIdentity: 'provider=fake;quality=standard' }],
+    ['run options', { selectiveExecutionIdentity: 'provider=fake;quality=high' }],
+  ] as const)('rejects a preview after %s change', async (_kind, changed) => {
+    const store = campaignStore();
+    const run = harness();
+    const identity = 'provider=fake;quality=standard';
+    const preflight = await store.preflightSelectiveExecution(
+      'run-node',
+      'transform-generate-square',
+      { ...run.options(), selectiveExecutionIdentity: identity },
+    );
+
+    await expect(store.runSelectiveExecution(
+      preflight,
+      { ...run.options(), ...changed },
+    )).rejects.toThrow(/provider or run options changed after selective preflight/i);
+    expect(run.providerCalls()).toBe(0);
+  });
+
+  it.each(['graph', 'project'] as const)('rejects a preview after %s change', async (kind) => {
+    const store = campaignStore();
+    const run = harness();
+    const preflight = await store.preflightSelectiveExecution(
+      'run-node', 'transform-generate-square', run.options(),
+    );
+
+    if (kind === 'graph') store.setBriefObjective('brief', 'Changed after preview.');
+    else run.switchProject();
+
+    await expect(store.runSelectiveExecution(preflight, run.options()))
+      .rejects.toThrow(/workflow or project changed after selective preflight/i);
+    expect(run.providerCalls()).toBe(0);
+  });
+
   it('reuses an exact project-verified cache hit with zero provider calls and no history mutation', async () => {
     const store = campaignStore();
     const run = harness();

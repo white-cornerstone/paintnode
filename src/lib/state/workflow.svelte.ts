@@ -57,6 +57,7 @@ export interface WorkflowTransformStoreOutcome extends WorkflowTransformExecutio
 
 export interface WorkflowStoreRunOptions extends ExecuteCampaignGenerateOptions {
   currentProjectIdentity?: () => string | null;
+  selectiveExecutionIdentity?: string;
   cancelExecution?: WorkflowCancellationHandler;
   cancellationTimeoutMs?: number;
 }
@@ -77,6 +78,7 @@ interface WorkflowSelectivePreflightSnapshot {
   storeRevision: number;
   graphBytes: string;
   projectIdentity: string | null;
+  optionsIdentity: string;
 }
 
 interface ActiveWorkflowSelectiveOperation {
@@ -1556,6 +1558,26 @@ export class WorkflowStore {
     return options.currentProjectIdentity?.() ?? options.projectPath;
   }
 
+  private selectiveOptionsIdentity(options: WorkflowStoreRunOptions): string {
+    const explicit = options.selectiveExecutionIdentity?.trim();
+    return JSON.stringify({
+      provider: options.provider,
+      callerIdentity: explicit || null,
+      executors: options.executors.map((executor) => ({
+        provider: executor.provider,
+        capabilities: [...executor.capabilities],
+        materialization: executor.materialization ?? null,
+      })),
+      assets: options.assets.map((asset) => ({
+        id: asset.id,
+        relativePath: asset.relativePath,
+        width: asset.width ?? null,
+        height: asset.height ?? null,
+        mime: asset.mime ?? null,
+      })),
+    });
+  }
+
   private captureSelectiveSnapshot(options: WorkflowStoreRunOptions): WorkflowSelectivePreflightSnapshot {
     return {
       sessionIdentity: this.workflowSessionIdentity,
@@ -1563,6 +1585,7 @@ export class WorkflowStore {
       storeRevision: this.rev,
       graphBytes: new TextDecoder().decode(this.toBytes()),
       projectIdentity: this.selectiveProjectIdentity(options),
+      optionsIdentity: this.selectiveOptionsIdentity(options),
     };
   }
 
@@ -1578,6 +1601,13 @@ export class WorkflowStore {
       throw new WorkflowTransformExecutionError(
         'CANCELLED',
         'The workflow or project changed after selective preflight.',
+        'Run preflight again',
+      );
+    }
+    if (snapshot.optionsIdentity !== this.selectiveOptionsIdentity(options)) {
+      throw new WorkflowTransformExecutionError(
+        'CANCELLED',
+        'The provider or run options changed after selective preflight.',
         'Run preflight again',
       );
     }
