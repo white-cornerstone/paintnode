@@ -516,10 +516,10 @@ impl AiProcessTree {
             if error.raw_os_error() == Some(libc::ESRCH) {
                 return Ok(());
             }
-            return Err(format!(
+            Err(format!(
                 "Could not stop provider process group {}: {error}",
                 self.process_id
-            ));
+            ))
         }
         #[cfg(windows)]
         unsafe {
