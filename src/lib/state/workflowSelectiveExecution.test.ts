@@ -3,6 +3,7 @@ import type { ProjectAsset } from '../integrations/desktop';
 import {
   createCreatorNode,
   createWorkflowCompositionExecutor,
+  isFullWorkflowRunRecord,
   workflowSha256Bytes,
   type WorkflowGraphV2,
   type WorkflowTransformArtifact,
@@ -73,7 +74,7 @@ function harness() {
   let currentProductBytes = productBytes;
   const generatedAssets: ProjectAsset[] = [];
   const generatedBytes = new Map<string, Uint8Array>();
-  let execute = async (): Promise<WorkflowTransformArtifact> => {
+  const executeSuccessfully = async (): Promise<WorkflowTransformArtifact> => {
     providerCalls += 1;
     const id = `generated-${providerCalls}`;
     const bytes = new Uint8Array([137, 80, 78, 71, providerCalls]);
@@ -92,6 +93,7 @@ function harness() {
     generatedBytes.set(asset.id, bytes);
     return { kind: 'project-asset', asset, bytes };
   };
+  let execute = executeSuccessfully;
   const executor = createWorkflowCompositionExecutor('fake', async () => execute());
   const resolveAsset = vi.fn(async (asset: Readonly<{ id: string; relativePath: string }>) => {
     const bytes = asset.id === productAsset.id ? currentProductBytes : generatedBytes.get(asset.id) ?? null;
@@ -120,6 +122,7 @@ function harness() {
     generatedAssets,
     providerCalls: () => providerCalls,
     setExecute(value: typeof execute) { execute = value; },
+    executeSuccessfully,
     switchProject() { projectIdentity = '/virtual/project:b'; },
     changeProductMaterial() { currentProductBytes = new Uint8Array([...productBytes, 99]); },
   };
@@ -150,6 +153,34 @@ describe('WorkflowStore selective execution integration', () => {
     expect(run.resolveAsset).toHaveBeenCalledWith(expect.objectContaining({ id: 'generated-1' }));
     expect(store.graphSnapshot()).toEqual(acceptedGraph);
   });
+
+  it.each(['missing-bytes', 'liar-hash'] as const)(
+    'treats resolver %s output proof as a cache miss',
+    async (mode) => {
+      const store = campaignStore();
+      const run = harness();
+      await seedAcceptedResult(store, run);
+      const callsAfterSeed = run.providerCalls();
+      const normalResolve = run.resolveAsset.getMockImplementation()!;
+      run.resolveAsset.mockImplementation(async (asset) => {
+        const material = await normalResolve(asset);
+        if (asset.id !== 'generated-1') return material;
+        return mode === 'missing-bytes'
+          ? { ...material, bytes: null }
+          : { ...material, contentHash: 'sha256:dishonest-resolver-hash' };
+      });
+
+      const preflight = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+
+      expect(preflight.stateByNodeId['transform-generate-square']).toMatchObject({
+        state: 'planned',
+        willExecute: true,
+        reason: { code: 'CACHED_OUTPUT_UNAVAILABLE' },
+      });
+      expect(preflight.plan.executionNodeIds).toEqual(['transform-generate-square']);
+      expect(run.providerCalls()).toBe(callsAfterSeed);
+    },
+  );
 
   it('projects a changed prepared material key as stale without replacing accepted history', async () => {
     const store = campaignStore();
@@ -232,7 +263,7 @@ describe('WorkflowStore selective execution integration', () => {
     run.resolveAsset.mockImplementation(() => new Promise(() => undefined));
 
     const preflight = store.preflightSelectiveExecution('run-node', 'output-square', run.options());
-    await Promise.resolve();
+    while (run.resolveAsset.mock.calls.length === 0) await Promise.resolve();
     await expect(store.cancelSelectiveExecution()).resolves.toMatchObject({ disposition: 'terminated' });
 
     await expect(preflight).rejects.toMatchObject({ code: 'CANCELLED' });
@@ -298,14 +329,114 @@ describe('WorkflowStore selective execution integration', () => {
     await expect(execution).resolves.toMatchObject({ cancelledNodeIds: ['transform-generate-square'] });
   });
 
+  it.each(['detached', 'error'] as const)(
+    'awaits %s provider supersession and links the replacement to the durable cancelled attempt',
+    async (cancelMode) => {
+      const store = campaignStore();
+      const run = harness();
+      let starts = 0;
+      run.setExecute(async () => {
+        starts += 1;
+        if (starts === 1) return new Promise(() => undefined);
+        return run.executeSuccessfully();
+      });
+      const cancelProvider = cancelMode === 'detached'
+        ? vi.fn(async () => ({ disposition: 'detached' as const, message: 'Provider detached.' }))
+        : vi.fn(async () => { throw new Error('provider cancellation failed'); });
+      const options = { ...run.options(), cancelExecution: cancelProvider, cancellationTimeoutMs: 20 };
+      const firstPreflight = await store.preflightSelectiveExecution('run-node', 'output-square', options);
+      const firstExecution = store.runSelectiveExecution(firstPreflight, options);
+      while (starts === 0) await Promise.resolve();
+
+      const replacementPreflight = await store.preflightSelectiveExecution('run-node', 'output-square', options);
+      const firstOutcome = await firstExecution;
+      const replacementOutcome = await store.runSelectiveExecution(replacementPreflight, options);
+      const records = store.graphSnapshot().runRecords
+        .filter((record) => isFullWorkflowRunRecord(record));
+
+      expect(firstOutcome.cancelledNodeIds).toEqual(['transform-generate-square']);
+      expect(replacementOutcome.failures).toEqual({});
+      expect(cancelProvider).toHaveBeenCalledTimes(1);
+      expect(records.map((record) => record.status)).toEqual(['cancelled', 'succeeded']);
+      expect(records[1].retryOfRunId).toBe(records[0].id);
+    },
+  );
+
+  it('awaits a superseded forever material preflight before returning its replacement', async () => {
+    const store = campaignStore();
+    const run = harness();
+    const normalResolve = run.resolveAsset.getMockImplementation()!;
+    let firstMaterial = true;
+    run.resolveAsset.mockImplementation(async (asset) => {
+      if (firstMaterial) {
+        firstMaterial = false;
+        return new Promise(() => undefined);
+      }
+      return normalResolve(asset);
+    });
+    let firstSettled = false;
+    const first = store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+    void first.then(() => { firstSettled = true; }, () => { firstSettled = true; });
+    while (run.resolveAsset.mock.calls.length === 0) await Promise.resolve();
+
+    const replacement = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+
+    expect(firstSettled).toBe(true);
+    await expect(first).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(replacement.stateByNodeId['transform-generate-square']).toMatchObject({ state: 'planned' });
+    expect(run.providerCalls()).toBe(0);
+  });
+
+  it('serializes concurrent replacement races so only the latest preflight can execute', async () => {
+    const store = campaignStore();
+    const run = harness();
+    let starts = 0;
+    run.setExecute(async () => {
+      starts += 1;
+      if (starts === 1) return new Promise(() => undefined);
+      return run.executeSuccessfully();
+    });
+    const options = { ...run.options(), cancelExecution: async () => ({
+      disposition: 'detached' as const, message: 'Provider detached.',
+    }) };
+    const firstPreflight = await store.preflightSelectiveExecution('run-node', 'output-square', options);
+    const firstExecution = store.runSelectiveExecution(firstPreflight, options);
+    while (starts === 0) await Promise.resolve();
+    const normalResolve = run.resolveAsset.getMockImplementation()!;
+    let blockNextMaterial = true;
+    run.resolveAsset.mockImplementation(async (asset) => {
+      if (blockNextMaterial) {
+        blockNextMaterial = false;
+        return new Promise(() => undefined);
+      }
+      return normalResolve(asset);
+    });
+
+    const middle = store.preflightSelectiveExecution('run-node', 'output-square', options);
+    while (blockNextMaterial) await Promise.resolve();
+    const latest = store.preflightSelectiveExecution('run-node', 'output-square', options);
+    const replacements = await Promise.allSettled([middle, latest]);
+
+    expect(replacements[0].status).toBe('rejected');
+    expect(replacements[1].status).toBe('fulfilled');
+    await firstExecution;
+    const latestPreflight = (replacements[1] as PromiseFulfilledResult<Awaited<typeof latest>>).value;
+    const outcome = await store.runSelectiveExecution(latestPreflight, options);
+    expect(outcome.failures).toEqual({});
+  });
+
   it('does not commit selective results after workflow session or project switches', async () => {
     const sessionStore = campaignStore();
     const sessionRun = harness();
     const sessionGate = deferred<WorkflowTransformArtifact>();
-    sessionRun.setExecute(async () => sessionGate.promise);
+    let sessionStarts = 0;
+    sessionRun.setExecute(async () => {
+      sessionStarts += 1;
+      return sessionGate.promise;
+    });
     const sessionPreflight = await sessionStore.preflightSelectiveExecution('run-node', 'output-square', sessionRun.options());
     const sessionExecution = sessionStore.runSelectiveExecution(sessionPreflight, sessionRun.options());
-    await Promise.resolve();
+    while (sessionStarts === 0) await Promise.resolve();
     sessionStore.newFromTemplate('campaign-composer', 'Replacement session');
     await expect(sessionExecution).resolves.toMatchObject({ cancelledNodeIds: ['transform-generate-square'] });
     expect(sessionStore.graphSnapshot().runRecords).toEqual([]);
@@ -313,10 +444,14 @@ describe('WorkflowStore selective execution integration', () => {
     const projectStore = campaignStore();
     const projectRun = harness();
     const projectGate = deferred<WorkflowTransformArtifact>();
-    projectRun.setExecute(async () => projectGate.promise);
+    let projectStarts = 0;
+    projectRun.setExecute(async () => {
+      projectStarts += 1;
+      return projectGate.promise;
+    });
     const projectPreflight = await projectStore.preflightSelectiveExecution('run-node', 'output-square', projectRun.options());
     const projectExecution = projectStore.runSelectiveExecution(projectPreflight, projectRun.options());
-    await Promise.resolve();
+    while (projectStarts === 0) await Promise.resolve();
     projectRun.switchProject();
     projectGate.resolve({
       kind: 'project-asset',
