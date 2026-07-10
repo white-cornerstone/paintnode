@@ -44,6 +44,22 @@ const DETACHED_CANCELLATION: WorkflowCancellationResult = {
 const PROGRESS_STAGES = new Set<WorkflowRunProgressStage>([
   'queued', 'running', 'cancelling', 'cancelled', 'failed', 'succeeded',
 ]);
+const COMBINING_MARK = /^\p{M}$/u;
+const TRAVERSAL_IDENTIFIER_BASE = /^[\p{L}\p{N}_.]$/u;
+
+function containsUnsafeTraversalSegment(value: string): boolean {
+  for (const match of value.matchAll(/\.\.(?:[\\/]|$)/gu)) {
+    const precedingCharacters = Array.from(value.slice(0, match.index));
+    let baseIndex = precedingCharacters.length - 1;
+    while (baseIndex >= 0 && COMBINING_MARK.test(precedingCharacters[baseIndex])) {
+      baseIndex -= 1;
+    }
+    if (baseIndex < 0 || !TRAVERSAL_IDENTIFIER_BASE.test(precedingCharacters[baseIndex])) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function sanitizeWorkflowProgressMessage(value: unknown): string {
   if (typeof value !== 'string') return 'Provider reported progress.';
@@ -69,7 +85,7 @@ export function sanitizeWorkflowProgressMessage(value: unknown): string {
   if (!normalized || !decodingStable
     || /(?:bearer|access[_-]?token|api[_-]?key|authorization|cookie|secret)/i.test(decoded)
     || /(?:file:|\/Users\/|\/Volumes\/|\/private\/|\/tmp\/|\/home\/|\/var\/|~\/|[A-Za-z]:\\|\\\\)/i.test(decoded)
-    || /(?:^|[^\p{L}\p{N}_.])\.\.(?:[\\/]|$)/u.test(decoded)) {
+    || containsUnsafeTraversalSegment(decoded)) {
     return 'Provider reported progress.';
   }
   return normalized.slice(0, 500);

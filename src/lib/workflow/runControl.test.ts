@@ -130,6 +130,17 @@ describe('workflow run control', () => {
     },
   );
 
+  it.each([
+    'Writing !\u0301../workspace/result.png',
+    '\u0301../workspace/result.png',
+    'Writing !%CC%81%2e%2e%2fworkspace%2fresult.png',
+    '%CC%81%2e%2e%2fworkspace%2fresult.png',
+    'Writing !%25CC%2581%252e%252e%252fworkspace%252fresult.png',
+    '%25CC%2581%252e%252e%252fworkspace%252fresult.png',
+  ])('redacts traversal when combining marks lack an identifier base: %s', (message) => {
+    expect(sanitizeWorkflowProgressMessage(message)).toBe('Provider reported progress.');
+  });
+
   it('preserves ordinary percentage progress without treating it as malformed encoding', () => {
     expect(sanitizeWorkflowProgressMessage('Rendered 50% complete')).toBe('Rendered 50% complete');
   });
@@ -141,8 +152,16 @@ describe('workflow run control', () => {
     'Rendered 75% complete; checking details...',
     'Keeping a../workspace token unchanged',
     'Keeping é../workspace token unchanged',
+    'Keeping e\u0301../workspace token unchanged',
+    'Keeping 1\u0301../workspace token unchanged',
+    'Keeping _\u0301../workspace token unchanged',
+    'Keeping .\u0301../workspace token unchanged',
     'Keeping 你../workspace token unchanged',
     'Keeping ٣../workspace token unchanged',
+    'Keeping e%CC%81%2e%2e%2fworkspace token unchanged',
+    'Keeping 1%CC%81%2e%2e%2fworkspace token unchanged',
+    'Keeping e%25CC%2581%252e%252e%252fworkspace token unchanged',
+    'Keeping 1%25CC%2581%252e%252e%252fworkspace token unchanged',
     'Ellipsis .../workspace is descriptive',
     'Dot boundary ....\\workspace is descriptive',
     'Underscore _../workspace is an identifier',
