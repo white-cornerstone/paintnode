@@ -3,6 +3,7 @@ import dialogSource from '../components/WorkflowDirectorDialog.svelte?raw';
 import revisionDialogSource from '../components/WorkflowDirectorRevisionDialog.svelte?raw';
 import boardSource from '../components/WorkflowBoard.svelte?raw';
 import providerFreeRevisionSource from '../integrations/providerFreeWorkflowRevision.ts?raw';
+import revisionHistorySource from './directorRevisionHistory.svelte.ts?raw';
 
 describe('Workflow Director UI contract', () => {
   it('opens an explicit proposal dialog from the workflow board', () => {
@@ -68,8 +69,12 @@ describe('Workflow Director UI contract', () => {
   it('cancels in-flight injected revision work and exposes transaction undo and redo status', () => {
     expect(revisionDialogSource).toContain('AbortController');
     expect(revisionDialogSource).toContain('controller?.abort()');
-    expect(revisionDialogSource).toContain('workflow.canUndoDirectorPatch');
-    expect(revisionDialogSource).toContain('workflow.canRedoDirectorPatch');
+    expect(revisionDialogSource).toContain('createWorkflowDirectorRevisionHistoryState(workflow)');
+    expect(revisionDialogSource).toContain('revisionHistory.canUndo');
+    expect(revisionDialogSource).toContain('revisionHistory.canRedo');
+    expect(revisionHistorySource).toContain('captureDirectorSession().mutationIdentity');
+    expect(revisionHistorySource).toContain('target.canUndoDirectorPatch');
+    expect(revisionHistorySource).toContain('target.canRedoDirectorPatch');
     expect(revisionDialogSource).toContain('workflow.undoDirectorPatch()');
     expect(revisionDialogSource).toContain('workflow.redoDirectorPatch()');
   });

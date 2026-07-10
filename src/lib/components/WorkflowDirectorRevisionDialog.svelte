@@ -5,6 +5,7 @@
   import { ArrowSync, CheckmarkCircle, ErrorCircle } from '../icons';
   import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
   import { workflow } from '../state/workflow.svelte';
+  import { createWorkflowDirectorRevisionHistoryState } from '../workflow/directorRevisionHistory.svelte';
   import {
     WorkflowDirectorRevisionCancelledError,
     acceptWorkflowDirectorRevisionPreview,
@@ -36,8 +37,7 @@
   const previewCurrent = $derived(preview
     ? workflowDirectorRevisionPreviewIsCurrent(preview, workflow, instruction)
     : false);
-  const canUndo = $derived(workflow.canUndoDirectorPatch);
-  const canRedo = $derived(workflow.canRedoDirectorPatch);
+  const revisionHistory = createWorkflowDirectorRevisionHistoryState(workflow);
 
   $effect(() => {
     if (!preview || preview.instruction === instruction.trim()) return;
@@ -244,8 +244,8 @@
       <section class="history" aria-labelledby="revision-history-heading">
         <span><strong id="revision-history-heading">Revision transaction</strong><small role="status">{historyStatus}</small></span>
         <div>
-          <button type="button" disabled={!canUndo} onclick={undoRevision}>Undo revision</button>
-          <button type="button" disabled={!canRedo} onclick={redoRevision}>Redo revision</button>
+          <button type="button" disabled={!revisionHistory.canUndo} onclick={undoRevision}>Undo revision</button>
+          <button type="button" disabled={!revisionHistory.canRedo} onclick={redoRevision}>Redo revision</button>
         </div>
       </section>
     </section>
