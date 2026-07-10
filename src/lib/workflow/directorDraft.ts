@@ -107,7 +107,7 @@ export interface WorkflowDirectorTransformDraft extends WorkflowDirectorNodeBase
 
 export interface WorkflowDirectorReviewDraft extends WorkflowDirectorNodeBase {
   type: 'review';
-  mode: 'human' | 'ai-assisted';
+  mode: 'human' | 'ai';
   instructions: string;
 }
 
@@ -394,13 +394,13 @@ function parseNode(
   }
   if (creatorType === 'review') {
     const mode = value.mode;
-    if (mode !== 'human' && mode !== 'ai-assisted') {
-      schemaIssue(issues, `${path}.mode`, 'mode must be "human" or "ai-assisted".');
+    if (mode !== 'human' && mode !== 'ai') {
+      schemaIssue(issues, `${path}.mode`, 'mode must be "human" or "ai".');
     }
     return {
       ...base,
       type: 'review',
-      mode: mode === 'ai-assisted' ? 'ai-assisted' : 'human',
+      mode: mode === 'ai' ? 'ai' : 'human',
       instructions: stringValue(value, 'instructions', path, issues),
     };
   }
@@ -452,7 +452,7 @@ export function parseWorkflowDirectorGraphDraft(input: unknown): {
 } {
   const issues: WorkflowDirectorSchemaIssue[] = [];
   if (!isRecord(input)) {
-    return { value: null, issues: [{ path: '', message: 'GraphDraft v1 must be an object.' }] };
+    return detachedFrozen({ value: null, issues: [{ path: '', message: 'GraphDraft v1 must be an object.' }] });
   }
   exactKeys(input, ['version', 'name', 'summary', 'nodes', 'edges'], '', issues);
   if (input.version !== WORKFLOW_DIRECTOR_GRAPH_DRAFT_VERSION) {
@@ -475,7 +475,7 @@ export function parseWorkflowDirectorGraphDraft(input: unknown): {
     nodes,
     edges,
   };
-  return issues.length > 0 ? { value: null, issues } : { value: detachedFrozen(value), issues };
+  return detachedFrozen(issues.length > 0 ? { value: null, issues } : { value, issues });
 }
 
 function nodeConfig(node: WorkflowDirectorNodeDraft): Record<string, unknown> {
@@ -621,24 +621,25 @@ function draftRequirements(
           message: `${node.title} requires an available project asset.`,
         });
       }
-    } else if (node.type === 'transform') {
-      const availability = capabilities.get(node.capability);
+    } else if (node.type === 'transform' || (node.type === 'review' && node.mode === 'ai')) {
+      const capability = node.type === 'transform' ? node.capability : 'candidate-review';
+      const availability = capabilities.get(capability);
       const available = availability?.available === true;
       const reason = availability?.reason
         ?? (availability ? 'This capability is currently unavailable.' : 'This capability was not included in PaintNode capability availability.');
       requirements.push({
         id: `capability:${node.id}`,
-        label: node.capability,
+        label: capability,
         detail: available ? `${node.title} can use this capability.` : reason,
         status: available ? 'ready' : 'unsupported',
       });
       if (!available) {
-        unsupported.push({ capability: node.capability, nodeId: node.id, reason });
+        unsupported.push({ capability, nodeId: node.id, reason });
         issues.push({
           stage: 'capability',
           code: 'UNSUPPORTED_CAPABILITY',
           nodeId: node.id,
-          message: `${node.title} requests unsupported capability “${node.capability}”: ${reason}`,
+          message: `${node.title} requests unsupported capability “${capability}”: ${reason}`,
         });
       }
     }
@@ -694,7 +695,7 @@ export function createWorkflowDirectorProposal(
   options: { graphId?: string } = {},
 ): WorkflowDirectorProposalResult {
   const parsed = parseWorkflowDirectorGraphDraft(response);
-  if (!parsed.value) return { proposal: null, schemaIssues: detachedFrozen(parsed.issues) };
+  if (!parsed.value) return detachedFrozen({ proposal: null, schemaIssues: parsed.issues });
   const graph = materializeDraft(parsed.value, options.graphId?.trim() || freshDirectorGraphId());
   const proposalIssues: WorkflowDirectorProposalIssue[] = [];
   let normalizedGraph = graph;
@@ -727,7 +728,7 @@ export function createWorkflowDirectorProposal(
     issues: proposalIssues,
     canAccept: proposalIssues.length === 0,
   });
-  return { proposal, schemaIssues: [] };
+  return detachedFrozen({ proposal, schemaIssues: [] });
 }
 
 export async function draftWorkflowWithDirector(
@@ -749,6 +750,7 @@ function semanticNodeKey(node: WorkflowGraphV2['nodes'][number]): string {
     return `output:${normalizedTitle(node.title)}:${String(node.config.finalWidth)}x${String(node.config.finalHeight)}`;
   }
   if (node.type === 'transform') return `transform:${String(node.config.capability)}`;
+  if (node.type === 'review') return `review:${String(node.config.mode)}`;
   return node.type;
 }
 
@@ -765,6 +767,11 @@ export function isCampaignRequirementsEquivalent(
   supportedCampaign: WorkflowGraphV2,
 ): { equivalent: boolean; differences: string[] } {
   const differences: string[] = [];
+  const expectedInventory = supportedCampaign.nodes.map(semanticNodeKey).sort();
+  const actualInventory = candidate.nodes.map(semanticNodeKey).sort();
+  if (JSON.stringify(actualInventory) !== JSON.stringify(expectedInventory)) {
+    differences.push('Campaign creator inventory and semantic node counts do not match.');
+  }
   const expectedInputs = supportedCampaign.nodes.filter((node) => node.type === 'input');
   for (const expected of expectedInputs) {
     const actual = candidate.nodes.find((node) => node.type === 'input' && normalizedTitle(node.title) === normalizedTitle(expected.title));

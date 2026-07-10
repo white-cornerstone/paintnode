@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { creatorNodeDefinition } from './registry';
+import { createCreatorNode, creatorNodeDefinition } from './registry';
 import { instantiateWorkflowTemplate } from './templates';
 import {
   buildWorkflowDirectorContext,
   createWorkflowDirectorProposal,
   draftWorkflowWithDirector,
   isCampaignRequirementsEquivalent,
+  parseWorkflowDirectorGraphDraft,
   type WorkflowDirectorContext,
   type WorkflowDirectorGraphDraft,
+  type WorkflowDirectorSchemaIssue,
 } from './directorDraft';
 
 const campaignAssets = [
@@ -218,6 +220,48 @@ describe('GraphDraft v1 schema and validation', () => {
       expect.objectContaining({ label: 'relight', status: 'unsupported' }),
     ]));
   });
+
+  it('requires candidate-review availability for an AI Review and persists the stable ai mode', () => {
+    const draft = campaignDraft();
+    draft.nodes.splice(-3, 0, {
+      id: 'review',
+      type: 'review',
+      title: 'Review Candidates',
+      mode: 'ai',
+      instructions: 'Check campaign consistency.',
+    });
+    const result = createWorkflowDirectorProposal(draft, context());
+    expect(result.proposal?.canAccept).toBe(false);
+    expect(result.proposal?.unsupportedCapabilities).toEqual(expect.arrayContaining([{
+      capability: 'candidate-review',
+      nodeId: 'review',
+      reason: 'Review execution is not available yet.',
+    }]));
+    expect(result.proposal?.graph.nodes.find((node) => node.id === 'review')?.config.mode).toBe('ai');
+
+    const human = structuredClone(draft);
+    const humanReview = human.nodes.find((node) => node.type === 'review')!;
+    if (humanReview.type === 'review') humanReview.mode = 'human';
+    expect(createWorkflowDirectorProposal(human, context()).proposal?.unsupportedCapabilities).toEqual([]);
+  });
+
+  it('returns deeply frozen detached parse and proposal result wrappers', () => {
+    const parse = parseWorkflowDirectorGraphDraft(campaignDraft());
+    expect(Object.isFrozen(parse)).toBe(true);
+    expect(Object.isFrozen(parse.issues)).toBe(true);
+    expect(Object.isFrozen(parse.value)).toBe(true);
+    const result = createWorkflowDirectorProposal(campaignDraft(), context());
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.schemaIssues)).toBe(true);
+    expect(Object.isFrozen(result.proposal)).toBe(true);
+    expect(() => {
+      (result.schemaIssues as WorkflowDirectorSchemaIssue[]).push({ path: 'x', message: 'mutated' });
+    }).toThrow(TypeError);
+
+    const invalid = parseWorkflowDirectorGraphDraft({ version: 1 });
+    expect(Object.isFrozen(invalid)).toBe(true);
+    expect(Object.isFrozen(invalid.issues)).toBe(true);
+  });
 });
 
 describe('Workflow Director orchestration', () => {
@@ -257,6 +301,13 @@ describe('Campaign requirements equivalence', () => {
     expect(isCampaignRequirementsEquivalent(missingProductRequirement, template)).toMatchObject({
       equivalent: false,
       differences: expect.arrayContaining([expect.stringMatching(/Product.*required/i)]),
+    });
+
+    const extra = structuredClone(proposal.graph);
+    extra.nodes.push(createCreatorNode('review', { id: 'isolated-review', position: { x: 99, y: 99 } }));
+    expect(isCampaignRequirementsEquivalent(extra, template)).toMatchObject({
+      equivalent: false,
+      differences: expect.arrayContaining([expect.stringMatching(/creator inventory/i)]),
     });
   });
 });
