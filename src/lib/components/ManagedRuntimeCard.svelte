@@ -5,14 +5,12 @@
   import {
     formatRuntimeBytes,
     getManagedRuntimeStatus,
-    installManagedRuntime,
     loginManagedRuntime,
-    onManagedRuntimeProgress,
     runtimeProgressPercent,
-    type ManagedRuntimeProgress,
     type ManagedRuntimeProvider,
     type ManagedRuntimeStatus,
   } from '../ai/managedRuntime';
+  import { managedRuntimeOperations } from '../state/managedRuntimeOperations.svelte';
 
   let {
     provider,
@@ -25,29 +23,25 @@
   } = $props();
 
   let status = $state<ManagedRuntimeStatus | null>(null);
-  let progress = $state<ManagedRuntimeProgress | null>(null);
-  let busy = $state(false);
+  let signingIn = $state(false);
   let error = $state<string | null>(null);
   const label = $derived(provider === 'codex' ? 'Codex' : 'Claude');
+  const activeOperation = $derived(managedRuntimeOperations.active);
+  const operation = $derived(activeOperation?.provider === provider ? activeOperation : null);
+  const progress = $derived(operation?.progress ?? null);
+  const busy = $derived(activeOperation !== null || signingIn);
+  const busyMessage = $derived(
+    progress?.message ??
+      (activeOperation
+        ? `${activeOperation.provider === 'codex' ? 'Codex' : 'Claude'} support is installing in the background.`
+        : `Preparing ${label}...`),
+  );
   const percent = $derived(runtimeProgressPercent(progress));
   const ready = $derived(status?.state === 'ready' || status?.state === 'updateAvailable');
   const signedIn = $derived(status?.authenticated !== false);
 
   onMount(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void onManagedRuntimeProgress((event) => {
-      if (event.provider !== provider || disposed) return;
-      progress = event;
-    }).then((stop) => {
-      if (disposed) stop();
-      else unlisten = stop;
-    });
     void refresh(true);
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
   });
 
   function applyStatus(next: ManagedRuntimeStatus): void {
@@ -66,31 +60,24 @@
   }
 
   async function install(): Promise<void> {
-    busy = true;
     error = null;
     try {
-      const next = await installManagedRuntime(provider);
+      const next = await managedRuntimeOperations.install(provider);
       applyStatus(next);
-      progress = null;
     } catch (reason) {
       error = (reason as Error)?.message ?? String(reason);
-      progress = null;
-    } finally {
-      busy = false;
     }
   }
 
   async function signIn(): Promise<void> {
-    busy = true;
+    signingIn = true;
     error = null;
     try {
       applyStatus(await loginManagedRuntime(provider));
-      progress = null;
     } catch (reason) {
       error = (reason as Error)?.message ?? String(reason);
-      progress = null;
     } finally {
-      busy = false;
+      signingIn = false;
     }
   }
 </script>
@@ -103,7 +90,7 @@
     <div class="runtime-copy">
       <strong>
         {#if busy}
-          {progress?.message ?? `Preparing ${label}…`}
+          {busyMessage}
         {:else if ready && signedIn}
           {label} is ready
         {:else if ready}
@@ -141,7 +128,7 @@
       class:indeterminate={percent === null}
       class="progress-track"
       role="progressbar"
-      aria-label={progress?.message ?? `Preparing ${label}`}
+      aria-label={busyMessage}
       aria-valuemin="0"
       aria-valuemax="100"
       aria-valuenow={percent ?? undefined}
@@ -163,9 +150,9 @@
 <style>
   .runtime-card {
     padding: 12px;
-    border: 1px solid var(--border, #d8d8d8);
+    border: 1px solid var(--border);
     border-radius: 7px;
-    background: color-mix(in srgb, var(--surface, #fff) 92%, var(--accent, #0f6cbd) 8%);
+    background: color-mix(in srgb, var(--bg-panel) 88%, var(--accent) 12%);
   }
 
   .runtime-card.compact { padding: 10px; }
@@ -174,7 +161,7 @@
   .runtime-icon.ready { color: #18794e; }
   .runtime-icon.error { color: #b42318; }
   .runtime-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
-  .runtime-copy strong { font-size: 12px; font-weight: 600; }
+  .runtime-copy strong { color: var(--text-bright); font-size: 12px; font-weight: 600; }
   .runtime-copy small, .runtime-note { color: var(--muted, #666); font-size: 11px; line-height: 1.4; }
   .runtime-actions { flex: 0 0 auto; }
   .runtime-actions button { display: inline-flex; align-items: center; gap: 5px; }

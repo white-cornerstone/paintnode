@@ -5,6 +5,8 @@
   import { workflow } from '../state/workflow.svelte';
   import { tooltip } from '../actions/tooltip';
   import { isDesktop, readAppMemoryInfo, type AppMemoryInfo } from '../integrations/desktop';
+  import { runtimeProgressPercent } from '../ai/managedRuntime';
+  import { managedRuntimeOperations } from '../state/managedRuntimeOperations.svelte';
   import Icon from './Icon.svelte';
   import { DeveloperBoard } from '../icons';
 
@@ -14,6 +16,9 @@
   const hasZoomSurface = $derived(hasDocument || hasWorkflow);
   const pct = $derived(Math.round((hasWorkflow ? workflow.zoom : ui.zoom) * 100));
   const layerCount = $derived(doc?.layers.length ?? 0);
+  const managedRuntimeProgress = $derived(managedRuntimeOperations.active?.progress ?? null);
+  const busyLabel = $derived(managedRuntimeProgress?.message ?? ui.loadingLabel);
+  const busyPercent = $derived(runtimeProgressPercent(managedRuntimeProgress));
 
   let editing = $state(false);
   let draft = $state('');
@@ -99,10 +104,16 @@
     <span class="flash">{editor.flashMessage}</span>
   {/if}
   <span class="spacer"></span>
-  {#if ui.loadingLabel}
+  {#if busyLabel}
     <span class="loading" role="status">
-      <span class="loading-label">{ui.loadingLabel}</span>
-      <span class="loading-bar"><span class="loading-fill"></span></span>
+      <span class="loading-label">{busyLabel}</span>
+      <span class="loading-bar">
+        <span
+          class:determinate={busyPercent !== null}
+          class="loading-fill"
+          style:width={busyPercent === null ? undefined : `${busyPercent}%`}
+        ></span>
+      </span>
     </span>
     <span class="sep"></span>
   {/if}
@@ -210,6 +221,10 @@
     background: var(--accent);
     /* Sweep with transform (not `left`) so it composites without per-frame layout. */
     animation: loading-sweep 1.2s ease-in-out infinite;
+  }
+  .loading-fill.determinate {
+    animation: none;
+    transform: none;
   }
   @keyframes loading-sweep {
     from {

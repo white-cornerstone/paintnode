@@ -23,6 +23,7 @@
   import TasksPanel from './lib/components/TasksPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import LongRunningTaskToast from './lib/components/LongRunningTaskToast.svelte';
+  import ManagedRuntimeToast from './lib/components/ManagedRuntimeToast.svelte';
   import AiDirectorInputDialog from './lib/components/AiDirectorInputDialog.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { tooltip, truncatedTooltip } from './lib/actions/tooltip';
@@ -1121,6 +1122,7 @@
     <StatusBar />
   {/if}
   <LongRunningTaskToast />
+  <ManagedRuntimeToast />
   <AiDirectorInputDialog />
 </div>
 
