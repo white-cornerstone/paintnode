@@ -156,9 +156,18 @@ const immutableIdentityConfigKeys = new Set([
   'path',
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+function safeIsArray(value: unknown): boolean | null {
   try {
+    return Array.isArray(value);
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  try {
+    if (safeIsArray(value) !== false) return false;
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
   } catch {
@@ -249,13 +258,20 @@ function operationItems(
   value: unknown,
   issues: WorkflowDirectorPatchIssue[],
 ): { index: number; value: unknown }[] {
-  if (!Array.isArray(value)) {
-    addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations must be an array.');
+  const arrayState = safeIsArray(value);
+  if (arrayState !== true) {
+    addIssue(
+      issues,
+      'operations',
+      'INVALID_OPERATIONS',
+      arrayState === null ? 'operations could not be inspected safely.' : 'operations must be an array.',
+    );
     return [];
   }
+  const arrayValue = value as unknown[];
   let length = 0;
   try {
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(arrayValue, 'length');
     if (!lengthDescriptor || !('value' in lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value)) {
       addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations must have a safe array length.');
       return [];
@@ -272,14 +288,14 @@ function operationItems(
   const items: { index: number; value: unknown }[] = [];
   try {
     const descriptors = new Map<string, PropertyDescriptor>();
-    for (const key of Reflect.ownKeys(value)) {
+    for (const key of Reflect.ownKeys(arrayValue)) {
       if (key === 'length') continue;
       if (typeof key === 'symbol' || !/^(0|[1-9]\d*)$/.test(String(key))) {
         addIssue(issues, 'operations', 'INVALID_ARRAY_PROPERTY', 'operations cannot contain symbol or named properties.');
         continue;
       }
       const name = String(key);
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const descriptor = Object.getOwnPropertyDescriptor(arrayValue, key);
       if (descriptor) descriptors.set(name, descriptor);
     }
     for (let index = 0; index < length; index += 1) {
@@ -476,7 +492,7 @@ function parseOperation(
   return null;
 }
 
-export function parseWorkflowDirectorPatch(input: unknown): {
+function parseWorkflowDirectorPatchUnchecked(input: unknown): {
   value: WorkflowDirectorPatchV1 | null;
   issues: WorkflowDirectorPatchIssue[];
 } {
@@ -517,6 +533,24 @@ export function parseWorkflowDirectorPatch(input: unknown): {
     operations,
   };
   return detachedFrozen({ value: issues.length === 0 ? value : null, issues });
+}
+
+export function parseWorkflowDirectorPatch(input: unknown): {
+  value: WorkflowDirectorPatchV1 | null;
+  issues: WorkflowDirectorPatchIssue[];
+} {
+  try {
+    return parseWorkflowDirectorPatchUnchecked(input);
+  } catch {
+    return detachedFrozen({
+      value: null,
+      issues: [{
+        path: '<root>',
+        code: 'INVALID_PATCH',
+        message: 'Director patch could not be inspected safely.',
+      }],
+    });
+  }
 }
 
 function candidateProtected(node: WorkflowGraphV2['nodes'][number]): boolean {

@@ -161,6 +161,30 @@ describe('Workflow Director patch schema', () => {
     expect(JSON.stringify(result?.issues)).not.toContain(secret);
   });
 
+  it.each([
+    ['revoked root', () => {
+      const revocable = Proxy.revocable(patch([]), {});
+      revocable.revoke();
+      return revocable.proxy;
+    }],
+    ['revoked operations array', () => {
+      const revocable = Proxy.revocable([], {});
+      revocable.revoke();
+      return { ...patch([]), operations: revocable.proxy };
+    }],
+    ['revoked operation', () => {
+      const revocable = Proxy.revocable({ op: 'remove-edge', edgeId: 'edge-composition-output-landscape' }, {});
+      revocable.revoke();
+      return { ...patch([]), operations: [revocable.proxy] };
+    }],
+  ])('rejects %s without escaping an IsArray TypeError', (_name, hostile) => {
+    let result: ReturnType<typeof parseWorkflowDirectorPatch> | undefined;
+    expect(() => { result = parseWorkflowDirectorPatch(hostile()); }).not.toThrow();
+    expect(result?.value).toBeNull();
+    expect(result?.issues.length).toBeGreaterThan(0);
+    expect(JSON.stringify(result?.issues)).not.toMatch(/IsArray|revoked|TypeError/i);
+  });
+
   it('rejects oversized operation arrays before inspecting any operation', () => {
     const operations = new Array(129).fill(null);
     let reads = 0;
