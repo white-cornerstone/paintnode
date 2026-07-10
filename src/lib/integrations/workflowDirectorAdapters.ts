@@ -5,7 +5,7 @@ import type {
   WorkflowDirectorContext,
   WorkflowDirectorGraphDraft,
 } from '../workflow';
-import { isDesktop } from './desktop';
+import { cancelAiRun, isDesktop } from './desktop';
 
 export interface InvokeWorkflowDirectorOptions {
   provider: AiRunOptions['directorProvider'];
@@ -21,9 +21,15 @@ export interface InvokeWorkflowDirectorOptions {
   antigravityBin: string | null;
   antigravityModel: string | null;
   antigravityApprovalMode: string | null;
+  timeoutMs: number;
 }
 
 export type InvokeWorkflowDirector = (options: InvokeWorkflowDirectorOptions) => Promise<unknown>;
+export type CancelWorkflowDirector = (runId: string) => Promise<void>;
+
+export interface CancellableWorkflowDirector extends WorkflowDirector {
+  cancel(): Promise<void>;
+}
 
 function configuredBin(mode: 'builtin' | 'custom', value: string): string | null {
   return mode === 'custom' && value.trim() ? value.trim() : null;
@@ -43,7 +49,8 @@ export function createConfiguredWorkflowDirector(
   options: AiRunOptions,
   run: InvokeWorkflowDirector = invokeWorkflowDirector,
   runId: () => string = defaultRunId,
-): WorkflowDirector {
+  cancelRun: CancelWorkflowDirector = cancelAiRun,
+): CancellableWorkflowDirector {
   const invocation: Omit<InvokeWorkflowDirectorOptions, 'context' | 'runId'> = {
     provider: options.directorProvider,
     codexBin: options.directorProvider === 'codex' ? configuredBin(options.codexExecutableMode, options.codexBin) : null,
@@ -60,9 +67,23 @@ export function createConfiguredWorkflowDirector(
       ? options.antigravityModel
       : null,
     antigravityApprovalMode: options.directorProvider === 'antigravity' ? options.antigravityApprovalMode || null : null,
+    timeoutMs: 180_000,
   };
+  let activeRunId: string | null = null;
   return {
-    draft: (context) => run({ ...invocation, context, runId: runId() }),
+    draft: async (context) => {
+      if (activeRunId) throw new Error('AI Director is already drafting a workflow.');
+      const currentRunId = runId();
+      activeRunId = currentRunId;
+      try {
+        return await run({ ...invocation, context, runId: currentRunId });
+      } finally {
+        if (activeRunId === currentRunId) activeRunId = null;
+      }
+    },
+    cancel: async () => {
+      if (activeRunId) await cancelRun(activeRunId);
+    },
   };
 }
 
@@ -145,6 +166,9 @@ export function providerFreeWorkflowDraft(context: WorkflowDirectorContext): Wor
   };
 }
 
-export function createProviderFreeWorkflowDirector(): WorkflowDirector {
-  return { draft: async (context) => providerFreeWorkflowDraft(context) };
+export function createProviderFreeWorkflowDirector(): CancellableWorkflowDirector {
+  return {
+    draft: async (context) => providerFreeWorkflowDraft(context),
+    cancel: async () => undefined,
+  };
 }

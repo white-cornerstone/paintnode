@@ -6,6 +6,10 @@
 //! application. This command never calls an image executor.
 
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,12 +18,15 @@ use tauri::AppHandle;
 use crate::ai::antigravity::run_antigravity_director_request;
 use crate::ai::claude::run_claude_workflow_draft_request;
 use crate::ai::codex::run_codex_workflow_draft_request;
-use crate::ai::TempJobDir;
+use crate::ai::{clear_ai_run_cancelled, request_ai_run_cancel, TempJobDir};
 
 const WORKFLOW_DIRECTOR_CONTEXT_VERSION: u8 = 1;
 const WORKFLOW_DIRECTOR_DRAFT_FILE: &str = "paintnode-workflow-draft.json";
 const MAX_CONTEXT_JSON_BYTES: usize = 512 * 1024;
 const MAX_DRAFT_JSON_BYTES: u64 = 2 * 1024 * 1024;
+const DEFAULT_TIMEOUT_MS: u64 = 180_000;
+const MIN_TIMEOUT_MS: u64 = 1_000;
+const MAX_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -176,6 +183,47 @@ PaintNode Director context v1:
     )
 }
 
+fn workflow_director_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
+    )
+}
+
+fn run_with_timeout<T, Run>(run_id: &str, timeout: Duration, run: Run) -> Result<T, String>
+where
+    Run: FnOnce() -> Result<T, String>,
+{
+    clear_ai_run_cancelled(run_id);
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timeout_flag = Arc::clone(&timed_out);
+    let timeout_run_id = run_id.to_string();
+    let (finished_tx, finished_rx) = mpsc::channel::<()>();
+    let timer = thread::spawn(move || {
+        if matches!(
+            finished_rx.recv_timeout(timeout),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ) {
+            timeout_flag.store(true, Ordering::SeqCst);
+            let _ = request_ai_run_cancel(&timeout_run_id);
+        }
+    });
+    let result = run();
+    let _ = finished_tx.send(());
+    let _ = timer.join();
+    let did_time_out = timed_out.load(Ordering::SeqCst);
+    clear_ai_run_cancelled(run_id);
+    if did_time_out {
+        Err(format!(
+            "AI Director timed out after {} seconds and was stopped.",
+            timeout.as_secs_f64()
+        ))
+    } else {
+        result
+    }
+}
+
 fn read_workflow_draft(job: &TempJobDir) -> Result<Value, String> {
     let path = job.path().join(WORKFLOW_DIRECTOR_DRAFT_FILE);
     let metadata = fs::metadata(&path).map_err(|error| {
@@ -186,8 +234,37 @@ fn read_workflow_draft(job: &TempJobDir) -> Result<Value, String> {
     }
     let bytes = fs::read(&path)
         .map_err(|error| format!("Failed to read the AI Director workflow draft: {error}"))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| format!("AI Director returned malformed workflow draft JSON: {error}"))
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("AI Director returned malformed workflow draft JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "AI Director workflow draft must be a JSON object.".to_string())?;
+    let expected = ["version", "name", "summary", "nodes", "edges"];
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err("AI Director workflow draft does not match the GraphDraft v1 envelope.".into());
+    }
+    if object.get("version").and_then(Value::as_u64) != Some(1)
+        || object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map_or(true, str::is_empty)
+        || object
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map_or(true, str::is_empty)
+        || object
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map_or(true, Vec::is_empty)
+        || object.get("edges").and_then(Value::as_array).is_none()
+    {
+        return Err(
+            "AI Director workflow draft has an invalid GraphDraft v1 semantic envelope.".into(),
+        );
+    }
+    Ok(value)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -206,63 +283,67 @@ fn run_workflow_director(
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
+    timeout: Duration,
 ) -> Result<Value, String> {
     validate_identifier(run_id, "Workflow Director run id")?;
     let context_json = validate_context(&context)?;
     let prompt = workflow_director_prompt(&context_json);
     let job = TempJobDir::new("paintnode-workflow-director")?;
-    match provider.trim() {
-        "codex" => {
-            run_codex_workflow_draft_request(
-                app,
-                run_id,
-                codex_bin,
-                codex_model,
-                codex_reasoning_effort,
-                codex_service_tier,
-                job.path(),
-                &prompt,
-                WORKFLOW_DIRECTOR_DRAFT_FILE,
-            )?;
-        }
-        "claude" => {
-            run_claude_workflow_draft_request(
-                app,
-                run_id,
-                claude_bin,
-                claude_model,
-                claude_effort,
-                job.path(),
-                &prompt,
-                WORKFLOW_DIRECTOR_DRAFT_FILE,
-            )?;
-        }
-        "antigravity" => {
-            let run = run_antigravity_director_request(
-                app,
-                run_id,
-                antigravity_bin,
-                antigravity_model,
-                antigravity_approval_mode,
-                false,
-                job.path(),
-                job.path(),
-                &prompt,
-                false,
-                WORKFLOW_DIRECTOR_DRAFT_FILE,
-                None,
-            )?;
-            if !run.output.status.success() {
-                return Err("Antigravity workflow Director failed. Review the provider progress for details.".into());
+    run_with_timeout(run_id, timeout, || {
+        match provider.trim() {
+            "codex" => {
+                run_codex_workflow_draft_request(
+                    app,
+                    run_id,
+                    codex_bin,
+                    codex_model,
+                    codex_reasoning_effort,
+                    codex_service_tier,
+                    job.path(),
+                    &prompt,
+                    WORKFLOW_DIRECTOR_DRAFT_FILE,
+                )?;
+            }
+            "claude" => {
+                run_claude_workflow_draft_request(
+                    app,
+                    run_id,
+                    claude_bin,
+                    claude_model,
+                    claude_effort,
+                    job.path(),
+                    &prompt,
+                    WORKFLOW_DIRECTOR_DRAFT_FILE,
+                )?;
+            }
+            "antigravity" => {
+                let run = run_antigravity_director_request(
+                    app,
+                    run_id,
+                    antigravity_bin,
+                    antigravity_model,
+                    antigravity_approval_mode,
+                    false,
+                    job.path(),
+                    job.path(),
+                    &prompt,
+                    false,
+                    WORKFLOW_DIRECTOR_DRAFT_FILE,
+                    None,
+                )?;
+                if !run.output.status.success() {
+                    return Err("Antigravity workflow Director failed. Review the provider progress for details.".into());
+                }
+            }
+            other => {
+                return Err(format!(
+                    "Unsupported workflow Director provider: {}.",
+                    if other.is_empty() { "<empty>" } else { other }
+                ));
             }
         }
-        other => {
-            return Err(format!(
-                "Unsupported workflow Director provider: {}.",
-                if other.is_empty() { "<empty>" } else { other }
-            ));
-        }
-    }
+        Ok(())
+    })?;
     read_workflow_draft(&job)
 }
 
@@ -283,7 +364,9 @@ pub(crate) async fn draft_workflow_with_director(
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
+    timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
+    let timeout = workflow_director_timeout(timeout_ms);
     tauri::async_runtime::spawn_blocking(move || {
         run_workflow_director(
             &app,
@@ -300,6 +383,7 @@ pub(crate) async fn draft_workflow_with_director(
             antigravity_bin,
             antigravity_model,
             antigravity_approval_mode,
+            timeout,
         )
     })
     .await
@@ -366,9 +450,45 @@ mod tests {
             .contains("did not return"));
         fs::write(
             job.path().join(WORKFLOW_DIRECTOR_DRAFT_FILE),
-            br#"{"version":1,"name":"Draft","summary":"Safe","nodes":[],"edges":[]}"#,
+            br#"{"version":1,"name":"Draft","summary":"Safe","nodes":[{}],"edges":[]}"#,
         )
         .expect("write");
         assert_eq!(read_workflow_draft(&job).expect("draft")["version"], 1);
+    }
+
+    #[test]
+    fn draft_reader_rejects_malformed_oversized_and_wrong_semantic_envelopes() {
+        let job = TempJobDir::new("paintnode-workflow-director-invalid-test").expect("job");
+        let path = job.path().join(WORKFLOW_DIRECTOR_DRAFT_FILE);
+        fs::write(&path, b"{not json").expect("malformed");
+        assert!(read_workflow_draft(&job).unwrap_err().contains("malformed"));
+        fs::write(
+            &path,
+            br#"{"version":2,"name":"Draft","summary":"Safe","nodes":[{}],"edges":[]}"#,
+        )
+        .expect("semantic");
+        assert!(read_workflow_draft(&job)
+            .unwrap_err()
+            .contains("semantic envelope"));
+        let file = fs::File::create(&path).expect("oversized file");
+        file.set_len(MAX_DRAFT_JSON_BYTES + 1).expect("set length");
+        assert!(read_workflow_draft(&job).unwrap_err().contains("oversized"));
+    }
+
+    #[test]
+    fn timeout_is_bounded_and_cancels_a_hung_runner() {
+        assert_eq!(workflow_director_timeout(Some(1)), Duration::from_secs(1));
+        assert_eq!(
+            workflow_director_timeout(Some(u64::MAX)),
+            Duration::from_secs(600)
+        );
+        let result = run_with_timeout("director-timeout-test", Duration::from_millis(10), || {
+            while !crate::ai::ai_run_cancelled("director-timeout-test") {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err::<(), _>("provider stopped".into())
+        });
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(!crate::ai::ai_run_cancelled("director-timeout-test"));
     }
 }

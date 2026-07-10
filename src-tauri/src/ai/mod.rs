@@ -85,10 +85,14 @@ pub(crate) async fn cancel_ai_run(run_id: String) -> Result<(), String> {
     if run_id.is_empty() {
         return Err("Missing run id.".into());
     }
+    request_ai_run_cancel(&run_id)
+}
+
+pub(crate) fn request_ai_run_cancel(run_id: &str) -> Result<(), String> {
     cancelled_ai_runs()
         .lock()
         .map_err(|_| "Cancellation registry is unavailable.".to_string())?
-        .insert(run_id);
+        .insert(run_id.to_string());
     pending_director_inputs().1.notify_all();
     Ok(())
 }

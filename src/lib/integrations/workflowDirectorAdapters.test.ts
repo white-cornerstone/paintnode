@@ -49,7 +49,28 @@ describe('workflow Director adapters', () => {
       'claudeBin', 'claudeEffort', 'claudeModel',
       'codexBin', 'codexModel', 'codexReasoningEffort', 'codexServiceTier',
       'context', 'provider', 'runId',
+      'timeoutMs',
     ].sort());
+  });
+
+  it('keeps run identity internal while exposing cancellation for a hung draft', async () => {
+    let finish!: (value: unknown) => void;
+    const invoke = vi.fn<InvokeWorkflowDirector>(() => new Promise((resolve) => { finish = resolve; }));
+    const cancel = vi.fn(async () => undefined);
+    const director = createConfiguredWorkflowDirector(
+      { ...defaultAiRunOptions(), directorProvider: 'codex' },
+      invoke,
+      () => 'director-cancel-me',
+      cancel,
+    );
+    const pending = director.draft(context);
+    await director.cancel();
+    expect(cancel).toHaveBeenCalledWith('director-cancel-me');
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ runId: 'director-cancel-me', timeoutMs: 180_000 }));
+    finish({ version: 1 });
+    await pending;
+    await director.cancel();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it('returns a deterministic provider-free proposal through the same strict validation path', async () => {

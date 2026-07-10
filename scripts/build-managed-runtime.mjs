@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import {
+  MANAGED_RUNTIME_PROTOCOL_VERSION,
+  MANAGED_RUNTIME_SHARED_BRIDGE_FILES,
+} from './managed-runtime-package-contract.mjs';
 
 function value(args, name, fallback = null) {
   const index = args.indexOf(name);
@@ -62,10 +66,9 @@ run(
 
 const runnerName = provider === 'codex' ? 'codex-sdk-runner.mjs' : 'claude-agent-runner.mjs';
 cpSync(resolve('scripts', runnerName), join(stage, 'bridge', runnerName));
-cpSync(
-  resolve('scripts', 'director-action-schema.mjs'),
-  join(stage, 'bridge', 'director-action-schema.mjs'),
-);
+for (const bridgeFile of MANAGED_RUNTIME_SHARED_BRIDGE_FILES) {
+  cpSync(resolve('scripts', bridgeFile), join(stage, 'bridge', bridgeFile));
+}
 if (provider === 'codex') {
   cpSync(resolve('scripts', 'codex-capabilities.mjs'), join(stage, 'bridge', 'codex-capabilities.mjs'));
 }
@@ -91,7 +94,7 @@ const runtimeManifest = {
   packageVersion,
   sdkVersion,
   engineVersion,
-  protocolVersion: 1,
+  protocolVersion: MANAGED_RUNTIME_PROTOCOL_VERSION,
   minimumPaintNodeVersion,
   runner: `bridge/${runnerName}`,
   capabilitiesRunner: provider === 'codex' ? 'bridge/codex-capabilities.mjs' : null,
@@ -113,7 +116,7 @@ const metadata = {
   packageVersion,
   sdkVersion,
   engineVersion,
-  protocolVersion: 1,
+  protocolVersion: MANAGED_RUNTIME_PROTOCOL_VERSION,
   minimumPaintNodeVersion,
   artifact: {
     os: platform,
