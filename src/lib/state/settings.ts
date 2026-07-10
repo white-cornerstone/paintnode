@@ -34,6 +34,12 @@ export const GROK_IMAGE_MODEL_OPTIONS = [
   { id: 'grok-imagine-image-quality', label: 'Grok Imagine (Quality)' },
 ] as const;
 
+export const GROK_IMAGE_RESOLUTION_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: '1k', label: '1k (~1024px)' },
+  { id: '2k', label: '2k (~2048px)' },
+] as const;
+
 export const ANTIGRAVITY_IMAGE_MODEL_OPTIONS = [
   { id: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' },
   { id: 'auto', label: 'Auto' },
@@ -86,6 +92,7 @@ export type AntigravityModelId = string;
 export type ClaudeModelId = string;
 export type GrokModelId = string;
 export type GrokImageModelId = (typeof GROK_IMAGE_MODEL_OPTIONS)[number]['id'];
+export type GrokImageResolution = (typeof GROK_IMAGE_RESOLUTION_OPTIONS)[number]['id'];
 export type AntigravityImageModelId = (typeof ANTIGRAVITY_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageSize = (typeof ANTIGRAVITY_IMAGE_SIZE_OPTIONS)[number]['id'];
 export type AntigravityPersonGeneration = (typeof ANTIGRAVITY_PERSON_GENERATION_OPTIONS)[number]['id'];
@@ -159,6 +166,7 @@ export interface AiRunOptions {
   grokBin: string;
   grokModel: GrokModelId;
   grokImageModel: GrokImageModelId;
+  grokImageResolution: GrokImageResolution;
   editChecksLevel: AiEditChecksLevel;
   fillAspectRatio?: string | null;
 }
@@ -227,6 +235,7 @@ export interface PaintNodeSettings {
     grokBin: string;
     grokModel: GrokModelId;
     grokImageModel: GrokImageModelId;
+    grokImageResolution: GrokImageResolution;
     editChecksLevel: AiEditChecksLevel;
     profiles: AiSettingsProfile[];
     defaultProfileId: string | null;
@@ -252,6 +261,7 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
 
 const ANTIGRAVITY_IMAGE_MODEL_IDS = new Set<string>(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id));
 const GROK_IMAGE_MODEL_IDS = new Set<string>(GROK_IMAGE_MODEL_OPTIONS.map((option) => option.id));
+const GROK_IMAGE_RESOLUTION_IDS = new Set<string>(GROK_IMAGE_RESOLUTION_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_SIZE_IDS = new Set<string>(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_PERSON_GENERATION_IDS = new Set<string>(
   ANTIGRAVITY_PERSON_GENERATION_OPTIONS.map((option) => option.id),
@@ -357,6 +367,7 @@ export function defaultSettings(): PaintNodeSettings {
       grokBin: '',
       grokModel: 'auto',
       grokImageModel: 'grok-imagine-image-quality',
+      grokImageResolution: 'auto',
       editChecksLevel: 1,
       profiles: [],
       defaultProfileId: null,
@@ -476,6 +487,9 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
     grokImageModel: GROK_IMAGE_MODEL_IDS.has(String(value.grokImageModel))
       ? (value.grokImageModel as GrokImageModelId)
       : fallback.grokImageModel,
+    grokImageResolution: GROK_IMAGE_RESOLUTION_IDS.has(String(value.grokImageResolution))
+      ? (value.grokImageResolution as GrokImageResolution)
+      : fallback.grokImageResolution,
     editChecksLevel: clampInt(value.editChecksLevel, fallback.editChecksLevel, 0, 3) as AiEditChecksLevel,
   };
 }
@@ -594,6 +608,9 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
     grokImageModel: GROK_IMAGE_MODEL_IDS.has(String(ai.grokImageModel))
       ? (ai.grokImageModel as GrokImageModelId)
       : defaults.ai.grokImageModel,
+    grokImageResolution: GROK_IMAGE_RESOLUTION_IDS.has(String(ai.grokImageResolution))
+      ? (ai.grokImageResolution as GrokImageResolution)
+      : defaults.ai.grokImageResolution,
     editChecksLevel: clampInt(ai.editChecksLevel, defaults.ai.editChecksLevel, 0, 3) as AiEditChecksLevel,
   };
   const profileFallback = { ...normalizedAiBase, profiles: [], defaultProfileId: null };
@@ -697,6 +714,7 @@ export function defaultAiRunOptions(): AiRunOptions {
     grokBin: ai.grokBin,
     grokModel: ai.grokModel,
     grokImageModel: ai.grokImageModel,
+    grokImageResolution: ai.grokImageResolution,
     editChecksLevel: ai.editChecksLevel,
     fillAspectRatio: null,
   };
@@ -740,6 +758,7 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
     grokBin: value.ai.grokBin,
     grokModel: value.ai.grokModel,
     grokImageModel: value.ai.grokImageModel,
+    grokImageResolution: value.ai.grokImageResolution,
     editChecksLevel: value.ai.editChecksLevel,
     fillAspectRatio: null,
   };
@@ -821,6 +840,7 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
     grokBin: options.grokBin,
     grokModel: options.grokModel,
     grokImageModel: options.grokImageModel,
+    grokImageResolution: options.grokImageResolution,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };

@@ -1,9 +1,24 @@
-# Grok (xAI) provider — future expansion: image edit & video
+# Grok (xAI) provider — future expansion: video (image edit now implemented)
 
-This document captures the flow, verified facts, and PaintNode wiring for two
-Grok capabilities **not yet implemented**: **image editing** (image-to-image)
-and **video generation**. Text-to-image generation and Grok-as-Director are
-implemented (see `IMPLEMENTATION_PLAN.md`); these two are the next passes.
+> **Status update:** image editing is now IMPLEMENTED. The endpoint was
+> confirmed against the official xAI docs (`POST /v1/images/edits`; single
+> `image {url}` or `images: [{url}...]` data-URI inputs, max 3, referenced as
+> `<IMAGE_n>` in the prompt; `aspect_ratio`; `resolution: "1k"|"2k"`; same
+> `data[{b64_json}]` envelope) and cross-checked against strings in the grok
+> CLI binary. PaintNode wiring: `run_grok_owned_image_edit` +
+> `grok_restore_image_details` in `src-tauri/src/ai/grok.rs`, Tauri commands
+> `generate_grok_fill_image` / `generate_grok_retouch_image` /
+> `upscale_grok_image` / `compose_grok_workflow`, `AiEditProvider::Grok` +
+> `PaintNodeImageProvider::Grok` through placement/codex dispatch, reference
+> images (≤3) routed through the edit endpoint, a >1.25x detail-restoration
+> pass after cover-crop, and a user-facing `grokImageResolution`
+> (auto/1k/2k) setting. Asset extraction (decouple) remains unimplemented —
+> it needs an agentic manifest loop the xAI image API does not provide.
+> **Video generation below remains future work.**
+
+This document captures the flow, verified facts, and PaintNode wiring for
+Grok **video generation** (not yet implemented) and retains the original
+image-edit research notes for reference.
 
 All of this reuses the same decoupled auth model already implemented in
 `src-tauri/src/ai/grok.rs`: read the bearer JWT from `~/.grok/auth.json`, refresh

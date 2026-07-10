@@ -24,8 +24,10 @@
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
+    grokConfigFromRunOptions,
     upscaleCodexImage,
     upscaleAntigravityImage,
+    upscaleGrokImage,
     isDesktop,
   } from '../integrations/desktop';
   import { Copy } from '../icons';
@@ -153,13 +155,15 @@
 
       try {
         const sourcePng = await canvasToPngBytes(source);
-        if (imageProvider === 'grok') {
-          throw new Error(
-            'Grok upscale is coming soon. Switch the image generator to Codex or Antigravity for upscaling.',
-          );
-        }
         const generated =
-          imageProvider === 'antigravity'
+          imageProvider === 'grok'
+            ? await upscaleGrokImage(
+                grokConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
+                sourcePng,
+                scale,
+                keepComposedResult,
+              )
+            : imageProvider === 'antigravity'
             ? await upscaleAntigravityImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 sourcePng,

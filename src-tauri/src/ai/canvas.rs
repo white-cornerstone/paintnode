@@ -73,6 +73,33 @@ pub(crate) struct AntigravityImageCapability {
 /// Nano Banana resolution tiers as multiples of the 1K grids above.
 const ANTIGRAVITY_OUTPUT_TIERS: [(&str, u32); 3] = [("1K", 1), ("2K", 2), ("4K", 4)];
 
+/// xAI Images API resolution tiers as multiples of the grok 1k grids.
+const GROK_OUTPUT_TIERS: [(&str, u32); 2] = [("1k", 1), ("2k", 2)];
+
+/// The smallest resolution tier whose output grid covers the crop, so results
+/// only ever downscale back onto the document; oversized crops cap at the
+/// largest tier. Returns `(tier name, output dimensions)`; `None` when the
+/// label is not one of the capability's aspect ratios.
+fn tiered_output_target(
+    capability: &AntigravityImageCapability,
+    tiers: &[(&'static str, u32)],
+    aspect_label: &str,
+    dimensions: (u32, u32),
+) -> Option<(&'static str, (u32, u32))> {
+    let ratio = capability
+        .aspect_ratios
+        .iter()
+        .find(|ratio| ratio.label == aspect_label)?;
+    let (tier, scale) = tiers
+        .iter()
+        .copied()
+        .find(|(_, scale)| {
+            ratio.width * scale >= dimensions.0 && ratio.height * scale >= dimensions.1
+        })
+        .unwrap_or(*tiers.last()?);
+    Some((tier, (ratio.width * scale, ratio.height * scale)))
+}
+
 /// Image-tool parameters for a submitted crop: the smallest resolution tier
 /// whose output grid covers the crop, so results only ever downscale back
 /// onto the document. Returns `(tier name, output dimensions)`; `None` when
@@ -81,18 +108,28 @@ pub(crate) fn antigravity_output_target(
     aspect_label: &str,
     dimensions: (u32, u32),
 ) -> Option<(&'static str, (u32, u32))> {
-    let ratio = ai_antigravity_image_capability()
-        .aspect_ratios
-        .iter()
-        .find(|ratio| ratio.label == aspect_label)?;
-    let (tier, scale) = ANTIGRAVITY_OUTPUT_TIERS
-        .iter()
-        .copied()
-        .find(|(_, scale)| {
-            ratio.width * scale >= dimensions.0 && ratio.height * scale >= dimensions.1
-        })
-        .unwrap_or(("4K", 4));
-    Some((tier, (ratio.width * scale, ratio.height * scale)))
+    tiered_output_target(
+        ai_antigravity_image_capability(),
+        &ANTIGRAVITY_OUTPUT_TIERS,
+        aspect_label,
+        dimensions,
+    )
+}
+
+/// Grok request parameters for a submitted crop: the smallest xAI resolution
+/// tier ("1k" or "2k") whose output grid covers the crop; larger crops cap at
+/// "2k". Returns `(tier name, output dimensions)`; `None` when the label is
+/// not a grok aspect ratio.
+pub(crate) fn grok_output_target(
+    aspect_label: &str,
+    dimensions: (u32, u32),
+) -> Option<(&'static str, (u32, u32))> {
+    tiered_output_target(
+        ai_grok_image_capability(),
+        &GROK_OUTPUT_TIERS,
+        aspect_label,
+        dimensions,
+    )
 }
 
 /// Submission geometry for one AI image request. The working canvas is the
@@ -775,6 +812,28 @@ mod tests {
         );
         // Codex labels are not Antigravity ratios.
         assert_eq!(antigravity_output_target("codex-crop", (1280, 800)), None);
+    }
+
+    #[test]
+    fn grok_output_target_picks_smallest_covering_tier() {
+        // A crop inside the 1k "16:9" grid (1344x768) uses the 1k tier.
+        assert_eq!(
+            grok_output_target("16:9", (1344, 768)),
+            Some(("1k", (1344, 768)))
+        );
+        // A crop wider than the 1k grid needs the 2k tier.
+        assert_eq!(
+            grok_output_target("16:9", (1400, 700)),
+            Some(("2k", (2688, 1536)))
+        );
+        // Oversized crops cap at 2k rather than failing (no 4k tier).
+        assert_eq!(
+            grok_output_target("1:1", (9000, 9000)),
+            Some(("2k", (2048, 2048)))
+        );
+        // Labels outside the grok grid are not resolvable.
+        assert_eq!(grok_output_target("21:9", (1584, 672)), None);
+        assert_eq!(grok_output_target("codex-crop", (1280, 800)), None);
     }
 
     /// 128x128 seam mask: protected left (x < 56), gray feather strip, fully

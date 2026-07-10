@@ -11,6 +11,7 @@
     directorModeFromRunOptions,
     directorProviderFromRunOptions,
     focusTaskDocument,
+    grokEditComingSoonError,
     imageProviderFromRunOptions,
     providerLabel,
   } from '../ai/taskSupport';
@@ -212,7 +213,7 @@
     onClose();
     const executeTask = async () => {
       aiTasks.setProgress(task.id, 'Preparing source layer...');
-      editor.flash(decoupleProvider === 'antigravity' ? 'Extracting assets with Antigravity...' : 'Extracting assets with Codex...');
+      editor.flash(`Extracting assets with ${providerLabel(decoupleProvider)}...`);
       progressListener.start(
         runId,
         (message) => aiTasks.setProgress(task.id, message),
@@ -224,12 +225,8 @@
       );
 
       try {
+        if (decoupleProvider === 'grok') throw grokEditComingSoonError('asset extraction');
         const sourcePng = await canvasPngBytes(sourceLayer.canvas);
-        if (decoupleProvider === 'grok') {
-          throw new Error(
-            'Grok asset extraction is coming soon. Switch the image generator to Codex or Antigravity to extract assets.',
-          );
-        }
         const result =
           decoupleProvider === 'antigravity'
             ? await decoupleAntigravityImage(

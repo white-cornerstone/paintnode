@@ -578,7 +578,8 @@ fn draft_generation_note(
                 "- Use `{draft_canvas_path}` as the base image for a mask-guided draft image edit, and attach `{draft_mask_path}` as the edit mask. Set the Antigravity aspect-ratio parameter to `{aspect_label}` and the size tier to `1K`. Compose only inside the white mask area; keep black-mask provider padding plain and unchanged. PaintNode will crop the provider frame back to the real composition before parts use it."
             )
         }
-        AiEditProvider::Codex => "- For the draft image tool call, use the closest flexible canvas shape to the full PaintNode composition. It can be low-resolution and slightly rough; composition, subject placement, horizon, lighting, and continuity matter more than detail.".into(),
+        // Grok fills never storyboard; it only needs the generic draft note.
+        AiEditProvider::Codex | AiEditProvider::Grok => "- For the draft image tool call, use the closest flexible canvas shape to the full PaintNode composition. It can be low-resolution and slightly rough; composition, subject placement, horizon, lighting, and continuity matter more than detail.".into(),
     }
 }
 
@@ -618,7 +619,7 @@ pub(crate) fn fill_storyboard_master_prompt(
         AiEditProvider::Antigravity => format!(
             "\n- `{draft_canvas_path}`: provider-ratio draft scaffold.\n- `{draft_mask_path}`: draft edit mask. White marks the PaintNode composition area to fill; black marks protected provider padding that must stay plain and must not become final content."
         ),
-        AiEditProvider::Codex => String::new(),
+        AiEditProvider::Codex | AiEditProvider::Grok => String::new(),
     };
     let reference_note = if reference_names.is_empty() {
         "- No additional user reference images are attached.".to_string()

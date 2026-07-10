@@ -50,6 +50,7 @@
     loadAntigravityCapabilities,
     providerModelOptions,
   } from '../ai/providerCapabilities';
+  import { directorProviderLabel, providerLabel } from '../ai/taskSupport';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
 
   type AntigravityModelScope = 'all' | 'image';
@@ -210,9 +211,9 @@
   );
 
   const summary = $derived.by(() => {
-    const imageName = providerName(imageProvider);
+    const imageName = providerLabel(imageProvider);
     if (!directorEnabled) return `Director: Off · Image: ${imageName}`;
-    const directorName = directorProviderName(directorProvider);
+    const directorName = directorProviderLabel(directorProvider);
     if (directorProvider === imageProvider) return `Director: ${directorModeShort}, ${directorInvolvementShort} · Image: ${imageName}`;
     return `Director: ${directorModeShort} ${directorName}, ${directorInvolvementShort} · Image: ${imageName}`;
   });
@@ -232,16 +233,6 @@
         : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
     return `${directorDetail}. ${imageDetail}`;
   });
-
-  function providerName(provider: AiProvider): string {
-    if (provider === 'antigravity') return 'Antigravity';
-    if (provider === 'grok') return 'Grok';
-    return 'Codex';
-  }
-
-  function directorProviderName(provider: AiDirectorProvider): string {
-    return provider === 'claude' ? 'Claude' : providerName(provider);
-  }
 
   function activeDirectorMode(): 'auto' | 'force' {
     if (directorMode === 'force' || directorMode === 'auto') return directorMode;
@@ -305,8 +296,8 @@
       ? aiProfileRunOptionsFromSettings(settings.value, profileId)
       : aiProviderDefaultsFromSettings(settings.value);
     const profileImageProvider = profileOptions.imageProvider ?? profileOptions.provider ?? 'codex';
-    if (profileOptions.directorMode === 'skip') return `Director: Off · Image: ${providerName(profileImageProvider)}`;
-    return `Director: ${directorProviderName(profileOptions.directorProvider)} · Image: ${providerName(profileImageProvider)}`;
+    if (profileOptions.directorMode === 'skip') return `Director: Off · Image: ${providerLabel(profileImageProvider)}`;
+    return `Director: ${directorProviderLabel(profileOptions.directorProvider)} · Image: ${providerLabel(profileImageProvider)}`;
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {

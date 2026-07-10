@@ -23,8 +23,10 @@
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
+    grokConfigFromRunOptions,
     generateCodexRetouchImage,
     generateAntigravityRetouchImage,
+    generateGrokRetouchImage,
     isDesktop,
   } from '../integrations/desktop';
   import { Add, Copy, Dismiss } from '../icons';
@@ -182,13 +184,19 @@ Use these annotations as direct user instructions for the regions they point to.
         const bytes = await editor.prepareAiRetouchInput(active);
         if (!bytes) throw new Error('Unable to prepare AI retouch input.');
         const retouchPrompt = promptWithAnnotationNotes(prompt.trim(), bytes.annotationNotes);
-        if (imageProvider === 'grok') {
-          throw new Error(
-            'Grok image retouch is coming soon. Switch the image generator to Codex or Antigravity for retouching.',
-          );
-        }
         const generated =
-          imageProvider === 'antigravity'
+          imageProvider === 'grok'
+            ? await generateGrokRetouchImage(
+                grokConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
+                bytes.sourcePng,
+                bytes.editTargetPng,
+                bytes.maskPng,
+                bytes.annotatedSourcePng,
+                bytes.referencePng,
+                retouchPrompt,
+                references,
+              )
+            : imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 bytes.sourcePng,

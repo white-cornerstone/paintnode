@@ -910,19 +910,19 @@ fn normalize_progress_run_dir_references(text: String) -> String {
     ]
     .into_iter()
     .fold(text, |current, dir| {
-            [
-                (format!("`{dir}` directory"), "job folder"),
-                (format!("`{dir}` folder"), "job folder"),
-                (format!("{dir} directory"), "job folder"),
-                (format!("{dir} folder"), "job folder"),
-                (format!("`{dir}`"), "job folder"),
-                (dir.to_string(), "job folder"),
-            ]
-            .into_iter()
-            .fold(current, |next, (needle, replacement)| {
-                next.replace(&needle, replacement)
-            })
+        [
+            (format!("`{dir}` directory"), "job folder"),
+            (format!("`{dir}` folder"), "job folder"),
+            (format!("{dir} directory"), "job folder"),
+            (format!("{dir} folder"), "job folder"),
+            (format!("`{dir}`"), "job folder"),
+            (dir.to_string(), "job folder"),
+        ]
+        .into_iter()
+        .fold(current, |next, (needle, replacement)| {
+            next.replace(&needle, replacement)
         })
+    })
 }
 
 pub(crate) fn sanitize_provider_progress_line(line: &str) -> Option<String> {
@@ -997,6 +997,31 @@ fn provider_progress_update(
                 kind: kind.to_string(),
                 message,
                 detail,
+            });
+        }
+
+        // Grok CLI streaming-json events. `thought`/`text` carry incremental
+        // `data` fragments, so emit stable status lines instead of echoing
+        // partial deltas.
+        if event_type == "thought" {
+            return Some(ProviderProgressUpdate {
+                kind: "agentProgress".into(),
+                message: format!("{provider_label} is thinking through the request"),
+                detail: Some("thought".into()),
+            });
+        }
+        if event_type == "text" {
+            return Some(ProviderProgressUpdate {
+                kind: "agentMessage".into(),
+                message: format!("{provider_label} is writing its response"),
+                detail: Some("agentMessage".into()),
+            });
+        }
+        if event_type == "end" {
+            return Some(ProviderProgressUpdate {
+                kind: "turnCompleted".into(),
+                message: format!("{provider_label} finished; checking generated output"),
+                detail: None,
             });
         }
 
@@ -1641,6 +1666,7 @@ type ProjectJobPath = (
 pub(crate) fn project_or_temp_job_path(
     app: &AppHandle,
     project_path: &Option<String>,
+    runs_dir: &str,
     prefix: &str,
     run_id: &str,
     keep_job_dir: bool,
@@ -1648,8 +1674,7 @@ pub(crate) fn project_or_temp_job_path(
     let project_dir = optional_project_dir(project_path);
     let job_project_dir = ai_job_project_dir(app, &project_dir, keep_job_dir)?;
     if let Some(job_project_dir) = &job_project_dir {
-        let run_dir =
-            project_agent_run_dir_for_run(job_project_dir, ANTIGRAVITY_RUNS_DIR, prefix, run_id)?;
+        let run_dir = project_agent_run_dir_for_run(job_project_dir, runs_dir, prefix, run_id)?;
         Ok((
             project_dir,
             Some(job_project_dir.clone()),
@@ -1816,6 +1841,23 @@ mod tests {
         assert_eq!(update.kind, "subagentStarted");
         assert_eq!(update.message, "Reviewing candidate");
         assert_eq!(update.detail.as_deref(), Some("image-reviewer"));
+    }
+
+    #[test]
+    fn provider_progress_update_surfaces_grok_stream_events() {
+        let thought =
+            provider_progress_update(r#"{"type":"thought","data":"Consider the"}"#, false, "Grok")
+                .expect("thought update");
+        assert_eq!(thought.kind, "agentProgress");
+        assert_eq!(thought.message, "Grok is thinking through the request");
+
+        let text = provider_progress_update(r#"{"type":"text","data":"Placing"}"#, false, "Grok")
+            .expect("text update");
+        assert_eq!(text.kind, "agentMessage");
+
+        let end = provider_progress_update(r#"{"type":"end","sessionId":"abc"}"#, false, "Grok")
+            .expect("end update");
+        assert_eq!(end.kind, "turnCompleted");
     }
 
     #[test]

@@ -25,6 +25,9 @@ export interface FillFrameSummary {
 
 const ANTIGRAVITY_RATIO_CHOICE_LOG_ERROR = 0.10;
 const ANTIGRAVITY_OUTPUT_TIERS = [1, 2, 4] as const;
+// The xAI Images API offers 1k and 2k resolution tiers, so Grok frames can
+// reach at most twice the base ratio grid.
+const GROK_OUTPUT_TIERS = [1, 2] as const;
 
 export function ratioLabel(width: number, height: number): string {
   const safeWidth = normalizedDimension(width);
@@ -136,7 +139,8 @@ function ratioGridFillFrameSummary(
       : best;
   }, choices[0]);
   const selected = choices.find((ratio) => ratio.label === ratioOverride) ?? closest;
-  const frame = antigravityFrameForRatio(selected, documentWidth, documentHeight);
+  const tiers = provider === 'grok' ? GROK_OUTPUT_TIERS : ANTIGRAVITY_OUTPUT_TIERS;
+  const frame = ratioGridFrameForRatio(selected, tiers, documentWidth, documentHeight);
   const scale = Math.min(1, frame.width / documentWidth, frame.height / documentHeight);
   const error = aspectLogError(targetAspect, closest.width / Math.max(1, closest.height));
   return {
@@ -175,14 +179,15 @@ function codexFrameDimensions(
   return { width, height };
 }
 
-function antigravityFrameForRatio(
+function ratioGridFrameForRatio(
   ratio: FillFrameRatioOption,
+  tiers: readonly number[],
   documentWidth: number,
   documentHeight: number,
 ): { width: number; height: number } {
   const tier =
-    ANTIGRAVITY_OUTPUT_TIERS.find((scale) => ratio.width * scale >= documentWidth && ratio.height * scale >= documentHeight) ??
-    ANTIGRAVITY_OUTPUT_TIERS[ANTIGRAVITY_OUTPUT_TIERS.length - 1];
+    tiers.find((scale) => ratio.width * scale >= documentWidth && ratio.height * scale >= documentHeight) ??
+    tiers[tiers.length - 1];
   return { width: ratio.width * tier, height: ratio.height * tier };
 }
 

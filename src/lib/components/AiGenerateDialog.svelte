@@ -2,7 +2,7 @@
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
-  import { aiRoleSummary, copyTextToClipboard, imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { aiRoleSummary, copyTextToClipboard, imageProviderFromRunOptions, providerLabel } from '../ai/taskSupport';
   import { defaultFillPrompt } from '../ai/generateExecutor';
   import { fillFrameSummary } from '../ai/imageModelCapabilities';
   import { loadAiReferenceImages, type AiReferenceImage } from '../ai/references';
@@ -99,19 +99,16 @@
     const capturedRunOptions = cloneAiRunOptions({
       ...runOptions,
       fillAspectRatio:
-        imageProvider === 'antigravity' && fillFrame ? (antigravityRatioOverride ?? fillFrame.ratioLabel) : null,
+        (imageProvider === 'antigravity' || imageProvider === 'grok') && fillFrame
+          ? (antigravityRatioOverride ?? fillFrame.ratioLabel)
+          : null,
     });
     busy = true;
     const task = aiTasks.create({
       kind: 'generate',
       title: hasSelection ? 'Generative Fill' : 'Generate Image',
       subtitle: roleSummary,
-      progress:
-        imageProvider === 'codex'
-          ? 'Preparing Codex request...'
-          : imageProvider === 'antigravity'
-            ? 'Preparing Antigravity request...'
-            : 'Running local generator...',
+      progress: `Preparing ${providerLabel(imageProvider)} request...`,
       documentId: editor.activeDocumentId,
       detail: {
         kind: 'generate',

@@ -22,6 +22,7 @@ import type {
   AntigravitySafetyThreshold,
   GrokModelId,
   GrokImageModelId,
+  GrokImageResolution,
   ReasoningEffort,
   ServiceTier,
 } from '../state/settings';
@@ -200,10 +201,21 @@ export interface AntigravityGeneratorConfig {
   claudeModel?: ClaudeModelId | null;
   /** Claude reasoning effort used when Claude is selected as AI Director. */
   claudeEffort?: ClaudeEffort | null;
+  /** Grok executable used when Grok is selected as AI Director. */
+  grokBin?: string | null;
+  /** Grok model used when Grok is selected as AI Director. */
+  grokModel?: GrokModelId | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
   /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
   fillAspectRatio?: string | null;
+}
+
+export interface GrokDirectorConfig {
+  /** Optional `grok` binary override. Empty resolves the binary from PATH. */
+  bin?: string;
+  /** Grok Director model; 'auto' uses the CLI default. */
+  model?: GrokModelId;
 }
 
 export interface PlannedFillImageConfig {
@@ -211,8 +223,11 @@ export interface PlannedFillImageConfig {
   /** @deprecated Use directorProvider. */
   plannerProvider?: AiDirectorProvider;
   claude?: ClaudeDirectorConfig | null;
+  grok?: GrokDirectorConfig | null;
   imageProvider?: AiProvider;
   antigravity?: AntigravityGeneratorConfig | null;
+  /** Grok image-engine options used when Grok is the fill image provider. */
+  grokImage?: GrokGeneratorConfig | null;
 }
 
 export interface TargetDimensions {
@@ -377,6 +392,12 @@ export interface GrokGeneratorConfig {
   runId?: string;
   /** Fixed xAI Imagine image model. */
   imageModel?: GrokImageModelId;
+  /** xAI output resolution tier; 'auto' picks 1k or 2k from the target size. */
+  imageResolution?: GrokImageResolution;
+  /** Optional Grok aspect-ratio override for mask-guided generative fill. */
+  fillAspectRatio?: string | null;
+  /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
+  editChecksLevel?: number | null;
 }
 
 function grokInvokeConfig(config: GrokGeneratorConfig) {
@@ -387,6 +408,7 @@ function grokInvokeConfig(config: GrokGeneratorConfig) {
     keepDebugArtifacts: config.keepDebugArtifacts ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
     imageModel: config.imageModel ?? 'grok-imagine-image-quality',
+    imageResolution: config.imageResolution ?? 'auto',
   };
 }
 
@@ -404,6 +426,9 @@ export function grokConfigFromRunOptions(
     keepDebugArtifacts,
     runId,
     imageModel: options.grokImageModel,
+    imageResolution: options.grokImageResolution,
+    fillAspectRatio: options.fillAspectRatio ?? null,
+    editChecksLevel: options.editChecksLevel,
   };
 }
 
@@ -448,6 +473,8 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig, includeImag
     claudeBin: config.claudeBin?.trim() ? config.claudeBin.trim() : null,
     claudeModel: config.claudeModel && config.claudeModel !== 'default' ? config.claudeModel : null,
     claudeEffort: config.claudeEffort ?? null,
+    grokBin: config.grokBin?.trim() ? config.grokBin.trim() : null,
+    grokModel: config.grokModel ?? null,
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
@@ -540,8 +567,17 @@ export function antigravityConfigFromRunOptions(
     claudeBin: options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
     claudeModel: options.claudeModel,
     claudeEffort: options.claudeEffort,
+    grokBin: options.grokExecutableMode === 'custom' ? options.grokBin : '',
+    grokModel: options.grokModel,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
+  };
+}
+
+export function grokDirectorConfigFromRunOptions(options: AiRunOptions): GrokDirectorConfig {
+  return {
+    bin: options.grokExecutableMode === 'custom' ? options.grokBin : '',
+    model: options.grokModel,
   };
 }
 
@@ -655,6 +691,8 @@ export async function generateCodexFillImage(
   const runId = config.runId?.trim() ? config.runId.trim() : `fill-${Date.now()}`;
   const antigravity = plannedImage?.antigravity ?? null;
   const claude = plannedImage?.claude ?? null;
+  const grok = plannedImage?.grok ?? null;
+  const grokImage = plannedImage?.grokImage ?? null;
   const directorProvider =
     plannedImage?.directorProvider ?? plannedImage?.plannerProvider ?? config.directorProvider ?? 'codex';
   return invoke<GeneratedImageResult>('generate_codex_fill_image', {
@@ -671,6 +709,10 @@ export async function generateCodexFillImage(
     claudeBin: claude?.bin?.trim() ? claude.bin.trim() : null,
     claudeModel: claude?.model && claude.model !== 'default' ? claude.model : null,
     claudeEffort: claude?.effort ?? null,
+    grokBin: grok?.bin?.trim() ? grok.bin.trim() : grokImage?.bin?.trim() ? grokImage.bin.trim() : null,
+    grokModel: grok?.model ?? null,
+    grokImageModel: grokImage?.imageModel ?? null,
+    grokImageResolution: grokImage?.imageResolution ?? null,
     imageProvider: plannedImage?.imageProvider ?? 'codex',
     antigravityBin: antigravity?.bin?.trim() ? antigravity.bin.trim() : null,
     antigravityModel: antigravity?.model ?? null,
@@ -864,8 +906,8 @@ export async function discoverGrokCapabilities(bin?: string): Promise<AiProvider
 }
 
 /**
- * Decoupled Grok (xAI Imagine) text-to-image generation. Reference images and
- * image editing are not yet supported (see docs/grok-future-expansion.md).
+ * Decoupled Grok (xAI Imagine) text-to-image generation. Reference images are
+ * routed through the xAI edit endpoint (up to 3 supported).
  */
 export async function generateGrokImage(
   config: GrokGeneratorConfig,
@@ -875,6 +917,11 @@ export async function generateGrokImage(
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Grok image generation is only available in the desktop app.');
+  }
+  // Reject oversize reference sets here so multi-megabyte byte arrays are not
+  // serialized over IPC just for the backend to return the same error.
+  if (references.length > 3) {
+    throw new Error('Grok supports up to 3 reference images per generation. Remove some references, or use Antigravity or Codex.');
   }
   const runId = config.runId?.trim() ? config.runId.trim() : `grok-${Date.now()}`;
   return invoke<GeneratedImageResult>('generate_grok_image', {
@@ -887,6 +934,113 @@ export async function generateGrokImage(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+  });
+}
+
+/** Mask-guided Grok generative fill through the xAI image-edit endpoint. */
+export async function generateGrokFillImage(
+  config: GrokGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  prompt: string,
+  references: WorkflowSourceImage[] = [],
+  storeAsset = true,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok generative fill is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-fill-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_grok_fill_image', {
+    ...grokInvokeConfig({ ...config, runId }),
+    prompt,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    storeAsset,
+    fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
+    editChecksLevel: config.editChecksLevel ?? 1,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
+  });
+}
+
+/** Grok retouch / auto-adjust through the xAI image-edit endpoint. */
+export async function generateGrokRetouchImage(
+  config: GrokGeneratorConfig,
+  sourcePng: Uint8Array,
+  editTargetPng: Uint8Array,
+  maskPng: Uint8Array,
+  annotatedSourcePng: Uint8Array | null | undefined,
+  referencePng: Uint8Array | null | undefined,
+  prompt: string,
+  references: WorkflowSourceImage[] = [],
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok retouch is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-retouch-${Date.now()}`;
+  return invoke<GeneratedImageResult>('generate_grok_retouch_image', {
+    ...grokInvokeConfig({ ...config, runId }),
+    prompt,
+    sourcePng: Array.from(sourcePng),
+    editTargetPng: Array.from(editTargetPng),
+    maskPng: Array.from(maskPng),
+    annotatedSourcePng: annotatedSourcePng ? Array.from(annotatedSourcePng) : null,
+    referencePng: referencePng ? Array.from(referencePng) : null,
+    editChecksLevel: config.editChecksLevel ?? 1,
+    referencePngs: references.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
+  });
+}
+
+/** Grok upscale: enlarge, then restore detail tile-by-tile via image edits. */
+export async function upscaleGrokImage(
+  config: GrokGeneratorConfig,
+  sourcePng: Uint8Array,
+  scalePercent: number,
+  keepComposedResult = false,
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok upscale is only available in the desktop app.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-upscale-${Date.now()}`;
+  return invoke<GeneratedImageResult>('upscale_grok_image', {
+    ...grokInvokeConfig({ ...config, runId }),
+    sourcePng: Array.from(sourcePng),
+    scalePercent: Math.round(scalePercent),
+    keepComposedResult,
+    runId,
+  });
+}
+
+/** Grok multi-asset compose (up to 3 sources) via the xAI image-edit endpoint. */
+export async function composeGrokWorkflow(
+  config: GrokGeneratorConfig,
+  prompt: string,
+  sources: WorkflowSourceImage[],
+): Promise<GeneratedImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok workflow compose is only available in the desktop app.');
+  }
+  if (sources.length > 3) {
+    throw new Error('Grok multi-asset compose supports up to 3 source images. Connect at most 3 assets, or switch the image generator to Codex or Antigravity.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-workflow-${Date.now()}`;
+  return invoke<GeneratedImageResult>('compose_grok_workflow', {
+    ...grokInvokeConfig({ ...config, runId }),
+    prompt,
+    sources: sources.map((source) => ({
+      name: source.name,
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
   });
 }
 

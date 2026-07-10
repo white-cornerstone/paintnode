@@ -27,6 +27,21 @@ describe('fill frame summary', () => {
     expect(summary.choices.map((choice) => choice.label)).toContain('21:9');
   });
 
+  it('caps Grok fill frames at twice the ratio grid (1k/2k output tiers)', () => {
+    const summary = fillFrameSummary('grok', 4000, 2250, 526, 309);
+
+    expect(summary.provider).toBe('grok');
+    expect(summary.ratioLabel).toBe('16:9');
+    expect(summary.frameLabel).toBe('2688 x 1536');
+    expect(summary.scalePercent).toBe(67);
+    expect(summary.needsRestoration).toBe(true);
+
+    const small = fillFrameSummary('grok', 1280, 720, 526, 309);
+    expect(small.frameLabel).toBe('1344 x 768');
+    expect(small.scalePercent).toBe(100);
+    expect(small.needsRestoration).toBe(false);
+  });
+
   it('asks for an Antigravity ratio when the selected area is between supported shapes', () => {
     const auto = fillFrameSummary('antigravity', 1280, 800, 1000, 200);
     expect(auto.ratioLabel).toBe('4:1');

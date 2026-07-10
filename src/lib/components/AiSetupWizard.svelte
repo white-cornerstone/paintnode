@@ -181,14 +181,19 @@
   }
 
     function confirmProvider(): void {
-      settings.update({
-        ai: {
-          provider,
-          imageProvider: provider,
-          directorProvider: provider === 'codex' ? 'codex' : settings.value.ai.directorProvider,
-          directorMode: provider === 'antigravity' ? 'skip' : settings.value.ai.directorMode === 'skip' ? 'auto' : settings.value.ai.directorMode,
-        },
-      });
+      // The wizard only offers Codex/Antigravity cards; a stored Grok
+      // selection falls back to the Codex card for display. Don't overwrite
+      // the user's Grok settings unless they actively picked a card.
+      if (userPicked || settings.value.ai.imageProvider !== 'grok') {
+        settings.update({
+          ai: {
+            provider,
+            imageProvider: provider,
+            directorProvider: provider === 'codex' ? 'codex' : settings.value.ai.directorProvider,
+            directorMode: provider === 'antigravity' ? 'skip' : settings.value.ai.directorMode === 'skip' ? 'auto' : settings.value.ai.directorMode,
+          },
+        });
+      }
       manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;
       step = 2;
     }

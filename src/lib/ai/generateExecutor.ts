@@ -7,6 +7,8 @@ import {
   generateAntigravityFillImage,
   generateAntigravityImage,
   grokConfigFromRunOptions,
+  grokDirectorConfigFromRunOptions,
+  generateGrokFillImage,
   generateGrokImage,
   type ProjectAsset,
   type TargetDimensions,
@@ -24,6 +26,7 @@ import {
   directorProviderFromRunOptions,
   focusTaskDocument,
   imageProviderFromRunOptions,
+  providerLabel,
 } from './taskSupport';
 
 /**
@@ -56,18 +59,11 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
   const imageProvider = imageProviderFromRunOptions(runOptions);
   const directorMode = directorModeFromRunOptions(runOptions);
   const directorProvider = directorProviderFromRunOptions(runOptions);
-  aiTasks.setProgress(
-    task.id,
-    imageProvider === 'codex'
-      ? 'Preparing Codex request...'
-      : 'Preparing Antigravity request...',
-  );
+  aiTasks.setProgress(task.id, `Preparing ${providerLabel(imageProvider)} request...`);
   editor.flash(
     fillMode
       ? 'Preparing generative fill...'
-      : imageProvider === 'codex'
-        ? 'Generating with Codex...'
-        : 'Generating with Antigravity...',
+      : `Generating with ${providerLabel(imageProvider)}...`,
   );
   const runId = task.runId ?? createRunId('generate');
   if (runId && task.runId !== runId) aiTasks.setRunId(task.id, runId);
@@ -109,9 +105,18 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
       );
     }
     const useAgentDirectorForFill = !!fillEdit && directorMode !== 'skip';
-    if (imageProvider === 'grok' && fillEdit) {
+    // Plain Grok generation is a direct xAI API call with no director loop
+    // yet (fills are director-managed through the shared fill machinery).
+    // Fail an explicit 'force' request; for 'auto', proceed but say so.
+    if (imageProvider === 'grok' && !fillEdit && directorMode === 'force') {
       throw new Error(
-        'Grok generative fill is coming soon. Switch the image generator to Codex or Antigravity for fills, or clear the selection to generate a fresh image with Grok.',
+        'The AI Director does not support plain Grok image generation yet. Switch the image generator to Codex or Antigravity for directed runs, or set the Director to Off for Grok.',
+      );
+    }
+    if (imageProvider === 'grok' && !fillEdit && directorMode !== 'skip') {
+      aiTasks.setProgress(
+        task.id,
+        'AI Director is not yet available for plain Grok generation; generating directly with Grok...',
       );
     }
     const generated =
@@ -131,10 +136,18 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
                 directorProvider === 'claude'
                   ? claudeConfigFromRunOptions(runOptions)
                   : null,
+              grok:
+                directorProvider === 'grok'
+                  ? grokDirectorConfigFromRunOptions(runOptions)
+                  : null,
               imageProvider,
               antigravity:
                 imageProvider === 'antigravity' || directorProvider === 'antigravity'
                   ? antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts)
+                  : null,
+              grokImage:
+                imageProvider === 'grok'
+                  ? grokConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts)
                   : null,
             },
           )
@@ -156,12 +169,22 @@ async function executeGenerateTask(task: AiTask): Promise<void> {
               references,
             )
         : imageProvider === 'grok'
-        ? await generateGrokImage(
-            grokConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
-            generationPrompt,
-            generationTarget,
-            references,
-          )
+        ? fillEdit
+          ? await generateGrokFillImage(
+              grokConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts),
+              fillEdit.sourcePng,
+              fillEdit.editTargetPng,
+              fillEdit.maskPng,
+              generationPrompt,
+              references,
+              false,
+            )
+          : await generateGrokImage(
+              grokConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
+              generationPrompt,
+              generationTarget,
+              references,
+            )
         : fillEdit
           ? await generateAntigravityFillImage(
               antigravityConfigFromRunOptions(runOptions, fillJobProjectPath, runId, keepJobDir, keepDebugArtifacts),
