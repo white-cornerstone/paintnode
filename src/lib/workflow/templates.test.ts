@@ -6,6 +6,7 @@ import {
   instantiateWorkflowTemplate,
   type WorkflowTemplateId,
 } from './templates';
+import { creatorNodeDefinition } from './registry';
 
 const cases: Array<[WorkflowTemplateId, string, number]> = [
   ['blank', 'Blank Workflow', 1],
@@ -13,7 +14,25 @@ const cases: Array<[WorkflowTemplateId, string, number]> = [
   ['campaign-composer', 'Campaign Composer', 3],
 ];
 
+function goldenHash(value: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
 describe('workflow templates', () => {
+  it.each([
+    ['blank', '05ec353fb4ef34ad'],
+    ['asset-composition', 'ff5fdd72010519eb'],
+    ['campaign-composer', 'c9186efe61cff7a5'],
+  ] as const)('keeps the exact persisted v2 golden for %s', (id, expectedHash) => {
+    const graph = instantiateWorkflowTemplate(id, { graphId: `golden-${id}`, name: `Golden ${id}` });
+    expect(goldenHash(JSON.stringify(graph))).toBe(expectedHash);
+  });
+
   it.each(cases)('instantiates a fresh valid %s WorkflowGraph v2', (id, defaultName, outputCount) => {
     const first = instantiateWorkflowTemplate(id);
     const second = instantiateWorkflowTemplate(id);
@@ -108,6 +127,15 @@ describe('workflow templates', () => {
         { id: 'assets', label: 'Visual inputs', dataType: 'asset-reference', multiple: true },
         { id: 'brief', label: 'Brief', dataType: 'prompt', required: true },
       ]);
+      for (const node of graph.nodes) {
+        const definition = creatorNodeDefinition(node.type as Exclude<typeof node.type, 'unsupported'>);
+        expect(node.ports.inputs.map(({ id, dataType }) => ({ id, dataType }))).toEqual(
+          definition.ports.inputs.map(({ id, dataType }) => ({ id, dataType })),
+        );
+        expect(node.ports.outputs.map(({ id, dataType }) => ({ id, dataType }))).toEqual(
+          definition.ports.outputs.map(({ id, dataType }) => ({ id, dataType })),
+        );
+      }
     }
   });
 });

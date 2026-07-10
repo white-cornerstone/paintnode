@@ -6,6 +6,7 @@ import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
 import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
+import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -13,6 +14,51 @@ function ids(): WorkflowIdGenerator {
 }
 
 describe('WorkflowStore graph adapter', () => {
+  it('adds every creator registry node and preserves exact config and port identity on reopen', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Palette additions');
+    const types: CreatorNodeType[] = ['input', 'brief', 'art-direction', 'transform', 'review', 'output'];
+    const added = types.map((type, index) => store.addCreatorNode(type, { x: 50 + index * 250, y: 500 }));
+    const graph = store.graphSnapshot();
+
+    for (const [index, nodeId] of added.entries()) {
+      const expected = createCreatorNode(types[index], {
+        id: nodeId,
+        position: { x: 50 + index * 250, y: 500 },
+      });
+      expect(graph.nodes.find((node) => node.id === nodeId)).toEqual(expected);
+    }
+    expect([
+      store.nodes.find((node) => node.id === added[0])?.id,
+      store.briefNodes.find((node) => node.id === added[1])?.id,
+      store.creatorNodes.find((node) => node.id === added[2])?.id,
+      store.creatorNodes.find((node) => node.id === added[3])?.id,
+      store.creatorNodes.find((node) => node.id === added[4])?.id,
+      store.outputNodes.find((node) => node.id === added[5])?.id,
+    ]).toEqual(added);
+    expect(store.creatorNodes.map((node) => node.type)).toEqual(['art-direction', 'transform', 'review']);
+    expect(store.selection).toEqual({ kind: 'output', id: added.at(-1) });
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Palette additions');
+    expect(reopened.serialize()).toEqual(store.serialize());
+    expect(reopened.creatorNodes.map((node) => node.type)).toEqual(['art-direction', 'transform', 'review']);
+  });
+
+  it('rejects invalid creator additions atomically before the graph domain mutates', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Atomic palette add');
+    const before = store.graphSnapshot();
+
+    expect(() => store.addCreatorNode('transform', { x: 100, y: 200 }, {
+      capability: '',
+      instructions: '',
+      advanced: 'codex',
+    })).toThrow(/invalid transform configuration/i);
+    expect(store.graphSnapshot()).toBe(before);
+    expect(store.rev).toBe(0);
+  });
+
   it.each(WORKFLOW_TEMPLATES)('installs and round-trips the $name template through the graph adapter', (template) => {
     const store = new WorkflowStore({
       idGenerator: ids(),
@@ -467,6 +513,7 @@ describe('WorkflowStore graph adapter', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.openFromBytes(new TextEncoder().encode(JSON.stringify(graph)), 'workflows/future.cxflow.json', 'Future');
     store.setPrompt('Still preserved');
+    store.addCreatorNode('review', { x: 360, y: 500 });
 
     expect(store.serialize().nodes.find((node) => node.id === 'future')).toEqual(graph.nodes.at(-1));
     expect(store.serialize().runRecords).toEqual(graph.runRecords);

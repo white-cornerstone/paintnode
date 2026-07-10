@@ -13,8 +13,11 @@ import {
   type WorkflowGraphV2,
   type WorkflowIdGenerator,
   type WorkflowNodeV2,
+  type WorkflowNodePort,
   instantiateWorkflowTemplate,
   type WorkflowTemplateId,
+  createCreatorNode,
+  type CreatorNodeType,
 } from '../workflow';
 
 export interface WorkflowAssetNode {
@@ -46,6 +49,19 @@ export interface WorkflowBriefNode {
   color: string;
 }
 
+export interface WorkflowCreatorNode {
+  id: string;
+  type: 'art-direction' | 'transform' | 'review';
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  ports: { inputs: WorkflowNodePort[]; outputs: WorkflowNodePort[] };
+  config: Record<string, unknown>;
+}
+
 export interface WorkflowConnection {
   id: string;
   from: string;
@@ -67,7 +83,11 @@ export interface WorkflowOutputNode {
 }
 
 export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
-export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output'; id: string };
+export type WorkflowSelection =
+  | { kind: 'asset'; id: string }
+  | { kind: 'creator'; id: string }
+  | { kind: 'composition' }
+  | { kind: 'output'; id: string };
 export type WorkflowZoomMode = 'in' | 'out';
 export type StoryboardTool = 'brush' | 'eraser';
 
@@ -151,6 +171,7 @@ export class WorkflowStore {
   storyboardAnnotationsVisible = $state(true);
   nodes = $state<WorkflowAssetNode[]>([]);
   briefNodes = $state<WorkflowBriefNode[]>([]);
+  creatorNodes = $state<WorkflowCreatorNode[]>([]);
   connections = $state<WorkflowConnection[]>([]);
   outputAssetId = $state<string | null>(null);
   outputRelativePath = $state<string | null>(null);
@@ -214,6 +235,7 @@ export class WorkflowStore {
     this.storyboardAnnotationsVisible = true;
     this.nodes = [];
     this.briefNodes = [];
+    this.creatorNodes = [];
     this.connections = [{ id: this.nextGraphId('edge'), from: 'composition', to: 'output' }];
     this.outputAssetId = null;
     this.outputRelativePath = null;
@@ -330,11 +352,35 @@ export class WorkflowStore {
     this.tool = 'hand';
   }
 
+  addCreatorNode(
+    type: CreatorNodeType,
+    position?: { x: number; y: number },
+    config?: Record<string, unknown>,
+  ): string {
+    const domain = this.requireGraphDomain();
+    const node = createCreatorNode(type, {
+      id: this.nextGraphId('node'),
+      position: position
+        ? { x: roundWorkflowNumber(position.x), y: roundWorkflowNumber(position.y) }
+        : undefined,
+      config,
+    });
+    this.publishGraphMutation(domain, domain.addNode(node));
+    this.selection = type === 'input'
+      ? { kind: 'asset', id: node.id }
+      : type === 'output'
+        ? { kind: 'output', id: node.id }
+        : { kind: 'creator', id: node.id };
+    this.tool = 'hand';
+    return node.id;
+  }
+
   removeNode(id: string): void {
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
     this.publishGraphMutation(domain, domain.removeNode(id));
-    if (this.selection?.kind === 'asset' && this.selection.id === id) this.selection = null;
+    if ((this.selection?.kind === 'asset' || this.selection?.kind === 'creator' || this.selection?.kind === 'output')
+      && this.selection.id === id) this.selection = null;
   }
 
   moveNode(id: string, x: number, y: number): void {
@@ -673,6 +719,7 @@ export class WorkflowStore {
     }
     if (selection?.kind === 'composition') return this.compositionName;
     if (selection?.kind === 'output') return this.outputNode(selection.id)?.name ?? '';
+    if (selection?.kind === 'creator') return this.requireGraphDomain().node(selection.id)?.title ?? '';
     return '';
   }
 
@@ -683,6 +730,7 @@ export class WorkflowStore {
     }
     if (selection?.kind === 'composition') return this.compositionColor;
     if (selection?.kind === 'output') return this.outputNode(selection.id)?.color ?? '#3a3c42';
+    if (selection?.kind === 'creator') return this.requireGraphDomain().node(selection.id)?.color ?? '#3a3c42';
     return '#3a3c42';
   }
 
@@ -703,6 +751,10 @@ export class WorkflowStore {
       nodeId = selection.id;
       displayName = name.trim();
       fallback = 'Output';
+    } else if (selection?.kind === 'creator') {
+      nodeId = selection.id;
+      displayName = name.trim();
+      fallback = this.requireGraphDomain().node(nodeId)?.title ?? 'Node';
     } else {
       return;
     }
@@ -723,6 +775,8 @@ export class WorkflowStore {
     } else if (selection?.kind === 'composition') {
       nodeId = 'composition';
     } else if (selection?.kind === 'output') {
+      nodeId = selection.id;
+    } else if (selection?.kind === 'creator') {
       nodeId = selection.id;
     } else {
       return;
@@ -1054,6 +1108,27 @@ export class WorkflowStore {
         width: node.size.width,
         height: node.size.height,
         color: node.color,
+      }));
+    this.creatorNodes = domain.graph.nodes
+      .filter((node): node is WorkflowNodeV2 & { type: WorkflowCreatorNode['type'] } => (
+        node.type === 'transform'
+        || node.type === 'review'
+        || (node.type === 'art-direction' && node.id !== 'composition')
+      ))
+      .map((node) => ({
+        id: node.id,
+        type: node.type,
+        name: node.title,
+        x: roundLegacyGeometry ? roundWorkflowNumber(node.position.x) : node.position.x,
+        y: roundLegacyGeometry ? roundWorkflowNumber(node.position.y) : node.position.y,
+        width: node.size.width,
+        height: node.size.height,
+        color: node.color,
+        ports: {
+          inputs: node.ports.inputs.map((port) => ({ ...port })),
+          outputs: node.ports.outputs.map((port) => ({ ...port })),
+        },
+        config: { ...node.config },
       }));
     this.outputNodes = domain.graph.nodes
       .filter((node) => node.type === 'output' || node.config.legacyKind === 'output')
