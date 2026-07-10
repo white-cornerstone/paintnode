@@ -195,6 +195,26 @@ describe('WorkflowGraph v2 schema', () => {
       (run.provider as { effectiveOptions: Record<string, unknown> }).effectiveOptions = { token: 'secret' };
     }],
     ['invalid debug reference', (run: Record<string, unknown>) => { run.debugArtifactReference = '../raw.jsonl'; }],
+    ['zero attempt', (run: Record<string, unknown>) => { run.attempt = 0; }],
+    ['unsafe project task id', (run: Record<string, unknown>) => { run.projectTaskId = '../task'; }],
+    ['unsafe source path', (run: Record<string, unknown>) => {
+      (run.sourceAssets as Array<Record<string, unknown>>)[0].relativePath = '/opt/private/input.png';
+    }],
+    ['unsafe provider model path', (run: Record<string, unknown>) => {
+      (run.provider as Record<string, unknown>).model = '/Volumes/Models/private';
+    }],
+    ['unsafe provider model token', (run: Record<string, unknown>) => {
+      (run.provider as Record<string, unknown>).model = '{"access_token":"secret"}';
+    }],
+    ['unsafe target id', (run: Record<string, unknown>) => {
+      (run.target as Record<string, unknown>).nodeId = '../output';
+    }],
+    ['unsafe executor version', (run: Record<string, unknown>) => {
+      (run.executor as Record<string, unknown>).version = '../../bin';
+    }],
+    ['duplicate output refs', (run: Record<string, unknown>) => {
+      (run.outputs as Array<Record<string, unknown>>).push({ ...(run.outputs as Array<Record<string, unknown>>)[0] });
+    }],
   ])('rejects full record invariant: %s', (_label, mutate) => {
     const input = graph();
     input.nodes[0].runRecordIds = ['run-1'];

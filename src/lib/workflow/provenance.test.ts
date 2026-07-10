@@ -66,7 +66,7 @@ describe('workflow run provenance', () => {
     ['brief', (value: WorkflowRunRecordDraft) => { value.material.prompt.brief = 'Changed'; }],
     ['effective prompt', (value: WorkflowRunRecordDraft) => { value.material.prompt.effectivePrompt = 'Changed final prompt'; }],
     ['model', (value: WorkflowRunRecordDraft) => { value.material.provider.model = 'other-model'; }],
-    ['effective option', (value: WorkflowRunRecordDraft) => { value.material.provider.effectiveOptions = { fixture: 'portrait' }; }],
+    ['effective option', (value: WorkflowRunRecordDraft) => { value.material.provider.effectiveOptions = { quality: 'high' }; }],
     ['executor version', (value: WorkflowRunRecordDraft) => { value.material.executor.version = '2'; }],
     ['output target', (value: WorkflowRunRecordDraft) => { value.material.output.nodeId = 'output-portrait'; }],
     ['output title', (value: WorkflowRunRecordDraft) => { value.material.output.title = 'Portrait 4:5'; }],
@@ -82,10 +82,21 @@ describe('workflow run provenance', () => {
       .not.toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
   });
 
-  it.each(['token', 'apiKey', 'authorization', 'cookie', 'executable', 'projectPath', 'advancedJson'])
-  ('rejects unsafe provider option %s instead of persisting it', (key) => {
+  it.each([
+    ['token', 'secret-or-path'],
+    ['apiKey', 'secret-or-path'],
+    ['authorization', 'secret-or-path'],
+    ['cookie', 'secret-or-path'],
+    ['executable', '/opt/provider/bin'],
+    ['projectPath', '/Volumes/private'],
+    ['advancedJson', '{"access_token":"secret"}'],
+    ['reasoningEffort', 'Bearer secret-token'],
+    ['agentModel', '/opt/provider/model'],
+    ['compressionQuality', 101],
+    ['editChecksLevel', 4],
+  ])('rejects unsafe provider option %s instead of persisting it', (key, unsafeValue) => {
     const value = draft();
-    value.material.provider.effectiveOptions = { [key]: 'secret-or-path' };
+    value.material.provider.effectiveOptions = { [key]: unsafeValue };
     expect(() => createWorkflowRunRecord(value, canonicalHash)).toThrow(/safe provider option/i);
   });
 
@@ -99,8 +110,8 @@ describe('workflow run provenance', () => {
     });
     const record = createWorkflowRunRecord(failed, canonicalHash);
     expect(record.failure).toEqual({
-      code: 'PROVIDER_ERROR_',
-      message: 'Authorization: [redacted] at [path]',
+      code: 'EXECUTION_FAILED',
+      message: 'The workflow attempt did not complete.',
     });
     expect(JSON.stringify(record)).not.toContain('secret-token');
     expect(JSON.stringify(record)).not.toContain('/Users/alice');
@@ -109,6 +120,20 @@ describe('workflow run provenance', () => {
       .toThrow(/project-relative/i);
     expect(() => createWorkflowRunRecord({ ...draft(), debugArtifactReference: '../raw.jsonl' }, canonicalHash))
       .toThrow(/project-relative/i);
+  });
+
+  it('fails closed on model secrets and every shared record invariant', () => {
+    for (const model of ['/opt/private/model', '/Volumes/Models/private', '{"access_token":"secret"}', 'Bearer secret']) {
+      const value = draft();
+      value.material.provider.model = model;
+      expect(() => createWorkflowRunRecord(value, canonicalHash)).toThrow(/safe model/i);
+    }
+
+    const duplicate = draft();
+    duplicate.outputs.push({ ...duplicate.outputs[0] });
+    expect(() => createWorkflowRunRecord(duplicate, canonicalHash)).toThrow(/unique asset references/i);
+    expect(() => createWorkflowRunRecord({ ...draft(), attempt: 0 }, canonicalHash)).toThrow(/at least 1/i);
+    expect(() => createWorkflowRunRecord({ ...draft(), projectTaskId: '../task' }, canonicalHash)).toThrow(/safe identifier/i);
   });
 
   it('canonicalizes locale-independently and rejects cyclic or non-JSON-safe material', () => {

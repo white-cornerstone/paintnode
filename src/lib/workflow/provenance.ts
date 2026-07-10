@@ -14,6 +14,7 @@ import {
   safeWorkflowModel,
   safeWorkflowProviderOptions,
   sanitizeWorkflowFailure,
+  validateWorkflowRunRecordSafety,
 } from './provenanceSafety';
 
 export interface WorkflowRunMaterialDraft {
@@ -192,7 +193,7 @@ export function createWorkflowRunRecord(
       effectiveOptions: providerOptions,
     },
   }, hash);
-  return {
+  const record: WorkflowRunRecordV1 = {
     recordVersion: 1,
     id: draft.id,
     nodeId: draft.nodeId,
@@ -211,7 +212,7 @@ export function createWorkflowRunRecord(
     },
     provider: {
       id: safeWorkflowIdentifier(draft.material.provider.id, 'Provider ID'),
-      model: draft.material.provider.model,
+      model: safeWorkflowModel(draft.material.provider.model, 'Provider model'),
       effectiveOptions: providerOptions,
     },
     executor: structuredClone(draft.material.executor),
@@ -223,6 +224,8 @@ export function createWorkflowRunRecord(
     ...(draft.projectTaskId ? { projectTaskId: draft.projectTaskId } : {}),
     ...(draft.debugArtifactReference ? { debugArtifactReference: draft.debugArtifactReference } : {}),
   };
+  validateWorkflowRunRecordSafety(record);
+  return record;
 }
 
 function deepFreeze<T>(value: T): Readonly<T> {
