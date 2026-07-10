@@ -74,7 +74,10 @@ focused component is justified.
 The board renders one physical handle for every persisted named port. Connection
 gestures carry the exact source and target `nodeId` plus `portId`; presentation
 must not collapse several ports into one inferred handle. Repeated palette adds
-use deterministic open placement rather than identical centre stacking.
+use deterministic open placement rather than identical centre stacking. The
+persisted node size is also the rendered card frame used by ports, the map, and
+placement; content that exceeds that frame scrolls internally. When no visible
+slot remains, the board recentres the newly added node before moving focus to it.
 
 Persisted unsupported future nodes are projected as visible, non-runnable
 fallback cards and remain excluded from the creator palette. Their raw payload,

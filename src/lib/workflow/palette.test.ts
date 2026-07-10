@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { filterCreatorNodeDefinitions, findOpenCreatorNodePlacement, paletteIndexAfterKey } from './palette';
+import { creatorNodeDefinition } from './registry';
+import {
+  creatorNodeFitsPlacementBounds,
+  filterCreatorNodeDefinitions,
+  findOpenCreatorNodePlacement,
+  paletteIndexAfterKey,
+} from './palette';
 
 describe('creator node palette model', () => {
   it('searches creator language and never exposes providers as node types', () => {
@@ -44,20 +50,42 @@ describe('creator node palette model', () => {
     expect(findOpenCreatorNodePlacement({ x: 160, y: 120 }, size, [])).toEqual(placements[0]);
   });
 
-  it('keeps a six-node keyboard-add sequence usable inside an 800x560 viewport', () => {
-    const size = { width: 240, height: 190 };
-    const bounds = { x: 0, y: 0, width: 800, height: 560, padding: 10 };
-    const occupied: Array<{ x: number; y: number; width: number; height: number }> = [];
-    for (let index = 0; index < 6; index += 1) {
-      const position = findOpenCreatorNodePlacement({ x: 280, y: 170 }, size, occupied, 20, bounds);
-      occupied.push({ ...position, ...size });
+  it('keeps six mixed-size keyboard additions collision-free and navigable on the real constrained board', () => {
+    const definitions = ['input', 'brief', 'art-direction', 'transform', 'review', 'output']
+      .map((type) => creatorNodeDefinition(type as Parameters<typeof creatorNodeDefinition>[0]));
+    let viewport = { x: 0, y: 0, width: 552, height: 500, padding: 12 };
+    const occupied: Array<{ x: number; y: number; width: number; height: number }> = [
+      { x: 480, y: 70, width: 340, height: 408 },
+      { x: 895, y: 96, width: 210, height: 232 },
+    ];
+    const added: typeof occupied = [];
+
+    for (const definition of definitions) {
+      const preferred = {
+        x: viewport.x + viewport.width / 2 - definition.defaultSize.width / 2,
+        y: viewport.y + viewport.height / 2 - definition.defaultSize.height / 2,
+      };
+      const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, occupied, 20, viewport);
+      const rect = { ...position, ...definition.defaultSize };
+      expect(occupied.some((other) => (
+        rect.x < other.x + other.width
+        && rect.x + rect.width > other.x
+        && rect.y < other.y + other.height
+        && rect.y + rect.height > other.y
+      ))).toBe(false);
+      occupied.push(rect);
+      added.push(rect);
+
+      if (!creatorNodeFitsPlacementBounds(position, definition.defaultSize, viewport)) {
+        viewport = {
+          ...viewport,
+          x: position.x + definition.defaultSize.width / 2 - viewport.width / 2,
+          y: position.y + definition.defaultSize.height / 2 - viewport.height / 2,
+        };
+      }
+      expect(creatorNodeFitsPlacementBounds(position, definition.defaultSize, viewport)).toBe(true);
     }
-    expect(occupied).toHaveLength(6);
-    expect(occupied.every((rect) => (
-      rect.x >= bounds.x + bounds.padding
-      && rect.y >= bounds.y + bounds.padding
-      && rect.x + rect.width <= bounds.x + bounds.width - bounds.padding
-      && rect.y + rect.height <= bounds.y + bounds.height - bounds.padding
-    ))).toBe(true);
+
+    expect(new Set(added.map(({ x, y }) => `${x}:${y}`))).toHaveLength(6);
   });
 });

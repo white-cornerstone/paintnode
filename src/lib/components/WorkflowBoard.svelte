@@ -41,6 +41,7 @@
   } from '../state/workflow.svelte';
   import {
     creatorNodeDefinition,
+    creatorNodeFitsPlacementBounds,
     findOpenCreatorNodePlacement,
     workflowReadiness,
     type CreatorNodeType,
@@ -837,15 +838,22 @@
       x: (boardWidth / 2 - workflow.panX) / workflow.zoom - definition.defaultSize.width / 2,
       y: (boardHeight / 2 - workflow.panY) / workflow.zoom - definition.defaultSize.height / 2,
     };
-    const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, workflowMapItems(), 20, {
+    const visibleBounds = {
       x: -workflow.panX / workflow.zoom,
       y: -workflow.panY / workflow.zoom,
       width: boardWidth / workflow.zoom,
       height: boardHeight / workflow.zoom,
       padding: 12 / workflow.zoom,
-    });
+    };
+    const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, workflowMapItems(), 20, visibleBounds);
     const nodeId = workflow.addCreatorNode(type, position);
     paletteOpen = false;
+    if (!creatorNodeFitsPlacementBounds(position, definition.defaultSize, visibleBounds)) {
+      centerBoardAt(
+        position.x + definition.defaultSize.width / 2,
+        position.y + definition.defaultSize.height / 2,
+      );
+    }
     await tick();
     requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workflow-node="${nodeId}"]`)?.focus());
   }
@@ -1882,7 +1890,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             tabindex="-1"
             data-workflow-node={node.id}
             data-creator-node-type={node.type}
-            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; min-height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'creator', id: node.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'creator', id: node.id });
@@ -2001,7 +2009,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             tabindex="-1"
             data-workflow-node={node.id}
             data-unsupported-node-type={node.unsupportedType}
-            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; min-height:${node.height}px; --node-color:${node.color}`}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}`}
             onfocus={() => workflow.select({ kind: 'unsupported', id: node.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'unsupported', id: node.id });
@@ -2549,6 +2557,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .creator-node {
     width: 240px;
   }
+  .creator-node,
+  .unsupported-node {
+    display: flex;
+    flex-direction: column;
+  }
   .unsupported-node {
     width: 240px;
     border-style: dashed;
@@ -2576,6 +2589,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
       0 12px 30px rgba(0, 0, 0, 0.28);
   }
   .node-head {
+    flex: none;
     justify-content: space-between;
     height: 32px;
     padding: 0 8px;
@@ -2708,7 +2722,10 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   }
   .creator-node-body {
     display: grid;
+    flex: 1 1 auto;
     gap: 8px;
+    min-height: 0;
+    overflow: auto;
     padding: 9px;
     color: var(--text-dim);
     font-size: 10px;
@@ -2735,7 +2752,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   }
   .creator-config-field textarea {
     min-height: 54px;
-    resize: vertical;
+    resize: none;
   }
   .creator-port-list {
     display: grid;

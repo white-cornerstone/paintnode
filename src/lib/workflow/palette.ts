@@ -15,6 +15,18 @@ function rectsOverlap(left: CreatorPaletteOccupiedRect, right: CreatorPaletteOcc
     && left.y + left.height + gap > right.y;
 }
 
+export function creatorNodeFitsPlacementBounds(
+  position: WorkflowPoint,
+  size: WorkflowSize,
+  bounds: CreatorPalettePlacementBounds,
+): boolean {
+  const padding = bounds.padding ?? 0;
+  return position.x >= bounds.x + padding
+    && position.y >= bounds.y + padding
+    && position.x + size.width <= bounds.x + bounds.width - padding
+    && position.y + size.height <= bounds.y + bounds.height - padding;
+}
+
 export function findOpenCreatorNodePlacement(
   preferred: WorkflowPoint,
   size: WorkflowSize,
