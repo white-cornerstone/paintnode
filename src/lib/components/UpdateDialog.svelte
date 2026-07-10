@@ -1,38 +1,112 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
-  import { appUpdater } from '../state/updater.svelte';
-  import { ArrowDownload, ArrowSync, Checkmark } from '../icons';
+  import { formatRuntimeBytes } from '../ai/managedRuntime';
+  import {
+    appUpdater,
+    managedRuntimeLabel,
+    MANAGED_RUNTIME_PROVIDERS,
+  } from '../state/updater.svelte';
+  import { ArrowDownload, ArrowSync, Checkmark, ErrorCircle } from '../icons';
 
   let { onClose }: { onClose: () => void } = $props();
 
-  const percent = $derived(appUpdater.progress === null ? null : Math.round(appUpdater.progress * 100));
+  const appPercent = $derived(appUpdater.progress === null ? null : Math.round(appUpdater.progress * 100));
+  const runtimePercent = $derived(appUpdater.managedRuntimeProgressPercent);
+  const updateCount = $derived((appUpdater.appAvailable ? 1 : 0) + appUpdater.runtimeUpdates.length);
+  const hasRuntimeCheckErrors = $derived(Object.keys(appUpdater.runtimeErrors).length > 0);
+  const installLabel = $derived(
+    appUpdater.appAvailable
+      ? appUpdater.runtimeUpdates.length
+        ? 'Update All and Restart'
+        : 'Update and Restart'
+      : appUpdater.runtimeUpdates.length > 1
+        ? 'Update Runtimes'
+        : 'Update Runtime',
+  );
 
   function checkNow(): void {
     void appUpdater.checkForUpdates();
   }
 
   function installNow(): void {
-    void appUpdater.installAndRelaunch();
+    void appUpdater.installAvailableUpdates();
   }
 </script>
 
-<Modal title="PaintNode Updates" {onClose} width={440}>
+<Modal title="PaintNode Updates" {onClose} width={480}>
   <div class="update-dialog">
-    {#if appUpdater.status === 'available'}
+    {#if appUpdater.installing}
       <div class="status available">
         <Icon svg={ArrowDownload} size={22} />
         <div>
-          <h2>Version {appUpdater.version} is available</h2>
-          <p>Installed version {appUpdater.currentVersion}</p>
+          {#if appUpdater.runtimeInstalling}
+            <h2>Updating {managedRuntimeLabel(appUpdater.runtimeInstalling)}</h2>
+            <p>{appUpdater.runtimeProgress?.message ?? 'Installing managed AI provider support.'}</p>
+          {:else}
+            <h2>{appUpdater.status === 'ready' ? 'Restarting PaintNode' : 'Updating PaintNode'}</h2>
+            <p>{appPercent === null ? 'Downloading the application update.' : `${appPercent}% downloaded`}</p>
+          {/if}
         </div>
       </div>
-      {#if appUpdater.body}
+      <div class:indeterminate={(appUpdater.runtimeInstalling ? runtimePercent : appPercent) === null} class="progress" aria-label="Update progress">
+        <span style={`width:${(appUpdater.runtimeInstalling ? runtimePercent : appPercent) ?? 16}%`}></span>
+      </div>
+    {:else if appUpdater.checking}
+      <div class="status">
+        <Icon svg={ArrowSync} size={22} />
+        <div>
+          <h2>Checking for updates</h2>
+          <p>Checking PaintNode, Codex, and Claude support.</p>
+        </div>
+      </div>
+    {:else if appUpdater.available}
+      <div class="status available">
+        <Icon svg={ArrowDownload} size={22} />
+        <div>
+          <h2>{updateCount} {updateCount === 1 ? 'update is' : 'updates are'} available</h2>
+          <p>Runtime updates install independently and do not require a new PaintNode release.</p>
+        </div>
+      </div>
+
+      <div class="update-list" aria-label="Available updates">
+        {#if appUpdater.appAvailable}
+          <article class="update-item">
+            <div>
+              <strong>PaintNode {appUpdater.version}</strong>
+              <small>Application · installed {appUpdater.currentVersion}</small>
+            </div>
+            <span class="update-badge">Restart required</span>
+          </article>
+        {/if}
+        {#each appUpdater.runtimeUpdates as runtime (runtime.provider)}
+          <article class="update-item">
+            <div>
+              <strong>{managedRuntimeLabel(runtime.provider)} runtime {runtime.availableVersion}</strong>
+              <small>
+                SDK {runtime.sdkVersion ?? 'update'} · installed {runtime.installedVersion}
+                {runtime.downloadSize ? ` · ${formatRuntimeBytes(runtime.downloadSize)}` : ''}
+              </small>
+            </div>
+            <span class="update-badge">No restart</span>
+          </article>
+        {/each}
+      </div>
+
+      {#if appUpdater.body && appUpdater.appAvailable}
         <section class="notes-panel" aria-label="Release notes">
-          <h3>Release notes</h3>
+          <h3>PaintNode release notes</h3>
           <div class="notes">{appUpdater.body}</div>
         </section>
       {/if}
+
+      {#if appUpdater.runtimeInstallError}
+        <p class="inline-error" role="alert">{appUpdater.runtimeInstallError}</p>
+      {/if}
+      {#if appUpdater.status === 'error' && appUpdater.error}
+        <p class="inline-warning">PaintNode app update check failed: {appUpdater.error}</p>
+      {/if}
+
       <div class="actions">
         <button type="button" onclick={checkNow}>
           <Icon svg={ArrowSync} size={15} />
@@ -40,34 +114,45 @@
         </button>
         <button type="button" class="primary" onclick={installNow}>
           <Icon svg={ArrowDownload} size={15} />
-          <span>Update and Restart</span>
+          <span>{installLabel}</span>
         </button>
       </div>
-    {:else if appUpdater.status === 'checking'}
+    {:else if appUpdater.status === 'unsupported'}
       <div class="status">
-        <Icon svg={ArrowSync} size={22} />
+        <Icon svg={Checkmark} size={22} />
         <div>
-          <h2>Checking for updates</h2>
-          <p>Contacting GitHub Releases.</p>
+          <h2>Updates are available in the desktop app</h2>
+          <p>This browser preview cannot install updates.</p>
         </div>
       </div>
-    {:else if appUpdater.status === 'downloading' || appUpdater.status === 'ready'}
-      <div class="status available">
-        <Icon svg={ArrowDownload} size={22} />
+    {:else if appUpdater.status === 'error' || hasRuntimeCheckErrors}
+      <div class="status error">
+        <Icon svg={ErrorCircle} size={22} />
         <div>
-          <h2>{appUpdater.status === 'ready' ? 'Restarting' : 'Installing update'}</h2>
-          <p>{percent === null ? 'Downloading update package.' : `${percent}% downloaded`}</p>
+          <h2>{hasRuntimeCheckErrors ? 'Some update checks failed' : 'Update check failed'}</h2>
+          <p>Installed components remain available and can continue working.</p>
         </div>
       </div>
-      <div class="progress" aria-label="Update download progress">
-        <span style={`width:${percent ?? 8}%`}></span>
+      {#if appUpdater.error}
+        <p class="inline-warning">PaintNode: {appUpdater.error}</p>
+      {/if}
+      {#each MANAGED_RUNTIME_PROVIDERS as provider}
+        {#if appUpdater.runtimeErrors[provider]}
+          <p class="inline-warning">{managedRuntimeLabel(provider)}: {appUpdater.runtimeErrors[provider]}</p>
+        {/if}
+      {/each}
+      <div class="actions">
+        <button type="button" onclick={checkNow}>
+          <Icon svg={ArrowSync} size={15} />
+          <span>Try Again</span>
+        </button>
       </div>
     {:else if appUpdater.status === 'current'}
       <div class="status">
         <Icon svg={Checkmark} size={22} />
         <div>
-          <h2>PaintNode is up to date</h2>
-          <p>No newer release is available.</p>
+          <h2>Everything is up to date</h2>
+          <p>PaintNode and installed managed AI runtimes are current.</p>
         </div>
       </div>
       <div class="actions">
@@ -76,34 +161,12 @@
           <span>Check Again</span>
         </button>
       </div>
-    {:else if appUpdater.status === 'unsupported'}
-      <div class="status">
-        <Icon svg={Checkmark} size={22} />
-        <div>
-          <h2>Updates are available in the desktop app</h2>
-          <p>This browser preview cannot install app updates.</p>
-        </div>
-      </div>
-    {:else if appUpdater.status === 'error'}
-      <div class="status error">
-        <Icon svg={ArrowSync} size={22} />
-        <div>
-          <h2>Update check failed</h2>
-          <p>{appUpdater.error}</p>
-        </div>
-      </div>
-      <div class="actions">
-        <button type="button" onclick={checkNow}>
-          <Icon svg={ArrowSync} size={15} />
-          <span>Try Again</span>
-        </button>
-      </div>
     {:else}
       <div class="status">
         <Icon svg={ArrowSync} size={22} />
         <div>
           <h2>Check for updates</h2>
-          <p>PaintNode uses GitHub Releases for app updates.</p>
+          <p>Check PaintNode and installed Codex or Claude runtimes.</p>
         </div>
       </div>
       <div class="actions">
@@ -150,6 +213,47 @@
     font-size: 12px;
     line-height: 1.45;
   }
+  .update-list {
+    display: grid;
+    overflow: hidden;
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    background: var(--bg-input);
+  }
+  .update-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 11px;
+  }
+  .update-item + .update-item {
+    border-top: 1px solid var(--border-soft);
+  }
+  .update-item > div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .update-item strong {
+    color: var(--text-bright);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .update-item small {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .update-badge {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 650;
+  }
   .notes-panel {
     display: grid;
     gap: 6px;
@@ -187,7 +291,24 @@
     display: block;
     height: 100%;
     min-width: 8%;
+    border-radius: inherit;
     background: var(--accent);
+    transition: width 140ms ease;
+  }
+  .progress.indeterminate span {
+    animation: travel 1.2s ease-in-out infinite alternate;
+  }
+  .inline-error,
+  .inline-warning {
+    padding: 8px 10px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--danger) 9%, var(--bg-input));
+  }
+  .inline-error {
+    color: var(--danger);
+  }
+  .inline-warning {
+    color: var(--text-dim);
   }
   .actions {
     display: flex;
@@ -209,5 +330,9 @@
     border-color: var(--accent);
     background: var(--accent);
     color: var(--text-bright);
+  }
+  @keyframes travel {
+    from { transform: translateX(-75%); }
+    to { transform: translateX(180%); }
   }
 </style>

@@ -59,11 +59,27 @@ pub(crate) fn claude_command_label(options: &ClaudeCommandOptions) -> &str {
 }
 
 fn claude_agent_runner_script() -> PathBuf {
+    if let Some(path) = crate::managed_runtime::managed_runner("claude") {
+        return path;
+    }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent()
         .map(|root| root.join("scripts").join("claude-agent-runner.mjs"))
         .unwrap_or_else(|| PathBuf::from("scripts").join("claude-agent-runner.mjs"))
+}
+
+fn claude_sdk_node() -> PathBuf {
+    crate::managed_runtime::managed_node("claude").unwrap_or_else(|| PathBuf::from("node"))
+}
+
+fn managed_claude_bin_or(configured: &str) -> String {
+    if !configured.trim().is_empty() {
+        return configured.into();
+    }
+    crate::managed_runtime::managed_executable("claude")
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn build_claude_agent_command(
@@ -72,14 +88,15 @@ fn build_claude_agent_command(
     prompt_text: &str,
     image_paths: &[PathBuf],
 ) -> Command {
-    let mut command = Command::new("node");
+    let managed_bin = managed_claude_bin_or(&options.bin);
+    let mut command = Command::new(claude_sdk_node());
     apply_ai_cli_environment(&mut command)
         .current_dir(job_path)
         .arg(claude_agent_runner_script())
         .arg("--cwd")
         .arg(job_path);
-    if !options.bin.trim().is_empty() {
-        command.arg("--claude-path").arg(&options.bin);
+    if !managed_bin.is_empty() {
+        command.arg("--claude-path").arg(managed_bin);
     }
     if let Some(model) = options.model.as_deref() {
         command.arg("--model").arg(model);
@@ -285,10 +302,13 @@ pub(crate) async fn detect_claude(bin: Option<String>) -> Result<CodexDetectionR
             }
         }
 
-        let mut command = Command::new("node");
+        let mut command = Command::new(claude_sdk_node());
         apply_ai_cli_environment(&mut command)
             .arg(claude_agent_runner_script())
             .arg("--detect");
+        if let Some(path) = crate::managed_runtime::managed_executable("claude") {
+            command.arg("--claude-path").arg(path);
+        }
         match command.output() {
             Ok(output) if output.status.success() => {
                 for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -431,13 +451,17 @@ pub(crate) async fn discover_claude_capabilities(
     bin: Option<String>,
 ) -> Result<AiProviderCapabilitiesResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut command = Command::new("node");
+        let mut command = Command::new(claude_sdk_node());
         apply_ai_cli_environment(&mut command)
             .arg(claude_agent_runner_script())
             .arg("--capabilities");
         if let Some(bin) = bin
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| {
+                crate::managed_runtime::managed_executable("claude")
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
         {
             command.arg("--claude-path").arg(bin);
         }

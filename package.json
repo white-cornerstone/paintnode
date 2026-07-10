@@ -37,7 +37,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.205",
     "@fluentui/svg-icons": "^1.1.331",
-    "@openai/codex-sdk": "^0.142.5",
+    "@openai/codex-sdk": "^0.144.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-process": "^2.3.1",

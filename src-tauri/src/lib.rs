@@ -1,5 +1,6 @@
 mod ai;
 mod app;
+mod managed_runtime;
 mod menu;
 mod png;
 mod project;
@@ -26,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            managed_runtime::initialize(app.handle()).map_err(std::io::Error::other)?;
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -59,6 +61,9 @@ pub fn run() {
             ai::claude::discover_claude_capabilities,
             ai::antigravity::detect_antigravity,
             ai::antigravity::discover_antigravity_capabilities,
+            managed_runtime::managed_runtime_status,
+            managed_runtime::install_managed_runtime,
+            managed_runtime::login_managed_runtime,
             ai::codex::generate_codex_image,
             ai::codex::generate_codex_fill_image,
             ai::codex::generate_codex_retouch_image,

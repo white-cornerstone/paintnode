@@ -1,5 +1,6 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
+  import ManagedRuntimeCard from './ManagedRuntimeCard.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { detectCodex, detectAntigravity, detectClaude, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
@@ -804,8 +805,11 @@
 
       {:else if selectedSection === 'ai-provider-codex'}
         <div class="subsection-title">
-          <h3>Local Connection</h3>
+          <h3>Provider Runtime</h3>
         </div>
+        {#if settings.value.ai.codexExecutableMode === 'builtin'}
+          <ManagedRuntimeCard provider="codex" />
+        {/if}
         <div class="choice-group" role="radiogroup" aria-label="Codex executable source">
           <label class="choice-row">
             <input
@@ -816,8 +820,8 @@
               onchange={() => setExecutableMode('codex', 'builtin')}
             />
             <span>
-              <strong>Use bundled Codex SDK</strong>
-              <small>Default for PaintNode. Uses the app's bundled runner and your local Codex login.</small>
+              <strong>PaintNode-managed</strong>
+              <small>Recommended. PaintNode installs, signs in, and updates Codex support for you.</small>
             </span>
           </label>
           <label class="choice-row">
@@ -829,8 +833,8 @@
               onchange={() => setExecutableMode('codex', 'custom')}
             />
             <span>
-              <strong>Use custom Codex executable</strong>
-              <small>Choose this only when you need PaintNode to run a specific local Codex binary.</small>
+              <strong>Use an existing installation</strong>
+              <small>Advanced. Use a Codex executable that you install and update yourself.</small>
             </span>
           </label>
         </div>
@@ -950,8 +954,11 @@
 
       {:else if selectedSection === 'ai-provider-claude'}
         <div class="subsection-title">
-          <h3>Local Connection</h3>
+          <h3>Provider Runtime</h3>
         </div>
+        {#if settings.value.ai.claudeExecutableMode === 'builtin'}
+          <ManagedRuntimeCard provider="claude" />
+        {/if}
         <div class="choice-group" role="radiogroup" aria-label="Claude executable source">
           <label class="choice-row">
             <input
@@ -962,8 +969,8 @@
               onchange={() => setExecutableMode('claude', 'builtin')}
             />
             <span>
-              <strong>Use bundled Claude Agent SDK</strong>
-              <small>Default for PaintNode. Uses the SDK runner and your local Claude Code login.</small>
+              <strong>PaintNode-managed</strong>
+              <small>Recommended. PaintNode installs, signs in, and updates Claude support for you.</small>
             </span>
           </label>
           <label class="choice-row">
@@ -975,8 +982,8 @@
               onchange={() => setExecutableMode('claude', 'custom')}
             />
             <span>
-              <strong>Use custom Claude Code executable</strong>
-              <small>Choose this only when you need PaintNode to run a specific local Claude binary.</small>
+              <strong>Use an existing installation</strong>
+              <small>Advanced. Use a Claude executable that you install and update yourself.</small>
             </span>
           </label>
         </div>
