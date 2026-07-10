@@ -15,6 +15,10 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('createWorkflowBoardRunIdGenerator');
     expect(boardSource).toContain('WorkflowSelectiveUiState');
     expect(boardSource).toContain('selectiveUiState.invalidatePreview()');
+    expect(boardSource).toContain(
+      'resolveWorkflowBoardProjectAsset(runProjectPath, asset, resolveProjectAssetMaterial)',
+    );
+    expect(boardSource).not.toContain('provider-free-qa-asset-v1');
   });
 
   it('renders the exact transient state for each Transform during confirmed selective execution', () => {

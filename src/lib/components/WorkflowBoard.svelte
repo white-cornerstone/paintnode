@@ -48,11 +48,11 @@
     creatorNodeFitsPlacementBounds,
     createWorkflowBoardRunIdGenerator,
     findOpenCreatorNodePlacement,
+    resolveWorkflowBoardProjectAsset,
     resolveWorkflowStoryboardRead,
     selectiveExecutionOutcomeSummary,
     selectiveExecutionPreviewSummary,
     selectiveExecutionRunAvailability,
-    workflowSha256Text,
     workflowProviderSelection,
     workflowReadiness,
     type CreatorNodeType,
@@ -1601,18 +1601,7 @@
         progress = event.message;
         if (activeWorkflowTaskId) aiTasks.setProgress(activeWorkflowTaskId, event.message);
       },
-      resolveAsset: async (asset) => {
-        if (!runProjectPath) throw new Error('No project is open.');
-        if (runSelection.qaFake) {
-          return {
-            assetId: asset.id,
-            relativePath: asset.relativePath,
-            bytes: null,
-            contentHash: workflowSha256Text(`provider-free-qa-asset-v1:${asset.id}:${asset.relativePath}`),
-          };
-        }
-        return resolveProjectAssetMaterial(runProjectPath, asset.id);
-      },
+      resolveAsset: (asset) => resolveWorkflowBoardProjectAsset(runProjectPath, asset, resolveProjectAssetMaterial),
       readStoryboard: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => resolveWorkflowStoryboardRead(
         storyboard,
         {

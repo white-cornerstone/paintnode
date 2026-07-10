@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectAsset } from '../integrations/desktop';
+import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
 import {
   createWorkflowBoardRunIdGenerator,
   createCreatorNode,
   createWorkflowCompositionExecutor,
   isFullWorkflowRunRecord,
+  resolveWorkflowBoardProjectAsset,
   workflowSha256Bytes,
   type WorkflowGraphV2,
   type WorkflowTransformArtifact,
@@ -227,6 +229,100 @@ describe('WorkflowStore selective execution integration', () => {
       expect(run.providerCalls()).toBe(1);
     },
   );
+
+  it('reuses a provider-free Board output after project refresh resolves its actual saved bytes', async () => {
+    const store = campaignStore();
+    const qaPng = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const loadQaPng = vi.fn(async () => new Uint8Array(qaPng));
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadQaPng);
+    const currentAssets: ProjectAsset[] = [{ ...productAsset }];
+    const projectBytes = new Map<string, Uint8Array>([[productAsset.id, productBytes]]);
+    const readProjectMaterial = vi.fn(async (projectPath: string, assetId: string) => {
+      expect(projectPath).toBe('/virtual/project');
+      const asset = currentAssets.find((candidate) => candidate.id === assetId);
+      const bytes = projectBytes.get(assetId);
+      if (!asset || !bytes) throw new Error(`Project asset ${assetId} is unavailable.`);
+      return {
+        assetId: asset.id,
+        relativePath: asset.relativePath,
+        bytes: new Uint8Array(bytes),
+        contentHash: workflowSha256Bytes(bytes),
+      };
+    });
+    const storeAsset = vi.fn(async (artifact: Readonly<{
+      name: string;
+      bytes: Uint8Array;
+      width?: number | null;
+      height?: number | null;
+      mime?: string | null;
+    }>) => {
+      const asset: ProjectAsset = {
+        id: 'qa-square',
+        kind: 'generated',
+        name: artifact.name,
+        relativePath: `assets/generated/${artifact.name}`,
+        createdAt: 20,
+        exists: true,
+        width: artifact.width ?? null,
+        height: artifact.height ?? null,
+        mime: artifact.mime ?? null,
+      };
+      currentAssets.push(asset);
+      projectBytes.set(asset.id, new Uint8Array(artifact.bytes));
+      return asset;
+    });
+    let sequence = 0;
+    const options = (): WorkflowStoreRunOptions => ({
+      projectPath: '/virtual/project',
+      currentProjectIdentity: () => '/virtual/project:current',
+      provider: 'qa-fake',
+      executors: [executor],
+      assets: currentAssets.map((asset) => ({ ...asset })),
+      selectiveExecutionIdentity: 'provider=qa-fake;scenario=success',
+      resolveAsset: (asset) => resolveWorkflowBoardProjectAsset(
+        '/virtual/project', asset, readProjectMaterial,
+      ),
+      storeAsset,
+      idGenerator: () => `reference-${++sequence}`,
+      runIdGenerator: (_nodeId, attempt) => `qa-run-${++sequence}-${attempt}`,
+      clock: () => 30 + sequence,
+    });
+
+    const firstOptions = options();
+    const firstPreview = await store.preflightSelectiveExecution(
+      'run-from-here', 'composition', firstOptions,
+    );
+    const firstOutcome = await store.runSelectiveExecution(firstPreview, firstOptions);
+
+    expect(firstPreview.stateByNodeId['transform-generate-square']).toMatchObject({
+      state: 'planned', willExecute: true,
+    });
+    expect(firstOutcome.executedNodeIds).toEqual(['transform-generate-square']);
+    expect(storeAsset).toHaveBeenCalledOnce();
+    expect(currentAssets).toContainEqual(expect.objectContaining({
+      id: 'qa-square',
+      relativePath: 'assets/generated/paintnode-provider-free-qa-square.png',
+      exists: true,
+    }));
+
+    const refreshedOptions = options();
+    const secondPreview = await store.preflightSelectiveExecution(
+      'run-from-here', 'composition', refreshedOptions,
+    );
+    const secondOutcome = await store.runSelectiveExecution(secondPreview, refreshedOptions);
+
+    expect(secondPreview.stateByNodeId['transform-generate-square']).toMatchObject({
+      state: 'cached', willExecute: false, reason: { code: 'REUSABLE_RESULT' },
+    });
+    expect(secondOutcome).toMatchObject({
+      cachedNodeIds: ['transform-generate-square'],
+      executedNodeIds: [],
+      failures: {},
+    });
+    expect(readProjectMaterial).toHaveBeenCalledWith('/virtual/project', 'qa-square');
+    expect(loadQaPng).toHaveBeenCalledOnce();
+    expect(storeAsset).toHaveBeenCalledOnce();
+  });
 
   it('settles an invalidated deferred Board preview without letting it clobber an immediate replacement', async () => {
     const store = campaignStore();
