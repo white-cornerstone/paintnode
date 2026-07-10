@@ -6,6 +6,7 @@ import {
   type WorkflowExecutionResult,
 } from './execution';
 import { isFullWorkflowRunRecord } from './provenance';
+import { creatorNodeDefinition, type CreatorNodeType } from './registry';
 import type {
   WorkflowEdgeV2,
   WorkflowGraphV2,
@@ -76,14 +77,18 @@ export interface WorkflowSelectiveSchedulerOptions {
   providerKeyForNode: (node: Readonly<WorkflowNodeV2>) => string;
   providerConcurrency: Readonly<Record<string, number>>;
   executeNode: (context: WorkflowSelectiveNodeExecutionContext) => Promise<WorkflowExecutionResult>;
+  validateResultOwnership: (context: Readonly<{
+    nodeId: string;
+    result: Readonly<WorkflowExecutionResult>;
+  }>) => boolean;
   sanitizeFailure?: (error: unknown) => WorkflowSelectiveNodeFailure;
 }
 
 export interface WorkflowSelectiveExecutionOutcome {
   executedNodeIds: string[];
   cachedNodeIds: string[];
-  results: ReadonlyMap<string, Readonly<WorkflowExecutionResult>>;
-  failures: ReadonlyMap<string, Readonly<WorkflowSelectiveNodeFailure>>;
+  results: Readonly<Record<string, Readonly<WorkflowExecutionResult>>>;
+  failures: Readonly<Record<string, Readonly<WorkflowSelectiveNodeFailure>>>;
   blockedNodeIds: string[];
 }
 
@@ -157,12 +162,26 @@ function missingRequiredInput(
   ))?.id;
 }
 
-function defaultExecutionDisposition(node: WorkflowNodeV2): WorkflowNodeExecutionDisposition {
-  if (node.type === 'transform') return { kind: 'available' };
+export function registryExecutionDisposition(node: Readonly<WorkflowNodeV2>): WorkflowNodeExecutionDisposition {
   if (node.type === 'unsupported') {
     return { kind: 'unavailable', reason: `Node "${node.title}" uses an unsupported workflow type.` };
   }
-  return { kind: 'not-required' };
+  const executor = creatorNodeDefinition(node.type as CreatorNodeType).executor;
+  if (executor.status === 'not-required') return { kind: 'not-required' };
+  if (executor.status === 'draft-only') {
+    return {
+      kind: 'unavailable',
+      reason: executor.reason ?? `Execution for node "${node.title}" is not available yet.`,
+    };
+  }
+  const configuredCapability = node.config.capability;
+  if (typeof configuredCapability !== 'string' || configuredCapability !== executor.capability) {
+    return {
+      kind: 'unavailable',
+      reason: 'The configured Transform capability is not available for execution.',
+    };
+  }
+  return { kind: 'available' };
 }
 
 function safeFailure(
@@ -220,15 +239,32 @@ function reusableRun(
 
 function hasValidResult(result: unknown): result is WorkflowExecutionResult {
   if (typeof result !== 'object' || result === null) return false;
+  const prototype = Object.getPrototypeOf(result);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const keys = Reflect.ownKeys(result);
+  if (keys.some((key) => typeof key !== 'string')) return false;
+  if ((keys as string[]).sort().join('\u0000') !== ['cacheKey', 'outputIds'].sort().join('\u0000')) return false;
+  if ((keys as string[]).some((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(result, key);
+    return !descriptor?.enumerable || !('value' in descriptor);
+  })) return false;
   const candidate = result as Partial<WorkflowExecutionResult>;
   if (typeof candidate.cacheKey !== 'string' || candidate.cacheKey.trim().length === 0) return false;
   if (!Array.isArray(candidate.outputIds) || candidate.outputIds.length === 0) return false;
+  if (Object.getPrototypeOf(candidate.outputIds) !== Array.prototype) return false;
+  if (Reflect.ownKeys(candidate.outputIds).some((key) => (
+    key !== 'length' && (typeof key !== 'string' || !/^(?:0|[1-9]\d*)$/.test(key))
+  ))) return false;
   const unique = new Set<string>();
-  return candidate.outputIds.every((id) => {
+  for (let index = 0; index < candidate.outputIds.length; index += 1) {
+    if (!(index in candidate.outputIds)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(candidate.outputIds, String(index));
+    if (!descriptor?.enumerable || !('value' in descriptor)) return false;
+    const id = descriptor.value;
     if (typeof id !== 'string' || id.trim().length === 0 || unique.has(id)) return false;
     unique.add(id);
-    return true;
-  });
+  }
+  return true;
 }
 
 export function planSelectiveWorkflowExecution(
@@ -269,7 +305,7 @@ export function planSelectiveWorkflowExecution(
   const dispositions = new Map<string, WorkflowNodeExecutionDisposition>();
   for (const node of graph.nodes) {
     if (!required.has(node.id)) continue;
-    let disposition = defaultExecutionDisposition(node);
+    let disposition = registryExecutionDisposition(node);
     if (request.executionDisposition) {
       try {
         disposition = request.executionDisposition(detachedFrozen(node));
@@ -471,6 +507,12 @@ export async function executeSelectiveWorkflowPlan(
       maxConcurrency: options.maxConcurrency,
     });
   }
+  if (typeof options.validateResultOwnership !== 'function') {
+    throw new WorkflowExecutionError(
+      'INVALID_ARGUMENT',
+      'Selective execution requires an output ownership validator before any executor call.',
+    );
+  }
   const nodes = new Map(plan.nodes.map((node) => [node.id, node]));
   const results = new Map<string, WorkflowExecutionResult>(plan.cachedResults.map((entry) => [
     entry.nodeId,
@@ -480,14 +522,24 @@ export async function executeSelectiveWorkflowPlan(
   for (const nodeId of plan.executionNodeIds) {
     const node = nodes.get(nodeId);
     if (!node) throw new WorkflowExecutionError('INVALID_ARGUMENT', `Execution plan is missing node "${nodeId}".`);
-    const provider = options.providerKeyForNode(detachedFrozen(node));
-    const limit = options.providerConcurrency[provider];
+    let provider: string;
+    let limit: number;
+    try {
+      provider = options.providerKeyForNode(detachedFrozen(node));
+      limit = options.providerConcurrency[provider];
+    } catch {
+      throw new WorkflowExecutionError(
+        'INVALID_ARGUMENT',
+        `Execution provider mapping for node "${nodeId}" could not be resolved safely.`,
+        { nodeId },
+      );
+    }
     if (typeof provider !== 'string' || provider.trim().length === 0
       || !Number.isSafeInteger(limit) || limit <= 0) {
       throw new WorkflowExecutionError(
         'INVALID_ARGUMENT',
         `Execution provider concurrency for node "${nodeId}" must be an injected positive safe integer.`,
-        { nodeId, provider, limit },
+        { nodeId },
       );
     }
     providers.set(nodeId, provider);
@@ -500,6 +552,19 @@ export async function executeSelectiveWorkflowPlan(
   const executedNodeIds: string[] = [];
   const failures = new Map<string, WorkflowSelectiveNodeFailure>();
   const blockedNodeIds: string[] = [];
+  const outputOwners = new Map<string, string>();
+  for (const entry of plan.cachedResults) {
+    for (const outputId of entry.outputIds) {
+      const existingOwner = outputOwners.get(outputId);
+      if (existingOwner !== undefined) {
+        throw new WorkflowExecutionError(
+          'INVALID_ARGUMENT',
+          'Selective execution cache contains an output identity owned by more than one node.',
+        );
+      }
+      outputOwners.set(outputId, entry.nodeId);
+    }
+  }
 
   const blockFailedDependents = (): void => {
     let changed = true;
@@ -568,21 +633,53 @@ export async function executeSelectiveWorkflowPlan(
       failures.set(settled.nodeId, safeFailure(settled.error, options.sanitizeFailure));
       continue;
     }
-    if (!hasValidResult(settled.result) || settled.result.cacheKey !== plan.materialKeys[settled.nodeId]) {
+    let structurallyValid = false;
+    try {
+      structurallyValid = hasValidResult(settled.result)
+        && settled.result.cacheKey === plan.materialKeys[settled.nodeId];
+    } catch {
+      structurallyValid = false;
+    }
+    let ownershipValid = false;
+    if (structurallyValid && settled.result) {
+      const hasCollision = settled.result.outputIds.some((outputId) => {
+        const owner = outputOwners.get(outputId);
+        return owner !== undefined && owner !== settled.nodeId;
+      });
+      if (!hasCollision) {
+        try {
+          ownershipValid = options.validateResultOwnership(detachedFrozen({
+            nodeId: settled.nodeId,
+            result: {
+              cacheKey: settled.result.cacheKey,
+              outputIds: [...settled.result.outputIds],
+            },
+          })) === true;
+        } catch {
+          ownershipValid = false;
+        }
+      }
+    }
+    if (!structurallyValid || !ownershipValid || !settled.result) {
       failures.set(settled.nodeId, {
         code: 'INVALID_EXECUTOR_RESULT',
-        message: `Executor result for node "${settled.nodeId}" must contain the planned material key and valid outputs.`,
+        message: `Executor result for node "${settled.nodeId}" failed material, shape, identity, or ownership validation.`,
       });
       continue;
     }
-    results.set(settled.nodeId, cloneValue(settled.result));
+    const projectedResult: WorkflowExecutionResult = {
+      cacheKey: settled.result.cacheKey,
+      outputIds: [...settled.result.outputIds],
+    };
+    results.set(settled.nodeId, projectedResult);
+    projectedResult.outputIds.forEach((outputId) => outputOwners.set(outputId, settled.nodeId));
   }
 
-  return {
+  return detachedFrozen({
     executedNodeIds,
     cachedNodeIds: plan.cachedResults.map((entry) => entry.nodeId),
-    results,
-    failures,
+    results: Object.fromEntries(results),
+    failures: Object.fromEntries(failures),
     blockedNodeIds,
-  };
+  });
 }

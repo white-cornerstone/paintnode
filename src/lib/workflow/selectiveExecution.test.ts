@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { WorkflowExecutionResult } from './execution';
 import {
   executeSelectiveWorkflowPlan,
   planSelectiveWorkflowExecution,
@@ -11,6 +12,7 @@ import {
   type WorkflowNodeV2,
   type WorkflowRunRecordV1,
 } from './schema';
+import { instantiateWorkflowTemplate } from './templates';
 
 function node(
   id: string,
@@ -35,7 +37,9 @@ function node(
       })),
       outputs: outputs.map((id) => ({ id, label: id, dataType: 'image' })),
     },
-    config: { operation: type },
+    config: type === 'transform'
+      ? { operation: type, capability: 'generate' }
+      : { operation: type },
     runRecordIds: [],
   };
 }
@@ -122,6 +126,7 @@ async function execute(plan: WorkflowSelectiveExecutionPlan, calls: string[]): P
     maxConcurrency: 3,
     providerKeyForNode: () => 'fake',
     providerConcurrency: { fake: 3 },
+    validateResultOwnership: () => true,
     executeNode: async ({ nodeId, materialKey }) => {
       calls.push(nodeId);
       return { cacheKey: materialKey, outputIds: [`new-${nodeId}`] };
@@ -178,6 +183,11 @@ describe('selective workflow planning', () => {
       mode: 'run-from-here',
       nodeId: 'input-a',
       materialKeys,
+      executionDisposition: (candidate) => candidate.type === 'review'
+        ? { kind: 'not-required' }
+        : candidate.type === 'transform'
+          ? { kind: 'available' }
+          : { kind: 'not-required' },
       isRunRecordReusable: () => true,
     });
     const calls: string[] = [];
@@ -247,6 +257,11 @@ describe('selective workflow planning', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: { 'transform-b': 'key-transform-b' },
+      executionDisposition: (candidate) => candidate.type === 'review'
+        ? { kind: 'not-required' }
+        : candidate.type === 'transform'
+          ? { kind: 'available' }
+          : { kind: 'not-required' },
     });
 
     expect(plan.preflight).toEqual(expect.arrayContaining([
@@ -258,38 +273,50 @@ describe('selective workflow planning', () => {
   });
 
   it('runs only Generate for the real Campaign structural topology', async () => {
-    const input = graph();
-    input.nodes = [
-      node('product', 'input'),
-      node('brief', 'brief', [{ id: 'image', required: true }]),
-      node('art-direction', 'art-direction', [{ id: 'image', required: true }]),
-      node('generate', 'transform', [{ id: 'image', required: true }]),
-      node('square-output', 'output', [{ id: 'image', required: true }], []),
-    ];
-    input.edges = [
-      edge('product-brief', 'product', 'brief'),
-      edge('brief-art', 'brief', 'art-direction'),
-      edge('art-generate', 'art-direction', 'generate'),
-      edge('generate-output', 'generate', 'square-output'),
-    ];
+    const input = instantiateWorkflowTemplate('campaign-composer', { graphId: 'selective-campaign' });
     const plan = planSelectiveWorkflowExecution(input, {
       mode: 'run-node',
-      nodeId: 'square-output',
-      materialKeys: { generate: 'key-generate' },
+      nodeId: 'output-square',
+      materialKeys: { 'transform-generate-square': 'key-generate' },
     });
     const calls: string[] = [];
     await execute(plan, calls);
 
-    expect(plan.requiredNodeIds).toEqual(['product', 'brief', 'art-direction', 'generate', 'square-output']);
-    expect(plan.executionNodeIds).toEqual(['generate']);
-    expect(plan.preflight.map(({ nodeId, willExecute }) => [nodeId, willExecute])).toEqual([
-      ['product', false],
-      ['brief', false],
-      ['art-direction', false],
-      ['generate', true],
-      ['square-output', false],
+    expect(plan.requiredNodeIds).toEqual([
+      'slot-product', 'slot-subject', 'slot-style', 'brief', 'composition', 'transform-generate-square', 'output-square',
     ]);
-    expect(calls).toEqual(['generate']);
+    expect(plan.executionNodeIds).toEqual(['transform-generate-square']);
+    expect(plan.preflight.map(({ nodeId, willExecute }) => [nodeId, willExecute])).toEqual([
+      ['slot-product', false],
+      ['slot-subject', false],
+      ['slot-style', false],
+      ['brief', false],
+      ['composition', false],
+      ['transform-generate-square', true],
+      ['output-square', false],
+    ]);
+    expect(calls).toEqual(['transform-generate-square']);
+  });
+
+  it('blocks a configured transform capability that the registry does not support', () => {
+    const input = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
+    input.nodes.find((candidate) => candidate.id === 'transform-generate-square')!.config.capability = 'relight';
+
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'output-square',
+      materialKeys: {},
+    });
+
+    expect(plan.executionNodeIds).toEqual([]);
+    expect(plan.preflight).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'transform-generate-square',
+        state: 'blocked',
+        reason: expect.objectContaining({ code: 'NODE_DISABLED', message: expect.stringContaining('not available') }),
+      }),
+      expect.objectContaining({ nodeId: 'output-square', state: 'blocked' }),
+    ]));
   });
 
   it('fails closed without explicit artifact proof and snapshots validated material keys', () => {
@@ -336,6 +363,7 @@ describe('selective workflow scheduling', () => {
       maxConcurrency: 3,
       providerKeyForNode,
       providerConcurrency: { asset: 1, creative: 2 },
+      validateResultOwnership: () => true,
       executeNode: async ({ nodeId, materialKey, node: candidate }) => {
         const provider = providerKeyForNode(candidate);
         started.push(nodeId);
@@ -350,7 +378,7 @@ describe('selective workflow scheduling', () => {
     expect(started).toEqual(['input-a', 'input-b', 'transform-a', 'transform-b', 'review', 'output']);
     expect(maximum).toEqual(new Map([['asset', 1], ['creative', 2]]));
     expect(result.executedNodeIds).toEqual(started);
-    expect(result.results.get('output')).toEqual({ cacheKey: 'key-output', outputIds: ['new-output'] });
+    expect(result.results.output).toEqual({ cacheKey: 'key-output', outputIds: ['new-output'] });
   });
 
   it('rejects a zero provider limit before making calls with an actionable configuration error', async () => {
@@ -366,12 +394,142 @@ describe('selective workflow scheduling', () => {
       maxConcurrency: 1,
       providerKeyForNode: () => 'fake',
       providerConcurrency: { fake: 0 },
+      validateResultOwnership: () => true,
       executeNode: async () => {
         calls += 1;
         return { cacheKey: 'key-unrelated', outputIds: ['never'] };
       },
     })).rejects.toThrow(/provider concurrency.*positive safe integer/i);
     expect(calls).toBe(0);
+  });
+
+  it('sanitizes provider mapping exceptions before making executor calls', async () => {
+    const input = graph();
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'unrelated',
+      materialKeys: keys(input),
+    });
+    let calls = 0;
+
+    const run = executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => { throw new Error('/Users/private/project auth-token=secret'); },
+      providerConcurrency: {},
+      validateResultOwnership: () => true,
+      executeNode: async () => {
+        calls += 1;
+        return { cacheKey: 'key-unrelated', outputIds: ['never'] };
+      },
+    });
+
+    const error = await run.then(
+      () => new Error('Expected provider mapping to reject.'),
+      (failure: unknown) => failure as Error,
+    );
+    expect(error.message).toBe('Execution provider mapping for node "unrelated" could not be resolved safely.');
+    expect(error.message).not.toMatch(/private|auth-token|secret/);
+    expect(calls).toBe(0);
+  });
+
+  it('rejects extra result fields and foreign output ownership', async () => {
+    const input = graph();
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'unrelated',
+      materialKeys: keys(input),
+    });
+
+    const extra = await executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => 'fake',
+      providerConcurrency: { fake: 1 },
+      validateResultOwnership: () => true,
+      executeNode: async () => ({
+        cacheKey: 'key-unrelated',
+        outputIds: ['asset-unrelated'],
+        foreignMetadata: '/private/path',
+      } as WorkflowExecutionResult),
+    });
+    const foreign = await executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => 'fake',
+      providerConcurrency: { fake: 1 },
+      validateResultOwnership: (context) => {
+        expect(Object.isFrozen(context)).toBe(true);
+        expect(Object.isFrozen(context.result.outputIds)).toBe(true);
+        return context.result.outputIds.every((id) => id.startsWith('owned-'));
+      },
+      executeNode: async () => ({ cacheKey: 'key-unrelated', outputIds: ['foreign-asset'] }),
+    });
+    const duplicate = await executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => 'fake',
+      providerConcurrency: { fake: 1 },
+      validateResultOwnership: () => true,
+      executeNode: async () => ({ cacheKey: 'key-unrelated', outputIds: ['same', 'same'] }),
+    });
+
+    expect(extra.failures.unrelated?.code).toBe('INVALID_EXECUTOR_RESULT');
+    expect(extra.results.unrelated).toBeUndefined();
+    expect(foreign.failures.unrelated?.code).toBe('INVALID_EXECUTOR_RESULT');
+    expect(foreign.results.unrelated).toBeUndefined();
+    expect(duplicate.failures.unrelated?.code).toBe('INVALID_EXECUTOR_RESULT');
+    expect(duplicate.results.unrelated).toBeUndefined();
+  });
+
+  it('requires an ownership validator before resolving providers or executing nodes', async () => {
+    const input = graph();
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'unrelated',
+      materialKeys: keys(input),
+    });
+    let boundaryCalls = 0;
+
+    await expect(executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => {
+        boundaryCalls += 1;
+        return 'fake';
+      },
+      providerConcurrency: { fake: 1 },
+      validateResultOwnership: undefined as never,
+      executeNode: async () => {
+        boundaryCalls += 1;
+        return { cacheKey: 'key-unrelated', outputIds: ['owned'] };
+      },
+    })).rejects.toThrow(/requires an output ownership validator/i);
+    expect(boundaryCalls).toBe(0);
+  });
+
+  it('rejects cross-node output collisions and returns a detached immutable outcome', async () => {
+    const input = graph();
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'output',
+      materialKeys: keys(input),
+      executionDisposition: () => ({ kind: 'available' }),
+    });
+
+    const result = await executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 2,
+      providerKeyForNode: () => 'fake',
+      providerConcurrency: { fake: 2 },
+      validateResultOwnership: () => true,
+      executeNode: async ({ nodeId, materialKey }) => ({
+        cacheKey: materialKey,
+        outputIds: nodeId.startsWith('input') ? ['colliding-output'] : [`owned-${nodeId}`],
+      }),
+    });
+
+    expect(result.results['input-a']).toEqual({ cacheKey: 'key-input-a', outputIds: ['colliding-output'] });
+    expect(result.failures['input-b']?.code).toBe('INVALID_EXECUTOR_RESULT');
+    expect(result.blockedNodeIds).toEqual(['transform-b', 'review', 'output']);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.results)).toBe(true);
+    expect(Object.isFrozen(result.results['input-a']?.outputIds)).toBe(true);
+    expect(() => (result.results['input-a']!.outputIds as string[]).push('mutation')).toThrow();
   });
 
   it('blocks only failed dependents while an independent ready branch completes', async () => {
@@ -390,6 +548,7 @@ describe('selective workflow scheduling', () => {
       maxConcurrency: 2,
       providerKeyForNode: () => 'fake',
       providerConcurrency: { fake: 2 },
+      validateResultOwnership: () => true,
       executeNode: async ({ nodeId, materialKey }) => {
         if (nodeId === 'transform-a') throw new Error('transform-a failed');
         completed.push(nodeId);
@@ -398,13 +557,13 @@ describe('selective workflow scheduling', () => {
     });
 
     expect(completed).toEqual(['transform-b']);
-    expect(result.failures.get('transform-a')).toEqual({
+    expect(result.failures['transform-a']).toEqual({
       code: 'EXECUTOR_FAILED',
       message: 'Node execution failed. Retry the node or inspect safe run diagnostics.',
     });
-    expect(result.failures.get('transform-a')?.message).not.toContain('transform-a failed');
+    expect(result.failures['transform-a']?.message).not.toContain('transform-a failed');
     expect(result.blockedNodeIds).toEqual(['review']);
-    expect(result.results.has('transform-b')).toBe(true);
-    expect(result.results.has('review')).toBe(false);
+    expect(result.results['transform-b']).toBeDefined();
+    expect(result.results.review).toBeUndefined();
   });
 });

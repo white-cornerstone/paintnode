@@ -284,6 +284,12 @@ capability nodes block with their creator-facing recovery reason. A normal
 Campaign output run therefore executes Generate, not every structural node on
 the path. Planning continues through a propagated blocker so preflight exposes
 the disabled or missing-input root cause as well as affected downstream nodes.
+The default disposition is derived from the creator registry and the node's
+configured capability. A Transform cannot execute merely because its node type
+is `transform`: the configured capability must match the registry's available
+capability. A boundary may inject a stricter disposition, but unsupported Edit,
+Relight, or Remove Background configurations remain blocked until their real
+executor is registered.
 
 Planning never mutates run history. A material change is represented by the
 new current key, so only that node and downstream nodes whose own keys changed
@@ -297,7 +303,16 @@ already-ready unrelated work continues and is returned with the failure and
 blocked-node outcome. Raw executor errors are replaced by a safe generic
 failure unless the boundary injects a validated sanitizer. Zero, missing, or
 invalid provider capacity is a configuration error raised before the first
-executor call.
+executor call, and exceptions from provider mapping are converted to the same
+stable safe boundary without exposing paths, credentials, or adapter details.
+
+Executor results are accepted only as the exact `{ cacheKey, outputIds }`
+shape, with the planned key, unique nonblank identities, no cross-node identity
+collision, and an injected ownership check proving that every output belongs
+to the current node and project. Extra metadata and foreign output identities
+are failures. The returned outcome strictly projects those fields into a
+detached deeply frozen snapshot; callers cannot mutate result arrays, failure
+records, or outcome collections after execution.
 
 Progress and cancellation remain owned by the adjacent runtime work. That
 integration should wrap the injected node executor and consume the plan and
