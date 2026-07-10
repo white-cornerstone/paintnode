@@ -15,6 +15,7 @@ use crate::ai::{
     AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
+use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
 
 #[derive(Debug)]
 pub(crate) struct ClaudeCommandOptions {
@@ -89,7 +90,15 @@ fn build_claude_agent_command(
     prompt_text: &str,
     image_paths: &[PathBuf],
 ) -> Command {
-    build_claude_agent_command_with_session(options, job_path, prompt_text, image_paths, None)
+    build_claude_agent_command_with_session(
+        options,
+        job_path,
+        prompt_text,
+        image_paths,
+        None,
+        None,
+        None,
+    )
 }
 
 fn build_claude_agent_command_with_session(
@@ -98,6 +107,8 @@ fn build_claude_agent_command_with_session(
     prompt_text: &str,
     image_paths: &[PathBuf],
     session_id: Option<&str>,
+    output_file: Option<&str>,
+    output_schema: Option<&str>,
 ) -> Command {
     let managed_bin = managed_claude_bin_or(&options.bin);
     let mut command = Command::new(claude_sdk_node());
@@ -117,6 +128,12 @@ fn build_claude_agent_command_with_session(
     }
     if let Some(effort) = options.effort.as_deref() {
         command.arg("--effort").arg(effort);
+    }
+    if let Some(output_file) = output_file {
+        command.arg("--output-file").arg(job_path.join(output_file));
+    }
+    if let Some(output_schema) = output_schema {
+        command.arg("--output-schema").arg(output_schema);
     }
     for path in image_paths {
         command.arg("--image").arg(path);
@@ -147,17 +164,57 @@ pub(crate) fn build_director_claude_command(
     image_paths: &[PathBuf],
     session_id: Option<&str>,
 ) -> Command {
-    let mut command = build_claude_agent_command_with_session(
+    build_claude_agent_command_with_session(
         options,
         job_path,
         prompt_text,
         image_paths,
         session_id,
+        Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_claude_workflow_draft_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Claude)?;
+    let options = claude_command_options(bin, model, effort);
+    let mut command = build_claude_agent_command_with_session(
+        &options,
+        job_path,
+        prompt_text,
+        &[],
+        None,
+        Some(output_file),
+        Some("workflow-draft"),
     );
-    command
-        .arg("--output-file")
-        .arg(job_path.join(PAINTNODE_DIRECTOR_ACTION_FILE));
-    command
+    let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Claude at '{}': {error}",
+                claude_command_label(&options)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_claude_agent_message(&run.output) {
+        Err(format!("Claude workflow Director failed.\n\n{message}"))
+    } else {
+        Err(claude_command_failure(
+            "Claude workflow Director",
+            &run.output,
+        ))
+    }
 }
 
 pub(crate) fn run_claude_with_progress(
@@ -562,6 +619,37 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
         }));
+    }
+
+    #[test]
+    fn workflow_director_output_flags_precede_prompt_delimiter() {
+        let job = TempJobDir::new("paintnode-claude-workflow-draft-test").expect("temp dir");
+        let command = build_claude_agent_command_with_session(
+            &claude_command_options(None, None, None),
+            job.path(),
+            "draft a workflow",
+            &[],
+            None,
+            Some("paintnode-workflow-draft.json"),
+            Some("workflow-draft"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let delimiter = args.iter().position(|arg| arg == "--").expect("delimiter");
+        let output = args
+            .iter()
+            .position(|arg| arg == "--output-file")
+            .expect("output");
+        let schema = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema");
+        assert!(output < delimiter);
+        assert!(schema < delimiter);
+        assert_eq!(args[schema + 1], "workflow-draft");
+        assert!(!args.iter().any(|arg| arg == "--image"));
     }
 
     #[test]

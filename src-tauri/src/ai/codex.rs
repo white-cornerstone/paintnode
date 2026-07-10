@@ -543,6 +543,7 @@ pub(crate) fn run_codex_director_request(
         &options,
         session_id,
         Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+        None,
     );
     let run =
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
@@ -557,6 +558,46 @@ pub(crate) fn run_codex_director_request(
         Err(format!("Codex Director failed.\n\n{message}"))
     } else {
         Err(command_failure("Codex Director", &run.output))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_workflow_draft_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        &[],
+        &options,
+        None,
+        Some(output_file),
+        Some("workflow-draft"),
+    );
+    let run =
+        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+            format!(
+                "Failed to run Codex at '{}': {e}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!("Codex workflow Director failed.\n\n{message}"))
+    } else {
+        Err(command_failure("Codex workflow Director", &run.output))
     }
 }
 
@@ -805,6 +846,7 @@ fn build_codex_sdk_command(
         options,
         None,
         None,
+        None,
     )
 }
 
@@ -816,6 +858,7 @@ fn build_codex_sdk_command_with_session(
     options: &CodexCommandOptions,
     session_id: Option<&str>,
     output_file: Option<&str>,
+    output_schema: Option<&str>,
 ) -> Command {
     let codex_bin = managed_codex_bin_or(codex_bin);
     let mut command = Command::new(codex_sdk_node());
@@ -834,6 +877,9 @@ fn build_codex_sdk_command_with_session(
     }
     if let Some(output_file) = output_file {
         command.arg("--output-file").arg(job_path.join(output_file));
+    }
+    if let Some(output_schema) = output_schema {
+        command.arg("--output-schema").arg(output_schema);
     }
     if !codex_bin.trim().is_empty() {
         command.arg("--codex-path").arg(codex_bin.as_ref());
@@ -2578,6 +2624,7 @@ fn run_director_provider_action_turn(
                 codex_options,
                 session_id,
                 Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                None,
             );
             let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
                 .map_err(|e| {
@@ -4988,6 +5035,7 @@ mod tests {
             &CodexCommandOptions::default(),
             Some(session_id),
             Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+            None,
         );
         let args = command
             .get_args()
@@ -5000,6 +5048,29 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
         }));
+    }
+
+    #[test]
+    fn workflow_director_command_uses_strict_draft_schema_without_images() {
+        let job = TempJobDir::new("paintnode-codex-workflow-draft-test").expect("temp dir");
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "draft a workflow",
+            &[],
+            &CodexCommandOptions::default(),
+            None,
+            Some("paintnode-workflow-draft.json"),
+            Some("workflow-draft"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-draft" }));
+        assert!(!args.iter().any(|arg| arg == "--image"));
     }
 
     #[test]

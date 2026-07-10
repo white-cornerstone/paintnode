@@ -7,6 +7,7 @@ pub(crate) mod codex;
 pub(crate) mod director;
 pub(crate) mod fill_storyboard;
 pub(crate) mod placement;
+pub(crate) mod workflow_director;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
