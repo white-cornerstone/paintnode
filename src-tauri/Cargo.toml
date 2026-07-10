@@ -1,7 +1,7 @@
 [package]
 name = "paintnode"
-version = "0.1.6"
-description = "Use Codex CLI and Antigravity to generate and edit image layers with your existing CLI login."
+version = "0.2.0"
+description = "Use managed Codex and Claude runtimes plus Antigravity to plan, generate, and edit image layers."
 authors = ["White Cornerstone Pty Ltd"]
 license = "GPL-3.0-or-later"
 publish = false

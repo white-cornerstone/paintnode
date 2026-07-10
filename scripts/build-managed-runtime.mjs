@@ -31,6 +31,11 @@ const args = process.argv.slice(2);
 const provider = value(args, '--provider');
 const sdkVersion = value(args, '--sdk-version');
 const packageVersion = value(args, '--package-version');
+const minimumPaintNodeVersion = value(
+  args,
+  '--minimum-paintnode-version',
+  JSON.parse(readFileSync(resolve('package.json'), 'utf8')).version,
+);
 const platform = value(args, '--platform', 'darwin');
 const arch = value(args, '--arch', process.arch === 'arm64' ? 'arm64' : 'x64');
 const nodePath = resolve(value(args, '--node', process.execPath));
@@ -87,7 +92,7 @@ const runtimeManifest = {
   sdkVersion,
   engineVersion,
   protocolVersion: 1,
-  minimumPaintNodeVersion: '0.1.6',
+  minimumPaintNodeVersion,
   runner: `bridge/${runnerName}`,
   capabilitiesRunner: provider === 'codex' ? 'bridge/codex-capabilities.mjs' : null,
   node: 'bin/node',
@@ -109,7 +114,7 @@ const metadata = {
   sdkVersion,
   engineVersion,
   protocolVersion: 1,
-  minimumPaintNodeVersion: '0.1.6',
+  minimumPaintNodeVersion,
   artifact: {
     os: platform,
     arch,

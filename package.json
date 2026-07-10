@@ -1,8 +1,8 @@
 {
   "name": "paintnode",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "private": true,
-  "description": "Use Codex, Claude, and Antigravity local AI tools to plan, generate, and edit image layers with your existing CLI login.",
+  "description": "Use managed Codex and Claude runtimes plus Antigravity to plan, generate, and edit image layers.",
   "homepage": "https://paintnode.com",
   "repository": {
     "type": "git",
