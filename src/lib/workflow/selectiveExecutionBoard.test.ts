@@ -47,5 +47,11 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain(
       'if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);',
     );
+    expect(boardSource).toContain('role="tablist"');
+    expect(boardSource).toContain("event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'");
+    expect(boardSource).toContain('Promote this candidate');
+    expect(boardSource).toContain('<strong>Brief</strong>');
+    expect(boardSource).toContain('<strong>Art direction</strong>');
+    expect(boardSource).toContain('Provenance:');
   });
 });

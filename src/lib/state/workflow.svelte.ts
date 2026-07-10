@@ -49,6 +49,11 @@ import {
   type WorkflowCandidateBranchExecutionOutcome,
   type WorkflowCandidateBranchGroup,
   type WorkflowCandidateSummary,
+  deriveWorkflowReviewCandidates,
+  promoteWorkflowCandidate,
+  type WorkflowReviewCandidate,
+  resolveWorkflowCampaignPath,
+  resolveWorkflowReviewTopology,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -1156,6 +1161,86 @@ export class WorkflowStore {
     return sourceNodeId ? groups.filter((group) => group.sourceNodeId === sourceNodeId) : groups;
   }
 
+  reviewCandidates(reviewNodeId: string, availableAssets?: readonly ProjectAsset[]): WorkflowReviewCandidate[] {
+    return deriveWorkflowReviewCandidates(this.serialize(), reviewNodeId, availableAssets
+      ? {
+          isOutputAvailable: (output) => availableAssets.some((asset) => (
+            asset.id === output.assetId && asset.relativePath === output.relativePath && asset.exists
+          )),
+        }
+      : {});
+  }
+
+  reviewResolution(reviewNodeId: string, availableAssets?: readonly ProjectAsset[]) {
+    return resolveWorkflowReviewTopology(this.serialize(), {
+      reviewNodeId,
+      ...(availableAssets ? {
+        isOutputAvailable: (output) => availableAssets.some((asset) => (
+          asset.id === output.assetId && asset.relativePath === output.relativePath && asset.exists
+        )),
+      } : {}),
+    });
+  }
+
+  async promoteCandidate(
+    reviewNodeId: string,
+    candidateId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<void> {
+    const sessionIdentity = this.workflowSessionIdentity;
+    const graphRevision = this.graphRevision;
+    const storeRevision = this.rev;
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
+    const graph = this.serialize();
+    const candidate = deriveWorkflowReviewCandidates(graph, reviewNodeId)
+      .find((item) => item.candidateId === candidateId);
+    if (!candidate?.output || candidate.state !== 'eligible') {
+      throw new Error('Only an available, current candidate can be promoted.');
+    }
+    const path = resolveWorkflowCampaignPath(graph, { transformNodeId: candidate.sourceNodeId });
+    if (!path || path.reviewNodeId !== reviewNodeId) {
+      throw new Error('The candidate is no longer connected to this Review.');
+    }
+    const prepared = await prepareCampaignGenerateTransform(graph, path.outputNodeId, {
+      ...options,
+      allowUnpromotedReview: true,
+    });
+    if (prepared.materialKey !== candidate.materialKey) {
+      throw new Error('The candidate is stale because its upstream creative material changed. Generate current branches first.');
+    }
+    const asset = options.assets.find((item) => (
+      item.id === candidate.output!.assetId && item.relativePath === candidate.output!.relativePath
+    ));
+    if (!asset) throw new Error('The candidate asset is unavailable. Restore it or choose another candidate.');
+    const material = await options.resolveAsset(asset);
+    const computed = material.bytes instanceof Uint8Array && material.bytes.length > 0
+      ? workflowSha256Bytes(material.bytes)
+      : null;
+    if (material.assetId !== candidate.output.assetId
+      || material.relativePath !== candidate.output.relativePath
+      || material.contentHash !== candidate.output.contentHash
+      || computed !== candidate.output.contentHash) {
+      throw new Error('The candidate asset changed and must be reviewed again.');
+    }
+    if (this.workflowSessionIdentity !== sessionIdentity
+      || this.graphRevision !== graphRevision
+      || this.rev !== storeRevision
+      || (options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
+      throw new Error('The workflow or project changed while promotion was being verified. Review the candidates again.');
+    }
+    const promoted = promoteWorkflowCandidate(graph, {
+      reviewNodeId,
+      candidateId,
+      id: `promotion-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+      promotedAt: options.clock?.() ?? Date.now(),
+      isOutputAvailable: () => true,
+    });
+    this.graphDomain = new WorkflowGraphDomain(promoted, { idGenerator: this.graphIdGenerator });
+    this.projectedGraphRevision = this.graphDomain.revision;
+    this.syncReactiveGraph(this.graphDomain);
+    this.bump();
+  }
+
   async runCandidateBranches(
     outputNodeId: string,
     options: WorkflowStoreRunOptions,
@@ -1211,8 +1296,7 @@ export class WorkflowStore {
   ): Promise<WorkflowTransformStoreOutcome> {
     const requestedSessionIdentity = this.workflowSessionIdentity;
     const initialGraph = this.serialize();
-    const outputEdge = initialGraph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
-    const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
+    const transformNodeId = resolveWorkflowCampaignPath(initialGraph, { outputNodeId })?.transformNodeId ?? 'transform';
     const previousStart = this.transformStartQueues.get(transformNodeId);
     let releaseStart!: () => void;
     const startHeld = new Promise<void>((resolve) => { releaseStart = resolve; });
@@ -1557,7 +1641,7 @@ export class WorkflowStore {
         restrictions.push({
           nodeId: transformNodeId,
           kind: 'unavailable',
-          reason: 'Campaign Generate requires a directly connected Output.',
+          reason: 'Campaign Generate requires one unambiguous Output path, with at most one Review hop.',
         });
         continue;
       }
@@ -1750,13 +1834,7 @@ export class WorkflowStore {
   }
 
   private campaignOutputForTransform(graph: WorkflowGraphV2, transformNodeId: string): string | null {
-    const edge = graph.edges.find((candidate) => (
-      candidate.source.nodeId === transformNodeId
-      && candidate.source.portId === 'result'
-      && candidate.target.portId === 'source'
-      && graph.nodes.some((node) => node.id === candidate.target.nodeId && node.type === 'output')
-    ));
-    return edge?.target.nodeId ?? null;
+    return resolveWorkflowCampaignPath(graph, { transformNodeId })?.outputNodeId ?? null;
   }
 
   private beginWorkflowSession(): void {

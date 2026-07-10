@@ -141,6 +141,24 @@ export interface WorkflowCandidateLineageV1 {
   attempt: number;
 }
 
+export interface WorkflowReviewPromotionV1 {
+  version: 1;
+  id: string;
+  reviewNodeId: string;
+  sourceNodeId: string;
+  branchGroupId: string;
+  candidateId: string;
+  candidateRunId: string;
+  assetReferenceId: string;
+  assetId: string;
+  relativePath: string;
+  contentHash: string;
+  materialKey: string;
+  reviewNodeRevision: string;
+  promotedAt: number;
+  supersedesPromotionId?: string;
+}
+
 export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
   recordVersion: 1;
   status: WorkflowRunStatus;
@@ -187,6 +205,8 @@ export interface WorkflowGraphV2 {
   edges: WorkflowEdgeV2[];
   assetReferences: WorkflowAssetReference[];
   runRecords: WorkflowRunReference[];
+  /** Append-only review decisions. Missing in early v2 files and preserved as absent. */
+  reviewPromotions?: WorkflowReviewPromotionV1[];
 }
 
 export interface WorkflowValidationIssue {
@@ -888,6 +908,88 @@ function parseMigrations(value: unknown, issues: WorkflowValidationIssue[]): Wor
   });
 }
 
+function parseReviewPromotions(value: unknown, issues: WorkflowValidationIssue[]): WorkflowReviewPromotionV1[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    issues.push({ path: 'reviewPromotions', message: 'reviewPromotions must be an array', severity: 'error' });
+    return [];
+  }
+  return value.map((item, index) => {
+    const path = `reviewPromotions[${index}]`;
+    if (!isRecord(item)) {
+      issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+      return {
+        version: 1, id: '', reviewNodeId: '', sourceNodeId: '', branchGroupId: '', candidateId: '',
+        candidateRunId: '', assetReferenceId: '', assetId: '', relativePath: '', contentHash: '',
+        materialKey: '', reviewNodeRevision: '', promotedAt: 0,
+      };
+    }
+    if (item.version !== 1) issues.push({ path: `${path}.version`, message: 'Promotion version must be 1', severity: 'error' });
+    const promotedAt = readNonnegativeInteger(item, 'promotedAt', `${path}.promotedAt`, issues);
+    const promotion: WorkflowReviewPromotionV1 = {
+      version: 1,
+      id: readString(item, 'id', `${path}.id`, issues),
+      reviewNodeId: readString(item, 'reviewNodeId', `${path}.reviewNodeId`, issues),
+      sourceNodeId: readString(item, 'sourceNodeId', `${path}.sourceNodeId`, issues),
+      branchGroupId: readString(item, 'branchGroupId', `${path}.branchGroupId`, issues),
+      candidateId: readString(item, 'candidateId', `${path}.candidateId`, issues),
+      candidateRunId: readString(item, 'candidateRunId', `${path}.candidateRunId`, issues),
+      assetReferenceId: readString(item, 'assetReferenceId', `${path}.assetReferenceId`, issues),
+      assetId: readString(item, 'assetId', `${path}.assetId`, issues),
+      relativePath: readString(item, 'relativePath', `${path}.relativePath`, issues),
+      contentHash: readString(item, 'contentHash', `${path}.contentHash`, issues),
+      materialKey: readString(item, 'materialKey', `${path}.materialKey`, issues),
+      reviewNodeRevision: readString(item, 'reviewNodeRevision', `${path}.reviewNodeRevision`, issues),
+      promotedAt,
+      ...(typeof item.supersedesPromotionId === 'string'
+        ? { supersedesPromotionId: item.supersedesPromotionId }
+        : {}),
+    };
+    if (item.supersedesPromotionId !== undefined && typeof item.supersedesPromotionId !== 'string') {
+      issues.push({ path: `${path}.supersedesPromotionId`, message: 'supersedesPromotionId must be a string', severity: 'error' });
+    }
+    for (const [key, identifier] of [
+      ['id', promotion.id], ['reviewNodeId', promotion.reviewNodeId], ['sourceNodeId', promotion.sourceNodeId],
+      ['branchGroupId', promotion.branchGroupId], ['candidateId', promotion.candidateId],
+      ['candidateRunId', promotion.candidateRunId], ['assetReferenceId', promotion.assetReferenceId],
+      ...(promotion.supersedesPromotionId ? [['supersedesPromotionId', promotion.supersedesPromotionId] as const] : []),
+    ] as const) {
+      try { safeWorkflowIdentifier(identifier, `Promotion ${key}`); }
+      catch (error) { issues.push({ path: `${path}.${key}`, message: (error as Error).message, severity: 'error' }); }
+    }
+    if (!isProjectRelativeWorkflowReference(promotion.relativePath)) {
+      issues.push({ path: `${path}.relativePath`, message: 'Promotion output path must be project-relative', severity: 'error' });
+    }
+    for (const [key, hash] of [
+      ['contentHash', promotion.contentHash], ['reviewNodeRevision', promotion.reviewNodeRevision],
+    ] as const) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(hash)) {
+        issues.push({ path: `${path}.${key}`, message: `${key} must be a canonical SHA-256 digest`, severity: 'error' });
+      }
+    }
+    return promotion;
+  });
+}
+
+function validateReviewPromotions(graph: WorkflowGraphV2, issues: WorkflowValidationIssue[]): void {
+  const promotions = graph.reviewPromotions ?? [];
+  const ids = new Set<string>();
+  const latestByReview = new Map<string, WorkflowReviewPromotionV1>();
+  for (const [index, promotion] of promotions.entries()) {
+    const path = `reviewPromotions[${index}]`;
+    if (ids.has(promotion.id)) issues.push({ path: `${path}.id`, message: 'Promotion IDs must be unique', severity: 'error' });
+    ids.add(promotion.id);
+    const prior = latestByReview.get(promotion.reviewNodeId);
+    if ((prior?.id ?? undefined) !== promotion.supersedesPromotionId) {
+      issues.push({ path: `${path}.supersedesPromotionId`, message: 'Promotion history must append from the prior Review decision', severity: 'error' });
+    }
+    if (prior && promotion.promotedAt < prior.promotedAt) {
+      issues.push({ path: `${path}.promotedAt`, message: 'Promotion times must be monotonic per Review node', severity: 'error' });
+    }
+    latestByReview.set(promotion.reviewNodeId, promotion);
+  }
+}
+
 export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
   const issues: WorkflowValidationIssue[] = [];
   if (!isRecord(input)) {
@@ -958,10 +1060,14 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
     edges: rawEdges.map((edge, index) => parseEdge(edge, index, issues)),
     assetReferences: rawAssets.map((asset, index) => parseAssetReference(asset, index, issues)),
     runRecords: rawRuns.map((run, index) => parseRunReference(run, index, issues)),
+    ...(input.reviewPromotions === undefined
+      ? {}
+      : { reviewPromotions: parseReviewPromotions(input.reviewPromotions, issues) }),
   };
 
   validateRunRetryLinks(value, issues);
   validateCandidateBranchGroups(value, issues);
+  validateReviewPromotions(value, issues);
 
   if (issues.some((issue) => issue.severity === 'error')) return { ok: false, issues };
   return { ok: true, value, issues };

@@ -16,4 +16,5 @@ export * from './runControl';
 export * from './providerQaSelection';
 export * from './provenance';
 export * from './candidateBranches';
+export * from './candidatePromotion';
 export * from './storyboardRead';

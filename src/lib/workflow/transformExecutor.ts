@@ -1,4 +1,5 @@
 import { WorkflowGraphDomain } from './domain';
+import { resolveWorkflowCampaignPath } from './candidatePromotion';
 import { planWorkflowExecution, type WorkflowExecutionPlan } from './execution';
 import { workflowReadiness } from './readiness';
 import {
@@ -168,6 +169,8 @@ export interface ExecuteCampaignGenerateOptions {
   signal?: AbortSignal;
   onProgress?: (event: Readonly<WorkflowRunProgressEvent>) => void;
   cancelExecutionForRun?: (runId: string) => Promise<unknown>;
+  /** Internal candidate preparation may traverse a Review before a decision exists. */
+  allowUnpromotedReview?: boolean;
   retryOfRunId?: string;
   candidateLineage?: WorkflowCandidateLineageV1;
   runAttempt?: number;
@@ -312,20 +315,21 @@ function requireTransformPath(graph: WorkflowGraphV2, outputNodeId: string): {
   output: WorkflowNodeV2;
   transform: WorkflowNodeV2;
   artDirection: WorkflowNodeV2;
+  reviewNodeId: string | null;
 } {
   const output = graph.nodes.find((node) => node.id === outputNodeId && node.type === 'output');
-  const transformEdge = graph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
-  const transform = graph.nodes.find((node) => node.id === transformEdge?.source.nodeId && node.type === 'transform');
+  const path = resolveWorkflowCampaignPath(graph, { outputNodeId });
+  const transform = graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform');
   const artEdge = transform && graph.edges.find((edge) => edge.target.nodeId === transform.id && edge.target.portId === 'source');
   const artDirection = graph.nodes.find((node) => node.id === artEdge?.source.nodeId && node.type === 'art-direction');
-  if (!output || !transform || !artDirection || transformEdge?.source.portId !== 'result' || artEdge?.source.portId !== 'layout') {
+  if (!output || !path || !transform || !artDirection || artEdge?.source.portId !== 'layout') {
     throw new WorkflowTransformExecutionError(
       'INVALID_TRANSFORM_PATH',
       'Square Output must be connected through a Generate Transform from Art Direction.',
       'Reconnect Art Direction to Generate, then Generate to Square Output',
     );
   }
-  return { output, transform, artDirection };
+  return { output, transform, artDirection, reviewNodeId: path.reviewNodeId };
 }
 
 function boundAsset(node: WorkflowNodeV2, assets: readonly WorkflowProjectAsset[]): WorkflowProjectAsset | null {
@@ -440,7 +444,14 @@ async function campaignGenerateTransform(
       'Choose or create a project folder',
     );
   }
-  const { output, transform, artDirection } = requireTransformPath(graph, outputNodeId);
+  const { output, transform, artDirection, reviewNodeId } = requireTransformPath(graph, outputNodeId);
+  if (reviewNodeId && !options.allowUnpromotedReview && !options.candidateLineage) {
+    throw new WorkflowTransformExecutionError(
+      'NOT_READY',
+      'This Transform feeds a Review. Generate concept branches and promote one before continuing downstream.',
+      'Generate and review candidates',
+    );
+  }
   const capability = textConfig(transform, 'capability');
   if (capability !== 'generate') {
     throw new WorkflowTransformExecutionError(
@@ -470,6 +481,7 @@ async function campaignGenerateTransform(
     provider: effectiveProvider,
     supportedProviders: options.executors.map((candidate) => candidate.provider),
     targetNodeId: outputNodeId,
+    allowUnpromotedReview: options.allowUnpromotedReview === true,
   });
   if (!readiness.ready) {
     throw new WorkflowTransformExecutionError(
@@ -479,7 +491,7 @@ async function campaignGenerateTransform(
     );
   }
 
-  const plan = planWorkflowExecution(graph, outputNodeId, { maxConcurrency: 4 });
+  const plan = planWorkflowExecution(graph, reviewNodeId && options.allowUnpromotedReview ? transform.id : outputNodeId, { maxConcurrency: 4 });
   if (plan.blocked.length > 0) {
     throw new WorkflowTransformExecutionError('NOT_READY', plan.blocked[0].message, 'Reconnect the blocked workflow inputs');
   }

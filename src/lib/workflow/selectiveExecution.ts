@@ -6,6 +6,7 @@ import {
   type WorkflowExecutionResult,
 } from './execution';
 import { isFullWorkflowRunRecord } from './provenance';
+import { resolveWorkflowReviewTopology, workflowReviewPromotionMaterialKey } from './candidatePromotion';
 import { creatorNodeDefinition, type CreatorNodeType } from './registry';
 import type {
   WorkflowEdgeV2,
@@ -419,9 +420,23 @@ export function planSelectiveWorkflowExecution(
   affectedNodeIds.forEach(visitUpstream);
   const requiredNodeIds = graph.nodes.filter((node) => required.has(node.id)).map((node) => node.id);
   const dispositions = new Map<string, WorkflowNodeExecutionDisposition>();
+  const promotedReviewResults = new Map<string, WorkflowCachedResult>();
   for (const node of graph.nodes) {
     if (!required.has(node.id)) continue;
-    const registryDisposition = registryExecutionDisposition(node);
+    let registryDisposition = registryExecutionDisposition(node);
+    if (node.type === 'review') {
+      const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: node.id });
+      if (resolution.state === 'ready') {
+        registryDisposition = { kind: 'available' };
+        promotedReviewResults.set(node.id, {
+          nodeId: node.id,
+          cacheKey: workflowReviewPromotionMaterialKey(resolution),
+          outputIds: [resolution.output.assetReferenceId],
+        });
+      } else {
+        registryDisposition = { kind: 'unavailable', reason: resolution.reason.message };
+      }
+    }
     let disposition = registryDisposition;
     const restriction = restrictions.get(node.id);
     if (restriction && registryDisposition.kind === 'available') {
@@ -469,7 +484,10 @@ export function planSelectiveWorkflowExecution(
     .filter((node) => required.has(node.id)
       && dispositions.get(node.id)?.kind === 'available'
       && !blocked.has(node.id))
-    .map((node) => [node.id, requireMaterialKey(request.materialKeys, node.id)]));
+    .map((node) => [
+      node.id,
+      promotedReviewResults.get(node.id)?.cacheKey ?? requireMaterialKey(request.materialKeys, node.id),
+    ]));
 
   const cachedRuns = new Map<string, WorkflowRunRecordV1>();
   const latestSuccessful = new Map<string, WorkflowRunRecordV1>();
@@ -488,14 +506,15 @@ export function planSelectiveWorkflowExecution(
   const visitNeeded = (nodeId: string): void => {
     if (needed.has(nodeId)) return;
     needed.add(nodeId);
-    if (cachedRuns.has(nodeId)) return;
+    if (blocked.has(nodeId) && graph.nodes.some((node) => node.id === nodeId && node.type === 'review')) return;
+    if (cachedRuns.has(nodeId) || promotedReviewResults.has(nodeId)) return;
     incomingNodeIds(edges, nodeId).forEach(visitNeeded);
   };
   affectedNodeIds.forEach(visitNeeded);
 
   const cachedResults: WorkflowCachedResult[] = graph.nodes
-    .filter((node) => needed.has(node.id) && cachedRuns.has(node.id))
-    .map((node) => ({
+    .filter((node) => needed.has(node.id) && (cachedRuns.has(node.id) || promotedReviewResults.has(node.id)))
+    .map((node) => promotedReviewResults.get(node.id) ?? ({
       nodeId: node.id,
       cacheKey: materialKeys[node.id],
       outputIds: cachedRuns.get(node.id)!.outputs.map((output) => output.assetReferenceId),
@@ -504,6 +523,7 @@ export function planSelectiveWorkflowExecution(
     .filter((node) => needed.has(node.id)
       && dispositions.get(node.id)?.kind === 'available'
       && !cachedRuns.has(node.id)
+      && !promotedReviewResults.has(node.id)
       && !blocked.has(node.id))
     .map((node) => node.id);
   const preflight: WorkflowNodePreflight[] = graph.nodes
@@ -522,7 +542,7 @@ export function planSelectiveWorkflowExecution(
           },
         };
       }
-      if (cachedRuns.has(node.id)) {
+      if (cachedRuns.has(node.id) || promotedReviewResults.has(node.id)) {
         return {
           nodeId: node.id,
           state: 'cached' as const,

@@ -1,4 +1,5 @@
 import { WorkflowGraphDomain } from './domain';
+import { resolveWorkflowCampaignPath, resolveWorkflowReviewTopology } from './candidatePromotion';
 import type { WorkflowGraphV2, WorkflowNodeV2 } from './schema';
 
 export type WorkflowReadinessCode =
@@ -9,6 +10,7 @@ export type WorkflowReadinessCode =
   | 'art-direction'
   | 'provider'
   | 'transform'
+  | 'review'
   | 'outputs';
 
 export interface WorkflowReadinessAsset {
@@ -24,6 +26,7 @@ export interface WorkflowReadinessOptions {
   provider?: string | null;
   supportedProviders?: readonly string[];
   targetNodeId?: string | null;
+  allowUnpromotedReview?: boolean;
 }
 
 export interface WorkflowReadinessItem {
@@ -130,8 +133,8 @@ function targetOutputs(graph: WorkflowGraphV2, targetNodeId?: string | null): Wo
 }
 
 function transformForOutput(graph: WorkflowGraphV2, output: WorkflowNodeV2): WorkflowNodeV2 | null {
-  const incoming = graph.edges.find((edge) => edge.target.nodeId === output.id && edge.target.portId === 'source');
-  return graph.nodes.find((node) => node.id === incoming?.source.nodeId && node.type === 'transform') ?? null;
+  const path = resolveWorkflowCampaignPath(graph, { outputNodeId: output.id });
+  return graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform') ?? null;
 }
 
 function outputReadiness(graph: WorkflowGraphV2, targetNodeId?: string | null): WorkflowReadinessItem {
@@ -147,8 +150,8 @@ function outputReadiness(graph: WorkflowGraphV2, targetNodeId?: string | null): 
       return blocked('outputs', 'Outputs', `${output.title} needs valid dimensions.`, `Configure ${output.title}`);
     }
     const transform = transformForOutput(graph, output);
-    const connected = graph.edges.some((edge) => (
-      edge.target.nodeId === output.id && (artDirectionIds.has(edge.source.nodeId) || edge.source.nodeId === transform?.id)
+    const connected = Boolean(resolveWorkflowCampaignPath(graph, { outputNodeId: output.id })) || graph.edges.some((edge) => (
+      edge.target.nodeId === output.id && artDirectionIds.has(edge.source.nodeId)
     ));
     if (!connected) {
       return blocked('outputs', 'Outputs', `${output.title} is not connected to Art Direction.`, `Reconnect ${output.title}`);
@@ -181,11 +184,8 @@ function transformReadiness(
     && artDirectionIds.has(edge.source.nodeId)
   ));
   const hasResult = graph.edges.some((edge) => (
-    edge.source.nodeId === transform.id
-    && edge.source.portId === 'result'
-    && edge.target.nodeId === output.id
-    && edge.target.portId === 'source'
-  ));
+    edge.source.nodeId === transform.id && edge.source.portId === 'result'
+  )) && Boolean(resolveWorkflowCampaignPath(graph, { outputNodeId: output.id, transformNodeId: transform.id }));
   if (textConfig(transform, 'capability') !== 'generate' || !hasSource || !hasResult) {
     return blocked(
       'transform',
@@ -195,6 +195,19 @@ function transformReadiness(
     );
   }
   return complete('transform', 'Generate Transform', `${transform.title} is configured for ${output.title}.`);
+}
+
+function reviewReadiness(
+  graph: WorkflowGraphV2,
+  output: WorkflowNodeV2,
+  options: WorkflowReadinessOptions,
+): WorkflowReadinessItem | null {
+  const path = resolveWorkflowCampaignPath(graph, { outputNodeId: output.id });
+  if (!path?.reviewNodeId || options.allowUnpromotedReview) return null;
+  const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: path.reviewNodeId });
+  return resolution.state === 'ready'
+    ? complete('review', 'Concept review', 'A promoted candidate is ready for downstream use.')
+    : blocked('review', 'Concept review', resolution.reason.message, resolution.reason.action);
 }
 
 function providerReadiness(
@@ -260,6 +273,7 @@ export function workflowReadiness(
     ? transformReadiness(graph, targetOutput, Boolean(options.targetNodeId))
     : null;
   const provider = targetOutput ? providerReadiness(targetOutput, graph, options) : null;
+  const review = targetOutput ? reviewReadiness(graph, targetOutput, options) : null;
   const items: WorkflowReadinessItem[] = [
     options.desktop
       ? complete('desktop', 'Desktop app', 'Workflow generation is available.')
@@ -274,6 +288,7 @@ export function workflowReadiness(
       : blocked('art-direction', 'Art direction', 'Add composition, lighting, colour, or style guidance.', 'Add art-direction guidance'),
     ...(transform ? [transform] : []),
     ...(provider ? [provider] : []),
+    ...(review ? [review] : []),
     outputReadiness(graph, options.targetNodeId),
   ];
   const nextAction = items.find((item) => item.status === 'blocked') ?? null;

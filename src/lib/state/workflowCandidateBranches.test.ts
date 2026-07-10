@@ -106,4 +106,52 @@ describe('WorkflowStore candidate branches', () => {
     expect(runOptions.storeAsset).toHaveBeenCalledTimes(2);
     expect(workflow.candidateBranchGroups()).toEqual([]);
   });
+
+  it('verifies candidate bytes before atomically appending and reopening a promotion', async () => {
+    const workflow = store();
+    const reviewId = workflow.addCreatorNode('review');
+    workflow.disconnectNodes('transform-generate-square', 'output-square');
+    expect(workflow.connectPorts('transform-generate-square', 'result', reviewId, 'candidates')).toBe(true);
+    expect(workflow.connectPorts(reviewId, 'selected', 'output-square', 'source')).toBe(true);
+    const candidateBytes = new Uint8Array([137, 80, 78, 71, 81, 1]);
+    const runOptions = options(async () => ({
+      kind: 'bytes', name: 'concept.png', bytes: candidateBytes,
+      mime: 'image/png', width: 1024, height: 1024,
+    }));
+    await workflow.runCandidateBranches('output-square', runOptions, {
+      branchGroupId: 'promotion-store-group', count: 2, maxConcurrency: 1,
+    });
+    const candidate = workflow.reviewCandidates(reviewId)[0];
+    const generated = {
+      id: candidate.output!.assetId, kind: 'generated', name: 'concept.png',
+      relativePath: candidate.output!.relativePath, createdAt: 2, exists: true,
+      width: 1024, height: 1024, mime: 'image/png',
+    } satisfies ProjectAsset;
+    runOptions.assets = [product, generated];
+    runOptions.resolveAsset = async (asset) => asset.id === generated.id
+      ? {
+          assetId: generated.id, relativePath: generated.relativePath,
+          bytes: candidateBytes, contentHash: workflowSha256Bytes(candidateBytes),
+        }
+      : {
+          assetId: product.id, relativePath: product.relativePath,
+          bytes: productBytes, contentHash: workflowSha256Bytes(productBytes),
+        };
+
+    await workflow.promoteCandidate(reviewId, candidate.candidateId, runOptions);
+    expect(workflow.serialize().reviewPromotions).toHaveLength(1);
+    const reopened = new WorkflowStore();
+    reopened.openFromBytes(workflow.toBytes(), null, 'Reopened promotion');
+    expect(reopened.reviewResolution(reviewId)).toMatchObject({
+      state: 'ready', promotion: { candidateId: candidate.candidateId },
+    });
+
+    runOptions.resolveAsset = async (asset) => ({
+      assetId: asset.id, relativePath: asset.relativePath,
+      bytes: new Uint8Array([1, 2, 3]), contentHash: workflowSha256Bytes(new Uint8Array([1, 2, 3])),
+    });
+    await expect(workflow.promoteCandidate(reviewId, candidate.candidateId, runOptions))
+      .rejects.toThrow(/changed/i);
+    expect(workflow.serialize().reviewPromotions).toHaveLength(1);
+  });
 });

@@ -55,6 +55,7 @@
     selectiveExecutionRunAvailability,
     workflowProviderSelection,
     workflowReadiness,
+    resolveWorkflowCampaignPath,
     type CreatorNodeType,
     type WorkflowNodePort,
     type WorkflowSelectiveExecutionOutcome,
@@ -109,6 +110,7 @@
   let qaScenario = $state<ProviderFreeQaScenario>('success');
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
+  let selectedReviewCandidates = $state<Record<string, string>>({});
   let activeCandidateController: AbortController | null = null;
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
@@ -1791,9 +1793,48 @@
   }
 
   function outputForTransform(nodeId: string): WorkflowOutputNode | null {
-    const outputId = workflow.outgoing(nodeId)
-      .find((connection) => connection.sourcePortId === 'result')?.to ?? null;
+    const outputId = resolveWorkflowCampaignPath(workflow.serialize(), { transformNodeId: nodeId })?.outputNodeId ?? null;
     return outputId ? workflow.outputNode(outputId) ?? null : null;
+  }
+
+  function selectedReviewCandidate(nodeId: string) {
+    const candidates = workflow.reviewCandidates(nodeId, assets);
+    const selectedId = selectedReviewCandidates[nodeId];
+    return candidates.find((candidate) => candidate.candidateId === selectedId) ?? candidates[0] ?? null;
+  }
+
+  function switchReviewCandidate(nodeId: string, direction: -1 | 1): void {
+    const candidates = workflow.reviewCandidates(nodeId, assets);
+    if (candidates.length === 0) return;
+    const current = selectedReviewCandidate(nodeId);
+    const index = Math.max(0, candidates.findIndex((candidate) => candidate.candidateId === current?.candidateId));
+    selectedReviewCandidates[nodeId] = candidates[(index + direction + candidates.length) % candidates.length].candidateId;
+  }
+
+  function reviewCandidateKeydown(event: KeyboardEvent, nodeId: string): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    const candidates = workflow.reviewCandidates(nodeId, assets);
+    if (candidates.length === 0) return;
+    if (event.key === 'Home' || event.key === 'End') {
+      selectedReviewCandidates[nodeId] = candidates[event.key === 'Home' ? 0 : candidates.length - 1].candidateId;
+    } else switchReviewCandidate(nodeId, event.key === 'ArrowLeft' ? -1 : 1);
+  }
+
+  async function promoteReviewCandidate(nodeId: string): Promise<void> {
+    const candidate = selectedReviewCandidate(nodeId);
+    if (!candidate || candidate.state !== 'eligible') return;
+    busy = true;
+    error = '';
+    const context = createWorkflowExecutionContext(createRunId());
+    try {
+      await workflow.promoteCandidate(nodeId, candidate.candidateId, context.options);
+      editor.flash(`Promoted Candidate ${candidate.ordinal}`);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Candidate promotion failed.';
+    } finally {
+      busy = false;
+    }
   }
 
   async function generateCandidateBranches(nodeId: string): Promise<void> {
@@ -2264,6 +2305,55 @@
                     oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
                   ></textarea>
                 </label>
+                {@const reviewCandidates = workflow.reviewCandidates(node.id, assets)}
+                {@const reviewCandidate = selectedReviewCandidate(node.id)}
+                {@const reviewResolution = workflow.reviewResolution(node.id, assets)}
+                <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
+                  <p class="review-resolution" data-review-state={reviewResolution.state}>
+                    {reviewResolution.state === 'ready'
+                      ? `Promoted Candidate ${reviewCandidates.find((candidate) => candidate.candidateId === reviewResolution.promotion.candidateId)?.ordinal ?? ''}`
+                      : reviewResolution.reason.message}
+                  </p>
+                  <div
+                    class="review-candidate-tabs"
+                    role="tablist"
+                    tabindex="-1"
+                    aria-label="Concept candidates"
+                    onkeydown={(event) => reviewCandidateKeydown(event, node.id)}
+                  >
+                    {#each reviewCandidates as candidate (candidate.candidateId)}
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={candidate.candidateId === reviewCandidate?.candidateId}
+                        tabindex={candidate.candidateId === reviewCandidate?.candidateId ? 0 : -1}
+                        data-candidate-state={candidate.state}
+                        onclick={() => { selectedReviewCandidates[node.id] = candidate.candidateId; }}
+                      >Candidate {candidate.ordinal} · {candidate.state}</button>
+                    {/each}
+                  </div>
+                  {#if reviewCandidate}
+                    <div class="review-candidate-context" role="tabpanel" tabindex="0">
+                      <p><strong>Brief</strong> {reviewCandidate.brief || 'No brief recorded.'}</p>
+                      <p><strong>Art direction</strong> {reviewCandidate.artDirection || 'No art direction recorded.'}</p>
+                      <small>
+                        Provenance: {reviewCandidate.providerId}{reviewCandidate.model ? ` / ${reviewCandidate.model}` : ''}
+                        · {reviewCandidate.sourceAssetIds.length} sources · run {reviewCandidate.latestRunId}
+                      </small>
+                      {#if reviewCandidate.failure}<p>{reviewCandidate.failure.message}</p>{/if}
+                      <button
+                        type="button"
+                        disabled={busy || reviewCandidate.state !== 'eligible'}
+                        onclick={() => void promoteReviewCandidate(node.id)}
+                      >Promote this candidate</button>
+                      {#if reviewCandidate.state !== 'eligible'}
+                        <small>Resolve this candidate’s {reviewCandidate.state} state before promotion.</small>
+                      {/if}
+                    </div>
+                  {:else}
+                    <p class="draft-reason">Generate concept branches upstream to compare and promote them here.</p>
+                  {/if}
+                </section>
               {/if}
               {#if node.ports.inputs.length > 0}
                 <div class="creator-port-list">
@@ -2389,7 +2479,7 @@
                 </p>
                 <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
               {/if}
-              {#if definition.executor.status === 'draft-only'}
+              {#if definition.executor.status === 'draft-only' && node.type !== 'review'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
                 <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
               {/if}
@@ -3265,6 +3355,44 @@
     padding: 7px;
     border-top: 1px solid #4b4d52;
     background: #292a2e;
+  }
+
+  .review-compare {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .review-candidate-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+  }
+
+  .review-candidate-tabs button {
+    flex: 0 0 auto;
+    font-size: 11px;
+  }
+
+  .review-candidate-tabs button[aria-selected='true'] {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .review-candidate-context {
+    display: grid;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--panel-bg) 88%, white 12%);
+  }
+
+  .review-candidate-context p,
+  .review-candidate-context small {
+    margin: 0;
   }
   .candidate-branch-head,
   .candidate-branch-controls,
