@@ -69,10 +69,7 @@ function assetBinding(graph: WorkflowGraphV2, node: WorkflowNodeV2): { assetId: 
 }
 
 function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOptions): WorkflowReadinessItem {
-  const templateSlots = graph.nodes.filter((node) => node.type === 'input' && node.config.templateRole === 'asset-slot');
-  const slots = templateSlots.length > 0
-    ? templateSlots
-    : graph.nodes.filter((node) => node.type === 'input');
+  const slots = graph.nodes.filter((node) => node.type === 'input');
   const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
   for (const slot of slots) {
     const binding = assetBinding(graph, slot);

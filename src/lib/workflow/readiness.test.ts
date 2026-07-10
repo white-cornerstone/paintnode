@@ -69,6 +69,32 @@ describe('workflow readiness', () => {
       status: 'blocked',
       message: expect.stringMatching(/Subject is required/i),
     });
+
+    const malformed = structuredClone(graph);
+    malformed.nodes.find((node) => node.id === 'slot-subject')!.config.required = 'false';
+    const invalid = workflowReadiness(malformed, readyOptions());
+    expect(invalid.ready).toBe(false);
+    expect(invalid.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'blocked',
+      message: expect.stringMatching(/Subject is required/i),
+    });
+  });
+
+  it('does not let partial template metadata hide an untagged required Campaign input', () => {
+    const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
+    delete graph.nodes.find((node) => node.id === 'slot-product')!.config.templateRole;
+    delete graph.nodes.find((node) => node.id === 'slot-subject')!.config.templateRole;
+
+    const result = workflowReadiness(graph, {
+      ...readyOptions(),
+      assets: [],
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'blocked',
+      message: expect.stringMatching(/Product is required/i),
+    });
   });
 
   it('scopes Transform and provider readiness to the requested output', () => {
