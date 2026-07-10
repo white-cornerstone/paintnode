@@ -1,19 +1,10 @@
 //! Project folders: manifest, assets, documents, thumbnails, and their commands.
 
 use std::collections::hash_map::DefaultHasher;
-#[cfg(unix)]
-use std::ffi::CString;
 use std::fs;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::io::Write;
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -37,7 +28,6 @@ const DEFAULT_PROJECT_DIR_NAME: &str = "PaintNode";
 const PROJECT_THUMBNAIL_MAX_EDGE: u32 = 160;
 const ASSET_HASH_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_HASHABLE_ASSET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_ASSET_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -224,35 +214,12 @@ fn save_manifest(project_path: &Path, manifest: &ProjectManifest) -> Result<(), 
     let json = serde_json::to_vec_pretty(&next)
         .map_err(|e| format!("Failed to serialize project manifest: {e}"))?;
     let path = project_manifest_path(project_path);
-    let nonce = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let temporary = project_path.join(format!(
-        ".{PROJECT_MANIFEST}.{}.{}.tmp",
-        std::process::id(),
-        nonce
-    ));
-    let result = (|| -> Result<(), String> {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| format!("Failed to create project manifest update: {error}"))?;
-        file.write_all(&json)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("Failed to write project manifest update: {error}"))?;
-        fs::rename(&temporary, &path).map_err(|error| {
-            format!(
-                "Failed to replace project manifest at {}: {error}",
-                path.display()
-            )
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    fs::write(&path, json).map_err(|e| {
+        format!(
+            "Failed to write project manifest at {}: {e}",
+            path.display()
+        )
+    })
 }
 
 fn sha256_content_hash(bytes: &[u8]) -> String {
@@ -270,7 +237,6 @@ fn is_canonical_sha256_content_hash(value: &str) -> bool {
     })
 }
 
-#[cfg(test)]
 fn hash_project_asset_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path)
         .map_err(|error| format!("Failed to open project asset for hashing: {error}"))?;
@@ -372,7 +338,9 @@ fn refresh_project_asset_content_hash(project_path: &Path, asset: &mut ProjectAs
             replace_asset_hash_state(asset, "unsafe", None, None, None)
         }
         ProjectAssetFileProbe::File {
-            size, modified_at, ..
+            path,
+            size,
+            modified_at,
         } => {
             if asset.content_hash_state.as_deref() == Some("verified")
                 && asset
@@ -385,17 +353,13 @@ fn refresh_project_asset_content_hash(project_path: &Path, asset: &mut ProjectAs
             {
                 return false;
             }
-            match hash_confined_project_file(
-                project_path,
-                &asset.relative_path,
-                MAX_HASHABLE_ASSET_BYTES,
-            ) {
-                Ok((hash, identity)) => replace_asset_hash_state(
+            match hash_project_asset_file(&path) {
+                Ok(hash) => replace_asset_hash_state(
                     asset,
                     "verified",
                     Some(hash),
-                    Some(identity.size),
-                    Some(identity.modified_millis()),
+                    Some(size),
+                    Some(modified_at),
                 ),
                 Err(_) => replace_asset_hash_state(asset, "unsafe", None, None, None),
             }
@@ -474,42 +438,6 @@ fn data_url_for_file(path: &Path, mime: Option<&str>) -> Option<String> {
     let bytes = fs::read(path).ok()?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Some(format!("data:{mime};base64,{b64}"))
-}
-
-fn data_url_for_bytes(bytes: &[u8], mime: Option<&str>, relative_path: &str) -> Option<String> {
-    let mime = mime
-        .map(str::to_string)
-        .or_else(|| mime_for_path(Path::new(relative_path)))
-        .filter(|mime| mime.starts_with("image/"))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Some(format!("data:{mime};base64,{b64}"))
-}
-
-fn thumbnail_data_url_for_asset_bytes(bytes: &[u8], mime: Option<&str>) -> Option<String> {
-    let mime = mime?.to_ascii_lowercase();
-    if !mime.starts_with("image/") {
-        return None;
-    }
-    if mime == "image/openraster" {
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
-        for entry_name in ["Thumbnails/thumbnail.png", "mergedimage.png"] {
-            let Ok(mut entry) = archive.by_name(entry_name) else {
-                continue;
-            };
-            let mut thumbnail = Vec::new();
-            entry.read_to_end(&mut thumbnail).ok()?;
-            if is_png(&thumbnail) {
-                return png_data_url_from_bytes(&thumbnail);
-            }
-        }
-        return None;
-    }
-    let image = image::load_from_memory(bytes).ok()?;
-    let thumbnail = image
-        .thumbnail(PROJECT_THUMBNAIL_MAX_EDGE, PROJECT_THUMBNAIL_MAX_EDGE)
-        .to_rgba8();
-    let png = encode_rgba_png(thumbnail, "project asset preview").ok()?;
-    png_data_url_from_bytes(&png)
 }
 
 fn project_thumbnail_cache_dir(project_path: &Path) -> PathBuf {
@@ -699,15 +627,10 @@ fn path_size(path: &Path) -> u64 {
 }
 
 fn asset_view(project_path: &Path, asset: ProjectAsset) -> ProjectAssetView {
-    let exists = open_confined_project_file(project_path, &asset.relative_path).is_ok();
+    let path = project_path.join(&asset.relative_path);
+    let exists = path.exists();
     let preview_data_url = exists
-        .then(|| {
-            read_confined_project_file(project_path, &asset.relative_path, MAX_ASSET_PREVIEW_BYTES)
-                .ok()
-                .and_then(|read| {
-                    thumbnail_data_url_for_asset_bytes(&read.bytes, asset.mime.as_deref())
-                })
-        })
+        .then(|| thumbnail_data_url_for_file(project_path, &path, asset.mime.as_deref()))
         .flatten();
     ProjectAssetView {
         asset,
@@ -737,11 +660,7 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if entry
-                .file_type()
-                .map(|kind| !kind.is_file() || kind.is_symlink())
-                .unwrap_or(true)
-            {
+            if !path.is_file() {
                 continue;
             }
             let name = path
@@ -1007,233 +926,6 @@ fn safe_project_relative_path(relative_path: &str) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConfinedFileIdentity {
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    size: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    #[cfg(unix)]
-    changed_seconds: i64,
-    #[cfg(unix)]
-    changed_nanoseconds: i64,
-}
-
-impl ConfinedFileIdentity {
-    #[cfg(unix)]
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            size: metadata.len(),
-            modified_seconds: metadata.mtime(),
-            modified_nanoseconds: metadata.mtime_nsec(),
-            changed_seconds: metadata.ctime(),
-            changed_nanoseconds: metadata.ctime_nsec(),
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok());
-        Self {
-            size: metadata.len(),
-            modified_seconds: modified
-                .as_ref()
-                .map(|duration| duration.as_secs() as i64)
-                .unwrap_or_default(),
-            modified_nanoseconds: modified
-                .map(|duration| duration.subsec_nanos() as i64)
-                .unwrap_or_default(),
-        }
-    }
-
-    fn modified_millis(&self) -> u128 {
-        if self.modified_seconds < 0 || self.modified_nanoseconds < 0 {
-            return 0;
-        }
-        (self.modified_seconds as u128) * 1_000 + (self.modified_nanoseconds as u128) / 1_000_000
-    }
-}
-
-#[cfg(unix)]
-fn open_confined_project_file(project_path: &Path, relative_path: &str) -> Result<File, String> {
-    let relative = safe_project_relative_path(relative_path)?;
-    let root = fs::canonicalize(project_path)
-        .map_err(|error| format!("Project folder is unavailable: {error}"))?;
-    let root_name = CString::new(root.as_os_str().as_bytes())
-        .map_err(|_| "Project folder path is invalid.".to_string())?;
-    let root_fd = unsafe {
-        libc::open(
-            root_name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if root_fd < 0 {
-        return Err(format!(
-            "Project folder could not be opened safely: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let mut current = unsafe { File::from_raw_fd(root_fd) };
-    let components = relative.components().collect::<Vec<_>>();
-    for (index, component) in components.iter().enumerate() {
-        let std::path::Component::Normal(part) = component else {
-            return Err("Project file path is invalid.".into());
-        };
-        let name = CString::new(part.as_bytes())
-            .map_err(|_| "Project file path is invalid.".to_string())?;
-        let final_component = index + 1 == components.len();
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NOFOLLOW
-            | if final_component {
-                0
-            } else {
-                libc::O_DIRECTORY
-            };
-        let next_fd = unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags) };
-        if next_fd < 0 {
-            return Err(format!(
-                "Project file could not be opened safely: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        current = unsafe { File::from_raw_fd(next_fd) };
-    }
-    let metadata = current
-        .metadata()
-        .map_err(|error| format!("Project file metadata is unavailable: {error}"))?;
-    if !metadata.is_file() {
-        return Err("Project file path does not identify a regular file.".into());
-    }
-    Ok(current)
-}
-
-#[cfg(not(unix))]
-fn open_confined_project_file(project_path: &Path, relative_path: &str) -> Result<File, String> {
-    match probe_project_asset_file(project_path, relative_path) {
-        ProjectAssetFileProbe::File { path, .. } => File::open(path)
-            .map_err(|error| format!("Project file could not be opened safely: {error}")),
-        ProjectAssetFileProbe::Missing => Err("Project file is missing.".into()),
-        ProjectAssetFileProbe::Unsafe => Err("Project file path is unsafe.".into()),
-    }
-}
-
-struct ConfinedFileRead {
-    bytes: Vec<u8>,
-    identity: ConfinedFileIdentity,
-}
-
-fn confined_file_identity_is_stable(
-    project_path: &Path,
-    relative_path: &str,
-    file: &File,
-    before: &ConfinedFileIdentity,
-    bytes_read: u64,
-) -> Result<bool, String> {
-    let after = ConfinedFileIdentity::from_metadata(
-        &file
-            .metadata()
-            .map_err(|error| format!("Project file metadata is unavailable: {error}"))?,
-    );
-    let current_path_file = open_confined_project_file(project_path, relative_path)?;
-    let current_path = ConfinedFileIdentity::from_metadata(
-        &current_path_file
-            .metadata()
-            .map_err(|error| format!("Project file metadata is unavailable: {error}"))?,
-    );
-    Ok(*before == after && *before == current_path && before.size == bytes_read)
-}
-
-fn hash_confined_project_file(
-    project_path: &Path,
-    relative_path: &str,
-    byte_limit: u64,
-) -> Result<(String, ConfinedFileIdentity), String> {
-    let mut file = open_confined_project_file(project_path, relative_path)?;
-    let before = ConfinedFileIdentity::from_metadata(
-        &file
-            .metadata()
-            .map_err(|error| format!("Project file metadata is unavailable: {error}"))?,
-    );
-    if before.size > byte_limit {
-        return Err(format!(
-            "Project file exceeds the safe read limit of {byte_limit} bytes."
-        ));
-    }
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; ASSET_HASH_BUFFER_BYTES];
-    let mut total = 0_u64;
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|error| format!("Failed to read project file safely: {error}"))?;
-        if count == 0 {
-            break;
-        }
-        total = total.saturating_add(count as u64);
-        if total > byte_limit {
-            return Err(format!(
-                "Project file exceeds the safe read limit of {byte_limit} bytes."
-            ));
-        }
-        hasher.update(&buffer[..count]);
-    }
-    if !confined_file_identity_is_stable(project_path, relative_path, &file, &before, total)? {
-        return Err(
-            "Project file changed while it was being hashed; refresh and try again.".into(),
-        );
-    }
-    Ok((format!("sha256:{:x}", hasher.finalize()), before))
-}
-
-fn read_confined_project_file(
-    project_path: &Path,
-    relative_path: &str,
-    byte_limit: u64,
-) -> Result<ConfinedFileRead, String> {
-    let mut file = open_confined_project_file(project_path, relative_path)?;
-    let before_metadata = file
-        .metadata()
-        .map_err(|error| format!("Project file metadata is unavailable: {error}"))?;
-    let before = ConfinedFileIdentity::from_metadata(&before_metadata);
-    if before.size > byte_limit {
-        return Err(format!(
-            "Project file exceeds the safe read limit of {byte_limit} bytes."
-        ));
-    }
-    let mut bytes = Vec::with_capacity(before.size.min(16 * 1024 * 1024) as usize);
-    std::io::Read::by_ref(&mut file)
-        .take(byte_limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Failed to read project file safely: {error}"))?;
-    if bytes.len() as u64 > byte_limit {
-        return Err(format!(
-            "Project file exceeds the safe read limit of {byte_limit} bytes."
-        ));
-    }
-    if !confined_file_identity_is_stable(
-        project_path,
-        relative_path,
-        &file,
-        &before,
-        bytes.len() as u64,
-    )? {
-        return Err("Project file changed while it was being read; refresh and try again.".into());
-    }
-    Ok(ConfinedFileRead {
-        bytes,
-        identity: before,
-    })
-}
-
 pub(crate) fn add_asset(
     project_path: &Path,
     mut asset: ProjectAsset,
@@ -1331,71 +1023,25 @@ pub(crate) async fn project_read_asset(
     project_path: String,
     asset_id: String,
 ) -> Result<StoredAssetResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        read_project_asset(Path::new(project_path.trim()), &asset_id)
+    tauri::async_runtime::spawn_blocking(move || -> Result<StoredAssetResult, String> {
+        let project_dir = PathBuf::from(project_path.trim());
+        let manifest = load_manifest(&project_dir)?;
+        let asset = manifest
+            .assets
+            .into_iter()
+            .find(|asset| asset.id == asset_id)
+            .ok_or_else(|| "Asset is not in this project.".to_string())?;
+        let view = asset_view(&project_dir, asset);
+        let path = project_dir.join(&view.asset.relative_path);
+        let data_url = data_url_for_file(&path, view.asset.mime.as_deref())
+            .ok_or_else(|| "Asset is not a previewable image or is missing.".to_string())?;
+        Ok(StoredAssetResult {
+            data_url,
+            asset: view,
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
-}
-
-fn read_project_asset(project_path: &Path, asset_id: &str) -> Result<StoredAssetResult, String> {
-    let mut manifest = load_manifest(project_path)?;
-    let index = manifest
-        .assets
-        .iter()
-        .position(|asset| asset.id == asset_id)
-        .ok_or_else(|| "Asset is not in this project.".to_string())?;
-    let relative_path = manifest.assets[index].relative_path.clone();
-    let read =
-        match read_confined_project_file(project_path, &relative_path, MAX_HASHABLE_ASSET_BYTES) {
-            Ok(read) => read,
-            Err(error) => {
-                let changed = match probe_project_asset_file(project_path, &relative_path) {
-                    ProjectAssetFileProbe::Missing => replace_asset_hash_state(
-                        &mut manifest.assets[index],
-                        "missing",
-                        None,
-                        None,
-                        None,
-                    ),
-                    ProjectAssetFileProbe::Unsafe | ProjectAssetFileProbe::File { .. } => {
-                        replace_asset_hash_state(
-                            &mut manifest.assets[index],
-                            "unsafe",
-                            None,
-                            None,
-                            None,
-                        )
-                    }
-                };
-                if changed {
-                    save_manifest(project_path, &manifest)?;
-                }
-                return Err(format!("Asset could not be read safely: {error}"));
-            }
-        };
-    let hash = sha256_content_hash(&read.bytes);
-    if replace_asset_hash_state(
-        &mut manifest.assets[index],
-        "verified",
-        Some(hash),
-        Some(read.identity.size),
-        Some(read.identity.modified_millis()),
-    ) {
-        save_manifest(project_path, &manifest)?;
-    }
-    let asset = manifest.assets[index].clone();
-    let data_url = data_url_for_bytes(&read.bytes, asset.mime.as_deref(), &asset.relative_path)
-        .ok_or_else(|| "Asset is not a previewable image or is missing.".to_string())?;
-    let preview_data_url = thumbnail_data_url_for_asset_bytes(&read.bytes, asset.mime.as_deref());
-    Ok(StoredAssetResult {
-        data_url,
-        asset: ProjectAssetView {
-            asset,
-            preview_data_url,
-            exists: true,
-        },
-    })
 }
 
 fn reveal_path(path: &Path) -> Result<(), String> {
@@ -1438,13 +1084,7 @@ pub(crate) async fn project_reveal(
                 .into_iter()
                 .find(|asset| asset.id == asset_id)
                 .ok_or_else(|| "Asset is not in this project.".to_string())?;
-            match probe_project_asset_file(&project_dir, &asset.relative_path) {
-                ProjectAssetFileProbe::File { path, .. } => reveal_path(&path),
-                ProjectAssetFileProbe::Missing => Err("Asset file is missing.".into()),
-                ProjectAssetFileProbe::Unsafe => {
-                    Err("Asset path is unsafe and cannot be revealed.".into())
-                }
-            }
+            reveal_path(&project_dir.join(asset.relative_path))
         } else {
             reveal_path(&project_dir)
         }
@@ -1460,13 +1100,8 @@ pub(crate) async fn project_reveal_file(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let project_dir = PathBuf::from(project_path.trim());
-        match probe_project_asset_file(&project_dir, &relative_path) {
-            ProjectAssetFileProbe::File { path, .. } => reveal_path(&path),
-            ProjectAssetFileProbe::Missing => Err("Project file is missing.".into()),
-            ProjectAssetFileProbe::Unsafe => {
-                Err("Project file path is unsafe and cannot be revealed.".into())
-            }
-        }
+        let relative = safe_project_relative_path(&relative_path)?;
+        reveal_path(&project_dir.join(relative))
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -1479,8 +1114,10 @@ pub(crate) async fn project_read_file(
 ) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let project_dir = PathBuf::from(project_path.trim());
-        read_confined_project_file(&project_dir, &relative_path, MAX_HASHABLE_ASSET_BYTES)
-            .map(|read| read.bytes)
+        let relative = safe_project_relative_path(&relative_path)?;
+        let path = project_dir.join(relative);
+        fs::read(&path)
+            .map_err(|e| format!("Failed to read project file at {}: {e}", path.display()))
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -1502,15 +1139,10 @@ pub(crate) async fn project_delete_asset(
             return project_state(&project_dir);
         };
         let asset = manifest.assets[index].clone();
-        match probe_project_asset_file(&project_dir, &asset.relative_path) {
-            ProjectAssetFileProbe::File { path, .. } => {
-                trash::delete(&path)
-                    .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
-            }
-            ProjectAssetFileProbe::Missing => {}
-            ProjectAssetFileProbe::Unsafe => {
-                return Err("Asset path is unsafe and cannot be deleted.".into());
-            }
+        let source = project_dir.join(&asset.relative_path);
+        if source.exists() {
+            trash::delete(&source)
+                .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
         }
         manifest.assets.remove(index);
         save_manifest(&project_dir, &manifest)?;
@@ -1851,114 +1483,6 @@ mod tests {
         let _ = fs::remove_file(outside);
     }
 
-    #[test]
-    fn unsafe_asset_paths_are_refused_by_view_and_read_boundaries() {
-        let project = TempJobDir::new("paintnode-project-unsafe-read").expect("project dir");
-        ensure_project_dirs(project.path()).expect("project dirs");
-        let outside = project
-            .path()
-            .parent()
-            .expect("project parent")
-            .join("paintnode-project-unsafe-read-secret.png");
-        fs::write(&outside, ONE_PIXEL_PNG).expect("outside secret");
-        let mut manifest = new_manifest(project.path());
-        manifest.assets.push(test_asset(
-            outside
-                .strip_prefix(project.path())
-                .unwrap_or(Path::new("../paintnode-project-unsafe-read-secret.png"))
-                .to_string_lossy()
-                .as_ref(),
-        ));
-        manifest.assets[0].relative_path = "../paintnode-project-unsafe-read-secret.png".into();
-        save_manifest(project.path(), &manifest).expect("unsafe manifest");
-
-        let state = project_state(project.path()).expect("project state");
-        assert!(!state.assets[0].exists);
-        assert!(state.assets[0].preview_data_url.is_none());
-        assert_eq!(
-            state.assets[0].asset.content_hash_state.as_deref(),
-            Some("unsafe")
-        );
-        let error = read_project_asset(project.path(), "legacy").expect_err("unsafe read");
-        assert!(error.contains("safely"));
-        assert!(!error.contains("outside-secret"));
-        let _ = fs::remove_file(outside);
-    }
-
-    #[test]
-    fn asset_read_rehashes_same_size_replacement_with_preserved_mtime() {
-        let project = TempJobDir::new("paintnode-project-read-rehash").expect("project dir");
-        ensure_project_dirs(project.path()).expect("project dirs");
-        let relative = "assets/imported/source.png";
-        let path = project.path().join(relative);
-        fs::write(&path, ONE_PIXEL_PNG).expect("source");
-        let mut manifest = new_manifest(project.path());
-        manifest.assets.push(test_asset(relative));
-        assert!(refresh_project_asset_content_hashes(
-            project.path(),
-            &mut manifest
-        ));
-        let original_hash = manifest.assets[0].content_hash.clone();
-        save_manifest(project.path(), &manifest).expect("verified manifest");
-        let original_modified = fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .expect("original modified time");
-
-        let mut replacement = ONE_PIXEL_PNG.to_vec();
-        let last = replacement.last_mut().expect("PNG byte");
-        *last ^= 0x01;
-        fs::write(&path, &replacement).expect("same-size replacement");
-        File::open(&path)
-            .expect("replacement file")
-            .set_times(fs::FileTimes::new().set_modified(original_modified))
-            .expect("restore modified time");
-        assert_eq!(
-            fs::metadata(&path).expect("replacement metadata").len(),
-            ONE_PIXEL_PNG.len() as u64
-        );
-        assert_eq!(
-            modified_millis(&path),
-            manifest.assets[0]
-                .content_hash_modified_at
-                .unwrap_or_default()
-        );
-
-        read_project_asset(project.path(), "legacy").expect("safe asset read");
-        let persisted = load_manifest(project.path()).expect("rehash manifest");
-        assert_eq!(
-            persisted.assets[0].content_hash.as_deref(),
-            Some(sha256_content_hash(&replacement).as_str())
-        );
-        assert_ne!(persisted.assets[0].content_hash, original_hash);
-        assert_eq!(
-            persisted.assets[0].content_hash_state.as_deref(),
-            Some("verified")
-        );
-    }
-
-    #[test]
-    fn asset_read_refuses_sparse_files_above_the_byte_cap() {
-        let project = TempJobDir::new("paintnode-project-read-cap").expect("project dir");
-        ensure_project_dirs(project.path()).expect("project dirs");
-        let relative = "assets/imported/oversized.png";
-        let path = project.path().join(relative);
-        File::create(&path)
-            .and_then(|file| file.set_len(MAX_HASHABLE_ASSET_BYTES + 1))
-            .expect("sparse oversized asset");
-        let mut manifest = new_manifest(project.path());
-        manifest.assets.push(test_asset(relative));
-        save_manifest(project.path(), &manifest).expect("oversized manifest");
-
-        let error = read_project_asset(project.path(), "legacy").expect_err("oversized read");
-        assert!(error.contains("safe read limit"));
-        let persisted = load_manifest(project.path()).expect("unsafe manifest");
-        assert_eq!(
-            persisted.assets[0].content_hash_state.as_deref(),
-            Some("unsafe")
-        );
-        assert!(persisted.assets[0].content_hash.is_none());
-    }
-
     #[cfg(unix)]
     #[test]
     fn project_asset_hash_rejects_symlinks_even_when_the_target_is_inside_the_project() {
@@ -1981,11 +1505,6 @@ mod tests {
             Some("unsafe")
         );
         assert!(manifest.assets[0].content_hash.is_none());
-        let view = asset_view(project.path(), manifest.assets[0].clone());
-        assert!(!view.exists);
-        assert!(view.preview_data_url.is_none());
-        save_manifest(project.path(), &manifest).expect("unsafe symlink manifest");
-        assert!(read_project_asset(project.path(), "legacy").is_err());
     }
 
     #[test]
