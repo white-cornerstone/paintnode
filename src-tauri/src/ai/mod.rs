@@ -346,8 +346,16 @@ fn connect_provider_launch_gate(address: &str, secret: &[u8; 32]) -> Result<Vec<
     if !address.ip().is_loopback() {
         return Err("Provider launch channel must use loopback.".into());
     }
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
+    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
         .map_err(|error| format!("Could not connect to the provider launch channel: {error}"))?;
+    authenticate_provider_launch_stream(stream, secret)
+}
+
+#[cfg(any(windows, test))]
+fn authenticate_provider_launch_stream(
+    mut stream: TcpStream,
+    secret: &[u8; 32],
+) -> Result<Vec<u8>, String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|error| format!("Could not configure the provider launch channel: {error}"))?;
@@ -2257,27 +2265,20 @@ mod tests {
             Ok(secret)
         );
         let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
-        let address = gate
-            .listener
-            .local_addr()
-            .expect("gate address")
-            .to_string();
-        let wrong_address = address.clone();
-        let wrong =
-            thread::spawn(move || connect_provider_launch_gate(&wrong_address, &[8_u8; 32]));
-        thread::sleep(Duration::from_millis(20));
-        let correct = thread::spawn(move || connect_provider_launch_gate(&address, &secret));
-
-        release_provider_launch_gate(&gate).expect("release authenticated wrapper");
-
+        let address = gate.listener.local_addr().expect("gate address");
+        let wrong_stream = TcpStream::connect(address).expect("preconnect wrong client");
+        let release_gate = thread::spawn(move || release_provider_launch_gate(&gate));
         assert_ne!(
-            wrong.join().expect("wrong client").unwrap_or_default(),
+            authenticate_provider_launch_stream(wrong_stream, &[8_u8; 32]).unwrap_or_default(),
             PROVIDER_WRAPPER_RELEASE_TOKEN
         );
-        let release = correct
+        let correct_stream = TcpStream::connect(address).expect("preconnect correct client");
+        let release =
+            authenticate_provider_launch_stream(correct_stream, &secret).expect("release token");
+        release_gate
             .join()
-            .expect("correct client")
-            .expect("release token");
+            .expect("release thread")
+            .expect("release authenticated wrapper");
         assert_eq!(release, PROVIDER_WRAPPER_RELEASE_TOKEN);
     }
 
@@ -2302,29 +2303,13 @@ mod tests {
         let secret = [13_u8; 32];
         let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
         let address = gate.listener.local_addr().expect("gate address");
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let attacker_stop = Arc::clone(&stop);
-        let attacker_attempts = Arc::clone(&attempts);
-        let attacker = thread::spawn(move || {
-            while !attacker_stop.load(std::sync::atomic::Ordering::SeqCst) {
-                if let Ok(mut stream) =
-                    TcpStream::connect_timeout(&address, Duration::from_millis(20))
-                {
-                    let _ = stream.write_all(&[99_u8; 32]);
-                    let _ = stream.shutdown(Shutdown::Write);
-                    attacker_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
-            }
-        });
+        let _slow_clients = (0..4)
+            .map(|_| TcpStream::connect(address).expect("preconnect slow wrong client"))
+            .collect::<Vec<_>>();
         let started = Instant::now();
         let error = release_provider_launch_gate_with_timeout(&gate, Duration::from_millis(120))
             .expect_err("wrong clients must not authenticate");
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        attacker.join().expect("attacker thread");
-
         assert!(error.contains("timeout"));
-        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
