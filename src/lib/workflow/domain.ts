@@ -1,0 +1,604 @@
+import {
+  parseWorkflowGraphV2,
+  serializeWorkflowGraphV2,
+  type WorkflowEdgeEndpoint,
+  type WorkflowEdgeV2,
+  type WorkflowGraphV2,
+  type WorkflowNodeV2,
+  type WorkflowPoint,
+  type WorkflowSize,
+  type WorkflowValidationIssue,
+} from './schema';
+
+export type WorkflowDomainErrorCode =
+  | 'INVALID_GRAPH'
+  | 'INVALID_ID'
+  | 'DUPLICATE_NODE_ID'
+  | 'DUPLICATE_EDGE_ID'
+  | 'DUPLICATE_ASSET_REFERENCE_ID'
+  | 'DUPLICATE_RUN_RECORD_ID'
+  | 'DUPLICATE_RUN_RECORD_LINK'
+  | 'NODE_NOT_FOUND'
+  | 'EDGE_NOT_FOUND'
+  | 'ENDPOINT_NODE_NOT_FOUND'
+  | 'RUN_RECORD_NODE_NOT_FOUND'
+  | 'RUN_RECORD_NOT_FOUND'
+  | 'RUN_RECORD_LINK_MISSING'
+  | 'RUN_RECORD_LINK_MISMATCH'
+  | 'INVALID_POSITION'
+  | 'INVALID_SIZE'
+  | 'INVALID_ATTACHED_EDGE_DIRECTION'
+  | 'INVALID_JSON_VALUE'
+  | 'SERIALIZATION_FAILED';
+
+export class WorkflowDomainError extends Error {
+  readonly code: WorkflowDomainErrorCode;
+  readonly details: Readonly<Record<string, unknown>>;
+
+  constructor(
+    code: WorkflowDomainErrorCode,
+    message: string,
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message);
+    this.name = 'WorkflowDomainError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export type WorkflowIdKind = 'node' | 'edge';
+export type WorkflowIdGenerator = (kind: WorkflowIdKind) => string;
+
+export interface WorkflowDomainOptions {
+  idGenerator?: WorkflowIdGenerator;
+  initialRevision?: number;
+}
+
+export type WorkflowNodeDraft = Omit<WorkflowNodeV2, 'id'> & { id?: string };
+export type WorkflowEdgeDraft = Omit<WorkflowEdgeV2, 'id'> & { id?: string };
+export type WorkflowNodeUpdate = Partial<Pick<WorkflowNodeV2, 'title' | 'color' | 'config' | 'position' | 'size'>>;
+
+export interface WorkflowAttachedEdgeDraft {
+  id?: string;
+  direction: 'incoming' | 'outgoing';
+  nodePortId: string;
+  other: WorkflowEdgeEndpoint;
+}
+
+export interface WorkflowNodeWithEdgeResult {
+  node: WorkflowNodeV2;
+  edge: WorkflowEdgeV2;
+}
+
+let fallbackIdSequence = 0;
+
+function defaultIdGenerator(kind: WorkflowIdKind): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return `${kind}-${uuid}`;
+  fallbackIdSequence += 1;
+  return `${kind}-${Date.now()}-${fallbackIdSequence}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (Array.isArray(value)) {
+    value.forEach((item) => deepFreeze(item));
+    return Object.freeze(value) as T;
+  }
+  if (isRecord(value)) {
+    Object.values(value).forEach((item) => deepFreeze(item));
+    return Object.freeze(value) as T;
+  }
+  return value;
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => valuesEqual(item, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && valuesEqual(left[key], right[key]));
+}
+
+function invalidJsonValue(path: string, reason: string, valueType: string): never {
+  throw new WorkflowDomainError('INVALID_JSON_VALUE', `${path} is not JSON-safe: ${reason}.`, {
+    path,
+    reason,
+    valueType,
+  });
+}
+
+function assertJsonSafe(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) invalidJsonValue(path, 'numbers must be finite', 'number');
+    return;
+  }
+  if (typeof value !== 'object') {
+    invalidJsonValue(path, `${typeof value} values are not represented by JSON`, typeof value);
+  }
+
+  const object = value as object;
+  if (ancestors.has(object)) invalidJsonValue(path, 'cyclic references are not supported', 'object');
+  ancestors.add(object);
+  try {
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!(index in value)) invalidJsonValue(`${path}[${index}]`, 'sparse array entries serialize as null', 'undefined');
+        assertJsonSafe(value[index], `${path}[${index}]`, ancestors);
+      }
+      const extraKeys = Reflect.ownKeys(value).filter((key) => key !== 'length' && !/^\d+$/.test(String(key)));
+      if (extraKeys.length > 0) {
+        invalidJsonValue(path, 'arrays cannot contain symbol or named properties', typeof extraKeys[0]);
+      }
+      return;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      invalidJsonValue(path, 'only plain objects are supported', value.constructor?.name ?? 'object');
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === 'symbol') invalidJsonValue(path, 'symbol keys are omitted by JSON', 'symbol');
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable) invalidJsonValue(`${path}.${key}`, 'non-enumerable properties are omitted by JSON', 'property');
+      if (!('value' in descriptor)) invalidJsonValue(`${path}.${key}`, 'accessor properties are not supported', 'property');
+      assertJsonSafe(descriptor.value, `${path}.${key}`, ancestors);
+    }
+  } finally {
+    ancestors.delete(object);
+  }
+}
+
+function ensureJsonSafe(value: unknown, path: string): void {
+  try {
+    assertJsonSafe(value, path);
+  } catch (error) {
+    if (error instanceof WorkflowDomainError) throw error;
+    throw new WorkflowDomainError('INVALID_JSON_VALUE', `${path} could not be inspected for JSON safety.`, {
+      path,
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function normalizeNegativeZero<T>(value: T): T {
+  if (typeof value === 'number') return (Object.is(value, -0) ? 0 : value) as T;
+  if (Array.isArray(value)) return value.map((item) => normalizeNegativeZero(item)) as T;
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, normalizeNegativeZero(item)]),
+    ) as T;
+  }
+  return value;
+}
+
+function invalidGraphMessage(issues: WorkflowValidationIssue[]): string {
+  return issues.map((issue) => `${issue.path || '<root>'}: ${issue.message}`).join('; ');
+}
+
+function requireId(value: string, kind: WorkflowIdKind): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new WorkflowDomainError('INVALID_ID', `The ${kind} ID must be a non-empty string.`, {
+      kind,
+      value,
+    });
+  }
+  return value;
+}
+
+function assertFinitePoint(position: WorkflowPoint, nodeId: string): void {
+  if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+    throw new WorkflowDomainError('INVALID_POSITION', `Node "${nodeId}" must have a finite position.`, {
+      nodeId,
+      position,
+    });
+  }
+}
+
+function assertValidSize(size: WorkflowSize, nodeId: string): void {
+  if (!Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0) {
+    throw new WorkflowDomainError('INVALID_SIZE', `Node "${nodeId}" must have a positive finite size.`, {
+      nodeId,
+      size,
+    });
+  }
+}
+
+function assertUniqueIds(graph: WorkflowGraphV2): void {
+  const nodeIds = new Set<string>();
+  for (const node of graph.nodes) {
+    if (nodeIds.has(node.id)) {
+      throw new WorkflowDomainError('DUPLICATE_NODE_ID', `A node with ID "${node.id}" already exists.`, {
+        nodeId: node.id,
+      });
+    }
+    nodeIds.add(node.id);
+  }
+
+  const edgeIds = new Set<string>();
+  for (const edge of graph.edges) {
+    if (edgeIds.has(edge.id)) {
+      throw new WorkflowDomainError('DUPLICATE_EDGE_ID', `An edge with ID "${edge.id}" already exists.`, {
+        edgeId: edge.id,
+      });
+    }
+    edgeIds.add(edge.id);
+  }
+}
+
+function assertReferenceInvariants(graph: WorkflowGraphV2): void {
+  const assetReferenceIds = new Set<string>();
+  for (const reference of graph.assetReferences) {
+    if (assetReferenceIds.has(reference.id)) {
+      throw new WorkflowDomainError(
+        'DUPLICATE_ASSET_REFERENCE_ID',
+        `An asset reference with ID "${reference.id}" already exists.`,
+        { assetReferenceId: reference.id },
+      );
+    }
+    assetReferenceIds.add(reference.id);
+  }
+
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const runsById = new Map<string, WorkflowGraphV2['runRecords'][number]>();
+  for (const run of graph.runRecords) {
+    if (runsById.has(run.id)) {
+      throw new WorkflowDomainError(
+        'DUPLICATE_RUN_RECORD_ID',
+        `A run record with ID "${run.id}" already exists.`,
+        { runRecordId: run.id },
+      );
+    }
+    if (!nodesById.has(run.nodeId)) {
+      throw new WorkflowDomainError(
+        'RUN_RECORD_NODE_NOT_FOUND',
+        `Run record "${run.id}" refers to missing node "${run.nodeId}".`,
+        { runRecordId: run.id, nodeId: run.nodeId },
+      );
+    }
+    runsById.set(run.id, run);
+  }
+
+  for (const node of graph.nodes) {
+    const links = new Set<string>();
+    for (const runRecordId of node.runRecordIds) {
+      if (links.has(runRecordId)) {
+        throw new WorkflowDomainError(
+          'DUPLICATE_RUN_RECORD_LINK',
+          `Node "${node.id}" links run record "${runRecordId}" more than once.`,
+          { nodeId: node.id, runRecordId },
+        );
+      }
+      links.add(runRecordId);
+      const run = runsById.get(runRecordId);
+      if (!run) {
+        throw new WorkflowDomainError(
+          'RUN_RECORD_NOT_FOUND',
+          `Node "${node.id}" refers to missing run record "${runRecordId}".`,
+          { nodeId: node.id, runRecordId },
+        );
+      }
+      if (run.nodeId !== node.id) {
+        throw new WorkflowDomainError(
+          'RUN_RECORD_LINK_MISMATCH',
+          `Run record "${runRecordId}" belongs to node "${run.nodeId}", not "${node.id}".`,
+          { nodeId: node.id, runRecordId, runNodeId: run.nodeId },
+        );
+      }
+    }
+  }
+
+  for (const run of graph.runRecords) {
+    if (!nodesById.get(run.nodeId)?.runRecordIds.includes(run.id)) {
+      throw new WorkflowDomainError(
+        'RUN_RECORD_LINK_MISSING',
+        `Run record "${run.id}" is not linked from node "${run.nodeId}".`,
+        { runRecordId: run.id, nodeId: run.nodeId },
+      );
+    }
+  }
+}
+
+function assertEndpointNodes(graph: WorkflowGraphV2): void {
+  const nodeIds = new Set(graph.nodes.map((node) => node.id));
+  for (const edge of graph.edges) {
+    for (const [endpointName, endpoint] of [
+      ['source', edge.source],
+      ['target', edge.target],
+    ] as const) {
+      if (!nodeIds.has(endpoint.nodeId)) {
+        throw new WorkflowDomainError(
+          'ENDPOINT_NODE_NOT_FOUND',
+          `The ${endpointName} node "${endpoint.nodeId}" for edge "${edge.id}" does not exist.`,
+          { edgeId: edge.id, endpoint: endpointName, nodeId: endpoint.nodeId },
+        );
+      }
+    }
+  }
+}
+
+function normalizeGraph(graph: WorkflowGraphV2): WorkflowGraphV2 {
+  if (Array.isArray(graph.nodes)) {
+    graph.nodes.forEach((node, index) => ensureJsonSafe(node?.config, `nodes[${index}].config`));
+  }
+  const parsed = parseWorkflowGraphV2(graph);
+  if (!parsed.ok || !parsed.value) {
+    throw new WorkflowDomainError(
+      'INVALID_GRAPH',
+      `Workflow graph is structurally invalid: ${invalidGraphMessage(parsed.issues)}`,
+      { issues: parsed.issues },
+    );
+  }
+
+  const normalized = normalizeNegativeZero(parsed.value);
+  assertUniqueIds(normalized);
+  // Parsing intentionally normalizes optional undefined fields. The parsed
+  // graph must then round-trip through JSON without changing numeric identity
+  // (including the otherwise lossy negative-zero case).
+  ensureJsonSafe(normalized, 'graph');
+  assertReferenceInvariants(normalized);
+  for (const node of normalized.nodes) {
+    assertFinitePoint(node.position, node.id);
+    assertValidSize(node.size, node.id);
+  }
+  assertEndpointNodes(normalized);
+  return deepFreeze(normalized);
+}
+
+function endpointEquals(left: WorkflowEdgeEndpoint, right: WorkflowEdgeEndpoint): boolean {
+  return left.nodeId === right.nodeId && left.portId === right.portId;
+}
+
+/**
+ * Framework-independent owner of a WorkflowGraph v2.
+ *
+ * The graph exposed by this class is deeply frozen. Every material operation
+ * validates and replaces it with a detached snapshot, then advances revision
+ * exactly once. Selection and other presentation state intentionally live in
+ * the reactive UI adapter instead.
+ */
+export class WorkflowGraphDomain {
+  #graph: WorkflowGraphV2;
+  #revision: number;
+  readonly #idGenerator: WorkflowIdGenerator;
+
+  constructor(graph: WorkflowGraphV2, options: WorkflowDomainOptions = {}) {
+    const initialRevision = options.initialRevision ?? 0;
+    if (!Number.isSafeInteger(initialRevision) || initialRevision < 0) {
+      throw new WorkflowDomainError('INVALID_GRAPH', 'Initial graph revision must be a non-negative safe integer.', {
+        initialRevision,
+      });
+    }
+    this.#graph = normalizeGraph(graph);
+    this.#revision = initialRevision;
+    this.#idGenerator = options.idGenerator ?? defaultIdGenerator;
+  }
+
+  get graph(): WorkflowGraphV2 {
+    return this.#graph;
+  }
+
+  get revision(): number {
+    return this.#revision;
+  }
+
+  node(nodeId: string): WorkflowNodeV2 | null {
+    return this.#graph.nodes.find((node) => node.id === nodeId) ?? null;
+  }
+
+  edge(edgeId: string): WorkflowEdgeV2 | null {
+    return this.#graph.edges.find((edge) => edge.id === edgeId) ?? null;
+  }
+
+  incoming(nodeId: string): WorkflowEdgeV2[] {
+    return this.#graph.edges.filter((edge) => edge.target.nodeId === nodeId);
+  }
+
+  outgoing(nodeId: string): WorkflowEdgeV2[] {
+    return this.#graph.edges.filter((edge) => edge.source.nodeId === nodeId);
+  }
+
+  isConnected(sourceNodeId: string, targetNodeId: string): boolean {
+    return this.#graph.edges.some(
+      (edge) => edge.source.nodeId === sourceNodeId && edge.target.nodeId === targetNodeId,
+    );
+  }
+
+  addNode(draft: WorkflowNodeDraft): WorkflowNodeV2 {
+    const id = requireId(draft.id ?? this.#idGenerator('node'), 'node');
+    if (this.#graph.nodes.some((node) => node.id === id)) {
+      throw new WorkflowDomainError('DUPLICATE_NODE_ID', `A node with ID "${id}" already exists.`, { nodeId: id });
+    }
+
+    ensureJsonSafe(draft.config, `nodes.${id}.config`);
+    const candidate = normalizeNegativeZero<WorkflowNodeV2>({ ...draft, id });
+    assertFinitePoint(candidate.position, id);
+    assertValidSize(candidate.size, id);
+    this.commit({ ...this.#graph, nodes: [...this.#graph.nodes, candidate] });
+    return this.#graph.nodes[this.#graph.nodes.length - 1];
+  }
+
+  /**
+   * Atomically adds one node and one edge attached to it. Work is validated on
+   * a shadow graph and published only after both operations succeed. Generated
+   * IDs are external inputs and remain consumed when validation fails.
+   */
+  addNodeWithEdge(
+    nodeDraft: WorkflowNodeDraft,
+    attachedEdge: WorkflowAttachedEdgeDraft,
+  ): WorkflowNodeWithEdgeResult {
+    if (attachedEdge.direction !== 'incoming' && attachedEdge.direction !== 'outgoing') {
+      throw new WorkflowDomainError(
+        'INVALID_ATTACHED_EDGE_DIRECTION',
+        'Attached edge direction must be incoming or outgoing.',
+        { direction: String(attachedEdge.direction) },
+      );
+    }
+    const working = new WorkflowGraphDomain(this.#graph, {
+      idGenerator: this.#idGenerator,
+      initialRevision: this.#revision,
+    });
+    const node = working.addNode(nodeDraft);
+    const edge = working.addEdge({
+      ...(attachedEdge.id === undefined ? {} : { id: attachedEdge.id }),
+      source: attachedEdge.direction === 'outgoing'
+        ? { nodeId: node.id, portId: attachedEdge.nodePortId }
+        : attachedEdge.other,
+      target: attachedEdge.direction === 'incoming'
+        ? { nodeId: node.id, portId: attachedEdge.nodePortId }
+        : attachedEdge.other,
+    });
+    this.#graph = working.#graph;
+    this.#revision = working.#revision;
+    return { node, edge };
+  }
+
+  removeNode(nodeId: string): void {
+    this.requireNode(nodeId);
+    this.commit({
+      ...this.#graph,
+      nodes: this.#graph.nodes.filter((node) => node.id !== nodeId),
+      edges: this.#graph.edges.filter(
+        (edge) => edge.source.nodeId !== nodeId && edge.target.nodeId !== nodeId,
+      ),
+      // Run records are node-owned provenance. Deleting a node removes only
+      // that node's records so cross-links remain valid and unrelated history
+      // retains its original order.
+      runRecords: this.#graph.runRecords.filter((run) => run.nodeId !== nodeId),
+    });
+  }
+
+  moveNode(nodeId: string, position: WorkflowPoint): void {
+    const node = this.requireNode(nodeId);
+    const normalizedPosition = normalizeNegativeZero(position);
+    assertFinitePoint(normalizedPosition, nodeId);
+    if (node.position.x === normalizedPosition.x && node.position.y === normalizedPosition.y) return;
+    this.replaceNode(nodeId, { ...node, position: normalizedPosition });
+  }
+
+  resizeNode(nodeId: string, size: WorkflowSize): void {
+    const node = this.requireNode(nodeId);
+    const normalizedSize = normalizeNegativeZero(size);
+    assertValidSize(normalizedSize, nodeId);
+    if (node.size.width === normalizedSize.width && node.size.height === normalizedSize.height) return;
+    this.replaceNode(nodeId, { ...node, size: normalizedSize });
+  }
+
+  configureNode(nodeId: string, config: Record<string, unknown>): void {
+    const node = this.requireNode(nodeId);
+    if (!isRecord(config)) {
+      throw new WorkflowDomainError('INVALID_GRAPH', `Node "${nodeId}" configuration must be an object.`, {
+        nodeId,
+      });
+    }
+    ensureJsonSafe(config, `nodes.${nodeId}.config`);
+    const normalizedConfig = normalizeNegativeZero(config);
+    if (valuesEqual(node.config, normalizedConfig)) return;
+    this.replaceNode(nodeId, { ...node, config: normalizedConfig });
+  }
+
+  updateNode(nodeId: string, update: WorkflowNodeUpdate): void {
+    const node = this.requireNode(nodeId);
+    if (update.config !== undefined) ensureJsonSafe(update.config, `nodes.${nodeId}.config`);
+    const normalizedUpdate = normalizeNegativeZero(update);
+    if (normalizedUpdate.position !== undefined) assertFinitePoint(normalizedUpdate.position, nodeId);
+    if (normalizedUpdate.size !== undefined) assertValidSize(normalizedUpdate.size, nodeId);
+    const replacement = { ...node, ...normalizedUpdate };
+    if (valuesEqual(node, replacement)) return;
+    this.replaceNode(nodeId, replacement);
+  }
+
+  addEdge(draft: WorkflowEdgeDraft): WorkflowEdgeV2 {
+    const id = requireId(draft.id ?? this.#idGenerator('edge'), 'edge');
+    if (this.#graph.edges.some((edge) => edge.id === id)) {
+      throw new WorkflowDomainError('DUPLICATE_EDGE_ID', `An edge with ID "${id}" already exists.`, { edgeId: id });
+    }
+    const candidate = normalizeNegativeZero<WorkflowEdgeV2>({ ...draft, id });
+    this.assertEndpoint(candidate.source, id, 'source');
+    this.assertEndpoint(candidate.target, id, 'target');
+    this.commit({ ...this.#graph, edges: [...this.#graph.edges, candidate] });
+    return this.#graph.edges[this.#graph.edges.length - 1];
+  }
+
+  updateEdge(edgeId: string, endpoints: Pick<WorkflowEdgeV2, 'source' | 'target'>): void {
+    const edge = this.requireEdge(edgeId);
+    const normalizedEndpoints = normalizeNegativeZero(endpoints);
+    this.assertEndpoint(normalizedEndpoints.source, edgeId, 'source');
+    this.assertEndpoint(normalizedEndpoints.target, edgeId, 'target');
+    if (endpointEquals(edge.source, normalizedEndpoints.source) && endpointEquals(edge.target, normalizedEndpoints.target)) return;
+    this.commit({
+      ...this.#graph,
+      edges: this.#graph.edges.map((item) => item.id === edgeId ? { ...item, ...normalizedEndpoints } : item),
+    });
+  }
+
+  removeEdge(edgeId: string): void {
+    this.requireEdge(edgeId);
+    this.commit({ ...this.#graph, edges: this.#graph.edges.filter((edge) => edge.id !== edgeId) });
+  }
+
+  serialize(): string {
+    try {
+      return serializeWorkflowGraphV2(this.#graph);
+    } catch (error) {
+      if (error instanceof WorkflowDomainError) throw error;
+      throw new WorkflowDomainError('SERIALIZATION_FAILED', 'Workflow graph could not be serialized.', {
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private replaceNode(nodeId: string, replacement: WorkflowNodeV2): void {
+    this.commit({
+      ...this.#graph,
+      nodes: this.#graph.nodes.map((node) => node.id === nodeId ? replacement : node),
+    });
+  }
+
+  private requireNode(nodeId: string): WorkflowNodeV2 {
+    const node = this.#graph.nodes.find((item) => item.id === nodeId);
+    if (!node) {
+      throw new WorkflowDomainError('NODE_NOT_FOUND', `Node "${nodeId}" does not exist.`, { nodeId });
+    }
+    return node;
+  }
+
+  private requireEdge(edgeId: string): WorkflowEdgeV2 {
+    const edge = this.#graph.edges.find((item) => item.id === edgeId);
+    if (!edge) {
+      throw new WorkflowDomainError('EDGE_NOT_FOUND', `Edge "${edgeId}" does not exist.`, { edgeId });
+    }
+    return edge;
+  }
+
+  private assertEndpoint(
+    endpoint: WorkflowEdgeEndpoint,
+    edgeId: string,
+    endpointName: 'source' | 'target',
+  ): void {
+    if (!this.#graph.nodes.some((node) => node.id === endpoint.nodeId)) {
+      throw new WorkflowDomainError(
+        'ENDPOINT_NODE_NOT_FOUND',
+        `The ${endpointName} node "${endpoint.nodeId}" for edge "${edgeId}" does not exist.`,
+        { edgeId, endpoint: endpointName, nodeId: endpoint.nodeId },
+      );
+    }
+  }
+
+  private commit(candidate: WorkflowGraphV2): void {
+    this.#graph = normalizeGraph(candidate);
+    this.#revision += 1;
+  }
+}

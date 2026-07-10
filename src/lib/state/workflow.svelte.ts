@@ -2,6 +2,13 @@ import type { ProjectAsset } from '../integrations/desktop';
 import { project } from './project.svelte';
 import { ui } from './ui.svelte';
 import { coerceAnnotations, type AnnotationItem } from '../engine/annotations';
+import {
+  WORKFLOW_GRAPH_VERSION,
+  WorkflowGraphDomain,
+  type WorkflowGraphV2,
+  type WorkflowIdGenerator,
+  type WorkflowNodeV2,
+} from '../workflow';
 
 export interface WorkflowAssetNode {
   id: string;
@@ -85,6 +92,11 @@ function cleanWorkflowName(name: string): string {
   return trimmed || 'Untitled Workflow';
 }
 
+function roundWorkflowNumber(value: number): number {
+  const rounded = Math.round(value);
+  return rounded === 0 ? 0 : rounded;
+}
+
 function defaultOutputNode(): WorkflowOutputNode {
   return {
     id: 'output',
@@ -101,7 +113,11 @@ function defaultOutputNode(): WorkflowOutputNode {
   };
 }
 
-class WorkflowStore {
+export interface WorkflowStoreOptions {
+  idGenerator?: WorkflowIdGenerator;
+}
+
+export class WorkflowStore {
   active = $state(false);
   name = $state('Untitled Workflow');
   savedPath = $state<string | null>(null);
@@ -140,10 +156,21 @@ class WorkflowStore {
   outputRelativePath = $state<string | null>(null);
   rev = $state(0);
   savedRev = $state(0);
+  private graphDomain: WorkflowGraphDomain | null = null;
+  private readonly graphIdGenerator: WorkflowIdGenerator | undefined;
+  private projectedGraphRevision = 0;
+
+  constructor(options: WorkflowStoreOptions = {}) {
+    this.graphIdGenerator = options.idGenerator;
+  }
 
   get dirty(): boolean {
     this.rev;
     return this.rev !== this.savedRev;
+  }
+
+  get graphRevision(): number {
+    return this.graphDomain?.revision ?? 0;
   }
 
   newBoard(name = 'Untitled Workflow'): void {
@@ -181,11 +208,12 @@ class WorkflowStore {
     this.storyboardAnnotationItems = [];
     this.storyboardAnnotationsVisible = true;
     this.nodes = [];
-    this.connections = [{ id: id('connection'), from: 'composition', to: 'output' }];
+    this.connections = [{ id: this.nextGraphId('edge'), from: 'composition', to: 'output' }];
     this.outputAssetId = null;
     this.outputRelativePath = null;
     this.rev = 0;
     this.savedRev = 0;
+    this.resetGraphDomain();
   }
 
   show(): void {
@@ -230,121 +258,129 @@ class WorkflowStore {
 
   addAsset(asset: ProjectAsset): void {
     const index = this.nodes.length;
-    const node = {
-      id: id('asset'),
-      assetId: asset.id,
-      name: asset.name.replace(/\.[^.]+$/, '') || 'Asset',
-      relativePath: asset.relativePath,
-      x: 80 + (index % 3) * 230,
-      y: 110 + Math.floor(index / 3) * 160,
-      width: 205,
-      height: 190,
+    const domain = this.requireGraphDomain();
+    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+      type: 'input',
+      title: asset.name.replace(/\.[^.]+$/, '') || 'Asset',
+      position: { x: 80 + (index % 3) * 230, y: 110 + Math.floor(index / 3) * 160 },
+      size: { width: 205, height: 190 },
       color: '#3a3c42',
-      included: true,
-      note: '',
-    };
-    this.nodes = [
-      ...this.nodes,
-      node,
-    ];
-    this.connect(node.id, 'composition');
-    this.selection = { kind: 'asset', id: node.id };
+      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      config: { legacyKind: 'asset', assetId: asset.id, relativePath: asset.relativePath, note: '' },
+      runRecordIds: [],
+    }, {
+      direction: 'outgoing',
+      nodePortId: 'asset',
+      other: { nodeId: 'composition', portId: 'assets' },
+    }));
+    this.selection = { kind: 'asset', id: added.node.id };
     this.tool = 'hand';
   }
 
   addBlankAsset(x: number, y: number, width: number, height: number): void {
-    const node = {
-      id: id('asset'),
-      assetId: null,
-      name: `Asset ${this.nodes.length + 1}`,
-      relativePath: '',
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.max(160, Math.round(width)),
-      height: Math.max(130, Math.round(height)),
+    const domain = this.requireGraphDomain();
+    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+      type: 'input',
+      title: `Asset ${this.nodes.length + 1}`,
+      position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
+      size: { width: Math.max(160, roundWorkflowNumber(width)), height: Math.max(130, roundWorkflowNumber(height)) },
       color: '#3a3c42',
-      included: true,
-      note: '',
-    };
-    this.nodes = [...this.nodes, node];
-    this.connect(node.id, 'composition');
-    this.selection = { kind: 'asset', id: node.id };
+      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      config: { legacyKind: 'asset', assetId: null, relativePath: '', note: '' },
+      runRecordIds: [],
+    }, {
+      direction: 'outgoing',
+      nodePortId: 'asset',
+      other: { nodeId: 'composition', portId: 'assets' },
+    }));
+    this.selection = { kind: 'asset', id: added.node.id };
     this.tool = 'hand';
   }
 
   removeNode(id: string): void {
-    this.nodes = this.nodes.filter((node) => node.id !== id);
-    this.connections = this.connections.filter((connection) => connection.from !== id && connection.to !== id);
+    if (!this.requireGraphDomain().node(id)) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.removeNode(id));
     if (this.selection?.kind === 'asset' && this.selection.id === id) this.selection = null;
-    this.bump();
   }
 
   moveNode(id: string, x: number, y: number): void {
-    const node = this.nodes.find((item) => item.id === id);
-    if (!node) return;
-    node.x = Math.round(x);
-    node.y = Math.round(y);
-    this.bump();
+    if (!this.requireGraphDomain().node(id)) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.moveNode(id, { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }));
   }
 
   resizeNode(id: string, width: number, height: number): void {
-    const node = this.nodes.find((item) => item.id === id);
-    if (!node) return;
-    node.width = Math.max(160, Math.round(width));
-    node.height = Math.max(130, Math.round(height));
-    this.bump();
+    if (!this.requireGraphDomain().node(id)) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.resizeNode(id, {
+      width: Math.max(160, roundWorkflowNumber(width)),
+      height: Math.max(130, roundWorkflowNumber(height)),
+    }));
   }
 
   movePrompt(x: number, y: number): void {
-    this.promptX = Math.round(x);
-    this.promptY = Math.round(y);
-    this.bump();
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.moveNode('composition', { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }));
   }
 
   resizePrompt(width: number, height: number): void {
-    this.compositionWidth = Math.max(260, Math.round(width));
-    this.compositionHeight = Math.max(260, Math.round(height));
-    this.bump();
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.resizeNode('composition', {
+      width: Math.max(260, roundWorkflowNumber(width)),
+      height: Math.max(260, roundWorkflowNumber(height)),
+    }));
   }
 
   moveOutput(x: number, y: number): void {
     this.moveOutputNode('output', x, y);
-    this.outputX = this.outputNodes[0]?.x ?? Math.round(x);
-    this.outputY = this.outputNodes[0]?.y ?? Math.round(y);
-    this.bump();
   }
 
   resizeOutput(width: number, height: number): void {
     this.resizeOutputNode('output', width, height);
-    this.outputWidth = this.outputNodes[0]?.width ?? Math.max(170, Math.round(width));
-    this.outputHeight = this.outputNodes[0]?.height ?? Math.max(150, Math.round(height));
-    this.bump();
   }
 
   addOutputNode(x = this.outputX + 280, y = this.outputY, width = this.outputWidth, height = this.outputHeight): WorkflowOutputNode {
     const base = defaultOutputNode();
-    const node: WorkflowOutputNode = {
-      ...base,
-      id: id('output'),
-      name: `Output ${this.outputNodes.length + 1}`,
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.max(190, Math.round(width)),
-      height: Math.max(190, Math.round(height)),
-    };
-    this.outputNodes = [...this.outputNodes, node];
-    this.connect('composition', node.id);
-    this.selection = { kind: 'output', id: node.id };
+    const domain = this.requireGraphDomain();
+    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+      type: 'output',
+      title: `Output ${this.outputNodes.length + 1}`,
+      position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
+      size: { width: Math.max(190, roundWorkflowNumber(width)), height: Math.max(190, roundWorkflowNumber(height)) },
+      color: base.color,
+      ports: { inputs: [{ id: 'composition', label: 'Composition', dataType: 'layout' }], outputs: [] },
+      config: {
+        legacyKind: 'output',
+        displayName: `Output ${this.outputNodes.length + 1}`,
+        legacyX: roundWorkflowNumber(x),
+        legacyY: roundWorkflowNumber(y),
+        legacyWidth: Math.max(190, roundWorkflowNumber(width)),
+        legacyHeight: Math.max(190, roundWorkflowNumber(height)),
+        legacyColor: base.color,
+        finalWidth: base.finalWidth,
+        finalHeight: base.finalHeight,
+        outputAssetId: null,
+        outputRelativePath: null,
+      },
+      runRecordIds: [],
+    }, {
+      direction: 'incoming',
+      nodePortId: 'composition',
+      other: { nodeId: 'composition', portId: 'composition' },
+    }));
+    const node = this.outputNode(added.node.id)!;
+    this.selection = { kind: 'output', id: added.node.id };
     this.tool = 'hand';
     return node;
   }
 
   removeOutputNode(id: string): void {
     if (this.outputNodes.length <= 1) return;
-    this.outputNodes = this.outputNodes.filter((node) => node.id !== id);
-    this.connections = this.connections.filter((connection) => connection.from !== id && connection.to !== id);
+    if (!this.requireGraphDomain().node(id)) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.removeNode(id));
     if (this.selection?.kind === 'output' && this.selection.id === id) this.selection = { kind: 'output', id: this.outputNodes[0].id };
-    this.bump();
   }
 
   outputNode(id: string | null | undefined): WorkflowOutputNode | null {
@@ -357,40 +393,56 @@ class WorkflowStore {
   }
 
   moveOutputNode(id: string, x: number, y: number): void {
-    const node = this.outputNode(id);
+    const node = this.requireGraphDomain().node(id);
     if (!node) return;
-    node.x = Math.round(x);
-    node.y = Math.round(y);
-    if (id === 'output') {
-      this.outputX = node.x;
-      this.outputY = node.y;
-    }
-    this.bump();
+    const position = { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) };
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.updateNode(id, {
+      position,
+      ...(id === 'output'
+        ? { config: {
+          ...node.config,
+          legacyX: position.x,
+          legacyY: position.y,
+        } }
+        : {}),
+    }));
   }
 
   resizeOutputNode(id: string, width: number, height: number): void {
-    const node = this.outputNode(id);
+    const node = this.requireGraphDomain().node(id);
     if (!node) return;
-    node.width = Math.max(190, Math.round(width));
-    node.height = Math.max(190, Math.round(height));
-    if (id === 'output') {
-      this.outputWidth = node.width;
-      this.outputHeight = node.height;
-    }
-    this.bump();
+    const size = {
+      width: Math.max(190, roundWorkflowNumber(width)),
+      height: Math.max(190, roundWorkflowNumber(height)),
+    };
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.updateNode(id, {
+      size,
+      ...(id === 'output'
+        ? { config: {
+          ...node.config,
+          legacyWidth: size.width,
+          legacyHeight: size.height,
+        } }
+        : {}),
+    }));
   }
 
   setOutputFinalSize(id: string, width: number, height: number): void {
-    const node = this.outputNode(id);
+    const node = this.requireGraphDomain().node(id);
     if (!node) return;
-    node.finalWidth = Math.max(64, Math.round(width));
-    node.finalHeight = Math.max(64, Math.round(height));
-    this.bump();
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, {
+      ...node.config,
+      finalWidth: Math.max(64, roundWorkflowNumber(width)),
+      finalHeight: Math.max(64, roundWorkflowNumber(height)),
+    }));
   }
 
   panBy(dx: number, dy: number): void {
-    this.panX = Math.round(this.panX + dx);
-    this.panY = Math.round(this.panY + dy);
+    this.panX = roundWorkflowNumber(this.panX + dx);
+    this.panY = roundWorkflowNumber(this.panY + dy);
   }
 
   setZoom(nextZoom: number): void {
@@ -403,8 +455,8 @@ class WorkflowStore {
     const worldX = (viewX - this.panX) / current;
     const worldY = (viewY - this.panY) / current;
     this.zoom = Number(next.toFixed(3));
-    this.panX = Math.round(viewX - worldX * this.zoom);
-    this.panY = Math.round(viewY - worldY * this.zoom);
+    this.panX = roundWorkflowNumber(viewX - worldX * this.zoom);
+    this.panY = roundWorkflowNumber(viewY - worldY * this.zoom);
   }
 
   zoomBy(factor: number, viewX: number, viewY: number): void {
@@ -413,8 +465,8 @@ class WorkflowStore {
     const worldX = (viewX - this.panX) / current;
     const worldY = (viewY - this.panY) / current;
     this.zoom = Number(next.toFixed(3));
-    this.panX = Math.round(viewX - worldX * this.zoom);
-    this.panY = Math.round(viewY - worldY * this.zoom);
+    this.panX = roundWorkflowNumber(viewX - worldX * this.zoom);
+    this.panY = roundWorkflowNumber(viewY - worldY * this.zoom);
   }
 
   resetZoom(): void {
@@ -424,13 +476,8 @@ class WorkflowStore {
   setNodeIncluded(id: string, included: boolean): void {
     const node = this.nodes.find((item) => item.id === id);
     if (!node) return;
-    const wasIncluded = node.included;
     if (included) {
       if (!this.isConnected(id, 'composition')) this.connect(id, 'composition');
-      else if (!wasIncluded) {
-        node.included = true;
-        this.bump();
-      }
     } else {
       this.disconnectNodes(id, 'composition');
     }
@@ -438,46 +485,45 @@ class WorkflowStore {
 
   connect(from: string, to: string): void {
     if (!this.canConnect(from, to)) return;
-    if (this.connections.some((connection) => connection.from === from && connection.to === to)) return;
-    this.connections = [
-      ...this.connections,
-      { id: id('connection'), from, to },
-    ];
-    const fromNode = this.nodes.find((node) => node.id === from);
-    if (fromNode && to === 'composition') fromNode.included = true;
-    this.bump();
+    if (this.isConnected(from, to)) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.addEdge({
+      source: { nodeId: from, portId: from === 'composition' ? 'composition' : 'asset' },
+      target: { nodeId: to, portId: to === 'composition' ? 'assets' : 'composition' },
+    }));
   }
 
   disconnectConnection(id: string): void {
-    const connection = this.connections.find((item) => item.id === id);
-    if (!connection) return;
-    this.connections = this.connections.filter((item) => item.id !== id);
-    if (connection?.to === 'composition') {
-      const node = this.nodes.find((item) => item.id === connection.from);
-      if (node) node.included = this.connections.some((item) => item.from === node.id && item.to === 'composition');
-    }
-    this.bump();
+    if (!this.requireGraphDomain().edge(id)) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.removeEdge(id));
   }
 
   disconnectNodes(from: string, to: string): void {
-    const before = this.connections.length;
-    const node = to === 'composition' ? this.nodes.find((item) => item.id === from) : null;
-    const wasIncluded = node?.included ?? false;
-    this.connections = this.connections.filter((connection) => connection.from !== from || connection.to !== to);
-    if (node) node.included = false;
-    if (this.connections.length !== before || wasIncluded !== (node?.included ?? false)) this.bump();
+    const domain = this.requireGraphDomain();
+    const edge = domain.outgoing(from).find((item) => item.target.nodeId === to);
+    if (!edge) return;
+    this.publishGraphMutation(domain, domain.removeEdge(edge.id));
   }
 
   isConnected(from: string, to: string): boolean {
-    return this.connections.some((connection) => connection.from === from && connection.to === to);
+    return this.requireGraphDomain().isConnected(from, to);
   }
 
   incoming(nodeId: string): WorkflowConnection[] {
-    return this.connections.filter((connection) => connection.to === nodeId);
+    return this.requireGraphDomain().incoming(nodeId).map((edge) => ({
+      id: edge.id,
+      from: edge.source.nodeId,
+      to: edge.target.nodeId,
+    }));
   }
 
   outgoing(nodeId: string): WorkflowConnection[] {
-    return this.connections.filter((connection) => connection.from === nodeId);
+    return this.requireGraphDomain().outgoing(nodeId).map((edge) => ({
+      id: edge.id,
+      from: edge.source.nodeId,
+      to: edge.target.nodeId,
+    }));
   }
 
   connectedAssetNodesTo(nodeId: string): WorkflowAssetNode[] {
@@ -486,57 +532,51 @@ class WorkflowStore {
   }
 
   canConnect(from: string, to: string): boolean {
-    return from !== to && this.workflowNodeExists(from) && this.workflowNodeExists(to);
-  }
-
-  private workflowNodeExists(nodeId: string): boolean {
-    return nodeId === 'composition' || this.outputNodes.some((node) => node.id === nodeId) || this.nodes.some((node) => node.id === nodeId);
+    const domain = this.requireGraphDomain();
+    return from !== to && domain.node(from) !== null && domain.node(to) !== null;
   }
 
   setPrompt(prompt: string): void {
-    this.prompt = prompt;
-    this.bump();
+    this.configureComposition({ prompt });
   }
 
   setStoryboardDataUrl(dataUrl: string | null): void {
-    this.storyboardDataUrl = dataUrl;
-    this.bump();
+    this.configureComposition({ storyboardDataUrl: dataUrl });
   }
 
   setStoryboardSize(width: number, height: number): void {
-    this.storyboardWidth = Math.max(64, Math.round(width));
-    this.storyboardHeight = Math.max(64, Math.round(height));
-    this.bump();
+    this.configureComposition({
+      storyboardWidth: Math.max(64, roundWorkflowNumber(width)),
+      storyboardHeight: Math.max(64, roundWorkflowNumber(height)),
+    });
   }
 
   setStoryboardOraPath(path: string | null): void {
-    this.storyboardOraPath = path;
-    this.bump();
+    this.configureComposition({ storyboardOraPath: path });
   }
 
   setStoryboardAnnotations(annotations: string[]): void {
-    this.storyboardAnnotations = annotations
-      .map((annotation) => annotation.trim())
-      .filter(Boolean)
-      .slice(0, 24);
-    this.bump();
+    this.configureComposition({
+      storyboardAnnotations: annotations
+        .map((annotation) => annotation.trim())
+        .filter(Boolean)
+        .slice(0, 24),
+    });
   }
 
   setStoryboardAnnotationItems(items: AnnotationItem[]): void {
-    this.storyboardAnnotationItems = coerceAnnotations(items);
-    this.bump();
+    this.configureComposition({ storyboardAnnotationItems: coerceAnnotations(items) });
   }
 
   setStoryboardAnnotationsVisible(visible: boolean): void {
-    this.storyboardAnnotationsVisible = visible;
-    this.bump();
+    this.configureComposition({ storyboardAnnotationsVisible: visible });
   }
 
   setNodeNote(id: string, note: string): void {
-    const node = this.nodes.find((item) => item.id === id);
+    const node = this.requireGraphDomain().node(id);
     if (!node) return;
-    node.note = note;
-    this.bump();
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, note }));
   }
 
   selectedLabel(): string {
@@ -561,53 +601,63 @@ class WorkflowStore {
 
   setSelectedLabel(name: string): void {
     const selection = this.selection;
+    let nodeId: string;
+    let displayName: string;
+    let fallback: string;
     if (selection?.kind === 'asset') {
-      const node = this.nodes.find((item) => item.id === selection.id);
-      if (!node) return;
-      node.name = name.trim() || 'Asset';
+      nodeId = selection.id;
+      displayName = name.trim() || 'Asset';
+      fallback = 'Asset';
     } else if (selection?.kind === 'composition') {
-      this.compositionName = name.trim();
+      nodeId = 'composition';
+      displayName = name.trim();
+      fallback = 'Composition';
     } else if (selection?.kind === 'output') {
-      const node = this.outputNode(selection.id);
-      if (!node) return;
-      node.name = name.trim();
-      if (node.id === 'output') this.outputName = node.name;
+      nodeId = selection.id;
+      displayName = name.trim();
+      fallback = 'Output';
     } else {
       return;
     }
-    this.bump();
+    const node = this.requireGraphDomain().node(nodeId);
+    if (!node) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.updateNode(nodeId, {
+      title: displayName || fallback,
+      config: { ...node.config, displayName },
+    }));
   }
 
   setSelectedColor(color: string): void {
     const selection = this.selection;
+    let nodeId: string;
     if (selection?.kind === 'asset') {
-      const node = this.nodes.find((item) => item.id === selection.id);
-      if (!node) return;
-      node.color = color;
+      nodeId = selection.id;
     } else if (selection?.kind === 'composition') {
-      this.compositionColor = color;
+      nodeId = 'composition';
     } else if (selection?.kind === 'output') {
-      const node = this.outputNode(selection.id);
-      if (!node) return;
-      node.color = color;
-      if (node.id === 'output') this.outputColor = color;
+      nodeId = selection.id;
     } else {
       return;
     }
-    this.bump();
+    const node = this.requireGraphDomain().node(nodeId);
+    if (!node) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.updateNode(nodeId, {
+      color,
+      ...(nodeId === 'output' ? { config: { ...node.config, legacyColor: color } } : {}),
+    }));
   }
 
   setOutput(asset: ProjectAsset | null, outputId = this.selectedOutputNode()?.id ?? 'output'): void {
-    const node = this.outputNode(outputId);
-    if (node) {
-      node.outputAssetId = asset?.id ?? null;
-      node.outputRelativePath = asset?.relativePath ?? null;
-    }
-    if (outputId === 'output' || !node) {
-      this.outputAssetId = asset?.id ?? null;
-      this.outputRelativePath = asset?.relativePath ?? null;
-    }
-    this.bump();
+    const node = this.requireGraphDomain().node(outputId);
+    if (!node) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(outputId, {
+      ...node.config,
+      outputAssetId: asset?.id ?? null,
+      outputRelativePath: asset?.relativePath ?? null,
+    }));
   }
 
   serialize(): WorkflowFile {
@@ -666,21 +716,21 @@ class WorkflowStore {
     this.savedPath = savedPath;
     this.prompt = parsed.prompt ?? '';
     this.compositionName = parsed.compositionName ?? '';
-    this.compositionWidth = Number.isFinite(parsed.compositionWidth) ? Math.round(parsed.compositionWidth!) : 340;
-    this.compositionHeight = Number.isFinite(parsed.compositionHeight) ? Math.round(parsed.compositionHeight!) : 408;
+    this.compositionWidth = Number.isFinite(parsed.compositionWidth) ? roundWorkflowNumber(parsed.compositionWidth!) : 340;
+    this.compositionHeight = Number.isFinite(parsed.compositionHeight) ? roundWorkflowNumber(parsed.compositionHeight!) : 408;
     this.compositionColor = parsed.compositionColor ?? '#3a3c42';
-    this.promptX = Number.isFinite(parsed.promptX) ? Math.round(parsed.promptX!) : 480;
-    this.promptY = Number.isFinite(parsed.promptY) ? Math.round(parsed.promptY!) : 70;
+    this.promptX = Number.isFinite(parsed.promptX) ? roundWorkflowNumber(parsed.promptX!) : 480;
+    this.promptY = Number.isFinite(parsed.promptY) ? roundWorkflowNumber(parsed.promptY!) : 70;
     this.outputName = parsed.outputName ?? '';
-    this.outputWidth = Number.isFinite(parsed.outputWidth) ? Math.round(parsed.outputWidth!) : 210;
-    this.outputHeight = Number.isFinite(parsed.outputHeight) ? Math.round(parsed.outputHeight!) : 190;
+    this.outputWidth = Number.isFinite(parsed.outputWidth) ? roundWorkflowNumber(parsed.outputWidth!) : 210;
+    this.outputHeight = Number.isFinite(parsed.outputHeight) ? roundWorkflowNumber(parsed.outputHeight!) : 190;
     this.outputColor = parsed.outputColor ?? '#3a3c42';
-    this.outputX = Number.isFinite(parsed.outputX) ? Math.round(parsed.outputX!) : 895;
-    this.outputY = Number.isFinite(parsed.outputY) ? Math.round(parsed.outputY!) : 96;
+    this.outputX = Number.isFinite(parsed.outputX) ? roundWorkflowNumber(parsed.outputX!) : 895;
+    this.outputY = Number.isFinite(parsed.outputY) ? roundWorkflowNumber(parsed.outputY!) : 96;
     const legacyOutput = defaultOutputNode();
     legacyOutput.name = parsed.outputName ?? '';
-    legacyOutput.width = Number.isFinite(parsed.outputWidth) ? Math.max(190, Math.round(parsed.outputWidth!)) : 210;
-    legacyOutput.height = Number.isFinite(parsed.outputHeight) ? Math.max(190, Math.round(parsed.outputHeight!)) : 232;
+    legacyOutput.width = Number.isFinite(parsed.outputWidth) ? Math.max(190, roundWorkflowNumber(parsed.outputWidth!)) : 210;
+    legacyOutput.height = Number.isFinite(parsed.outputHeight) ? Math.max(190, roundWorkflowNumber(parsed.outputHeight!)) : 232;
     legacyOutput.color = parsed.outputColor ?? '#3a3c42';
     legacyOutput.x = this.outputX;
     legacyOutput.y = this.outputY;
@@ -688,31 +738,31 @@ class WorkflowStore {
     legacyOutput.outputRelativePath = parsed.outputRelativePath ?? null;
     this.outputNodes = Array.isArray(parsed.outputNodes) && parsed.outputNodes.length
       ? parsed.outputNodes.map((node, index) => ({
-        id: node.id || (index === 0 ? 'output' : id('output')),
+        id: node.id || (index === 0 ? 'output' : this.nextGraphId('node')),
         name: node.name ?? (index === 0 ? '' : `Output ${index + 1}`),
-        x: Number.isFinite(node.x) ? Math.round(node.x) : legacyOutput.x + index * 280,
-        y: Number.isFinite(node.y) ? Math.round(node.y) : legacyOutput.y,
-        width: Number.isFinite(node.width) ? Math.max(190, Math.round(node.width)) : legacyOutput.width,
-        height: Number.isFinite(node.height) ? Math.max(190, Math.round(node.height)) : legacyOutput.height,
+        x: Number.isFinite(node.x) ? roundWorkflowNumber(node.x) : legacyOutput.x + index * 280,
+        y: Number.isFinite(node.y) ? roundWorkflowNumber(node.y) : legacyOutput.y,
+        width: Number.isFinite(node.width) ? Math.max(190, roundWorkflowNumber(node.width)) : legacyOutput.width,
+        height: Number.isFinite(node.height) ? Math.max(190, roundWorkflowNumber(node.height)) : legacyOutput.height,
         color: node.color || legacyOutput.color,
-        finalWidth: Number.isFinite(node.finalWidth) ? Math.max(64, Math.round(node.finalWidth)) : legacyOutput.finalWidth,
-        finalHeight: Number.isFinite(node.finalHeight) ? Math.max(64, Math.round(node.finalHeight)) : legacyOutput.finalHeight,
+        finalWidth: Number.isFinite(node.finalWidth) ? Math.max(64, roundWorkflowNumber(node.finalWidth)) : legacyOutput.finalWidth,
+        finalHeight: Number.isFinite(node.finalHeight) ? Math.max(64, roundWorkflowNumber(node.finalHeight)) : legacyOutput.finalHeight,
         outputAssetId: node.outputAssetId ?? (index === 0 ? legacyOutput.outputAssetId : null),
         outputRelativePath: node.outputRelativePath ?? (index === 0 ? legacyOutput.outputRelativePath : null),
       }))
       : [legacyOutput];
-    this.outputName = this.outputNodes[0]?.name ?? '';
-    this.outputWidth = this.outputNodes[0]?.width ?? legacyOutput.width;
-    this.outputHeight = this.outputNodes[0]?.height ?? legacyOutput.height;
-    this.outputColor = this.outputNodes[0]?.color ?? legacyOutput.color;
-    this.outputX = this.outputNodes[0]?.x ?? legacyOutput.x;
-    this.outputY = this.outputNodes[0]?.y ?? legacyOutput.y;
-    this.panX = Number.isFinite(parsed.panX) ? Math.round(parsed.panX!) : 0;
-    this.panY = Number.isFinite(parsed.panY) ? Math.round(parsed.panY!) : 0;
+    if (parsed.outputName === undefined) this.outputName = this.outputNodes[0]?.name ?? '';
+    if (!Number.isFinite(parsed.outputWidth)) this.outputWidth = this.outputNodes[0]?.width ?? legacyOutput.width;
+    if (!Number.isFinite(parsed.outputHeight)) this.outputHeight = this.outputNodes[0]?.height ?? legacyOutput.height;
+    if (parsed.outputColor === undefined) this.outputColor = this.outputNodes[0]?.color ?? legacyOutput.color;
+    if (!Number.isFinite(parsed.outputX)) this.outputX = this.outputNodes[0]?.x ?? legacyOutput.x;
+    if (!Number.isFinite(parsed.outputY)) this.outputY = this.outputNodes[0]?.y ?? legacyOutput.y;
+    this.panX = Number.isFinite(parsed.panX) ? roundWorkflowNumber(parsed.panX!) : 0;
+    this.panY = Number.isFinite(parsed.panY) ? roundWorkflowNumber(parsed.panY!) : 0;
     this.zoom = Number.isFinite(parsed.zoom) ? Math.min(4, Math.max(0.2, Number(parsed.zoom!.toFixed(3)))) : 1;
     this.storyboardDataUrl = parsed.storyboardDataUrl ?? null;
-    this.storyboardWidth = Number.isFinite(parsed.storyboardWidth) ? Math.max(64, Math.round(parsed.storyboardWidth!)) : 1024;
-    this.storyboardHeight = Number.isFinite(parsed.storyboardHeight) ? Math.max(64, Math.round(parsed.storyboardHeight!)) : 768;
+    this.storyboardWidth = Number.isFinite(parsed.storyboardWidth) ? Math.max(64, roundWorkflowNumber(parsed.storyboardWidth!)) : 1024;
+    this.storyboardHeight = Number.isFinite(parsed.storyboardHeight) ? Math.max(64, roundWorkflowNumber(parsed.storyboardHeight!)) : 768;
     this.storyboardOraPath = parsed.storyboardOraPath ?? null;
     this.storyboardAnnotations = Array.isArray(parsed.storyboardAnnotations)
       ? parsed.storyboardAnnotations.map((annotation) => String(annotation).trim()).filter(Boolean).slice(0, 24)
@@ -720,14 +770,14 @@ class WorkflowStore {
     this.storyboardAnnotationItems = coerceAnnotations(parsed.storyboardAnnotationItems);
     this.storyboardAnnotationsVisible = parsed.storyboardAnnotationsVisible !== false;
     this.nodes = parsed.nodes.map((node, index) => ({
-      id: node.id || id('asset'),
+      id: node.id || this.nextGraphId('node'),
       assetId: node.assetId ?? null,
       name: node.name || `Asset ${index + 1}`,
       relativePath: node.relativePath || '',
-      x: Number.isFinite(node.x) ? Math.round(node.x) : 80 + index * 32,
-      y: Number.isFinite(node.y) ? Math.round(node.y) : 120 + index * 32,
-      width: Number.isFinite(node.width) ? Math.max(160, Math.round(node.width!)) : 205,
-      height: Number.isFinite(node.height) ? Math.max(130, Math.round(node.height!)) : 190,
+      x: Number.isFinite(node.x) ? roundWorkflowNumber(node.x) : 80 + index * 32,
+      y: Number.isFinite(node.y) ? roundWorkflowNumber(node.y) : 120 + index * 32,
+      width: Number.isFinite(node.width) ? Math.max(160, roundWorkflowNumber(node.width!)) : 205,
+      height: Number.isFinite(node.height) ? Math.max(130, roundWorkflowNumber(node.height!)) : 190,
       color: node.color || '#3a3c42',
       included: node.included ?? true,
       note: node.note ?? '',
@@ -737,20 +787,30 @@ class WorkflowStore {
         .filter((connection): connection is WorkflowConnection => typeof connection?.id === 'string' && typeof connection.from === 'string' && typeof connection.to === 'string')
         .filter((connection, index, all) => all.findIndex((item) => item.from === connection.from && item.to === connection.to) === index)
       : [];
-    this.connections = parsedConnections.filter((connection) => this.canConnect(connection.from, connection.to));
+    const loadedNodeIds = new Set([
+      'composition',
+      ...this.nodes.map((node) => node.id),
+      ...this.outputNodes.map((node) => node.id),
+    ]);
+    this.connections = parsedConnections.filter((connection) => (
+      connection.from !== connection.to
+      && loadedNodeIds.has(connection.from)
+      && loadedNodeIds.has(connection.to)
+    ));
     if (!parsedConnections.length) {
       this.connections = this.nodes
         .filter((node) => node.included)
-        .map((node) => ({ id: id('connection'), from: node.id, to: 'composition' }));
+        .map((node) => ({ id: this.nextGraphId('edge'), from: node.id, to: 'composition' }));
       this.connections = [
         ...this.connections,
-        ...this.outputNodes.map((node) => ({ id: id('connection'), from: 'composition', to: node.id })),
+        ...this.outputNodes.map((node) => ({ id: this.nextGraphId('edge'), from: 'composition', to: node.id })),
       ];
     }
     this.outputAssetId = this.outputNodes[0]?.outputAssetId ?? parsed.outputAssetId ?? null;
     this.outputRelativePath = this.outputNodes[0]?.outputRelativePath ?? parsed.outputRelativePath ?? null;
     this.rev = 0;
     this.savedRev = 0;
+    this.resetGraphDomain();
   }
 
   async save(): Promise<string | null> {
@@ -776,6 +836,221 @@ class WorkflowStore {
       this.savedRev = this.rev;
     }
     return relativePath;
+  }
+
+  private configureComposition(update: Record<string, unknown>): void {
+    const composition = this.requireGraphDomain().node('composition');
+    if (!composition) return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode('composition', {
+      ...composition.config,
+      ...update,
+    }));
+  }
+
+  private nextGraphId(kind: 'node' | 'edge'): string {
+    return this.graphIdGenerator?.(kind) ?? id(kind === 'node' ? 'asset' : 'connection');
+  }
+
+  private resetGraphDomain(): void {
+    this.graphDomain = new WorkflowGraphDomain(this.domainGraphFromReactiveState(), {
+      idGenerator: this.graphIdGenerator,
+    });
+    this.projectedGraphRevision = this.graphDomain.revision;
+  }
+
+  private requireGraphDomain(): WorkflowGraphDomain {
+    if (!this.graphDomain) this.resetGraphDomain();
+    return this.graphDomain!;
+  }
+
+  private publishGraphMutation<T>(domain: WorkflowGraphDomain, result: T): T {
+    if (domain.revision !== this.projectedGraphRevision) {
+      this.syncReactiveGraph(domain);
+      this.bump();
+      this.projectedGraphRevision = domain.revision;
+    }
+    return result;
+  }
+
+  private domainGraphFromReactiveState(): WorkflowGraphV2 {
+    const composition: WorkflowNodeV2 = {
+      id: 'composition',
+      type: 'art-direction',
+      title: this.compositionName || 'Composition',
+      position: { x: this.promptX, y: this.promptY },
+      size: { width: this.compositionWidth, height: this.compositionHeight },
+      color: this.compositionColor,
+      ports: {
+        inputs: [{ id: 'assets', label: 'Assets', dataType: 'asset-reference', multiple: true }],
+        outputs: [{ id: 'composition', label: 'Composition', dataType: 'layout' }],
+      },
+      config: {
+        legacyKind: 'composition',
+        displayName: this.compositionName,
+        prompt: this.prompt,
+        storyboardDataUrl: this.storyboardDataUrl,
+        storyboardWidth: this.storyboardWidth,
+        storyboardHeight: this.storyboardHeight,
+        storyboardOraPath: this.storyboardOraPath,
+        storyboardAnnotations: this.storyboardAnnotations,
+        storyboardAnnotationItems: this.storyboardAnnotationItems,
+        storyboardAnnotationsVisible: this.storyboardAnnotationsVisible,
+      },
+      runRecordIds: [],
+    };
+    const assets: WorkflowNodeV2[] = this.nodes.map((node) => ({
+      id: node.id,
+      type: 'input',
+      title: node.name,
+      position: { x: node.x, y: node.y },
+      size: { width: node.width, height: node.height },
+      color: node.color,
+      ports: {
+        inputs: [],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
+      config: {
+        legacyKind: 'asset',
+        assetId: node.assetId,
+        relativePath: node.relativePath,
+        note: node.note,
+      },
+      runRecordIds: [],
+    }));
+    const outputs: WorkflowNodeV2[] = this.outputNodes.map((node, index) => ({
+      id: node.id,
+      type: 'output',
+      title: node.name || 'Output',
+      position: { x: node.x, y: node.y },
+      size: { width: node.width, height: node.height },
+      color: node.color,
+      ports: {
+        inputs: [{ id: 'composition', label: 'Composition', dataType: 'layout' }],
+        outputs: [],
+      },
+      config: {
+        legacyKind: 'output',
+        displayName: node.name,
+        legacyX: index === 0 ? this.outputX : node.x,
+        legacyY: index === 0 ? this.outputY : node.y,
+        legacyWidth: index === 0 ? this.outputWidth : node.width,
+        legacyHeight: index === 0 ? this.outputHeight : node.height,
+        legacyColor: index === 0 ? this.outputColor : node.color,
+        finalWidth: node.finalWidth,
+        finalHeight: node.finalHeight,
+        outputAssetId: node.outputAssetId,
+        outputRelativePath: node.outputRelativePath,
+      },
+      runRecordIds: [],
+    }));
+    return {
+      version: WORKFLOW_GRAPH_VERSION,
+      id: 'workflow-active',
+      metadata: { name: this.name, sourceVersion: 1, migrations: [{ from: 1, to: 2 }] },
+      viewport: { panX: this.panX, panY: this.panY, zoom: this.zoom },
+      nodes: [...assets, composition, ...outputs],
+      edges: this.connections.map((connection) => ({
+        id: connection.id,
+        source: {
+          nodeId: connection.from,
+          portId: connection.from === 'composition' ? 'composition' : 'asset',
+        },
+        target: {
+          nodeId: connection.to,
+          portId: connection.to === 'composition' ? 'assets' : 'composition',
+        },
+      })),
+      assetReferences: [],
+      runRecords: [],
+    };
+  }
+
+  private syncReactiveGraph(domain: WorkflowGraphDomain): void {
+    const composition = domain.node('composition');
+    if (composition) {
+      this.compositionName = typeof composition.config.displayName === 'string'
+        ? composition.config.displayName
+        : composition.title;
+      this.promptX = composition.position.x;
+      this.promptY = composition.position.y;
+      this.compositionWidth = composition.size.width;
+      this.compositionHeight = composition.size.height;
+      this.compositionColor = composition.color;
+      this.prompt = typeof composition.config.prompt === 'string' ? composition.config.prompt : '';
+      this.storyboardDataUrl = typeof composition.config.storyboardDataUrl === 'string'
+        ? composition.config.storyboardDataUrl
+        : null;
+      this.storyboardWidth = typeof composition.config.storyboardWidth === 'number'
+        ? composition.config.storyboardWidth
+        : 1024;
+      this.storyboardHeight = typeof composition.config.storyboardHeight === 'number'
+        ? composition.config.storyboardHeight
+        : 768;
+      this.storyboardOraPath = typeof composition.config.storyboardOraPath === 'string'
+        ? composition.config.storyboardOraPath
+        : null;
+      this.storyboardAnnotations = Array.isArray(composition.config.storyboardAnnotations)
+        ? composition.config.storyboardAnnotations.filter((item): item is string => typeof item === 'string')
+        : [];
+      this.storyboardAnnotationItems = coerceAnnotations(composition.config.storyboardAnnotationItems);
+      this.storyboardAnnotationsVisible = composition.config.storyboardAnnotationsVisible !== false;
+    }
+    this.nodes = domain.graph.nodes
+      .filter((node) => node.config.legacyKind === 'asset')
+      .map((node) => ({
+        id: node.id,
+        assetId: typeof node.config.assetId === 'string' ? node.config.assetId : null,
+        name: node.title,
+        relativePath: typeof node.config.relativePath === 'string' ? node.config.relativePath : '',
+        x: node.position.x,
+        y: node.position.y,
+        width: node.size.width,
+        height: node.size.height,
+        color: node.color,
+        included: domain.isConnected(node.id, 'composition'),
+        note: typeof node.config.note === 'string' ? node.config.note : '',
+      }));
+    this.outputNodes = domain.graph.nodes
+      .filter((node) => node.config.legacyKind === 'output')
+      .map((node) => ({
+        id: node.id,
+        name: typeof node.config.displayName === 'string' ? node.config.displayName : node.title,
+        x: node.position.x,
+        y: node.position.y,
+        width: node.size.width,
+        height: node.size.height,
+        color: node.color,
+        finalWidth: typeof node.config.finalWidth === 'number' ? node.config.finalWidth : 1024,
+        finalHeight: typeof node.config.finalHeight === 'number' ? node.config.finalHeight : 1024,
+        outputAssetId: typeof node.config.outputAssetId === 'string' ? node.config.outputAssetId : null,
+        outputRelativePath: typeof node.config.outputRelativePath === 'string' ? node.config.outputRelativePath : null,
+      }));
+    this.connections = domain.graph.edges.map((edge) => ({
+      id: edge.id,
+      from: edge.source.nodeId,
+      to: edge.target.nodeId,
+    }));
+    const firstOutput = this.outputNodes[0] ?? defaultOutputNode();
+    this.outputName = firstOutput.name;
+    const firstOutputDomain = domain.node(firstOutput.id);
+    this.outputWidth = typeof firstOutputDomain?.config.legacyWidth === 'number'
+      ? firstOutputDomain.config.legacyWidth
+      : firstOutput.width;
+    this.outputHeight = typeof firstOutputDomain?.config.legacyHeight === 'number'
+      ? firstOutputDomain.config.legacyHeight
+      : firstOutput.height;
+    this.outputColor = typeof firstOutputDomain?.config.legacyColor === 'string'
+      ? firstOutputDomain.config.legacyColor
+      : firstOutput.color;
+    this.outputX = typeof firstOutputDomain?.config.legacyX === 'number'
+      ? firstOutputDomain.config.legacyX
+      : firstOutput.x;
+    this.outputY = typeof firstOutputDomain?.config.legacyY === 'number'
+      ? firstOutputDomain.config.legacyY
+      : firstOutput.y;
+    this.outputAssetId = firstOutput.outputAssetId;
+    this.outputRelativePath = firstOutput.outputRelativePath;
   }
 
   private bump(): void {
