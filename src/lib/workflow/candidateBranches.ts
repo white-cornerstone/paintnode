@@ -203,6 +203,36 @@ function candidateArtifactName(name: string, lineage: WorkflowCandidateLineageV1
   return `${stem}-${lineage.candidateId}-attempt-${lineage.attempt}${extension}`;
 }
 
+function trackCandidateCancellation(options: ExecuteCampaignGenerateOptions) {
+  const activeRunIds = new Set<string>();
+  const requestedRunIds = new Set<string>();
+  const settlements: Promise<unknown>[] = [];
+  const cancelActive = (): void => {
+    if (!options.cancelExecutionForRun) return;
+    for (const runId of activeRunIds) {
+      if (requestedRunIds.has(runId)) continue;
+      requestedRunIds.add(runId);
+      settlements.push(Promise.resolve().then(() => options.cancelExecutionForRun!(runId)));
+    }
+  };
+  options.signal?.addEventListener('abort', cancelActive, { once: true });
+  return {
+    begin(runId: string): void {
+      activeRunIds.add(runId);
+      if (options.signal?.aborted) cancelActive();
+    },
+    end(runId: string): void {
+      activeRunIds.delete(runId);
+    },
+    async settle(): Promise<void> {
+      await Promise.allSettled(settlements);
+    },
+    dispose(): void {
+      options.signal?.removeEventListener('abort', cancelActive);
+    },
+  };
+}
+
 function mergeTerminalGraphs(base: WorkflowGraphV2, terminalGraphs: readonly WorkflowGraphV2[]): WorkflowGraphV2 {
   const baseRunIds = new Set(base.runRecords.map((record) => record.id));
   const baseReferenceIds = new Set(base.assetReferences.map((reference) => reference.id));
@@ -294,13 +324,13 @@ function cancelledCandidateGraph(
     candidate: lineage,
     failure: { code: 'CANCELLED', message: 'The candidate attempt was cancelled.' },
   }, options.hash ?? workflowSha256Text);
-  return new WorkflowGraphDomain({
+  return {
     ...base,
     nodes: base.nodes.map((node) => node.id === lineage.sourceNodeId
       ? { ...node, runRecordIds: [...node.runRecordIds, record.id] }
       : node),
     runRecords: [...base.runRecords, record],
-  }).graph;
+  };
 }
 
 async function executeCandidate(
@@ -365,25 +395,39 @@ export async function executeWorkflowCandidateBranches(
     return operation;
   };
   const terminalGraphs = new Array<WorkflowGraphV2>(count);
+  const cancellation = trackCandidateCancellation(options);
   let next = 0;
   const workers = Array.from({ length: concurrency }, async () => {
     while (next < count) {
       const index = next++;
-      terminalGraphs[index] = options.signal?.aborted
-        ? cancelledCandidateGraph(
-            inputGraph, options, prepared, lineages[index], firstNodeAttempt + index,
-          )
-        : await executeCandidate(
-            inputGraph,
-            outputNodeId,
-            { ...options, storeAsset: serializeStore },
-            lineages[index],
-            firstNodeAttempt + index,
-            prepared.materialKey,
-          );
+      const runId = `${lineages[index].candidateId}-attempt-${lineages[index].attempt}`;
+      if (options.signal?.aborted) {
+        terminalGraphs[index] = cancelledCandidateGraph(
+          inputGraph, options, prepared, lineages[index], firstNodeAttempt + index,
+        );
+        continue;
+      }
+      cancellation.begin(runId);
+      try {
+        terminalGraphs[index] = await executeCandidate(
+          inputGraph,
+          outputNodeId,
+          { ...options, storeAsset: serializeStore },
+          lineages[index],
+          firstNodeAttempt + index,
+          prepared.materialKey,
+        );
+      } finally {
+        cancellation.end(runId);
+      }
     }
   });
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } finally {
+    await cancellation.settle();
+    cancellation.dispose();
+  }
   const graph = mergeTerminalGraphs(inputGraph, terminalGraphs);
   const group = deriveWorkflowCandidateBranchGroups(graph).find((candidate) => candidate.id === groupId)!;
   return Object.freeze({ graph, group });
@@ -413,17 +457,32 @@ export async function retryWorkflowCandidateBranch(
     latest.candidate!.attempt + 1,
   );
   const nodeAttempt = maximumNodeAttempt(inputGraph, latest.nodeId) + 1;
-  const terminal = options.signal?.aborted
-    ? cancelledCandidateGraph(inputGraph, options, prepared, lineage, nodeAttempt, latest.id)
-    : await executeCandidate(
-        inputGraph,
-        latest.target.nodeId,
-        options,
-        lineage,
-        nodeAttempt,
-        prepared.materialKey,
-        latest.id,
-      );
+  const runId = `${lineage.candidateId}-attempt-${lineage.attempt}`;
+  const cancellation = trackCandidateCancellation(options);
+  let terminal: WorkflowGraphV2;
+  try {
+    if (options.signal?.aborted) {
+      terminal = cancelledCandidateGraph(inputGraph, options, prepared, lineage, nodeAttempt, latest.id);
+    } else {
+      cancellation.begin(runId);
+      try {
+        terminal = await executeCandidate(
+          inputGraph,
+          latest.target.nodeId,
+          options,
+          lineage,
+          nodeAttempt,
+          prepared.materialKey,
+          latest.id,
+        );
+      } finally {
+        cancellation.end(runId);
+      }
+    }
+  } finally {
+    await cancellation.settle();
+    cancellation.dispose();
+  }
   const graph = mergeTerminalGraphs(inputGraph, [terminal]);
   const candidate = deriveWorkflowCandidateBranchGroups(graph)
     .flatMap((group) => group.candidates)

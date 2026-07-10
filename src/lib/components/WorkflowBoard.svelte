@@ -1821,8 +1821,10 @@
         count: candidateCount,
         maxConcurrency: Math.min(candidateConcurrency, candidateCount),
       });
-      if (!outcome.committed) error = outcome.commitMessage;
-      else {
+      if (!outcome.committed) {
+        if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
+        error = outcome.commitMessage;
+      } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
         editor.flash(outcome.commitMessage);
       }
@@ -1848,8 +1850,10 @@
         ...context.options,
         signal: controller.signal,
       });
-      if (!outcome.committed) error = outcome.commitMessage;
-      else {
+      if (!outcome.committed) {
+        if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
+        error = outcome.commitMessage;
+      } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
         editor.flash(outcome.commitMessage);
       }

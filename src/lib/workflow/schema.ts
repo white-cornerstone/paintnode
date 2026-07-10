@@ -758,7 +758,9 @@ function validateRunRetryLinks(graph: WorkflowGraphV2, issues: WorkflowValidatio
       .map((id) => graph.runRecords.find((candidate) => candidate.id === id))
       .filter((candidate): candidate is WorkflowRunRecordV1 => Boolean(
         candidate && 'recordVersion' in candidate && candidate.recordVersion === 1 && candidate.status !== 'running'
-        && (!reference.candidate || candidate.candidate?.candidateId === reference.candidate.candidateId),
+        && (reference.candidate
+          ? candidate.candidate?.candidateId === reference.candidate.candidateId
+          : !candidate.candidate),
       ))
       .at(-1);
     if (latestTerminal?.id !== prior.id) {
@@ -767,14 +769,15 @@ function validateRunRetryLinks(graph: WorkflowGraphV2, issues: WorkflowValidatio
     if (reference.candidate && reference.candidate.attempt !== prior.candidate!.attempt + 1) {
       issues.push({ path, message: `${path} candidate attempt must immediately follow the linked candidate attempt`, severity: 'error' });
     }
-    if (reference.candidate ? reference.attempt <= prior.attempt : reference.attempt !== prior.attempt + 1) {
-      issues.push({
-        path,
-        message: reference.candidate
-          ? `${path} candidate retry attempt must follow the linked attempt`
-          : `${path} retry attempt must immediately follow the linked attempt`,
-        severity: 'error',
-      });
+    const previousNodeAttempt = node?.runRecordIds
+      .slice(0, currentIndex)
+      .map((id) => graph.runRecords.find((candidate) => candidate.id === id))
+      .filter((candidate): candidate is WorkflowRunRecordV1 => Boolean(
+        candidate && 'recordVersion' in candidate && candidate.recordVersion === 1,
+      ))
+      .at(-1)?.attempt ?? 0;
+    if (reference.attempt !== previousNodeAttempt + 1) {
+      issues.push({ path, message: `${path} retry must preserve node-global attempt order`, severity: 'error' });
     }
   }
 }
@@ -787,22 +790,19 @@ function validateCandidateBranchGroups(graph: WorkflowGraphV2, issues: WorkflowV
     for (const runId of node.runRecordIds) {
       const record = graph.runRecords.find((candidate) => candidate.id === runId);
       if (!record || !('recordVersion' in record) || record.recordVersion !== 1) continue;
+      if (attempts.has(record.attempt) || record.attempt <= previousAttempt) {
+        issues.push({
+          path: `runRecords.${record.id}.attempt`,
+          message: 'Run attempts must be unique and node-global monotonic.',
+          severity: 'error',
+        });
+      }
+      attempts.add(record.attempt);
+      previousAttempt = record.attempt;
       if (record.candidate) {
-        if (attempts.has(record.attempt) || record.attempt <= previousAttempt) {
-          issues.push({
-            path: `runRecords.${record.id}.attempt`,
-            message: 'Candidate run attempts must be unique and node-global monotonic.',
-            severity: 'error',
-          });
-        }
-        attempts.add(record.attempt);
-        previousAttempt = record.attempt;
         const records = groups.get(record.candidate.branchGroupId) ?? [];
         records.push(record);
         groups.set(record.candidate.branchGroupId, records);
-      } else {
-        attempts.add(record.attempt);
-        previousAttempt = Math.max(previousAttempt, record.attempt);
       }
     }
   }
@@ -853,6 +853,15 @@ function validateCandidateBranchGroups(graph: WorkflowGraphV2, issues: WorkflowV
         issues.push({ path, message: 'Candidate attempts must be contiguous and start at 1.', severity: 'error' });
       }
       candidateAttempts.set(lineage.candidateId, lineage.attempt);
+    }
+    const expectedCount = first.candidate!.requestedCount;
+    if (ordinals.size !== expectedCount
+      || Array.from({ length: expectedCount }, (_, index) => index + 1).some((ordinal) => !ordinals.has(ordinal))) {
+      issues.push({
+        path: `runRecords.candidateGroups.${groupId}`,
+        message: 'Persisted candidate branch groups must contain every requested ordinal exactly once.',
+        severity: 'error',
+      });
     }
   }
 }

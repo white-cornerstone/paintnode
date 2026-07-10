@@ -167,6 +167,7 @@ export interface ExecuteCampaignGenerateOptions {
   workflowSessionId?: string;
   signal?: AbortSignal;
   onProgress?: (event: Readonly<WorkflowRunProgressEvent>) => void;
+  cancelExecutionForRun?: (runId: string) => Promise<unknown>;
   retryOfRunId?: string;
   candidateLineage?: WorkflowCandidateLineageV1;
   runAttempt?: number;
@@ -346,13 +347,14 @@ function appendRunRecord(
   nodeId: string,
   record: WorkflowRunRecordV1,
 ): WorkflowGraphV2 {
-  return new WorkflowGraphDomain({
+  const candidate = {
     ...graph,
     nodes: graph.nodes.map((node) => node.id === nodeId
       ? { ...node, runRecordIds: [...node.runRecordIds, record.id] }
       : node),
     runRecords: [...graph.runRecords, record],
-  }).graph;
+  };
+  return record.candidate ? candidate : new WorkflowGraphDomain(candidate).graph;
 }
 
 function nextRunAttempt(graph: WorkflowGraphV2, node: WorkflowNodeV2): number {
@@ -992,7 +994,7 @@ async function campaignGenerateTransform(
   }
   reportProgress({ stage: 'succeeded', message: 'Execution completed.' });
   return {
-    graph: new WorkflowGraphDomain(resultGraph).graph,
+    graph: options.candidateLineage ? resultGraph : new WorkflowGraphDomain(resultGraph).graph,
     plan,
     request: deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>,
     asset: cloneValue(asset),

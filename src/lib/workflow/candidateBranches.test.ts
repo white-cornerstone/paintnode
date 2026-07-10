@@ -12,6 +12,7 @@ import { instantiateWorkflowTemplate } from './templates';
 import {
   createWorkflowCompositionExecutor,
   executeCampaignGenerateTransform,
+  WorkflowTransformExecutionError,
   type ExecuteCampaignGenerateOptions,
   type WorkflowProjectAsset,
 } from './transformExecutor';
@@ -208,6 +209,93 @@ describe('workflow candidate branches', () => {
       .toEqual(['branch-group-retry', 'branch-group-added']);
   });
 
+  it('keeps normal retry lineage valid after three intervening candidate attempts', async () => {
+    let providerCalls = 0;
+    let runSequence = 0;
+    let stored = 0;
+    const executor = createWorkflowCompositionExecutor('fake', async () => {
+      providerCalls += 1;
+      if (providerCalls === 1) throw new Error('Normal attempt failed safely.');
+      return {
+        kind: 'bytes', name: 'concept.png', bytes: new Uint8Array([137, 80, 78, 71, providerCalls]),
+        mime: 'image/png', width: 1024, height: 1024,
+      };
+    });
+    const options: ExecuteCampaignGenerateOptions = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [product],
+      resolveAsset: async () => ({
+        assetId: product.id, relativePath: product.relativePath,
+        bytes: productBytes, contentHash: workflowSha256Bytes(productBytes),
+      }),
+      storeAsset: async (artifact) => ({
+        id: `interleaved-asset-${++stored}`, name: artifact.name,
+        relativePath: `assets/generated/${artifact.name}`, width: 1024, height: 1024, mime: 'image/png',
+      }),
+      runIdGenerator: () => `normal-run-${++runSequence}`,
+      idGenerator: () => `normal-reference-${runSequence}`,
+      clock: (() => { let now = 500; return () => ++now; })(),
+    };
+    let failedGraph;
+    try {
+      await executeCampaignGenerateTransform(campaign(), 'output-square', options);
+      throw new Error('Expected the first normal attempt to fail.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkflowTransformExecutionError);
+      failedGraph = (error as WorkflowTransformExecutionError).failureGraph!;
+    }
+    const branched = await executeWorkflowCandidateBranches(failedGraph, 'output-square', options, {
+      branchGroupId: 'interleaved-branch-group', count: 3, maxConcurrency: 2,
+    });
+
+    const retried = await executeCampaignGenerateTransform(branched.graph, 'output-square', options);
+    expect(retried.graph.runRecords.at(-1)).toMatchObject({
+      id: 'normal-run-2',
+      attempt: 5,
+      retryOfRunId: 'normal-run-1',
+      status: 'succeeded',
+    });
+    expect((retried.graph.runRecords.at(-1) as WorkflowRunRecordV1).candidate).toBeUndefined();
+    expect(parseWorkflowGraphV2(JSON.parse(serializeWorkflowGraphV2(retried.graph))).ok).toBe(true);
+  });
+
+  it('cancels exact active native candidate attempt IDs and ignores late progress and results', async () => {
+    const controller = new AbortController();
+    const contexts: Array<Parameters<ReturnType<typeof createWorkflowCompositionExecutor>['execute']>[1]> = [];
+    const executor = createWorkflowCompositionExecutor('fake', async (_request, context) => {
+      contexts.push(context);
+      return new Promise(() => undefined);
+    });
+    const cancelExecutionForRun = vi.fn(async (_runId: string) => ({ disposition: 'terminated' as const }));
+    const onProgress = vi.fn();
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [product],
+      resolveAsset: async () => ({
+        assetId: product.id, relativePath: product.relativePath,
+        bytes: productBytes, contentHash: workflowSha256Bytes(productBytes),
+      }),
+      storeAsset: vi.fn(), signal: controller.signal, onProgress, cancelExecutionForRun,
+    } satisfies ExecuteCampaignGenerateOptions & {
+      cancelExecutionForRun: (runId: string) => Promise<unknown>;
+    };
+    const execution = executeWorkflowCandidateBranches(campaign(), 'output-square', options, {
+      branchGroupId: 'cancel-native-group', count: 3, maxConcurrency: 2,
+    });
+    while (contexts.length < 2) await Promise.resolve();
+    controller.abort();
+    const outcome = await execution;
+
+    expect(cancelExecutionForRun.mock.calls.map(([runId]) => runId).sort()).toEqual([
+      createWorkflowCandidateLineage('cancel-native-group', 'transform-generate-square', 1, 3).candidateId + '-attempt-1',
+      createWorkflowCandidateLineage('cancel-native-group', 'transform-generate-square', 2, 3).candidateId + '-attempt-1',
+    ].sort());
+    expect(outcome.group.candidates.map((candidate) => candidate.status))
+      .toEqual(['cancelled', 'cancelled', 'cancelled']);
+    const progressCalls = onProgress.mock.calls.length;
+    contexts[0]?.reportProgress({ message: 'Late provider progress must be ignored.' });
+    await Promise.resolve();
+    expect(onProgress).toHaveBeenCalledTimes(progressCalls);
+  });
+
   it('keeps successful, failed, and cancelled siblings in one durable group', async () => {
     const run = harness(true);
     const outcome = await executeWorkflowCandidateBranches(campaign(), 'output-square', run.options(), {
@@ -253,6 +341,36 @@ describe('workflow candidate branches', () => {
       isFullWorkflowRunRecord(record) && record.candidate?.branchGroupId === 'branch-group-invalid'
     ));
     mutate(records);
+    expect(parseWorkflowGraphV2(input).ok).toBe(false);
+  });
+
+  it('rejects a persisted group missing one requested ordinal', async () => {
+    const run = harness();
+    const outcome = await executeWorkflowCandidateBranches(campaign(), 'output-square', run.options(), {
+      branchGroupId: 'missing-ordinal-group', count: 3, maxConcurrency: 2,
+    });
+    const input = structuredClone(outcome.graph);
+    const removed = input.runRecords.find((record) => (
+      isFullWorkflowRunRecord(record) && record.candidate?.ordinal === 3
+    )) as WorkflowRunRecordV1;
+    input.runRecords = input.runRecords.filter((record) => record.id !== removed.id);
+    input.nodes.find((node) => node.id === removed.nodeId)!.runRecordIds = input.nodes
+      .find((node) => node.id === removed.nodeId)!.runRecordIds.filter((id) => id !== removed.id);
+    const removedRefs = new Set(removed.outputs.map((output) => output.assetReferenceId));
+    input.assetReferences = input.assetReferences.filter((reference) => !removedRefs.has(reference.id));
+    expect(parseWorkflowGraphV2(input).ok).toBe(false);
+  });
+
+  it('rejects acceptedAt on an unpromoted candidate output', async () => {
+    const run = harness();
+    const outcome = await executeWorkflowCandidateBranches(campaign(), 'output-square', run.options(), {
+      branchGroupId: 'accepted-candidate-group', count: 2, maxConcurrency: 1,
+    });
+    const input = structuredClone(outcome.graph);
+    const succeeded = input.runRecords.find((record) => (
+      isFullWorkflowRunRecord(record) && record.candidate && record.status === 'succeeded'
+    )) as WorkflowRunRecordV1;
+    succeeded.outputs[0].acceptedAt = succeeded.finishedAt!;
     expect(parseWorkflowGraphV2(input).ok).toBe(false);
   });
 });

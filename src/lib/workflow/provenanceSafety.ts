@@ -168,6 +168,9 @@ export function validateWorkflowRunRecordSafety(record: WorkflowRunRecordSafetyS
       record.status !== 'succeeded' || !nonnegativeSafeInteger(output.acceptedAt)
       || output.acceptedAt < record.startedAt || record.finishedAt === null || output.acceptedAt > record.finishedAt
     )) throw new Error('Accepted output time must fall within a successful run.');
+    if (record.candidate && output.acceptedAt !== undefined) {
+      throw new Error('Unpromoted candidate outputs cannot be accepted.');
+    }
   }
   if (new Set(record.outputs.map((output) => output.assetReferenceId)).size !== record.outputs.length) {
     throw new Error('Run outputs must have unique asset references.');

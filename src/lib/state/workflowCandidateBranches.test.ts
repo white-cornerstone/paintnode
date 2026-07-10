@@ -103,6 +103,7 @@ describe('WorkflowStore candidate branches', () => {
 
     const outcome = await execution;
     expect(outcome).toMatchObject({ committed: false, commitMessage: expect.stringMatching(/workflow changed/i) });
+    expect(runOptions.storeAsset).toHaveBeenCalledTimes(2);
     expect(workflow.candidateBranchGroups()).toEqual([]);
   });
 });

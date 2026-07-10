@@ -216,16 +216,20 @@ export function createWorkflowRunRecord(
       .map((id) => draft.graph.runRecords.find((record) => record.id === id))
       .filter((record): record is WorkflowRunRecordV1 => Boolean(
         record && isFullWorkflowRunRecord(record) && record.status !== 'running'
-        && (!draft.candidate || record.candidate?.candidateId === draft.candidate.candidateId),
+        && (draft.candidate
+          ? record.candidate?.candidateId === draft.candidate.candidateId
+          : !record.candidate),
       ))
       .at(-1);
     if (latestTerminal?.id !== prior.id) {
       throw new Error('Retry run ID must reference the latest terminal attempt.');
     }
-    if (draft.candidate ? draft.attempt <= prior.attempt : draft.attempt !== prior.attempt + 1) {
-      throw new Error(draft.candidate
-        ? 'Candidate retry attempt must follow the linked attempt.'
-        : 'Retry attempt must immediately follow the linked attempt.');
+    const latestNodeAttempt = draft.graph.nodes.find((candidate) => candidate.id === draft.nodeId)?.runRecordIds
+      .map((id) => draft.graph.runRecords.find((record) => record.id === id))
+      .filter(isFullWorkflowRunRecord)
+      .at(-1)?.attempt ?? 0;
+    if (draft.attempt !== latestNodeAttempt + 1) {
+      throw new Error('Retry attempt must preserve node-global attempt order.');
     }
   }
   if (draft.debugArtifactReference) {
