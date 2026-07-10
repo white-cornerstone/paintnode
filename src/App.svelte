@@ -755,9 +755,24 @@
     let unlistenClose: UnlistenFn | null = null;
     let unlistenResize: UnlistenFn | null = null;
     let unlistenNativeOpenFiles: UnlistenFn | null = null;
+    let unlistenRuntimeProgress: UnlistenFn | null = null;
+    let updateCheckTimer: number | null = null;
+    let updateCheckInterval: number | null = null;
+    let disposed = false;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
-      window.setTimeout(() => void appUpdater.checkForUpdates(), 2500);
+      updateCheckTimer = window.setTimeout(
+        () => void appUpdater.checkForUpdates({ background: true }),
+        2500,
+      );
+      updateCheckInterval = window.setInterval(
+        () => void appUpdater.checkForUpdates({ background: true }),
+        60 * 60 * 1000,
+      );
+      void appUpdater.listenForRuntimeProgress().then((unlisten) => {
+        if (disposed) unlisten();
+        else unlistenRuntimeProgress = unlisten;
+      });
       void listen<string>('app-menu', (event) => runAppMenuAction(event.payload)).then((unlisten) => {
         unlistenMenu = unlisten;
       });
@@ -820,11 +835,15 @@
     window.addEventListener('contextmenu', preventWebviewContextMenu);
     window.addEventListener('paintnode:show-properties-panel', showPropertiesPanel);
     return () => {
+      disposed = true;
       unlistenMenu?.();
       unlistenClose?.();
       unlistenResize?.();
       unlistenNativeOpenFiles?.();
+      unlistenRuntimeProgress?.();
       unlistenNativeDrops.forEach((unlisten) => unlisten());
+      if (updateCheckTimer !== null) window.clearTimeout(updateCheckTimer);
+      if (updateCheckInterval !== null) window.clearInterval(updateCheckInterval);
       window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('contextmenu', preventWebviewContextMenu);
       window.removeEventListener('paintnode:show-properties-panel', showPropertiesPanel);
@@ -929,7 +948,7 @@
           type="button"
           onclick={() => ui.open('update')}
           onpointerdown={(event) => event.stopPropagation()}
-          use:tooltip={{ text: `Install PaintNode ${appUpdater.version}`, placement: 'bottom' }}
+          use:tooltip={{ text: 'Install available updates', placement: 'bottom' }}
         >
           <Icon svg={ArrowDownload} size={14} />
           <span>Update</span>
