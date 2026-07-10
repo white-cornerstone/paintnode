@@ -219,7 +219,7 @@ export function createWorkflowRunRecord(
   const nodeRevision = digest(hash, 'paintnode-workflow-node-revision-v1', {
     type: node.type,
     ports: node.ports,
-    config: node.config,
+    config: persistedMaterialConfig(node.config),
   });
   const effectivePromptHash = digest(hash, 'paintnode-workflow-prompt-v1', draft.material.prompt.effectivePrompt);
   const materialKey = createWorkflowCacheKey({

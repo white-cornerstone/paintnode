@@ -167,6 +167,7 @@ export interface ExecuteCampaignGenerateOptions {
   signal?: AbortSignal;
   onProgress?: (event: Readonly<WorkflowRunProgressEvent>) => void;
   retryOfRunId?: string;
+  expectedMaterialKey?: string;
 }
 
 export interface WorkflowTransformExecutionOutcome {
@@ -174,6 +175,13 @@ export interface WorkflowTransformExecutionOutcome {
   plan: WorkflowExecutionPlan;
   request: Readonly<WorkflowTransformExecutionRequest>;
   asset: WorkflowProjectAsset;
+  transformNodeId: string;
+  outputNodeId: string;
+}
+
+export interface WorkflowPreparedCampaignGenerateTransform {
+  materialKey: string;
+  request: Readonly<WorkflowTransformExecutionRequest>;
   transformNodeId: string;
   outputNodeId: string;
 }
@@ -409,11 +417,12 @@ export function createWorkflowCompositionExecutor(
   });
 }
 
-export async function executeCampaignGenerateTransform(
+async function campaignGenerateTransform(
   inputGraph: WorkflowGraphV2,
   outputNodeId: string,
   options: ExecuteCampaignGenerateOptions,
-): Promise<WorkflowTransformExecutionOutcome> {
+  prepareOnly: boolean,
+): Promise<WorkflowTransformExecutionOutcome | WorkflowPreparedCampaignGenerateTransform> {
   const graph = new WorkflowGraphDomain(inputGraph).graph;
   if (!options.projectPath?.trim()) {
     throw new WorkflowTransformExecutionError(
@@ -483,21 +492,23 @@ export async function executeCampaignGenerateTransform(
     height: numberConfig(output, 'finalHeight'),
   };
   const attempt = nextRunAttempt(graph, transform);
-  const startedAt = options.clock?.() ?? Date.now();
-  const runId = options.runIdGenerator?.(transform.id, attempt)
-    ?? globalThis.crypto?.randomUUID?.()
-    ?? `run-${transform.id}-${startedAt}-${attempt}`;
+  const startedAt = prepareOnly ? 0 : (options.clock?.() ?? Date.now());
+  const runId = prepareOnly
+    ? 'workflow-preflight-run'
+    : options.runIdGenerator?.(transform.id, attempt)
+      ?? globalThis.crypto?.randomUUID?.()
+      ?? `run-${transform.id}-${startedAt}-${attempt}`;
   safeWorkflowIdentifier(runId, 'Run ID');
-  if (graph.runRecords.some((record) => record.id === runId)) {
+  if (!prepareOnly && graph.runRecords.some((record) => record.id === runId)) {
     throw new WorkflowTransformExecutionError(
       'INVALID_EXECUTOR_RESULT', 'The generated run ID collides with existing workflow history.', 'Retry Generate',
     );
   }
-  const referenceId = options.idGenerator?.() ?? `result-${runId}`;
+  const referenceId = prepareOnly ? 'workflow-preflight-output' : (options.idGenerator?.() ?? `result-${runId}`);
   safeWorkflowIdentifier(referenceId, 'Output asset reference ID');
-  if (graph.assetReferences.some((reference) => reference.id === referenceId)
+  if (!prepareOnly && (graph.assetReferences.some((reference) => reference.id === referenceId)
     || graph.runRecords.some((record) => isFullWorkflowRunRecord(record)
-      && record.outputs.some((item) => item.assetReferenceId === referenceId))) {
+      && record.outputs.some((item) => item.assetReferenceId === referenceId)))) {
     throw new WorkflowTransformExecutionError(
       'INVALID_EXECUTOR_RESULT',
       'The generated output reference collides with existing workflow history.',
@@ -523,6 +534,7 @@ export async function executeCampaignGenerateTransform(
     completed?: number;
     total?: number;
   }): void => {
+    if (prepareOnly) return;
     if (!['queued', 'running', 'cancelling', 'cancelled', 'failed', 'succeeded'].includes(update.stage)) return;
     const message = sanitizeWorkflowProgressMessage(update.message);
     if (update.completed !== undefined && (!Number.isSafeInteger(update.completed) || update.completed < 0)) return;
@@ -739,14 +751,7 @@ export async function executeCampaignGenerateTransform(
     output: request.output,
   };
   cancellationMaterial = runMaterial;
-  const context: Readonly<WorkflowNodeExecutionContext> = Object.freeze({
-    identity,
-    signal: options.signal,
-    reportProgress: (update: Parameters<WorkflowNodeExecutionContext['reportProgress']>[0]) => (
-      reportProgress({ ...update, stage: 'running' })
-    ),
-  });
-  createWorkflowRunRecord({
+  const preparedRecord = createWorkflowRunRecord({
     id: runId,
     nodeId: transform.id,
     attempt,
@@ -758,6 +763,29 @@ export async function executeCampaignGenerateTransform(
     outputs: [],
     retryOfRunId,
   }, hash);
+  if (!prepareOnly && options.expectedMaterialKey
+    && preparedRecord.materialKey !== options.expectedMaterialKey) {
+    throw new WorkflowTransformExecutionError(
+      'NOT_READY',
+      'Campaign Generate material changed after selective preflight.',
+      'Run preflight again',
+    );
+  }
+  if (prepareOnly) {
+    return deepFreeze({
+      materialKey: preparedRecord.materialKey,
+      request: deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>,
+      transformNodeId: transform.id,
+      outputNodeId: output.id,
+    });
+  }
+  const context: Readonly<WorkflowNodeExecutionContext> = Object.freeze({
+    identity,
+    signal: options.signal,
+    reportProgress: (update: Parameters<WorkflowNodeExecutionContext['reportProgress']>[0]) => (
+      reportProgress({ ...update, stage: 'running' })
+    ),
+  });
   reportProgress({ stage: 'queued', message: 'Queued for execution.' });
 
   let phase: 'executor' | 'store' | 'validation' = 'executor';
@@ -950,4 +978,24 @@ export async function executeCampaignGenerateTransform(
     transformNodeId: transform.id,
     outputNodeId: output.id,
   };
+}
+
+export async function prepareCampaignGenerateTransform(
+  inputGraph: WorkflowGraphV2,
+  outputNodeId: string,
+  options: ExecuteCampaignGenerateOptions,
+): Promise<WorkflowPreparedCampaignGenerateTransform> {
+  const result = await campaignGenerateTransform(inputGraph, outputNodeId, options, true);
+  if (!('materialKey' in result)) throw new Error('Campaign Generate preflight returned an execution outcome.');
+  return result;
+}
+
+export async function executeCampaignGenerateTransform(
+  inputGraph: WorkflowGraphV2,
+  outputNodeId: string,
+  options: ExecuteCampaignGenerateOptions,
+): Promise<WorkflowTransformExecutionOutcome> {
+  const result = await campaignGenerateTransform(inputGraph, outputNodeId, options, false);
+  if (!('graph' in result)) throw new Error('Campaign Generate execution returned a preflight outcome.');
+  return result;
 }

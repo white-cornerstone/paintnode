@@ -83,6 +83,7 @@ export interface WorkflowSelectiveNodeExecutionContext {
   node: Readonly<WorkflowNodeV2>;
   materialKey: string;
   dependencyResults: ReadonlyMap<string, Readonly<WorkflowExecutionResult>>;
+  signal?: AbortSignal;
 }
 
 export interface WorkflowSelectiveSchedulerOptions {
@@ -95,6 +96,7 @@ export interface WorkflowSelectiveSchedulerOptions {
     result: Readonly<WorkflowExecutionResult>;
   }>) => boolean;
   sanitizeFailure?: (error: unknown) => WorkflowSelectiveNodeFailure;
+  signal?: AbortSignal;
 }
 
 export interface WorkflowSelectiveExecutionOutcome {
@@ -103,6 +105,7 @@ export interface WorkflowSelectiveExecutionOutcome {
   results: Readonly<Record<string, Readonly<WorkflowExecutionResult>>>;
   failures: Readonly<Record<string, Readonly<WorkflowSelectiveNodeFailure>>>;
   blockedNodeIds: string[];
+  cancelledNodeIds: string[];
 }
 
 export interface WorkflowSelectiveNodeFailure {
@@ -618,6 +621,7 @@ export async function executeSelectiveWorkflowPlan(
       executeNode: options.executeNode,
       validateResultOwnership: options.validateResultOwnership,
       ...(options.sanitizeFailure ? { sanitizeFailure: options.sanitizeFailure } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     };
   } catch {
     throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Selective execution configuration could not be read safely.');
@@ -682,6 +686,7 @@ export async function executeSelectiveWorkflowPlan(
   const executedNodeIds: string[] = [];
   const failures = new Map<string, WorkflowSelectiveNodeFailure>();
   const blockedNodeIds: string[] = [];
+  const cancelledNodeIds: string[] = [];
   const outputOwners = new Map<string, string>();
   for (const entry of plan.cachedResults) {
     for (const outputId of entry.outputIds) {
@@ -714,6 +719,7 @@ export async function executeSelectiveWorkflowPlan(
   };
 
   const startReadyNodes = (): void => {
+    if (configuration.signal?.aborted) return;
     for (const nodeId of plan.executionNodeIds) {
       if (!pending.has(nodeId) || running.size >= configuration.maxConcurrency) continue;
       const dependencyIds = plan.dependencies[nodeId] ?? [];
@@ -736,6 +742,7 @@ export async function executeSelectiveWorkflowPlan(
           node: detachedFrozen(node),
           materialKey,
           dependencyResults,
+          ...(configuration.signal ? { signal: configuration.signal } : {}),
         }))
         .then(
           (result): Settled => ({ nodeId, provider, result }),
@@ -746,6 +753,12 @@ export async function executeSelectiveWorkflowPlan(
   };
 
   while (pending.size > 0 || running.size > 0) {
+    if (configuration.signal?.aborted) {
+      for (const nodeId of plan.executionNodeIds) {
+        if (!pending.delete(nodeId)) continue;
+        cancelledNodeIds.push(nodeId);
+      }
+    }
     blockFailedDependents();
     startReadyNodes();
     if (pending.size === 0 && running.size === 0) break;
@@ -759,6 +772,10 @@ export async function executeSelectiveWorkflowPlan(
     const settled = await Promise.race(running.values());
     running.delete(settled.nodeId);
     providerActive.set(settled.provider, providerActive.get(settled.provider)! - 1);
+    if (configuration.signal?.aborted) {
+      cancelledNodeIds.push(settled.nodeId);
+      continue;
+    }
     if (settled.error) {
       failures.set(settled.nodeId, safeFailure(settled.error, configuration.sanitizeFailure));
       continue;
@@ -807,5 +824,6 @@ export async function executeSelectiveWorkflowPlan(
     results: Object.fromEntries(results),
     failures: Object.fromEntries(failures),
     blockedNodeIds,
+    cancelledNodeIds,
   });
 }

@@ -82,6 +82,20 @@ describe('workflow run provenance', () => {
       .not.toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
   });
 
+  it('keeps persisted result pointers out of the next material key', () => {
+    const baseline = draft();
+    const completed = draft();
+    completed.graph.nodes.find((node) => node.id === completed.nodeId)!.config = {
+      ...completed.graph.nodes.find((node) => node.id === completed.nodeId)!.config,
+      resultAssetReferenceId: 'previous-reference',
+      resultAssetId: 'previous-asset',
+      resultRelativePath: 'generated/previous.png',
+    };
+
+    expect(createWorkflowRunRecord(completed, canonicalHash).materialKey)
+      .toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
+  });
+
   it.each([
     ['token', 'secret-or-path'],
     ['apiKey', 'secret-or-path'],

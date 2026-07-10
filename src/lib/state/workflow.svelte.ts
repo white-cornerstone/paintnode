@@ -31,6 +31,17 @@ import {
   type WorkflowCancellationResult,
   type WorkflowRunIdentity,
   type WorkflowRunProgressEvent,
+  planSelectiveWorkflowExecution,
+  executeSelectiveWorkflowPlan,
+  createWorkflowExecutionRestrictions,
+  prepareCampaignGenerateTransform,
+  workflowSha256Bytes,
+  isFullWorkflowRunRecord,
+  type WorkflowSelectiveRunMode,
+  type WorkflowSelectiveExecutionPlan,
+  type WorkflowSelectiveExecutionOutcome,
+  type WorkflowNodePreflight,
+  type WorkflowRunRecordV1,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -48,6 +59,30 @@ export interface WorkflowStoreRunOptions extends ExecuteCampaignGenerateOptions 
   currentProjectIdentity?: () => string | null;
   cancelExecution?: WorkflowCancellationHandler;
   cancellationTimeoutMs?: number;
+}
+
+export interface WorkflowSelectivePreflightProjection {
+  plan: WorkflowSelectiveExecutionPlan;
+  stateByNodeId: Readonly<Record<string, Readonly<WorkflowNodePreflight>>>;
+}
+
+export interface WorkflowSelectiveStoreExecutionOptions {
+  maxConcurrency?: number;
+  providerConcurrency?: Readonly<Record<string, number>>;
+}
+
+interface WorkflowSelectivePreflightSnapshot {
+  sessionIdentity: number;
+  graphRevision: number;
+  storeRevision: number;
+  graphBytes: string;
+  projectIdentity: string | null;
+}
+
+interface ActiveWorkflowSelectiveOperation {
+  controller: AbortController;
+  transformNodeIds: Set<string>;
+  stopExternalAbort: () => void;
 }
 
 interface ActiveWorkflowTransformRun {
@@ -251,6 +286,8 @@ export class WorkflowStore {
   private readonly transformStartQueues = new Map<string, Promise<void>>();
   private readonly latestTransformRunSequences = new Map<string, number>();
   private readonly progressRouter = new WorkflowRunProgressRouter();
+  private readonly selectivePreflightSnapshots = new WeakMap<object, WorkflowSelectivePreflightSnapshot>();
+  private activeSelectiveOperation: ActiveWorkflowSelectiveOperation | null = null;
 
   constructor(options: WorkflowStoreOptions = {}) {
     this.graphIdGenerator = options.idGenerator;
@@ -929,6 +966,220 @@ export class WorkflowStore {
     return planWorkflowExecution(this.serialize(), targetNodeId, options);
   }
 
+  async preflightSelectiveExecution(
+    mode: WorkflowSelectiveRunMode,
+    nodeId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<WorkflowSelectivePreflightProjection> {
+    const operation = this.beginSelectiveOperation(options);
+    const graph = this.serialize();
+    const snapshot = this.captureSelectiveSnapshot(options);
+    const placeholderKeys = Object.fromEntries(graph.nodes.map((node) => [node.id, `preflight:${node.id}`]));
+    const draft = planSelectiveWorkflowExecution(graph, {
+      mode,
+      nodeId,
+      materialKeys: placeholderKeys,
+      isRunRecordReusable: () => false,
+    });
+    const materialKeys: Record<string, string> = {};
+    const restrictions: Array<{ nodeId: string; kind: 'unavailable'; reason: string }> = [];
+    try {
+      for (const transformNodeId of draft.executionNodeIds) {
+        const outputNodeId = this.campaignOutputForTransform(graph, transformNodeId);
+        if (!outputNodeId) {
+          restrictions.push({
+            nodeId: transformNodeId,
+            kind: 'unavailable',
+            reason: 'Campaign Generate requires a directly connected Output.',
+          });
+          continue;
+        }
+        try {
+          const prepared = await prepareCampaignGenerateTransform(graph, outputNodeId, {
+            ...options,
+            signal: operation.controller.signal,
+          });
+          this.requireCurrentSelectiveSnapshot(snapshot, options);
+          if (prepared.transformNodeId !== transformNodeId) {
+            throw new Error('Prepared Campaign Generate material belongs to a different node.');
+          }
+          materialKeys[transformNodeId] = prepared.materialKey;
+        } catch (error) {
+          if (operation.controller.signal.aborted) throw error;
+          restrictions.push({
+            nodeId: transformNodeId,
+            kind: 'unavailable',
+            reason: error instanceof WorkflowTransformExecutionError
+              ? error.message
+              : 'Campaign Generate material could not be prepared safely.',
+          });
+        }
+      }
+
+      const verifiedRunIds = new Set<string>();
+      for (const transformNodeId of Object.keys(materialKeys)) {
+        const node = graph.nodes.find((candidate) => candidate.id === transformNodeId);
+        if (!node) continue;
+        for (const runId of node.runRecordIds) {
+          const record = graph.runRecords.find((candidate) => candidate.id === runId);
+          if (!record || !isFullWorkflowRunRecord(record) || record.status !== 'succeeded'
+            || record.materialKey !== materialKeys[transformNodeId] || record.outputs.length === 0) continue;
+          let reusable = true;
+          for (const output of record.outputs) {
+            const asset = options.assets.find((candidate) => (
+              candidate.id === output.assetId && candidate.relativePath === output.relativePath
+            ));
+            if (!asset) {
+              reusable = false;
+              break;
+            }
+            try {
+              const material = await options.resolveAsset(asset);
+              this.requireCurrentSelectiveSnapshot(snapshot, options);
+              const computedHash = material.bytes instanceof Uint8Array && material.bytes.length > 0
+                ? workflowSha256Bytes(material.bytes)
+                : material.contentHash;
+              if (material.assetId !== output.assetId
+                || material.relativePath !== output.relativePath
+                || material.contentHash !== output.contentHash
+                || computedHash !== output.contentHash) {
+                reusable = false;
+                break;
+              }
+            } catch (error) {
+              if (operation.controller.signal.aborted) throw error;
+              reusable = false;
+              break;
+            }
+          }
+          if (reusable) verifiedRunIds.add(record.id);
+        }
+      }
+      this.requireCurrentSelectiveSnapshot(snapshot, options);
+      const plan = planSelectiveWorkflowExecution(graph, {
+        mode,
+        nodeId,
+        materialKeys,
+        ...(restrictions.length > 0
+          ? { executionRestrictions: createWorkflowExecutionRestrictions(restrictions) }
+          : {}),
+        isRunRecordReusable: (record) => verifiedRunIds.has(record.id),
+      });
+      const stateByNodeId = Object.freeze(Object.fromEntries(
+        plan.preflight.map((entry) => [entry.nodeId, entry]),
+      ));
+      const projection = Object.freeze({ plan, stateByNodeId });
+      this.selectivePreflightSnapshots.set(projection, snapshot);
+      return projection;
+    } finally {
+      this.finishSelectiveOperation(operation, options.signal);
+    }
+  }
+
+  async runSelectiveExecution(
+    preflight: WorkflowSelectivePreflightProjection,
+    options: WorkflowStoreRunOptions,
+    scheduler: WorkflowSelectiveStoreExecutionOptions = {},
+  ): Promise<WorkflowSelectiveExecutionOutcome> {
+    const snapshot = this.selectivePreflightSnapshots.get(preflight);
+    if (!snapshot) {
+      throw new WorkflowTransformExecutionError(
+        'CANCELLED', 'Selective execution requires a current store preflight.', 'Run preflight again',
+      );
+    }
+    this.requireCurrentSelectiveSnapshot(snapshot, options);
+    const operation = this.beginSelectiveOperation(options);
+    const maxConcurrency = scheduler.maxConcurrency ?? 1;
+    const providerConcurrency = scheduler.providerConcurrency ?? Object.fromEntries(
+      options.executors.map((executor) => [executor.provider, maxConcurrency]),
+    );
+    try {
+      return await executeSelectiveWorkflowPlan(preflight.plan, {
+        maxConcurrency,
+        providerConcurrency,
+        signal: operation.controller.signal,
+        providerKeyForNode: (node) => {
+          const advanced = typeof node.config.advanced === 'object' && node.config.advanced !== null
+            && !Array.isArray(node.config.advanced)
+            ? node.config.advanced as Record<string, unknown>
+            : {};
+          return typeof advanced.provider === 'string' && advanced.provider.trim()
+            ? advanced.provider.trim()
+            : options.provider;
+        },
+        executeNode: async ({ nodeId: transformNodeId, materialKey }) => {
+          if (operation.controller.signal.aborted) {
+            throw new WorkflowTransformExecutionError('CANCELLED', 'Selective execution was cancelled.', 'Run again');
+          }
+          const graph = this.serialize();
+          const outputNodeId = this.campaignOutputForTransform(graph, transformNodeId);
+          if (!outputNodeId) throw new Error('Campaign Generate output is unavailable.');
+          operation.transformNodeIds.add(transformNodeId);
+          try {
+            const outcome = await this.runCampaignGenerate(outputNodeId, {
+              ...options,
+              signal: operation.controller.signal,
+              expectedMaterialKey: materialKey,
+            });
+            if (!outcome.committed) {
+              throw new WorkflowTransformExecutionError(
+                'NOT_READY', outcome.commitMessage, 'Run selective preflight again',
+              );
+            }
+            const committedGraph = this.serialize();
+            const transform = committedGraph.nodes.find((node) => node.id === transformNodeId);
+            const run = transform?.runRecordIds
+              .map((runId) => committedGraph.runRecords.find((record) => record.id === runId))
+              .filter((record): record is WorkflowRunRecordV1 => Boolean(record && isFullWorkflowRunRecord(record)))
+              .at(-1);
+            if (!run || run.status !== 'succeeded' || run.materialKey !== materialKey) {
+              throw new Error('Campaign Generate did not commit the prepared material result.');
+            }
+            return { cacheKey: materialKey, outputIds: run.outputs.map((output) => output.assetReferenceId) };
+          } finally {
+            operation.transformNodeIds.delete(transformNodeId);
+          }
+        },
+        validateResultOwnership: ({ nodeId: transformNodeId, result }) => {
+          const graph = this.serialize();
+          const node = graph.nodes.find((candidate) => candidate.id === transformNodeId);
+          return Boolean(node?.runRecordIds.some((runId) => {
+            const run = graph.runRecords.find((record) => record.id === runId);
+            return run && isFullWorkflowRunRecord(run) && run.status === 'succeeded'
+              && run.materialKey === result.cacheKey
+              && result.outputIds.every((outputId) => run.outputs.some((output) => output.assetReferenceId === outputId));
+          }));
+        },
+        sanitizeFailure: (error) => error instanceof WorkflowTransformExecutionError
+          ? { code: error.code, message: error.message }
+          : { code: 'EXECUTOR_FAILED', message: 'Campaign Generate did not complete.' },
+      });
+    } finally {
+      this.finishSelectiveOperation(operation, options.signal);
+    }
+  }
+
+  async cancelSelectiveExecution(): Promise<WorkflowCancellationResult> {
+    const operation = this.activeSelectiveOperation;
+    if (!operation) {
+      return {
+        disposition: 'detached',
+        message: 'No active selective workflow execution could be terminated.',
+      };
+    }
+    operation.controller.abort();
+    const cancellations = await Promise.all(
+      [...operation.transformNodeIds].map((nodeId) => this.cancelCampaignGenerate(nodeId)),
+    );
+    if (cancellations.some((result) => result.disposition !== 'terminated')) {
+      return {
+        disposition: 'detached',
+        message: 'Provider termination was not confirmed for every active selective workflow node; late results will be ignored.',
+      };
+    }
+    return { disposition: 'terminated', message: 'Selective workflow execution was cancelled.' };
+  }
+
   transformExecution(nodeId: string): WorkflowTransformExecutionState {
     const transient = this.transformExecutions[nodeId];
     if (transient) return transient;
@@ -1073,6 +1324,15 @@ export class WorkflowStore {
         onProgress: routeProgress,
       });
       let commitMessage = commitBlockReason();
+      if (!commitMessage && options.expectedMaterialKey) {
+        const completedRun = outcome.graph.nodes.find((node) => node.id === outcome.transformNodeId)?.runRecordIds
+          .map((runId) => outcome.graph.runRecords.find((record) => record.id === runId))
+          .filter((record): record is WorkflowRunRecordV1 => Boolean(record && isFullWorkflowRunRecord(record)))
+          .at(-1);
+        if (!completedRun || completedRun.materialKey !== options.expectedMaterialKey) {
+          commitMessage = 'Campaign Generate material changed after selective preflight. The result was not applied.';
+        }
+      }
       if (commitMessage) {
         commitMessage += ` The generated asset remains available at ${outcome.asset.relativePath}.`;
         if (
@@ -1264,7 +1524,72 @@ export class WorkflowStore {
     this.projectedGraphRevision = this.graphDomain.revision;
   }
 
+  private selectiveProjectIdentity(options: WorkflowStoreRunOptions): string | null {
+    return options.currentProjectIdentity?.() ?? options.projectPath;
+  }
+
+  private captureSelectiveSnapshot(options: WorkflowStoreRunOptions): WorkflowSelectivePreflightSnapshot {
+    return {
+      sessionIdentity: this.workflowSessionIdentity,
+      graphRevision: this.graphRevision,
+      storeRevision: this.rev,
+      graphBytes: new TextDecoder().decode(this.toBytes()),
+      projectIdentity: this.selectiveProjectIdentity(options),
+    };
+  }
+
+  private requireCurrentSelectiveSnapshot(
+    snapshot: WorkflowSelectivePreflightSnapshot,
+    options: WorkflowStoreRunOptions,
+  ): void {
+    if (snapshot.sessionIdentity !== this.workflowSessionIdentity
+      || snapshot.graphRevision !== this.graphRevision
+      || snapshot.storeRevision !== this.rev
+      || snapshot.graphBytes !== new TextDecoder().decode(this.toBytes())
+      || snapshot.projectIdentity !== this.selectiveProjectIdentity(options)) {
+      throw new WorkflowTransformExecutionError(
+        'CANCELLED',
+        'The workflow or project changed after selective preflight.',
+        'Run preflight again',
+      );
+    }
+  }
+
+  private beginSelectiveOperation(options: WorkflowStoreRunOptions): ActiveWorkflowSelectiveOperation {
+    this.activeSelectiveOperation?.controller.abort();
+    const controller = new AbortController();
+    const abortFromExternal = () => controller.abort();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', abortFromExternal, { once: true });
+    const operation: ActiveWorkflowSelectiveOperation = {
+      controller,
+      transformNodeIds: new Set(),
+      stopExternalAbort: () => options.signal?.removeEventListener('abort', abortFromExternal),
+    };
+    this.activeSelectiveOperation = operation;
+    return operation;
+  }
+
+  private finishSelectiveOperation(
+    operation: ActiveWorkflowSelectiveOperation,
+    _externalSignal?: AbortSignal,
+  ): void {
+    operation.stopExternalAbort();
+    if (this.activeSelectiveOperation === operation) this.activeSelectiveOperation = null;
+  }
+
+  private campaignOutputForTransform(graph: WorkflowGraphV2, transformNodeId: string): string | null {
+    const edge = graph.edges.find((candidate) => (
+      candidate.source.nodeId === transformNodeId
+      && candidate.source.portId === 'result'
+      && candidate.target.portId === 'source'
+      && graph.nodes.some((node) => node.id === candidate.target.nodeId && node.type === 'output')
+    ));
+    return edge?.target.nodeId ?? null;
+  }
+
   private beginWorkflowSession(): void {
+    this.activeSelectiveOperation?.controller.abort();
     for (const run of this.activeTransformRuns.values()) {
       void this.cancelActiveTransformRun(run);
     }
