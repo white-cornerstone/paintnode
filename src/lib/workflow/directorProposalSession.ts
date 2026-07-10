@@ -10,6 +10,7 @@ import type { WorkflowQaMode } from './providerQaSelection';
 
 export interface WorkflowDirectorSessionToken {
   readonly sessionIdentity: number;
+  readonly mutationIdentity: number;
   readonly graphRevision: number;
   readonly storeRevision: number;
 }

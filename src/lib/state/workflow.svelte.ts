@@ -24,6 +24,9 @@ import {
   type WorkflowTransformExecutionOutcome,
   type WorkflowDirectorProposal,
   type WorkflowDirectorSessionToken,
+  createWorkflowDirectorPatchProposal,
+  type WorkflowDirectorPatchProposal,
+  type WorkflowDirectorPatchProposalResult,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -172,6 +175,39 @@ export interface WorkflowStoreOptions {
   workflowGraphIdGenerator?: () => string;
 }
 
+interface WorkflowDirectorPatchReview {
+  proposal: WorkflowDirectorPatchProposal;
+  session: WorkflowDirectorSessionToken;
+  sourceBytes: string;
+}
+
+interface WorkflowDirectorPatchSnapshot {
+  graph: WorkflowGraphV2;
+  graphRevision: number;
+  storeRevision: number;
+  savedRevision: number;
+}
+
+interface WorkflowDirectorPatchTransaction {
+  before: WorkflowDirectorPatchSnapshot;
+  after: WorkflowDirectorPatchSnapshot;
+  sessionIdentity: number;
+}
+
+function workflowGraphBytes(graph: WorkflowGraphV2): string {
+  return new WorkflowGraphDomain(graph).serialize();
+}
+
+function immutableWorkflowHistoryBytes(graph: WorkflowGraphV2): string {
+  return JSON.stringify({
+    assetReferences: graph.assetReferences,
+    runRecords: graph.runRecords,
+    runRecordLinks: graph.nodes
+      .filter((node) => node.runRecordIds.length > 0)
+      .map((node) => [node.id, node.runRecordIds]),
+  });
+}
+
 export class WorkflowStore {
   active = $state(false);
   name = $state('Untitled Workflow');
@@ -224,7 +260,11 @@ export class WorkflowStore {
   private projectedGraphRevision = 0;
   private transformRunSequence = 0;
   private workflowSessionIdentity = 0;
+  private workflowMutationIdentity = 0;
   private readonly activeTransformRuns = new Map<string, number>();
+  private pendingDirectorPatchReview: WorkflowDirectorPatchReview | null = null;
+  private directorPatchUndoStack: WorkflowDirectorPatchTransaction[] = [];
+  private directorPatchRedoStack: WorkflowDirectorPatchTransaction[] = [];
 
   constructor(options: WorkflowStoreOptions = {}) {
     this.graphIdGenerator = options.idGenerator;
@@ -240,12 +280,126 @@ export class WorkflowStore {
     return this.graphDomain?.revision ?? 0;
   }
 
+  get pendingDirectorPatchProposal(): WorkflowDirectorPatchProposal | null {
+    return this.pendingDirectorPatchReview?.proposal ?? null;
+  }
+
   captureDirectorSession(): WorkflowDirectorSessionToken {
     return Object.freeze({
       sessionIdentity: this.workflowSessionIdentity,
+      mutationIdentity: this.workflowMutationIdentity,
       graphRevision: this.graphRevision,
       storeRevision: this.rev,
     });
+  }
+
+  createDirectorPatchProposal(response: unknown): WorkflowDirectorPatchProposalResult {
+    const graph = this.serialize();
+    const domain = this.requireGraphDomain();
+    const session = this.captureDirectorSession();
+    const result = createWorkflowDirectorPatchProposal(response, graph, domain.contentRevision);
+    this.pendingDirectorPatchReview = result.proposal
+      ? {
+          proposal: result.proposal,
+          session,
+          sourceBytes: workflowGraphBytes(graph),
+        }
+      : null;
+    return result;
+  }
+
+  rejectDirectorPatchProposal(): void {
+    this.pendingDirectorPatchReview = null;
+  }
+
+  acceptDirectorPatchProposal(): WorkflowDirectorPatchProposal {
+    const review = this.pendingDirectorPatchReview;
+    if (!review) throw new Error('There is no pending AI Director patch proposal to accept.');
+    const currentSession = this.captureDirectorSession();
+    const currentGraph = this.serialize();
+    if (
+      review.session.sessionIdentity !== currentSession.sessionIdentity
+      || review.session.mutationIdentity !== currentSession.mutationIdentity
+      || review.session.graphRevision !== currentSession.graphRevision
+      || review.session.storeRevision !== currentSession.storeRevision
+      || review.sourceBytes !== workflowGraphBytes(currentGraph)
+      || review.proposal.sourceGraphRevision.graphId !== currentGraph.id
+      || review.proposal.sourceGraphRevision.revision !== currentSession.graphRevision
+    ) {
+      this.pendingDirectorPatchReview = null;
+      throw new Error('The workflow changed while this AI Director patch was being reviewed. Draft again before accepting.');
+    }
+    if (review.proposal.targetGraphRevision.graphId !== currentGraph.id
+      || review.proposal.targetGraphRevision.revision !== currentSession.graphRevision + 1) {
+      this.pendingDirectorPatchReview = null;
+      throw new Error('The AI Director patch target revision is stale or invalid.');
+    }
+    if (immutableWorkflowHistoryBytes(currentGraph) !== immutableWorkflowHistoryBytes(review.proposal.graph)) {
+      this.pendingDirectorPatchReview = null;
+      throw new Error('AI Director patches cannot modify accepted candidates or workflow run history.');
+    }
+
+    const before = this.captureDirectorPatchSnapshot();
+    // Validate the complete target and its exact content revision before any
+    // reactive or history state is changed.
+    const nextDomain = new WorkflowGraphDomain(review.proposal.graph, {
+      idGenerator: this.graphIdGenerator,
+      initialRevision: review.proposal.targetGraphRevision.revision,
+    });
+    const after: WorkflowDirectorPatchSnapshot = {
+      graph: nextDomain.graph,
+      graphRevision: nextDomain.revision,
+      storeRevision: before.storeRevision + 1,
+      savedRevision: before.savedRevision,
+    };
+
+    try {
+      this.publishDirectorPatchSnapshot(after, nextDomain);
+    } catch (error) {
+      this.publishDirectorPatchSnapshot(before);
+      throw error;
+    }
+    this.pendingDirectorPatchReview = null;
+    this.directorPatchUndoStack.push({
+      before,
+      after,
+      sessionIdentity: this.workflowSessionIdentity,
+    });
+    this.directorPatchRedoStack = [];
+    this.workflowMutationIdentity += 1;
+    return review.proposal;
+  }
+
+  undoDirectorPatch(): boolean {
+    const transaction = this.directorPatchUndoStack.at(-1);
+    if (!transaction) return false;
+    if (transaction.sessionIdentity !== this.workflowSessionIdentity
+      || !this.matchesDirectorPatchSnapshot(transaction.after)) {
+      this.clearDirectorPatchHistory();
+      return false;
+    }
+    this.directorPatchUndoStack.pop();
+    this.publishDirectorPatchSnapshot(transaction.before);
+    this.workflowMutationIdentity += 1;
+    this.pendingDirectorPatchReview = null;
+    this.directorPatchRedoStack.push(transaction);
+    return true;
+  }
+
+  redoDirectorPatch(): boolean {
+    const transaction = this.directorPatchRedoStack.at(-1);
+    if (!transaction) return false;
+    if (transaction.sessionIdentity !== this.workflowSessionIdentity
+      || !this.matchesDirectorPatchSnapshot(transaction.before)) {
+      this.clearDirectorPatchHistory();
+      return false;
+    }
+    this.directorPatchRedoStack.pop();
+    this.publishDirectorPatchSnapshot(transaction.after);
+    this.workflowMutationIdentity += 1;
+    this.pendingDirectorPatchReview = null;
+    this.directorPatchUndoStack.push(transaction);
+    return true;
   }
 
   newBoard(name = 'Untitled Workflow'): void {
@@ -338,6 +492,7 @@ export class WorkflowStore {
   ): void {
     if (expectedSession && (
       expectedSession.sessionIdentity !== this.workflowSessionIdentity
+      || expectedSession.mutationIdentity !== this.workflowMutationIdentity
       || expectedSession.graphRevision !== this.graphRevision
       || expectedSession.storeRevision !== this.rev
     )) {
@@ -973,6 +1128,7 @@ export class WorkflowStore {
   ): Promise<WorkflowTransformStoreOutcome> {
     const graph = this.serialize();
     const sessionIdentity = this.workflowSessionIdentity;
+    const mutationIdentity = this.workflowMutationIdentity;
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
@@ -989,6 +1145,8 @@ export class WorkflowStore {
       let commitMessage = '';
       if (this.workflowSessionIdentity !== sessionIdentity) {
         commitMessage = 'The workflow session changed while Generate was running. The result was not applied.';
+      } else if (this.workflowMutationIdentity !== mutationIdentity) {
+        commitMessage = 'The workflow changed while Generate was running. The result was not applied.';
       } else if (this.activeTransformRuns.get(transformNodeId) !== run) {
         commitMessage = 'A newer Generate run replaced this result before it could be applied.';
       } else if (this.graphRevision !== graphRevision || this.rev !== storeRevision) {
@@ -1143,8 +1301,11 @@ export class WorkflowStore {
 
   private beginWorkflowSession(): void {
     this.workflowSessionIdentity += 1;
+    this.workflowMutationIdentity += 1;
     this.transformExecutions = {};
     this.activeTransformRuns.clear();
+    this.pendingDirectorPatchReview = null;
+    this.clearDirectorPatchHistory();
   }
 
   private requireGraphDomain(): WorkflowGraphDomain {
@@ -1159,6 +1320,49 @@ export class WorkflowStore {
       this.projectedGraphRevision = domain.revision;
     }
     return result;
+  }
+
+  private captureDirectorPatchSnapshot(): WorkflowDirectorPatchSnapshot {
+    return {
+      graph: this.serialize(),
+      graphRevision: this.graphRevision,
+      storeRevision: this.rev,
+      savedRevision: this.savedRev,
+    };
+  }
+
+  private publishDirectorPatchSnapshot(
+    snapshot: WorkflowDirectorPatchSnapshot,
+    preparedDomain?: WorkflowGraphDomain,
+  ): void {
+    const domain = preparedDomain ?? new WorkflowGraphDomain(snapshot.graph, {
+      idGenerator: this.graphIdGenerator,
+      initialRevision: snapshot.graphRevision,
+    });
+    if (domain.graph.id !== snapshot.graph.id || domain.revision !== snapshot.graphRevision) {
+      throw new Error('The AI Director patch transaction snapshot has an invalid graph revision.');
+    }
+    this.name = domain.graph.metadata.name;
+    this.panX = domain.graph.viewport.panX;
+    this.panY = domain.graph.viewport.panY;
+    this.zoom = domain.graph.viewport.zoom;
+    this.syncReactiveGraph(domain);
+    this.graphDomain = domain;
+    this.projectedGraphRevision = domain.revision;
+    this.rev = snapshot.storeRevision;
+    this.savedRev = snapshot.savedRevision;
+  }
+
+  private matchesDirectorPatchSnapshot(snapshot: WorkflowDirectorPatchSnapshot): boolean {
+    return this.graphRevision === snapshot.graphRevision
+      && this.rev === snapshot.storeRevision
+      && this.savedRev === snapshot.savedRevision
+      && workflowGraphBytes(this.serialize()) === workflowGraphBytes(snapshot.graph);
+  }
+
+  private clearDirectorPatchHistory(): void {
+    this.directorPatchUndoStack = [];
+    this.directorPatchRedoStack = [];
   }
 
   private domainGraphFromReactiveState(): WorkflowGraphV2 {
@@ -1425,6 +1629,8 @@ export class WorkflowStore {
   }
 
   private bump(): void {
+    this.clearDirectorPatchHistory();
+    this.workflowMutationIdentity += 1;
     this.rev++;
   }
 }
