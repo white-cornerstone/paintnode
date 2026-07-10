@@ -12,8 +12,11 @@ use std::process::Stdio;
 use std::time::SystemTime;
 
 use base64::Engine;
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tauri::Manager;
 
@@ -25,6 +28,8 @@ const PROJECT_MANIFEST: &str = "paintnode.project.json";
 const DEFAULT_PROJECT_DIR_NAME: &str = "PaintNode";
 
 const PROJECT_THUMBNAIL_MAX_EDGE: u32 = 160;
+const PROJECT_MATERIAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const PROJECT_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -118,6 +123,13 @@ struct ProjectFileView {
 pub(crate) struct StoredAssetResult {
     data_url: String,
     asset: ProjectAssetView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectAssetMaterialResult {
+    bytes: Vec<u8>,
+    content_hash: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -749,6 +761,149 @@ fn safe_project_relative_path(relative_path: &str) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
+fn ensure_no_project_symlink(dir: &Dir, relative: &Path) -> Result<(), String> {
+    let mut prefix = PathBuf::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err("Project material path is invalid.".into());
+        };
+        prefix.push(part);
+        let metadata = dir
+            .symlink_metadata(&prefix)
+            .map_err(|error| format!("Project material is unavailable: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("Project material cannot be read through a symbolic link.".into());
+        }
+    }
+    Ok(())
+}
+
+fn read_capability_file_once(
+    dir: &Dir,
+    relative: &Path,
+    byte_limit: u64,
+) -> Result<Vec<u8>, String> {
+    ensure_no_project_symlink(dir, relative)?;
+    let mut file = dir
+        .open(relative)
+        .map_err(|error| format!("Project material could not be opened safely: {error}"))?;
+    ensure_no_project_symlink(dir, relative)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Project material metadata is unavailable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Project material is not a regular file.".into());
+    }
+    if metadata.len() > byte_limit {
+        return Err(format!(
+            "Project material exceeds the safe read limit of {byte_limit} bytes."
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len().min(8 * 1024 * 1024) as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(byte_limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Project material could not be read safely: {error}"))?;
+    if bytes.len() as u64 > byte_limit {
+        return Err(format!(
+            "Project material exceeds the safe read limit of {byte_limit} bytes."
+        ));
+    }
+    ensure_no_project_symlink(dir, relative)?;
+    Ok(bytes)
+}
+
+fn read_stable_capability_file(
+    dir: &Dir,
+    relative: &Path,
+    byte_limit: u64,
+) -> Result<Vec<u8>, String> {
+    let bytes = read_capability_file_once(dir, relative, byte_limit)?;
+    ensure_no_project_symlink(dir, relative)?;
+    let mut file = dir
+        .open(relative)
+        .map_err(|error| format!("Project material could not be reopened safely: {error}"))?;
+    ensure_no_project_symlink(dir, relative)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Project material metadata is unavailable: {error}"))?;
+    if !metadata.is_file() || metadata.len() > byte_limit {
+        return Err(
+            "Project material changed while it was being read; refresh and try again.".into(),
+        );
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut length = 0_u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Project material could not be verified safely: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        length = length.saturating_add(count as u64);
+        if length > byte_limit {
+            return Err(format!(
+                "Project material exceeds the safe read limit of {byte_limit} bytes."
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    ensure_no_project_symlink(dir, relative)?;
+    if bytes.len() as u64 != length
+        || format!("{:x}", Sha256::digest(&bytes)) != format!("{:x}", hasher.finalize())
+    {
+        return Err(
+            "Project material changed while it was being read; refresh and try again.".into(),
+        );
+    }
+    Ok(bytes)
+}
+
+fn resolve_project_asset_material(
+    project_path: &Path,
+    asset_id: &str,
+) -> Result<ProjectAssetMaterialResult, String> {
+    let trimmed_asset_id = asset_id.trim();
+    if trimmed_asset_id.is_empty()
+        || trimmed_asset_id != asset_id
+        || trimmed_asset_id.len() > 160
+        || trimmed_asset_id.contains("..")
+        || !trimmed_asset_id.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'_' | b':' | b'-'))
+        })
+    {
+        return Err("Project asset ID is invalid.".into());
+    }
+    let dir = Dir::open_ambient_dir(project_path, ambient_authority())
+        .map_err(|error| format!("Project folder could not be opened safely: {error}"))?;
+    let manifest_bytes = read_stable_capability_file(
+        &dir,
+        Path::new(PROJECT_MANIFEST),
+        PROJECT_MANIFEST_MAX_BYTES,
+    )?;
+    let manifest: ProjectManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("Project manifest is invalid JSON: {error}"))?;
+    let mut matches = manifest
+        .assets
+        .into_iter()
+        .filter(|asset| asset.id == trimmed_asset_id);
+    let asset = matches
+        .next()
+        .ok_or_else(|| "Asset is not in this project.".to_string())?;
+    if matches.next().is_some() {
+        return Err("Project asset ID is ambiguous.".into());
+    }
+    let relative = safe_project_relative_path(&asset.relative_path)?;
+    let bytes = read_stable_capability_file(&dir, &relative, PROJECT_MATERIAL_MAX_BYTES)?;
+    let content_hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+    Ok(ProjectAssetMaterialResult {
+        bytes,
+        content_hash,
+    })
+}
+
 pub(crate) fn add_asset(
     project_path: &Path,
     asset: ProjectAsset,
@@ -857,6 +1012,18 @@ pub(crate) async fn project_read_asset(
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn project_resolve_asset_material(
+    project_path: String,
+    asset_id: String,
+) -> Result<ProjectAssetMaterialResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_project_asset_material(Path::new(project_path.trim()), &asset_id)
+    })
+    .await
+    .map_err(|error| format!("Task error: {error}"))?
 }
 
 fn reveal_path(path: &Path) -> Result<(), String> {
@@ -1093,6 +1260,133 @@ mod tests {
     use super::*;
     use crate::png::file_has_png_signature;
     use crate::test_util::{png_dimensions_from_data_url, ONE_PIXEL_PNG};
+
+    fn material_asset(id: &str, relative_path: &str) -> ProjectAsset {
+        ProjectAsset {
+            id: id.into(),
+            kind: "imported".into(),
+            name: "Material.png".into(),
+            relative_path: relative_path.into(),
+            created_at: 1,
+            prompt: None,
+            source_file_name: Some("Material.png".into()),
+            width: Some(1),
+            height: Some(1),
+            mime: Some("image/png".into()),
+        }
+    }
+
+    #[test]
+    fn project_asset_material_returns_exact_bytes_and_hash_without_manifest_writes() {
+        let project = TempJobDir::new("paintnode-material-read").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative = "assets/imported/material.png";
+        fs::write(project.path().join(relative), ONE_PIXEL_PNG).expect("asset bytes");
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(material_asset("material", relative));
+        save_manifest(project.path(), &manifest).expect("manifest");
+        let before = fs::read(project_manifest_path(project.path())).expect("manifest before");
+
+        let result = resolve_project_asset_material(project.path(), "material").expect("material");
+
+        assert_eq!(result.bytes, ONE_PIXEL_PNG);
+        assert_eq!(
+            result.content_hash,
+            format!("sha256:{:x}", Sha256::digest(ONE_PIXEL_PNG))
+        );
+        assert_eq!(
+            fs::read(project_manifest_path(project.path())).expect("manifest after"),
+            before
+        );
+    }
+
+    #[test]
+    fn project_asset_material_rejects_traversal_absolute_and_duplicate_ids() {
+        let project = TempJobDir::new("paintnode-material-invalid").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let outside = project
+            .path()
+            .parent()
+            .expect("parent")
+            .join("material-secret.png");
+        fs::write(&outside, b"outside-secret").expect("outside");
+        let mut manifest = new_manifest(project.path());
+        manifest
+            .assets
+            .push(material_asset("traversal", "../material-secret.png"));
+        manifest.assets.push(material_asset(
+            "absolute",
+            outside.to_string_lossy().as_ref(),
+        ));
+        manifest
+            .assets
+            .push(material_asset("duplicate", "assets/imported/one.png"));
+        manifest
+            .assets
+            .push(material_asset("duplicate", "assets/imported/two.png"));
+        save_manifest(project.path(), &manifest).expect("manifest");
+
+        for id in ["traversal", "absolute", "duplicate"] {
+            assert!(
+                resolve_project_asset_material(project.path(), id).is_err(),
+                "{id}"
+            );
+        }
+        assert!(resolve_project_asset_material(project.path(), "../traversal").is_err());
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_asset_material_rejects_final_and_intermediate_symlinks() {
+        use std::os::unix::fs::symlink;
+        let project = TempJobDir::new("paintnode-material-symlink").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let outside = TempJobDir::new("paintnode-material-outside").expect("outside dir");
+        fs::write(outside.path().join("secret.png"), ONE_PIXEL_PNG).expect("outside asset");
+        symlink(
+            outside.path().join("secret.png"),
+            project.path().join("assets/imported/final-link.png"),
+        )
+        .expect("final symlink");
+        symlink(
+            outside.path(),
+            project.path().join("assets/intermediate-link"),
+        )
+        .expect("intermediate symlink");
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(material_asset(
+            "final-link",
+            "assets/imported/final-link.png",
+        ));
+        manifest.assets.push(material_asset(
+            "intermediate-link",
+            "assets/intermediate-link/secret.png",
+        ));
+        save_manifest(project.path(), &manifest).expect("manifest");
+
+        for id in ["final-link", "intermediate-link"] {
+            let error = resolve_project_asset_material(project.path(), id).expect_err("symlink");
+            assert!(error.contains("symbolic link"), "{error}");
+        }
+    }
+
+    #[test]
+    fn project_asset_material_enforces_conservative_read_cap() {
+        let project = TempJobDir::new("paintnode-material-cap").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative = "assets/imported/oversized.png";
+        fs::File::create(project.path().join(relative))
+            .and_then(|file| file.set_len(PROJECT_MATERIAL_MAX_BYTES + 1))
+            .expect("sparse oversized asset");
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(material_asset("oversized", relative));
+        save_manifest(project.path(), &manifest).expect("manifest");
+
+        let error = resolve_project_asset_material(project.path(), "oversized")
+            .expect_err("oversized asset");
+        assert!(error.contains("safe read limit"));
+    }
 
     #[test]
     fn project_file_preview_uses_cached_thumbnail() {

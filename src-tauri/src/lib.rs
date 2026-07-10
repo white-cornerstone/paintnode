@@ -84,6 +84,7 @@ pub fn run() {
             project::project_refresh,
             project::project_store_asset_bytes,
             project::project_read_asset,
+            project::project_resolve_asset_material,
             project::project_reveal,
             project::project_reveal_file,
             project::project_read_file,

@@ -343,6 +343,11 @@ export interface StoredAssetResult {
   asset: ProjectAsset;
 }
 
+export interface ProjectAssetMaterial {
+  bytes: Uint8Array;
+  contentHash: string;
+}
+
 export interface SavedDocumentResult {
   relativePath: string;
   name: string;
@@ -982,6 +987,18 @@ export async function storeProjectAssetBytes(args: {
 export async function readProjectAsset(projectPath: string, assetId: string): Promise<StoredAssetResult> {
   if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
   return invoke<StoredAssetResult>('project_read_asset', { projectPath, assetId });
+}
+
+export async function resolveProjectAssetMaterial(
+  projectPath: string,
+  assetId: string,
+): Promise<ProjectAssetMaterial> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  const result = await invoke<{ bytes: number[]; contentHash: string }>('project_resolve_asset_material', {
+    projectPath,
+    assetId,
+  });
+  return { bytes: new Uint8Array(result.bytes), contentHash: result.contentHash };
 }
 
 export async function revealProjectPath(projectPath: string, assetId?: string | null): Promise<void> {

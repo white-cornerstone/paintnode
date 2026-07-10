@@ -11,6 +11,7 @@
     isDesktop,
     providerQaMode,
     readProjectFile,
+    resolveProjectAssetMaterial,
     storeProjectAssetBytes,
     type ProjectAsset,
   } from '../integrations/desktop';
@@ -45,7 +46,6 @@
     findOpenCreatorNodePlacement,
     runWithAsyncObserver,
     resolveWorkflowStoryboardRead,
-    workflowSha256Bytes,
     workflowSha256Text,
     workflowProviderSelection,
     workflowReadiness,
@@ -1591,8 +1591,7 @@
                 contentHash: workflowSha256Text(`provider-free-qa-asset-v1:${asset.id}:${asset.relativePath}`),
               };
             }
-            const bytes = await readProjectFile(runProjectPath, asset.relativePath);
-            return { bytes, contentHash: workflowSha256Bytes(bytes) };
+            return resolveProjectAssetMaterial(runProjectPath, asset.id);
           },
           readStoryboard: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => resolveWorkflowStoryboardRead(
             storyboard,

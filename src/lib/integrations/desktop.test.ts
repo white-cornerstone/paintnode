@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { antigravityConfigFromRunOptions, claudeConfigFromRunOptions, codexConfigFromRunOptions } from './desktop';
+import { describe, expect, it, vi } from 'vitest';
+
+const api = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: api.invoke }));
+
+import {
+  antigravityConfigFromRunOptions,
+  claudeConfigFromRunOptions,
+  codexConfigFromRunOptions,
+  resolveProjectAssetMaterial,
+} from './desktop';
 import { defaultAiRunOptions } from '../state/settings';
 
 describe('codexConfigFromRunOptions', () => {
@@ -44,5 +53,28 @@ describe('codexConfigFromRunOptions', () => {
     expect(codexConfigFromRunOptions(custom).bin).toBe('/bin/codex');
     expect(claudeConfigFromRunOptions(custom).bin).toBe('/bin/claude');
     expect(antigravityConfigFromRunOptions(custom).bin).toBe('/bin/agy');
+  });
+});
+
+describe('project asset material boundary', () => {
+  it('requests material by asset ID and preserves exact bytes and hash', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    api.invoke.mockResolvedValueOnce({
+      bytes: [1, 2, 3, 4],
+      contentHash: `sha256:${'a'.repeat(64)}`,
+    });
+    try {
+      await expect(resolveProjectAssetMaterial('/virtual/project', 'asset-1')).resolves.toEqual({
+        bytes: new Uint8Array([1, 2, 3, 4]),
+        contentHash: `sha256:${'a'.repeat(64)}`,
+      });
+      expect(api.invoke).toHaveBeenCalledWith('project_resolve_asset_material', {
+        projectPath: '/virtual/project',
+        assetId: 'asset-1',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      api.invoke.mockReset();
+    }
   });
 });
