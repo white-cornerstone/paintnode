@@ -168,4 +168,21 @@ describe('workflow run control', () => {
   ])('preserves benign punctuation progress: %s', (message) => {
     expect(sanitizeWorkflowProgressMessage(message)).toBe(message);
   });
+
+  it('bounds adversarial traversal scanning to the exact visible progress prefix', () => {
+    const visible = 'a../'.repeat(125);
+    const hidden = `!\u0301../${'a../'.repeat(25_000)}`;
+
+    expect(visible).toHaveLength(500);
+    expect(sanitizeWorkflowProgressMessage(visible + hidden)).toBe(visible);
+    expect(sanitizeWorkflowProgressMessage(`${visible.slice(0, -4)}!\u0301../${hidden}`))
+      .toBe('Provider reported progress.');
+  });
+
+  it('redacts unsafe traversal brought into the visible prefix by whitespace normalization', () => {
+    const normalizedPadding = ' \n'.repeat(1_000);
+
+    expect(sanitizeWorkflowProgressMessage(`${normalizedPadding}!\u0301../workspace`))
+      .toBe('Provider reported progress.');
+  });
 });

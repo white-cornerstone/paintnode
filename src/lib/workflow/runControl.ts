@@ -44,26 +44,35 @@ const DETACHED_CANCELLATION: WorkflowCancellationResult = {
 const PROGRESS_STAGES = new Set<WorkflowRunProgressStage>([
   'queued', 'running', 'cancelling', 'cancelled', 'failed', 'succeeded',
 ]);
+const PROGRESS_INPUT_CODE_UNIT_LIMIT = 4_096;
+const PROGRESS_OUTPUT_CODE_UNIT_LIMIT = 500;
 const COMBINING_MARK = /^\p{M}$/u;
 const TRAVERSAL_IDENTIFIER_BASE = /^[\p{L}\p{N}_.]$/u;
 
 function containsUnsafeTraversalSegment(value: string): boolean {
-  for (const match of value.matchAll(/\.\.(?:[\\/]|$)/gu)) {
-    const precedingCharacters = Array.from(value.slice(0, match.index));
-    let baseIndex = precedingCharacters.length - 1;
-    while (baseIndex >= 0 && COMBINING_MARK.test(precedingCharacters[baseIndex])) {
-      baseIndex -= 1;
-    }
-    if (baseIndex < 0 || !TRAVERSAL_IDENTIFIER_BASE.test(precedingCharacters[baseIndex])) {
+  let precedingBase: string | null = null;
+  for (let index = 0; index < value.length;) {
+    const codePoint = value.codePointAt(index)!;
+    const character = String.fromCodePoint(codePoint);
+    const nextIndex = index + character.length;
+    if (character === '.' && value[nextIndex] === '.'
+      && (nextIndex + 1 === value.length || value[nextIndex + 1] === '/' || value[nextIndex + 1] === '\\')
+      && (precedingBase === null || !TRAVERSAL_IDENTIFIER_BASE.test(precedingBase))) {
       return true;
     }
+    if (!COMBINING_MARK.test(character)) precedingBase = character;
+    index = nextIndex;
   }
   return false;
 }
 
 export function sanitizeWorkflowProgressMessage(value: unknown): string {
   if (typeof value !== 'string') return 'Provider reported progress.';
-  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const normalized = value.slice(0, PROGRESS_INPUT_CODE_UNIT_LIMIT)
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, PROGRESS_OUTPUT_CODE_UNIT_LIMIT);
   let decoded = normalized;
   let decodingStable = false;
   for (let depth = 0; depth < 4; depth += 1) {
@@ -88,7 +97,7 @@ export function sanitizeWorkflowProgressMessage(value: unknown): string {
     || containsUnsafeTraversalSegment(decoded)) {
     return 'Provider reported progress.';
   }
-  return normalized.slice(0, 500);
+  return normalized;
 }
 
 function validatedIdentity(identity: WorkflowRunIdentity): WorkflowRunIdentity {
