@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { workflowDirectorGraphDraftSchema } from '../../../scripts/workflow-director-schema.mjs';
+import providerRuntimeWorkflow from '../../../.github/workflows/provider-runtimes.yml?raw';
 import {
   MANAGED_RUNTIME_PROTOCOL_VERSION,
   MANAGED_RUNTIME_SHARED_BRIDGE_FILES,
@@ -31,5 +32,6 @@ describe('Workflow Director GraphDraft schema', () => {
       'director-action-schema.mjs',
       'workflow-director-schema.mjs',
     ]));
+    expect(providerRuntimeWorkflow).toContain('default: "2.0.0"');
   });
 });

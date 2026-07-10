@@ -11,8 +11,9 @@ use tauri::AppHandle;
 use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 use crate::ai::{
     ai_provider_features, ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled,
-    codex_agent_message_text, output_tail, spawn_output_reader, AgentRunResult, AiDirectorProvider,
-    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    codex_agent_message_text, configure_ai_process_group, output_tail, spawn_output_reader,
+    terminate_ai_process_tree, AgentRunResult, AiDirectorProvider, AiModelCapability,
+    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
@@ -222,6 +223,7 @@ pub(crate) fn run_claude_with_progress(
     app: AppHandle,
     run_id: String,
 ) -> Result<AgentRunResult, String> {
+    configure_ai_process_group(command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -265,8 +267,7 @@ pub(crate) fn run_claude_with_progress(
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_ai_process_tree(&mut child);
             clear_ai_run_cancelled(&run_id);
             return Err(AI_RUN_STOPPED_MESSAGE.into());
         }

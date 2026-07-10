@@ -60,14 +60,15 @@ use crate::ai::{
     ai_director_restore_contract, ai_director_workflow_contract, ai_provider_features,
     ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
     cleanup_project_agent_job, clear_ai_run_cancelled, command_failure_with_required_output,
-    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
-    emit_provider_progress, image_agent_autonomy_contract, now_id, output_tail,
-    project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
-    request_ai_director_input, required_png_output_is_ready, safe_job_child_path,
-    sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
-    write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
-    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
+    configure_ai_process_group, emit_codex_part_progress, emit_codex_progress,
+    emit_job_file_progress, emit_kept_job_dir, emit_provider_progress,
+    image_agent_autonomy_contract, now_id, output_tail, project_or_temp_job_path,
+    reference_prompt_note, remove_legacy_generative_fill_agent_inputs, request_ai_director_input,
+    required_png_output_is_ready, safe_job_child_path, sanitize_provider_progress_line,
+    should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
+    terminate_ai_process_tree, validate_reference_pngs, watched_job_files, write_ai_job_prompt,
+    write_ai_job_settings, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
+    AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
     AiProviderCapabilitiesResult, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
     DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage,
     AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
@@ -1403,6 +1404,7 @@ fn run_antigravity_with_progress(
     required_output: Option<&str>,
     keep_debug_artifacts: bool,
 ) -> Result<AgentRunResult, String> {
+    configure_ai_process_group(command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1511,17 +1513,15 @@ fn run_antigravity_with_progress(
                         "Antigravity wrote {required_output}; applying PaintNode post-processing"
                     ),
                 );
-                let _ = child.kill();
-                let status = child.wait().map_err(|e| {
-                    format!("Failed to stop Antigravity after output was ready: {e}")
+                let status = terminate_ai_process_tree(&mut child).ok_or_else(|| {
+                    "Failed to stop Antigravity after output was ready.".to_string()
                 })?;
                 break (status, true);
             }
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_ai_process_tree(&mut child);
             clear_ai_run_cancelled(&run_id);
             return Err(AI_RUN_STOPPED_MESSAGE.into());
         }

@@ -58,14 +58,14 @@ use crate::ai::{
     ai_director_restore_contract, ai_director_workflow_contract, ai_job_project_dir,
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
     clean_option, cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
-    codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
-    emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir, output_tail,
-    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
+    codex_agent_message_text, command_failure, configure_ai_process_group, copy_png_candidate,
+    emit_codex_part_progress, emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir,
+    output_tail, project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
     safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, unique_child_path, validate_reference_pngs,
-    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
+    synthesize_decouple_asset_manifest, terminate_ai_process_tree, unique_child_path,
+    validate_reference_pngs, write_ai_job_prompt, write_reference_pngs, AgentRunResult,
+    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
     AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult, DecoupleImageResult,
     DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
     TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
@@ -441,6 +441,7 @@ fn run_codex_with_progress(
     run_id: String,
 ) -> Result<AgentRunResult, String> {
     ensure_provider_launch_allowed(Provider::Codex)?;
+    configure_ai_process_group(command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -484,8 +485,7 @@ fn run_codex_with_progress(
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_ai_process_tree(&mut child);
             clear_ai_run_cancelled(&run_id);
             return Err(AI_RUN_STOPPED_MESSAGE.into());
         }

@@ -332,6 +332,29 @@ fn local_status(provider: &str) -> ManagedRuntimeStatus {
     }
 }
 
+fn apply_available_release(
+    status: &mut ManagedRuntimeStatus,
+    package: &RuntimeReleasePackage,
+    artifact: &RuntimeArtifact,
+) {
+    let installed_is_compatible = status.state == "ready";
+    status.available_version = Some(package.package_version.clone());
+    status.download_size = Some(artifact.size);
+    if status.installed_version.is_none() {
+        status.sdk_version = Some(package.sdk_version.clone());
+        status.engine_version = Some(package.engine_version.clone());
+        status.state = "notInstalled".into();
+    } else if !installed_is_compatible
+        || status.installed_version.as_deref() != Some(package.package_version.as_str())
+    {
+        // Protocol compatibility is part of update identity. A protocol-1
+        // package must upgrade even if a publisher accidentally reuses its
+        // packageVersion for the protocol-2 artifact.
+        status.state = "updateAvailable".into();
+        status.authenticated = None;
+    }
+}
+
 fn check_auth(provider: &str, package: &RuntimePackageManifest) -> Result<bool, String> {
     if package.auth_check_args.is_empty() {
         return Ok(true);
@@ -374,20 +397,7 @@ pub(crate) async fn managed_runtime_status(
             Ok((package.clone(), artifact.clone()))
         }) {
             Ok((package, artifact)) => {
-                status.available_version = Some(package.package_version.clone());
-                status.download_size = Some(artifact.size);
-                if status.installed_version.is_none() {
-                    status.sdk_version = Some(package.sdk_version.clone());
-                    status.engine_version = Some(package.engine_version.clone());
-                }
-                if status.installed_version.as_deref() != Some(package.package_version.as_str()) {
-                    status.state = if status.installed_version.is_some() {
-                        "updateAvailable"
-                    } else {
-                        "notInstalled"
-                    }
-                    .into();
-                }
+                apply_available_release(&mut status, &package, &artifact);
             }
             Err(error) if status.installed_version.is_some() => status.message = Some(error),
             Err(error) => return Err(error),
@@ -747,6 +757,44 @@ mod tests {
         let error = release_for(&release, "codex").unwrap_err();
         assert!(error.contains("outdated runtime protocol 1"));
         assert!(error.contains("requires protocol 2"));
+    }
+
+    #[test]
+    fn incompatible_install_requires_update_even_when_package_version_matches() {
+        let mut status = ManagedRuntimeStatus {
+            provider: "codex".into(),
+            state: "notInstalled".into(),
+            installed_version: Some("1.0.0".into()),
+            available_version: None,
+            sdk_version: Some("0.144.0".into()),
+            engine_version: Some("codex-cli 0.144.0".into()),
+            download_size: None,
+            authenticated: None,
+            message: Some("Installed runtime protocol 1 must be upgraded".into()),
+        };
+        let package = RuntimeReleasePackage {
+            provider: "codex".into(),
+            package_version: "1.0.0".into(),
+            sdk_version: "0.144.0".into(),
+            engine_version: "codex-cli 0.144.0".into(),
+            protocol_version: RUNTIME_PROTOCOL_VERSION,
+            minimum_paintnode_version: env!("CARGO_PKG_VERSION").into(),
+            artifacts: vec![],
+        };
+        let (os, arch) = current_target();
+        let artifact = RuntimeArtifact {
+            os: os.into(),
+            arch: arch.into(),
+            url: "https://example.invalid/runtime.zip".into(),
+            sha256: "00".repeat(32),
+            size: 42,
+        };
+
+        apply_available_release(&mut status, &package, &artifact);
+
+        assert_eq!(status.state, "updateAvailable");
+        assert_eq!(status.available_version.as_deref(), Some("1.0.0"));
+        assert_eq!(status.authenticated, None);
     }
 
     #[test]

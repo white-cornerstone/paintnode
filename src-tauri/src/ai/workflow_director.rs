@@ -18,7 +18,10 @@ use tauri::AppHandle;
 use crate::ai::antigravity::run_antigravity_director_request;
 use crate::ai::claude::run_claude_workflow_draft_request;
 use crate::ai::codex::run_codex_workflow_draft_request;
-use crate::ai::{clear_ai_run_cancelled, request_ai_run_cancel, TempJobDir};
+use crate::ai::{
+    ai_run_cancelled, clear_ai_run_cancelled, request_ai_run_cancel, TempJobDir,
+    AI_RUN_STOPPED_MESSAGE,
+};
 
 const WORKFLOW_DIRECTOR_CONTEXT_VERSION: u8 = 1;
 const WORKFLOW_DIRECTOR_DRAFT_FILE: &str = "paintnode-workflow-draft.json";
@@ -195,7 +198,10 @@ fn run_with_timeout<T, Run>(run_id: &str, timeout: Duration, run: Run) -> Result
 where
     Run: FnOnce() -> Result<T, String>,
 {
-    clear_ai_run_cancelled(run_id);
+    if ai_run_cancelled(run_id) {
+        clear_ai_run_cancelled(run_id);
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
+    }
     let timed_out = Arc::new(AtomicBool::new(false));
     let timeout_flag = Arc::clone(&timed_out);
     let timeout_run_id = run_id.to_string();
@@ -490,5 +496,21 @@ mod tests {
         });
         assert!(result.unwrap_err().contains("timed out"));
         assert!(!crate::ai::ai_run_cancelled("director-timeout-test"));
+    }
+
+    #[test]
+    fn cancellation_requested_before_runner_start_is_not_erased() {
+        let run_id = "director-cancel-before-start-test";
+        crate::ai::request_ai_run_cancel(run_id).expect("request cancellation");
+        let ran = std::cell::Cell::new(false);
+
+        let result = run_with_timeout(run_id, Duration::from_secs(1), || {
+            ran.set(true);
+            Ok(())
+        });
+
+        assert_eq!(result.unwrap_err(), crate::ai::AI_RUN_STOPPED_MESSAGE);
+        assert!(!ran.get());
+        assert!(!crate::ai::ai_run_cancelled(run_id));
     }
 }

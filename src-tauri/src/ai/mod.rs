@@ -17,7 +17,9 @@ use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
+use std::process::ExitStatus;
 use std::process::Output;
 use std::sync::Arc;
 use std::sync::Condvar;
@@ -224,6 +226,46 @@ pub(crate) fn ai_run_cancelled(run_id: &str) -> bool {
         .lock()
         .map(|runs| runs.contains(run_id))
         .unwrap_or(false)
+}
+
+/// Start provider bridges in their own OS process group so cancellation can
+/// terminate the bridge and every provider process it launches. Killing only
+/// the immediate Node bridge can leave Codex/Claude descendants holding pipes
+/// and temporary workspaces open indefinitely.
+pub(crate) fn configure_ai_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+/// Force-stop an isolated provider process group and reap its direct child.
+pub(crate) fn terminate_ai_process_tree(child: &mut Child) -> Option<ExitStatus> {
+    let process_id = child.id();
+    #[cfg(unix)]
+    unsafe {
+        // configure_ai_process_group makes the direct child the group leader,
+        // therefore its pid is also the process-group id.
+        let _ = libc::kill(-(process_id as i32), libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &process_id.to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    child.wait().ok()
 }
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -1651,6 +1693,48 @@ pub(crate) fn project_or_temp_job_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_tree_termination_kills_bridge_and_descendant() {
+        let job = TempJobDir::new("paintnode-process-tree-test").expect("temp dir");
+        let descendant_path = job.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$1\"; wait")
+            .arg("paintnode-process-tree-test")
+            .arg(&descendant_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        configure_ai_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn bridge with descendant");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !descendant_path.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_id = fs::read_to_string(&descendant_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+
+        let status = terminate_ai_process_tree(&mut child).expect("reap bridge");
+        assert!(!status.success());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let exists = unsafe { libc::kill(descendant_id, 0) } == 0;
+            if !exists {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "provider descendant survived process-tree termination"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::codex::codex_direct_generate_prompt;
     use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
