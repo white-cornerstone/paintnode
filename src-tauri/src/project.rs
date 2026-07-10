@@ -26,6 +26,8 @@ const PROJECT_MANIFEST: &str = "paintnode.project.json";
 const DEFAULT_PROJECT_DIR_NAME: &str = "PaintNode";
 
 const PROJECT_THUMBNAIL_MAX_EDGE: u32 = 160;
+const ASSET_HASH_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_HASHABLE_ASSET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -52,6 +54,14 @@ pub(crate) struct ProjectAsset {
     mime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash_modified_at: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash_relative_path: Option<String>,
 }
 
 impl ProjectAsset {
@@ -74,6 +84,10 @@ impl ProjectAsset {
             height: None,
             mime: Some("image/png".into()),
             content_hash: None,
+            content_hash_state: None,
+            content_hash_size: None,
+            content_hash_modified_at: None,
+            content_hash_relative_path: None,
         }
     }
 
@@ -214,25 +228,154 @@ fn sha256_content_hash(bytes: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn project_asset_content_hash(project_path: &Path, relative_path: &str) -> Option<String> {
-    fs::read(project_path.join(relative_path))
-        .ok()
-        .map(|bytes| sha256_content_hash(&bytes))
+fn is_canonical_sha256_content_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
-fn backfill_project_asset_content_hashes(
+fn hash_project_asset_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Failed to open project asset for hashing: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; ASSET_HASH_BUFFER_BYTES];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read project asset for hashing: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+enum ProjectAssetFileProbe {
+    Missing,
+    Unsafe,
+    File {
+        path: PathBuf,
+        size: u64,
+        modified_at: u128,
+    },
+}
+
+fn probe_project_asset_file(project_path: &Path, relative_path: &str) -> ProjectAssetFileProbe {
+    let Ok(relative) = safe_project_relative_path(relative_path) else {
+        return ProjectAssetFileProbe::Unsafe;
+    };
+    let Ok(root) = fs::canonicalize(project_path) else {
+        return ProjectAssetFileProbe::Unsafe;
+    };
+    let mut candidate = root.clone();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return ProjectAssetFileProbe::Unsafe;
+        };
+        candidate.push(part);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return ProjectAssetFileProbe::Unsafe
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return ProjectAssetFileProbe::Missing;
+            }
+            Err(_) => return ProjectAssetFileProbe::Unsafe,
+        }
+    }
+    let Ok(canonical) = fs::canonicalize(&candidate) else {
+        return ProjectAssetFileProbe::Unsafe;
+    };
+    if !canonical.starts_with(&root) {
+        return ProjectAssetFileProbe::Unsafe;
+    }
+    let Ok(metadata) = fs::metadata(&canonical) else {
+        return ProjectAssetFileProbe::Unsafe;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_HASHABLE_ASSET_BYTES {
+        return ProjectAssetFileProbe::Unsafe;
+    }
+    ProjectAssetFileProbe::File {
+        path: canonical.clone(),
+        size: metadata.len(),
+        modified_at: modified_millis(&canonical),
+    }
+}
+
+fn replace_asset_hash_state(
+    asset: &mut ProjectAsset,
+    state: &str,
+    hash: Option<String>,
+    size: Option<u64>,
+    modified_at: Option<u128>,
+) -> bool {
+    let changed = asset.content_hash_state.as_deref() != Some(state)
+        || asset.content_hash != hash
+        || asset.content_hash_size != size
+        || asset.content_hash_modified_at != modified_at
+        || asset.content_hash_relative_path.as_deref() != Some(asset.relative_path.as_str());
+    if changed {
+        asset.content_hash_state = Some(state.into());
+        asset.content_hash = hash;
+        asset.content_hash_size = size;
+        asset.content_hash_modified_at = modified_at;
+        asset.content_hash_relative_path = Some(asset.relative_path.clone());
+    }
+    changed
+}
+
+fn refresh_project_asset_content_hash(project_path: &Path, asset: &mut ProjectAsset) -> bool {
+    match probe_project_asset_file(project_path, &asset.relative_path) {
+        ProjectAssetFileProbe::Missing => {
+            replace_asset_hash_state(asset, "missing", None, None, None)
+        }
+        ProjectAssetFileProbe::Unsafe => {
+            replace_asset_hash_state(asset, "unsafe", None, None, None)
+        }
+        ProjectAssetFileProbe::File {
+            path,
+            size,
+            modified_at,
+        } => {
+            if asset.content_hash_state.as_deref() == Some("verified")
+                && asset
+                    .content_hash
+                    .as_deref()
+                    .is_some_and(is_canonical_sha256_content_hash)
+                && asset.content_hash_size == Some(size)
+                && asset.content_hash_modified_at == Some(modified_at)
+                && asset.content_hash_relative_path.as_deref() == Some(asset.relative_path.as_str())
+            {
+                return false;
+            }
+            match hash_project_asset_file(&path) {
+                Ok(hash) => replace_asset_hash_state(
+                    asset,
+                    "verified",
+                    Some(hash),
+                    Some(size),
+                    Some(modified_at),
+                ),
+                Err(_) => replace_asset_hash_state(asset, "unsafe", None, None, None),
+            }
+        }
+    }
+}
+
+fn refresh_project_asset_content_hashes(
     project_path: &Path,
     manifest: &mut ProjectManifest,
 ) -> bool {
-    let mut backfilled = false;
+    let mut changed = false;
     for asset in &mut manifest.assets {
-        if asset.content_hash.is_some() {
-            continue;
-        }
-        asset.content_hash = project_asset_content_hash(project_path, &asset.relative_path);
-        backfilled |= asset.content_hash.is_some();
+        changed |= refresh_project_asset_content_hash(project_path, asset);
     }
-    backfilled
+    changed
 }
 
 pub(crate) fn safe_stem(name: &str) -> String {
@@ -563,7 +706,7 @@ fn scan_project_files(project_path: &Path) -> Vec<ProjectFileView> {
 
 fn project_state(project_path: &Path) -> Result<ProjectState, String> {
     let mut manifest = load_manifest(project_path)?;
-    if backfill_project_asset_content_hashes(project_path, &mut manifest) {
+    if refresh_project_asset_content_hashes(project_path, &mut manifest) {
         save_manifest(project_path, &manifest)?;
     }
     let mut assets = manifest
@@ -787,9 +930,7 @@ pub(crate) fn add_asset(
     project_path: &Path,
     mut asset: ProjectAsset,
 ) -> Result<ProjectAssetView, String> {
-    if asset.content_hash.is_none() {
-        asset.content_hash = project_asset_content_hash(project_path, &asset.relative_path);
-    }
+    refresh_project_asset_content_hash(project_path, &mut asset);
     let mut manifest = load_manifest(project_path)?;
     manifest.assets.retain(|existing| existing.id != asset.id);
     manifest.assets.push(asset.clone());
@@ -848,6 +989,8 @@ pub(crate) async fn project_store_asset_bytes(
         };
         let ext = file_ext_for_mime(&name, mime.as_deref());
         let (id, relative_path) = write_asset_file(&project_dir, kind, &name, &ext, &bytes)?;
+        let content_hash_modified_at = modified_millis(&project_dir.join(&relative_path));
+        let content_hash_relative_path = relative_path.clone();
         let asset = ProjectAsset {
             id,
             kind: kind.into(),
@@ -860,6 +1003,10 @@ pub(crate) async fn project_store_asset_bytes(
             height,
             mime: mime.or_else(|| mime_for_path(Path::new(&format!("asset.{ext}")))),
             content_hash: Some(sha256_content_hash(&bytes)),
+            content_hash_state: Some("verified".into()),
+            content_hash_size: Some(bytes.len() as u64),
+            content_hash_modified_at: Some(content_hash_modified_at),
+            content_hash_relative_path: Some(content_hash_relative_path),
         };
         let asset = add_asset(&project_dir, asset)?;
         let path = project_dir.join(&asset.asset.relative_path);
@@ -1132,23 +1279,8 @@ mod tests {
     use crate::png::file_has_png_signature;
     use crate::test_util::{png_dimensions_from_data_url, ONE_PIXEL_PNG};
 
-    #[test]
-    fn project_asset_content_hash_is_stable_sha256() {
-        assert_eq!(
-            sha256_content_hash(b"abc"),
-            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_ne!(sha256_content_hash(b"abc"), sha256_content_hash(b"abd"));
-    }
-
-    #[test]
-    fn project_state_backfills_missing_asset_hash_once() {
-        let project = TempJobDir::new("paintnode-project-hash-backfill").expect("project dir");
-        ensure_project_dirs(project.path()).expect("project dirs");
-        let relative_path = "assets/imported/legacy.png";
-        fs::write(project.path().join(relative_path), ONE_PIXEL_PNG).expect("legacy asset");
-        let mut manifest = new_manifest(project.path());
-        manifest.assets.push(ProjectAsset {
+    fn test_asset(relative_path: &str) -> ProjectAsset {
+        ProjectAsset {
             id: "legacy".into(),
             kind: "imported".into(),
             name: "Legacy.png".into(),
@@ -1160,11 +1292,41 @@ mod tests {
             height: Some(1),
             mime: Some("image/png".into()),
             content_hash: None,
-        });
+            content_hash_state: None,
+            content_hash_size: None,
+            content_hash_modified_at: None,
+            content_hash_relative_path: None,
+        }
+    }
+
+    #[test]
+    fn project_asset_content_hash_is_stable_sha256() {
+        assert_eq!(
+            sha256_content_hash(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(sha256_content_hash(b"abc"), sha256_content_hash(b"abd"));
+        assert!(is_canonical_sha256_content_hash(
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        ));
+        assert!(!is_canonical_sha256_content_hash("sha256:abc"));
+        assert!(!is_canonical_sha256_content_hash(
+            "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
+        ));
+    }
+
+    #[test]
+    fn project_state_backfills_missing_asset_hash_once() {
+        let project = TempJobDir::new("paintnode-project-hash-backfill").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative_path = "assets/imported/legacy.png";
+        fs::write(project.path().join(relative_path), ONE_PIXEL_PNG).expect("legacy asset");
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(test_asset(relative_path));
         save_manifest(project.path(), &manifest).expect("legacy manifest");
 
         let mut first = load_manifest(project.path()).expect("legacy manifest");
-        assert!(backfill_project_asset_content_hashes(
+        assert!(refresh_project_asset_content_hashes(
             project.path(),
             &mut first
         ));
@@ -1174,6 +1336,10 @@ mod tests {
             first.assets[0].content_hash.as_deref(),
             Some(expected.as_str())
         );
+        assert_eq!(
+            first.assets[0].content_hash_state.as_deref(),
+            Some("verified")
+        );
         let persisted = load_manifest(project.path()).expect("persisted manifest");
         assert_eq!(
             persisted.assets[0].content_hash.as_deref(),
@@ -1182,7 +1348,7 @@ mod tests {
         let updated_at = persisted.updated_at;
 
         let mut second = load_manifest(project.path()).expect("already backfilled project");
-        assert!(!backfill_project_asset_content_hashes(
+        assert!(!refresh_project_asset_content_hashes(
             project.path(),
             &mut second
         ));
@@ -1194,6 +1360,192 @@ mod tests {
             load_manifest(project.path()).expect("manifest").updated_at,
             updated_at
         );
+    }
+
+    #[test]
+    fn project_asset_hash_revalidates_malformed_and_tampered_files() {
+        let project = TempJobDir::new("paintnode-project-hash-revalidate").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative = "assets/imported/source.png";
+        fs::write(project.path().join(relative), b"original").expect("source");
+        let mut manifest = new_manifest(project.path());
+        let mut asset = test_asset(relative);
+        asset.content_hash = Some("sha256:not-canonical".into());
+        asset.content_hash_state = Some("verified".into());
+        asset.content_hash_size = Some(8);
+        asset.content_hash_modified_at = Some(modified_millis(&project.path().join(relative)));
+        manifest.assets.push(asset);
+
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        let original_hash = sha256_content_hash(b"original");
+        assert_eq!(
+            manifest.assets[0].content_hash.as_deref(),
+            Some(original_hash.as_str())
+        );
+
+        fs::write(project.path().join(relative), b"tampered-content").expect("tamper");
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        assert_eq!(
+            manifest.assets[0].content_hash.as_deref(),
+            Some(sha256_content_hash(b"tampered-content").as_str())
+        );
+        assert_ne!(
+            manifest.assets[0].content_hash.as_deref(),
+            Some(original_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn project_asset_hash_tracks_missing_reappeared_and_moved_files_without_retrying() {
+        let project = TempJobDir::new("paintnode-project-hash-missing").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let mut manifest = new_manifest(project.path());
+        manifest
+            .assets
+            .push(test_asset("assets/imported/missing.png"));
+
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        assert_eq!(
+            manifest.assets[0].content_hash_state.as_deref(),
+            Some("missing")
+        );
+        assert!(manifest.assets[0].content_hash.is_none());
+        assert!(!refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+
+        fs::write(
+            project.path().join("assets/imported/missing.png"),
+            b"reappeared",
+        )
+        .expect("reappear");
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        assert_eq!(
+            manifest.assets[0].content_hash_state.as_deref(),
+            Some("verified")
+        );
+        assert_eq!(
+            manifest.assets[0].content_hash.as_deref(),
+            Some(sha256_content_hash(b"reappeared").as_str())
+        );
+
+        fs::write(project.path().join("assets/imported/moved.png"), b"moved").expect("moved");
+        manifest.assets[0].relative_path = "assets/imported/moved.png".into();
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        assert_eq!(
+            manifest.assets[0].content_hash.as_deref(),
+            Some(sha256_content_hash(b"moved").as_str())
+        );
+    }
+
+    #[test]
+    fn project_asset_hash_rejects_absolute_and_traversal_paths() {
+        let project = TempJobDir::new("paintnode-project-hash-paths").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let outside = project
+            .path()
+            .parent()
+            .expect("parent")
+            .join("paintnode-outside-hash-secret");
+        fs::write(&outside, b"outside-secret").expect("outside");
+        let mut manifest = new_manifest(project.path());
+        manifest
+            .assets
+            .push(test_asset("../paintnode-outside-hash-secret"));
+        manifest
+            .assets
+            .push(test_asset(outside.to_string_lossy().as_ref()));
+
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        for asset in &manifest.assets {
+            assert_eq!(asset.content_hash_state.as_deref(), Some("unsafe"));
+            assert!(asset.content_hash.is_none());
+        }
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_asset_hash_rejects_symlinks_even_when_the_target_is_inside_the_project() {
+        use std::os::unix::fs::symlink;
+        let project = TempJobDir::new("paintnode-project-hash-symlink").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let target = project.path().join("assets/imported/target.png");
+        let link = project.path().join("assets/imported/link.png");
+        fs::write(&target, b"target").expect("target");
+        symlink(&target, &link).expect("symlink");
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(test_asset("assets/imported/link.png"));
+
+        assert!(refresh_project_asset_content_hashes(
+            project.path(),
+            &mut manifest
+        ));
+        assert_eq!(
+            manifest.assets[0].content_hash_state.as_deref(),
+            Some("unsafe")
+        );
+        assert!(manifest.assets[0].content_hash.is_none());
+    }
+
+    #[test]
+    fn project_asset_hash_streams_large_files_and_add_asset_covers_imported_and_generated() {
+        let project = TempJobDir::new("paintnode-project-hash-stream").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let large = vec![42_u8; 2 * 1024 * 1024 + 123];
+        let large_path = project.path().join("assets/imported/large.bin");
+        fs::write(&large_path, &large).expect("large file");
+        assert_eq!(
+            hash_project_asset_file(&large_path).expect("streaming hash"),
+            sha256_content_hash(&large)
+        );
+
+        let mut large_asset = test_asset("assets/imported/large.bin");
+        large_asset.mime = Some("application/octet-stream".into());
+        let imported = add_asset(project.path(), large_asset).expect("imported");
+        assert_eq!(
+            imported.asset.content_hash_state.as_deref(),
+            Some("verified")
+        );
+        let generated_path = "assets/generated/generated.bin";
+        fs::write(project.path().join(generated_path), ONE_PIXEL_PNG).expect("generated file");
+        let mut generated_asset = ProjectAsset::generated_png(
+            "generated".into(),
+            generated_path.into(),
+            "Generated.png".into(),
+            Some("fixture".into()),
+            None,
+        );
+        generated_asset.mime = Some("application/octet-stream".into());
+        let generated = add_asset(project.path(), generated_asset).expect("generated");
+        assert_eq!(
+            generated.asset.content_hash_state.as_deref(),
+            Some("verified")
+        );
+
+        let api = serde_json::to_value(generated).expect("API JSON");
+        assert!(api["contentHash"].as_str().is_some());
+        assert_eq!(api["contentHashState"], "verified");
+        assert!(api.get("content_hash").is_none());
     }
 
     #[test]

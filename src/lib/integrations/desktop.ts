@@ -277,6 +277,10 @@ export interface ProjectAsset {
   height?: number | null;
   mime?: string | null;
   contentHash?: string | null;
+  contentHashState?: 'verified' | 'missing' | 'unsafe' | null;
+  contentHashSize?: number | null;
+  contentHashModifiedAt?: number | null;
+  contentHashRelativePath?: string | null;
   previewDataUrl?: string | null;
   exists: boolean;
 }
