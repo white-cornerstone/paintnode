@@ -69,7 +69,7 @@ export function sanitizeWorkflowProgressMessage(value: unknown): string {
   if (!normalized || !decodingStable
     || /(?:bearer|access[_-]?token|api[_-]?key|authorization|cookie|secret)/i.test(decoded)
     || /(?:file:|\/Users\/|\/Volumes\/|\/private\/|\/tmp\/|\/home\/|\/var\/|~\/|[A-Za-z]:\\|\\\\)/i.test(decoded)
-    || /(?:^|[\s\\/])\.\.(?:[\\/]|$)/.test(decoded)) {
+    || /(?:^|[\s\\/"'=(:,;\[\{])\.\.(?:[\\/]|$)/.test(decoded)) {
     return 'Provider reported progress.';
   }
   return normalized.slice(0, 500);
