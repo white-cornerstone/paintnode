@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectAsset } from '../integrations/desktop';
 import {
+  createWorkflowBoardRunIdGenerator,
   createCreatorNode,
   createWorkflowCompositionExecutor,
   isFullWorkflowRunRecord,
@@ -134,6 +135,66 @@ async function seedAcceptedResult(store: WorkflowStore, run: ReturnType<typeof h
 }
 
 describe('WorkflowStore selective execution integration', () => {
+  it('executes two Board-context Generate nodes with distinct provider and provenance run IDs', async () => {
+    const store = twoGenerateStore();
+    const run = harness();
+    const issuedRunIds: string[] = [];
+    const boardRunId = createWorkflowBoardRunIdGenerator('board-selective-run');
+    const options = {
+      ...run.options(),
+      runIdGenerator: (nodeId: string, attempt: number) => {
+        const runId = boardRunId(nodeId, attempt);
+        issuedRunIds.push(runId);
+        return runId;
+      },
+    };
+    const preflight = await store.preflightSelectiveExecution('run-from-here', 'composition', options);
+
+    const outcome = await store.runSelectiveExecution(preflight, options);
+    const committedRunIds = store.graphSnapshot().runRecords.map((record) => record.id);
+
+    expect(outcome.executedNodeIds).toEqual(['transform-generate-square', 'transform-second']);
+    expect(outcome.failures).toEqual({});
+    expect(issuedRunIds).toHaveLength(2);
+    expect(new Set(issuedRunIds).size).toBe(2);
+    expect(committedRunIds).toEqual(issuedRunIds);
+  });
+
+  it('keeps the active Transform visibly running and cancels the exact Board attempt ID', async () => {
+    const store = campaignStore();
+    const run = harness();
+    let starts = 0;
+    run.setExecute(async () => {
+      starts += 1;
+      return new Promise(() => undefined);
+    });
+    const cancelledRunIds: string[] = [];
+    const options = {
+      ...run.options(),
+      runIdGenerator: createWorkflowBoardRunIdGenerator('board-cancel-run'),
+      cancelExecutionForRun: async (runId: string) => {
+        cancelledRunIds.push(runId);
+        return { disposition: 'terminated' as const, message: 'Exact provider attempt stopped.' };
+      },
+    };
+    const preflight = await store.preflightSelectiveExecution(
+      'run-node', 'transform-generate-square', options,
+    );
+
+    const execution = store.runSelectiveExecution(preflight, options);
+    while (starts === 0) await Promise.resolve();
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'running',
+      message: expect.any(String),
+    });
+    await store.cancelSelectiveExecution();
+    const outcome = await execution;
+    const cancelledRecord = store.graphSnapshot().runRecords.find((record) => record.status === 'cancelled');
+
+    expect(outcome.cancelledNodeIds).toEqual(['transform-generate-square']);
+    expect(cancelledRunIds).toEqual([cancelledRecord?.id]);
+  });
+
   it.each(['run-node', 'run-from-here'] as const)(
     'previews Transform %s without provider work and executes only after explicit confirmation',
     async (mode) => {

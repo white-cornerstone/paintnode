@@ -68,6 +68,13 @@ async function executeObservedProvider<T>(
   });
 }
 
+function providerRunId(
+  configuredRunId: string | undefined,
+  context: Readonly<WorkflowNodeExecutionContext>,
+): string | undefined {
+  return context.identity.runId === 'unscoped-run' ? configuredRunId : context.identity.runId;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -166,14 +173,15 @@ export function createCodexWorkflowTransformExecutor(
   config: CodexGeneratorConfig,
   dependencies: WorkflowCompositionAdapterDependencies = {},
 ): WorkflowNodeExecutor {
-  return createWorkflowCompositionExecutor('codex', async (request, context) => resultAsset(
-    await executeObservedProvider(config.runId, context, () => composeCodexWorkflow(
-      codexConfigForRequest(config, request),
+  return createWorkflowCompositionExecutor('codex', async (request, context) => {
+    const runId = providerRunId(config.runId, context);
+    return resultAsset(await executeObservedProvider(runId, context, () => composeCodexWorkflow(
+      codexConfigForRequest({ ...config, runId }, request),
       request.prompt,
       providerSources(request),
       request.output,
-    ), dependencies),
-  ), {
+    ), dependencies));
+  }, {
     executor: { id: 'paintnode-codex-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
       const effective = codexConfigForRequest(config, request);
@@ -197,14 +205,15 @@ export function createAntigravityWorkflowTransformExecutor(
   config: AntigravityGeneratorConfig,
   dependencies: WorkflowCompositionAdapterDependencies = {},
 ): WorkflowNodeExecutor {
-  return createWorkflowCompositionExecutor('antigravity', async (request, context) => resultAsset(
-    await executeObservedProvider(config.runId, context, () => composeAntigravityWorkflow(
-      antigravityConfigForRequest(config, request),
+  return createWorkflowCompositionExecutor('antigravity', async (request, context) => {
+    const runId = providerRunId(config.runId, context);
+    return resultAsset(await executeObservedProvider(runId, context, () => composeAntigravityWorkflow(
+      antigravityConfigForRequest({ ...config, runId }, request),
       request.prompt,
       providerSources(request),
       request.output,
-    ), dependencies),
-  ), {
+    ), dependencies));
+  }, {
     executor: { id: 'paintnode-antigravity-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
       const effective = antigravityConfigForRequest(config, request);

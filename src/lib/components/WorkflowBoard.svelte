@@ -46,6 +46,7 @@
   import {
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
+    createWorkflowBoardRunIdGenerator,
     findOpenCreatorNodePlacement,
     resolveWorkflowStoryboardRead,
     selectiveExecutionOutcomeSummary,
@@ -1570,6 +1571,7 @@
     const runProjectPath = project.path;
     const runProvider = runSelection.provider;
     const runAssets = assets.map((asset) => ({ ...asset }));
+    const runIdGenerator = createWorkflowBoardRunIdGenerator(runId);
     const executors = runSelection.qaFake
       ? [createProviderFreeQaWorkflowExecutor('provider-free')]
       : [
@@ -1587,10 +1589,10 @@
       assets: runAssets,
       selectiveExecutionIdentity: workflowExecutionOptionsIdentity(),
       currentProjectIdentity: () => project.identity,
-      runIdGenerator: () => runId,
+      runIdGenerator,
       ...(runSelection.qaFake ? {} : {
-        cancelExecution: async () => {
-          await cancelAiRun(runId);
+        cancelExecutionForRun: async (attemptRunId: string) => {
+          await cancelAiRun(attemptRunId);
           return { disposition: 'detached' as const };
         },
       }),
@@ -2095,6 +2097,7 @@
 
         {#each workflow.creatorNodes as node (node.id)}
           {@const definition = creatorNodeDefinition(node.type)}
+          {@const transformRunState = workflow.transformExecution(node.id)}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -2207,6 +2210,13 @@
                 </div>
               {/if}
               {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+                {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
+                  <p
+                    class="selective-running-state"
+                    data-workflow-selective-running-state={transformRunState.state}
+                    aria-live="polite"
+                  ><strong>{transformRunState.state}</strong> {transformRunState.message}</p>
+                {/if}
                 <div class="selective-node-actions" role="group" aria-label="Preview selective run">
                   <button
                     type="button"
@@ -3109,6 +3119,21 @@
   }
   .selective-preview .selective-error {
     color: #ffb0b0;
+  }
+  .selective-running-state {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 5px;
+    align-items: baseline;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    color: var(--text);
+  }
+  .selective-running-state strong {
+    color: #a9d5ff;
+    text-transform: uppercase;
   }
   .brief-node textarea {
     min-height: 105px;

@@ -145,31 +145,44 @@ describe('desktop workflow composition adapters', () => {
     expect(JSON.stringify(provenance)).not.toMatch(/projectPath|antigravityBin|advancedJson|runId|debug|transcript/i);
   });
 
-  it('routes matching native progress through the exact workflow context and disposes the observer', async () => {
-    const dispose = vi.fn();
-    const reportProgress = vi.fn();
-    const observeProgress = vi.fn(async (runId, report) => {
-      expect(runId).toBe('native-run');
-      report({ runId: 'other-run', message: 'adapter receives only filtered events' });
-      report({ runId: 'native-run', message: '/tmp/private-output.png' });
-      return dispose;
-    });
-    const executor = createCodexWorkflowTransformExecutor({
-      model: 'codex-model', projectPath: '/virtual/project', runId: 'native-run',
-    } satisfies CodexGeneratorConfig, { observeProgress });
+  it.each(['codex', 'antigravity'] as const)(
+    'routes matching %s progress through the exact workflow context and disposes the observer',
+    async (provider) => {
+      const dispose = vi.fn();
+      const reportProgress = vi.fn();
+      const observeProgress = vi.fn(async (runId, report) => {
+        expect(runId).toBe('transform-attempt-1');
+        report({ runId: 'other-run', message: 'adapter receives only filtered events' });
+        report({ runId: 'transform-attempt-1', message: '/tmp/private-output.png' });
+        return dispose;
+      });
+      const executor = provider === 'codex'
+        ? createCodexWorkflowTransformExecutor({
+            model: 'codex-model', projectPath: '/virtual/project', runId: 'board-run-base',
+          } satisfies CodexGeneratorConfig, { observeProgress })
+        : createAntigravityWorkflowTransformExecutor({
+            model: 'agent-model', projectPath: '/virtual/project', runId: 'board-run-base',
+          } satisfies AntigravityGeneratorConfig, { observeProgress });
 
-    await executor.execute(request({ provider: 'codex' }), {
-      identity: {
-        workflowSessionId: 'session-1', workflowId: 'workflow-test',
-        runId: 'native-run', nodeId: 'transform-generate-square',
-      },
-      reportProgress,
-    });
+      await executor.execute(request({ provider }), {
+        identity: {
+          workflowSessionId: 'session-1', workflowId: 'workflow-test',
+          runId: 'transform-attempt-1', nodeId: 'transform-generate-square',
+        },
+        reportProgress,
+      });
 
-    expect(reportProgress).not.toHaveBeenCalledWith({ message: 'adapter receives only filtered events' });
-    expect(reportProgress).toHaveBeenCalledWith({ message: '/tmp/private-output.png' });
-    expect(dispose).toHaveBeenCalledOnce();
-  });
+      expect(reportProgress).not.toHaveBeenCalledWith({ message: 'adapter receives only filtered events' });
+      expect(reportProgress).toHaveBeenCalledWith({ message: '/tmp/private-output.png' });
+      expect(services[provider]).toHaveBeenCalledWith(
+        expect.objectContaining({ runId: 'transform-attempt-1' }),
+        expect.any(String),
+        expect.any(Array),
+        expect.any(Object),
+      );
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each(['codex', 'antigravity'] as const)('normalizes exact native stop completion for %s', async (provider) => {
     services[provider].mockRejectedValueOnce(new Error('The task was stopped.'));

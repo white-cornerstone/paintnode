@@ -58,6 +58,7 @@ export interface WorkflowTransformStoreOutcome extends WorkflowTransformExecutio
 export interface WorkflowStoreRunOptions extends ExecuteCampaignGenerateOptions {
   currentProjectIdentity?: () => string | null;
   selectiveExecutionIdentity?: string;
+  cancelExecutionForRun?: (runId: string) => Promise<unknown>;
   cancelExecution?: WorkflowCancellationHandler;
   cancellationTimeoutMs?: number;
 }
@@ -1178,7 +1179,9 @@ export class WorkflowStore {
       sequence,
       sessionIdentity,
       controller,
-      cancelExecution: options.cancelExecution,
+      cancelExecution: options.cancelExecutionForRun
+        ? async () => ({ disposition: 'terminated' as const, message: 'Cancelled before provider execution.' })
+        : options.cancelExecution,
       cancellationTimeoutMs: options.cancellationTimeoutMs ?? 1_500,
       identity: null,
       stopProgress: null,
@@ -1222,6 +1225,9 @@ export class WorkflowStore {
           runId: event.runId,
           nodeId: event.nodeId,
         };
+        if (options.cancelExecutionForRun) {
+          activeRun.cancelExecution = () => options.cancelExecutionForRun!(event.runId);
+        }
         activeRun.stopProgress = this.progressRouter.subscribe(activeRun.identity, (progress) => {
           if (!activeRun.progressOpen || this.activeTransformRuns.get(transformNodeId) !== activeRun) return;
           const state = progress.stage === 'succeeded' ? 'running' : progress.stage;

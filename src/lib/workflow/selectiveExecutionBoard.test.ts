@@ -12,6 +12,12 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('Preview selective run');
     expect(boardSource).toContain('Confirm selective run');
     expect(boardSource).toContain('maxConcurrency: 1');
+    expect(boardSource).toContain('createWorkflowBoardRunIdGenerator');
+  });
+
+  it('renders the exact transient state for each Transform during confirmed selective execution', () => {
+    expect(boardSource).toContain('workflow.transformExecution(node.id)');
+    expect(boardSource).toContain('data-workflow-selective-running-state');
   });
 
   it('invalidates the visible preview when graph, project, provider, or run options change', () => {
