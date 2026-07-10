@@ -1400,8 +1400,9 @@ export class WorkflowStore {
   ): void {
     if (!relativePath
       || submission.sessionIdentity !== this.workflowSessionIdentity
-      || submission.projectIdentity !== project.identity
-      || submission.pathIntentIdentity !== this.activeSavePathIntentIdentity) return;
+      || submission.projectIdentity !== project.identity) return;
+    if (submission.pathIntentIdentity !== this.activeSavePathIntentIdentity
+      && relativePath !== this.activeSavePathIntentTarget) return;
     this.activeSavePathIntentTarget = relativePath;
     this.savedPath = relativePath;
     this.savedRev = submission.storeRevision;

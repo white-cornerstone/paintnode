@@ -528,6 +528,31 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     },
   );
 
+  it('reconciles a stale path intent when its resolved target matches the active file', async () => {
+    const store = storeWithAcceptedHistory();
+    const originalWrite = deferred<string>();
+    const saveAsWrite = deferred<string | null>();
+    vi.spyOn(project, 'saveDocumentToPath').mockReturnValue(originalWrite.promise);
+    vi.spyOn(project, 'saveDocument').mockReturnValue(saveAsWrite.promise);
+    store.setBriefObjective('brief', 'Snapshot that will finish writing last.');
+    const originalBytes = bytes(store);
+
+    const originalSave = store.save();
+    const saveAs = store.saveAs('Same Path Rename');
+    saveAsWrite.resolve('workflows/campaign-with-history.cxflow.json');
+    await saveAs;
+    expect(store.dirty).toBe(false);
+
+    originalWrite.resolve('workflows/campaign-with-history.cxflow.json');
+    await originalSave;
+
+    expect(store.savedPath).toBe('workflows/campaign-with-history.cxflow.json');
+    expect(store.name).toBe('Same Path Rename');
+    expect(store.dirty).toBe(true);
+    expect((store as unknown as { savedWorkflowBytes: string }).savedWorkflowBytes)
+      .toBe(originalBytes);
+  });
+
   it.each(['older-first', 'newer-first'] as const)(
     'lets only the later unsaved Save establish a path when writes finish %s',
     async (completionOrder) => {
