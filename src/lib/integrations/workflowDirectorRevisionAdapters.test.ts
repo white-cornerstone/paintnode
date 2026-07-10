@@ -46,4 +46,32 @@ describe('configured workflow Director revision adapter', () => {
     await expect(pending).rejects.not.toThrow(/alice|Bearer/i);
     expect(cancel).toHaveBeenCalledWith('revision-cancel');
   });
+
+  it.each([
+    ['cancelled: Bearer secret at /Users/alice/private', 'The AI Director revision was cancelled.'],
+    ['timed out with token secret at /Users/alice/private', 'The AI Director revision timed out and was stopped.'],
+    ['stopped after reading Bearer secret at /Users/alice/private', 'The AI Director revision was stopped.'],
+  ])('maps provider state errors to fixed safe copy: %s', async (providerError, expected) => {
+    const store = new WorkflowStore();
+    store.newFromTemplate('campaign-composer');
+    const graph = store.graphSnapshot();
+    const requester = createConfiguredWorkflowRevisionRequester(
+      defaultAiRunOptions(),
+      vi.fn().mockRejectedValue(new Error(providerError)),
+      () => 'revision-safe-error',
+    );
+
+    await expect(requester.request({
+      instruction: 'Refine safely.',
+      graph,
+      sourceGraphRevision: { graphId: graph.id, revision: store.graphRevision },
+      session: store.captureDirectorSession(),
+    })).rejects.toThrow(expected);
+    await expect(requester.request({
+      instruction: 'Refine safely.',
+      graph,
+      sourceGraphRevision: { graphId: graph.id, revision: store.graphRevision },
+      session: store.captureDirectorSession(),
+    })).rejects.not.toThrow(/alice|Bearer|secret/i);
+  });
 });

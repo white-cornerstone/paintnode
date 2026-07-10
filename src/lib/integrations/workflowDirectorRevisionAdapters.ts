@@ -85,7 +85,9 @@ export function createConfiguredWorkflowRevisionRequester(
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/stopped|cancelled|timed out/i.test(message)) throw new Error(message.replace(/[\r\n]+/g, ' ').slice(0, 240));
+        if (/timed out/i.test(message)) throw new Error('The AI Director revision timed out and was stopped.');
+        if (/cancelled/i.test(message)) throw new Error('The AI Director revision was cancelled.');
+        if (/stopped/i.test(message)) throw new Error('The AI Director revision was stopped.');
         throw new Error('Configured AI Director could not prepare a safe workflow revision. Review provider progress and try again.');
       } finally {
         signal?.removeEventListener('abort', cancel);
@@ -94,4 +96,3 @@ export function createConfiguredWorkflowRevisionRequester(
     },
   };
 }
-
