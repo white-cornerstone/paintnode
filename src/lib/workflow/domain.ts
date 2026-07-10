@@ -64,6 +64,11 @@ export interface WorkflowDomainOptions {
   initialRevision?: number;
 }
 
+export interface WorkflowGraphRevision {
+  readonly graphId: string;
+  readonly revision: number;
+}
+
 export type WorkflowNodeDraft = Omit<WorkflowNodeV2, 'id'> & { id?: string };
 export type WorkflowEdgeDraft = Omit<WorkflowEdgeV2, 'id'> & { id?: string };
 export type WorkflowNodeUpdate = Partial<Pick<WorkflowNodeV2, 'title' | 'color' | 'config' | 'position' | 'size'>>;
@@ -604,6 +609,10 @@ export class WorkflowGraphDomain {
 
   get revision(): number {
     return this.#revision;
+  }
+
+  get contentRevision(): WorkflowGraphRevision {
+    return Object.freeze({ graphId: this.#graph.id, revision: this.#revision });
   }
 
   node(nodeId: string): WorkflowNodeV2 | null {

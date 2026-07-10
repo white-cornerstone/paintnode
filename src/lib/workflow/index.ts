@@ -12,3 +12,4 @@ export * from './runObserver';
 export * from './providerQaSelection';
 export * from './directorDraft';
 export * from './directorProposalSession';
+export * from './directorPatch';
