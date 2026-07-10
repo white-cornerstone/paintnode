@@ -1625,7 +1625,7 @@
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
       if (activeWorkflowTaskId) {
-        if ((e as { code?: unknown })?.code === 'CANCELLED') aiTasks.complete(activeWorkflowTaskId, 'Cancelled');
+        if ((e as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(activeWorkflowTaskId);
         else aiTasks.fail(activeWorkflowTaskId, error);
       }
       editor.flash('Workflow generation failed');

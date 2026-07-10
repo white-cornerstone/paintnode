@@ -49,17 +49,26 @@ export function sanitizeWorkflowProgressMessage(value: unknown): string {
   if (typeof value !== 'string') return 'Provider reported progress.';
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   let decoded = normalized;
-  for (let depth = 0; depth < 2; depth += 1) {
+  let decodingStable = false;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!/%[0-9a-f]{2}/i.test(decoded)) {
+      decodingStable = true;
+      break;
+    }
     try {
       const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
+      if (next === decoded) {
+        decodingStable = true;
+        break;
+      }
       decoded = next;
     } catch {
       break;
     }
   }
-  if (!normalized || /(?:bearer|access[_-]?token|api[_-]?key|authorization|cookie|secret)/i.test(normalized)
-    || /(?:^|\s)(?:file:|\/Users\/|\/Volumes\/|\/private\/|\/tmp\/|\/home\/|\/var\/|~\/|[A-Za-z]:\\|\\\\)/i.test(decoded)
+  if (!normalized || !decodingStable
+    || /(?:bearer|access[_-]?token|api[_-]?key|authorization|cookie|secret)/i.test(decoded)
+    || /(?:file:|\/Users\/|\/Volumes\/|\/private\/|\/tmp\/|\/home\/|\/var\/|~\/|[A-Za-z]:\\|\\\\)/i.test(decoded)
     || /(?:^|[\s\\/])\.\.(?:[\\/]|$)/.test(decoded)) {
     return 'Provider reported progress.';
   }

@@ -20,8 +20,11 @@ describe('AI task cancellation', () => {
     expect(cancel).toHaveBeenCalledOnce();
     expect(task.progress).toBe('Cancelling…');
 
-    store.complete(task.id, 'Cancelled');
+    store.markCancelled(task.id);
     expect(store.canCancel(task)).toBe(false);
     expect(task.cancel).toBeNull();
+    expect(task.status).toBe('cancelled');
+    expect(task.progress).toBe('Cancelled');
+    expect(task.completedAt).not.toBeNull();
   });
 });

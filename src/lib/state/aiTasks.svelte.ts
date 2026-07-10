@@ -5,7 +5,7 @@ import type { WorkflowSourceImage } from '../integrations/desktop';
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
 
 export type AiTaskKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust' | 'workflow';
-export type AiTaskStatus = 'running' | 'completed' | 'error';
+export type AiTaskStatus = 'running' | 'completed' | 'cancelled' | 'error';
 
 export interface GenerateTaskDetail {
   kind: 'generate';
@@ -144,7 +144,7 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
   const kind = value.kind;
   const status = value.status;
   if (kind !== 'generate' && kind !== 'retouch' && kind !== 'upscale' && kind !== 'decouple' && kind !== 'autoAdjust' && kind !== 'workflow') return null;
-  if (status !== 'running' && status !== 'completed' && status !== 'error') return null;
+  if (status !== 'running' && status !== 'completed' && status !== 'cancelled' && status !== 'error') return null;
   const detail = value.detail;
   if (!isRecord(detail) || detail.kind !== kind) return null;
   const id = typeof value.id === 'string' ? value.id : createTaskId(kind);
@@ -323,6 +323,18 @@ export class AiTaskStore {
     this.persistProject(task.projectPath);
   }
 
+  markCancelled(id: string, progress = 'Cancelled'): void {
+    const task = this.find(id);
+    if (!task) return;
+    task.status = 'cancelled';
+    task.progress = progress;
+    task.error = '';
+    task.completedAt = Date.now();
+    task.retry = null;
+    task.cancel = null;
+    this.persistProject(task.projectPath);
+  }
+
   fail(id: string, error: string): void {
     const task = this.find(id);
     if (!task) return;
@@ -366,14 +378,16 @@ export class AiTaskStore {
     // Clears everything the panel currently shows: the active project's tasks
     // plus project-less (null-path) tasks.
     this.allTasks = this.allTasks.filter(
-      (task) => (task.projectPath !== projectPath && task.projectPath !== null) || task.status !== 'completed',
+      (task) => (task.projectPath !== projectPath && task.projectPath !== null)
+        || (task.status !== 'completed' && task.status !== 'cancelled'),
     );
     this.persistProject(projectPath);
   }
 
   clearCompletedTask(id: string): void {
     const task = this.find(id);
-    this.allTasks = this.allTasks.filter((item) => item.id !== id || item.status !== 'completed');
+    this.allTasks = this.allTasks.filter((item) => item.id !== id
+      || (item.status !== 'completed' && item.status !== 'cancelled'));
     this.persistProject(task?.projectPath ?? this.activeProjectPath);
   }
 
@@ -390,7 +404,7 @@ export class AiTaskStore {
     this.allTasks = this.allTasks.filter(
       (task) =>
         (task.projectPath !== projectPath && task.projectPath !== null) ||
-        (task.status !== 'completed' && task.status !== 'error'),
+        (task.status !== 'completed' && task.status !== 'cancelled' && task.status !== 'error'),
     );
     this.persistProject(projectPath);
   }

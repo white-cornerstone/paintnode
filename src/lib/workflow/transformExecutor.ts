@@ -466,6 +466,133 @@ export async function executeCampaignGenerateTransform(
     throw new WorkflowTransformExecutionError('NOT_READY', plan.blocked[0].message, 'Reconnect the blocked workflow inputs');
   }
 
+  const brief = graph.nodes.find((node) => node.type === 'brief');
+  const briefText = textConfig(brief ?? artDirection, brief ? 'objective' : 'prompt');
+  const artDirectionText = textConfig(artDirection, 'prompt');
+  const transformInstructions = textConfig(transform, 'instructions');
+  const storyboard = storyboardDescriptor(artDirection);
+  const placementConstraints = storyboard ? [
+    'Treat the storyboard as the primary spatial plan. Preserve relative placement, ordering, scale, pose, prop positions, foreground and background zones, and intentional empty areas.',
+    ...storyboard.annotations,
+    ...annotationItemConstraints(storyboard.annotationItems, storyboard.width, storyboard.height),
+  ] : [];
+  const outputRequest = {
+    nodeId: output.id,
+    title: output.title,
+    width: numberConfig(output, 'finalWidth'),
+    height: numberConfig(output, 'finalHeight'),
+  };
+  const attempt = nextRunAttempt(graph, transform);
+  const startedAt = options.clock?.() ?? Date.now();
+  const runId = options.runIdGenerator?.(transform.id, attempt)
+    ?? globalThis.crypto?.randomUUID?.()
+    ?? `run-${transform.id}-${startedAt}-${attempt}`;
+  safeWorkflowIdentifier(runId, 'Run ID');
+  if (graph.runRecords.some((record) => record.id === runId)) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT', 'The generated run ID collides with existing workflow history.', 'Retry Generate',
+    );
+  }
+  const referenceId = options.idGenerator?.() ?? `result-${runId}`;
+  safeWorkflowIdentifier(referenceId, 'Output asset reference ID');
+  if (graph.assetReferences.some((reference) => reference.id === referenceId)
+    || graph.runRecords.some((record) => isFullWorkflowRunRecord(record)
+      && record.outputs.some((item) => item.assetReferenceId === referenceId))) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT',
+      'The generated output reference collides with existing workflow history.',
+      'Retry Generate',
+    );
+  }
+  const hash = options.hash ?? workflowSha256Text;
+  const retryOfRunId = retryRunId(graph, transform, options.retryOfRunId);
+  const workflowSessionId = safeWorkflowIdentifier(
+    options.workflowSessionId ?? 'workflow-session',
+    'Workflow session ID',
+  );
+  const identity: Readonly<WorkflowRunIdentity> = Object.freeze({
+    workflowSessionId,
+    workflowId: graph.id,
+    runId,
+    nodeId: transform.id,
+  });
+  let progressSequence = 0;
+  const reportProgress = (update: {
+    stage: WorkflowRunProgressEvent['stage'];
+    message: string;
+    completed?: number;
+    total?: number;
+  }): void => {
+    if (!['queued', 'running', 'cancelling', 'cancelled', 'failed', 'succeeded'].includes(update.stage)) return;
+    const message = sanitizeWorkflowProgressMessage(update.message);
+    if (update.completed !== undefined && (!Number.isSafeInteger(update.completed) || update.completed < 0)) return;
+    if (update.total !== undefined && (!Number.isSafeInteger(update.total) || update.total < 1)) return;
+    if (update.completed !== undefined && update.total !== undefined && update.completed > update.total) return;
+    const event: WorkflowRunProgressEvent = {
+      ...identity,
+      stage: update.stage,
+      message,
+      sequence: ++progressSequence,
+      ...(update.completed !== undefined ? { completed: update.completed } : {}),
+      ...(update.total !== undefined ? { total: update.total } : {}),
+    };
+    try {
+      options.onProgress?.(Object.freeze(event));
+    } catch {
+      // Progress reporting cannot replace the execution outcome.
+    }
+  };
+  const preMaterialPrompt = 'Workflow source materialization was pending when this attempt ended.';
+  const preMaterialRequest: WorkflowTransformExecutionRequest = {
+    workflowId: graph.id,
+    nodeId: transform.id,
+    capability,
+    provider: effectiveProvider,
+    projectPath: options.projectPath,
+    brief: briefText,
+    artDirection: artDirectionText,
+    transform: { capability, instructions: transformInstructions, advanced },
+    prompt: preMaterialPrompt,
+    sources: [],
+    storyboard: storyboard ? { ...storyboard, placementConstraints, source: null } : null,
+    output: outputRequest,
+  };
+  const preMaterialRunMaterial: WorkflowRunMaterialDraft = {
+    sourceAssets: [],
+    prompt: {
+      brief: briefText,
+      artDirection: artDirectionText,
+      instructions: transformInstructions,
+      constraints: placementConstraints,
+      effectivePrompt: preMaterialPrompt,
+    },
+    provider: executor.describeRun(deepFreeze(cloneValue(preMaterialRequest)) as Readonly<WorkflowTransformExecutionRequest>),
+    executor: executor.executor,
+    output: outputRequest,
+  };
+  let cancellationMaterial = preMaterialRunMaterial;
+  const cancellationError = (): WorkflowTransformExecutionError => {
+    const finishedAt = options.clock?.() ?? Date.now();
+    const cancelled = createWorkflowRunRecord({
+      id: runId, nodeId: transform.id, attempt, status: 'cancelled', graph, material: cancellationMaterial,
+      startedAt, finishedAt, outputs: [], retryOfRunId,
+      failure: { code: 'CANCELLED', message: 'The attempt was cancelled.' },
+    }, hash);
+    reportProgress({ stage: 'cancelled', message: cancelled.failure!.message });
+    return new WorkflowTransformExecutionError(
+      'CANCELLED', cancelled.failure!.message, 'Retry Generate',
+      appendRunRecord(graph, transform.id, cancelled),
+    );
+  };
+  const awaitMaterialization = async <T>(operation: () => Promise<T>): Promise<T> => {
+    try {
+      throwIfWorkflowCancelled(options.signal);
+      return await raceWorkflowCancellation(Promise.resolve().then(operation), options.signal);
+    } catch (error) {
+      if (error instanceof WorkflowRunCancelledError || options.signal?.aborted) throw cancellationError();
+      throw error;
+    }
+  };
   const inputEdges = graph.edges.filter((edge) => edge.target.nodeId === artDirection.id && edge.target.portId === 'assets');
   const sources: WorkflowTransformSource[] = [];
   for (const edge of inputEdges) {
@@ -480,7 +607,7 @@ export async function executeCampaignGenerateTransform(
         `Replace the asset in ${input.title}`,
       );
     }
-    const material = await options.resolveAsset(asset);
+    const material = await awaitMaterialization(() => options.resolveAsset(asset));
     let canonicalAssetId: string;
     let canonicalRelativePath: string;
     try {
@@ -535,19 +662,13 @@ export async function executeCampaignGenerateTransform(
     });
   }
 
-  const brief = graph.nodes.find((node) => node.type === 'brief');
-  const briefText = textConfig(brief ?? artDirection, brief ? 'objective' : 'prompt');
-  const artDirectionText = textConfig(artDirection, 'prompt');
-  const transformInstructions = textConfig(transform, 'instructions');
-  const storyboard = storyboardDescriptor(artDirection);
-  const placementConstraints = storyboard ? [
-    'Treat the storyboard as the primary spatial plan. Preserve relative placement, ordering, scale, pose, prop positions, foreground and background zones, and intentional empty areas.',
-    ...storyboard.annotations,
-    ...annotationItemConstraints(storyboard.annotationItems, storyboard.width, storyboard.height),
-  ] : [];
   const storyboardRead = executor.materialization !== 'metadata-only'
     && storyboard && (storyboard.dataUrl || storyboard.oraPath)
-    ? await options.readStoryboard?.(deepFreeze(cloneValue(storyboard)) as Readonly<WorkflowStoryboardDescriptor>) ?? null
+    ? options.readStoryboard
+      ? await awaitMaterialization(() => options.readStoryboard!(
+        deepFreeze(cloneValue(storyboard)) as Readonly<WorkflowStoryboardDescriptor>,
+      ))
+      : null
     : null;
   const storyboardBytes = storyboardRead?.bytes instanceof Uint8Array && storyboardRead.bytes.length > 0
     ? new Uint8Array(storyboardRead.bytes)
@@ -584,37 +705,8 @@ export async function executeCampaignGenerateTransform(
     prompt,
     sources,
     storyboard: materializedStoryboard,
-    output: {
-      nodeId: output.id,
-      title: output.title,
-      width: numberConfig(output, 'finalWidth'),
-      height: numberConfig(output, 'finalHeight'),
-    },
+    output: outputRequest,
   };
-
-  const attempt = nextRunAttempt(graph, transform);
-  const startedAt = options.clock?.() ?? Date.now();
-  const runId = options.runIdGenerator?.(transform.id, attempt)
-    ?? globalThis.crypto?.randomUUID?.()
-    ?? `run-${transform.id}-${startedAt}-${attempt}`;
-  safeWorkflowIdentifier(runId, 'Run ID');
-  if (graph.runRecords.some((record) => record.id === runId)) {
-    throw new WorkflowTransformExecutionError(
-      'INVALID_EXECUTOR_RESULT', 'The generated run ID collides with existing workflow history.', 'Retry Generate',
-    );
-  }
-  const referenceId = options.idGenerator?.() ?? `result-${runId}`;
-  safeWorkflowIdentifier(referenceId, 'Output asset reference ID');
-  if (graph.assetReferences.some((reference) => reference.id === referenceId)
-    || graph.runRecords.some((record) => isFullWorkflowRunRecord(record)
-      && record.outputs.some((item) => item.assetReferenceId === referenceId))) {
-    throw new WorkflowTransformExecutionError(
-      'INVALID_EXECUTOR_RESULT',
-      'The generated output reference collides with existing workflow history.',
-      'Retry Generate',
-    );
-  }
-  const hash = options.hash ?? workflowSha256Text;
   const provenanceSources = sources.map((source) => ({
     nodeId: source.nodeId,
     assetId: source.assetId,
@@ -646,43 +738,7 @@ export async function executeCampaignGenerateTransform(
     executor: executor.executor,
     output: request.output,
   };
-  const retryOfRunId = retryRunId(graph, transform, options.retryOfRunId);
-  const workflowSessionId = safeWorkflowIdentifier(
-    options.workflowSessionId ?? 'workflow-session',
-    'Workflow session ID',
-  );
-  const identity: Readonly<WorkflowRunIdentity> = Object.freeze({
-    workflowSessionId,
-    workflowId: graph.id,
-    runId,
-    nodeId: transform.id,
-  });
-  let progressSequence = 0;
-  const reportProgress = (update: {
-    stage: WorkflowRunProgressEvent['stage'];
-    message: string;
-    completed?: number;
-    total?: number;
-  }): void => {
-    if (!['queued', 'running', 'cancelling', 'cancelled', 'failed', 'succeeded'].includes(update.stage)) return;
-    const message = sanitizeWorkflowProgressMessage(update.message);
-    if (update.completed !== undefined && (!Number.isSafeInteger(update.completed) || update.completed < 0)) return;
-    if (update.total !== undefined && (!Number.isSafeInteger(update.total) || update.total < 1)) return;
-    if (update.completed !== undefined && update.total !== undefined && update.completed > update.total) return;
-    const event: WorkflowRunProgressEvent = {
-      ...identity,
-      stage: update.stage,
-      message,
-      sequence: ++progressSequence,
-      ...(update.completed !== undefined ? { completed: update.completed } : {}),
-      ...(update.total !== undefined ? { total: update.total } : {}),
-    };
-    try {
-      options.onProgress?.(Object.freeze(event));
-    } catch {
-      // Progress reporting cannot replace the execution outcome.
-    }
-  };
+  cancellationMaterial = runMaterial;
   const context: Readonly<WorkflowNodeExecutionContext> = Object.freeze({
     identity,
     signal: options.signal,
@@ -703,20 +759,6 @@ export async function executeCampaignGenerateTransform(
     retryOfRunId,
   }, hash);
   reportProgress({ stage: 'queued', message: 'Queued for execution.' });
-
-  const cancellationError = (): WorkflowTransformExecutionError => {
-    const finishedAt = options.clock?.() ?? Date.now();
-    const cancelled = createWorkflowRunRecord({
-      id: runId, nodeId: transform.id, attempt, status: 'cancelled', graph, material: runMaterial,
-      startedAt, finishedAt, outputs: [], retryOfRunId,
-      failure: { code: 'CANCELLED', message: 'The attempt was cancelled.' },
-    }, hash);
-    reportProgress({ stage: 'cancelled', message: cancelled.failure!.message });
-    return new WorkflowTransformExecutionError(
-      'CANCELLED', cancelled.failure!.message, 'Retry Generate',
-      appendRunRecord(graph, transform.id, cancelled),
-    );
-  };
 
   let phase: 'executor' | 'store' | 'validation' = 'executor';
   let artifact: WorkflowTransformArtifact;

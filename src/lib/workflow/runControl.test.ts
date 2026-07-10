@@ -102,7 +102,17 @@ describe('workflow run control', () => {
     '../private/result.png',
     '%2e%2e%2fprivate%2fresult.png',
     '%252e%252e%252fprivate%252fresult.png',
+    '%25252e%25252e%25252fprivate%25252fresult.png',
+    '%252525252e%252525252e%252525252fprivate%252525252fresult.png',
+    'path=/tmp/private/result.png',
+    'result:(/home/person/private.png)',
+    'Authorization%3A%20Bearer%20private-token',
+    '%41%75%74%68%6f%72%69%7a%61%74%69%6f%6e%253A%2520Bearer%2520private-token',
   ])('redacts unsafe provider progress paths: %s', (message) => {
     expect(sanitizeWorkflowProgressMessage(`Writing ${message}`)).toBe('Provider reported progress.');
+  });
+
+  it('preserves ordinary percentage progress without treating it as malformed encoding', () => {
+    expect(sanitizeWorkflowProgressMessage('Rendered 50% complete')).toBe('Rendered 50% complete');
   });
 });

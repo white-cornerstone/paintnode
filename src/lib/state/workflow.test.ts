@@ -373,6 +373,84 @@ describe('WorkflowStore graph adapter', () => {
     expect(cancelExecution).toHaveBeenCalledTimes(2);
   });
 
+  it('supersedes a run blocked forever while resolving source material', async () => {
+    const store = campaignStore();
+    let assetReads = 0;
+    const service = vi.fn(async () => ({
+      kind: 'project-asset' as const,
+      asset: {
+        id: 'replacement', name: 'Replacement.png', relativePath: 'generated/replacement.png',
+        width: 1024, height: 1024, mime: 'image/png',
+      },
+      bytes: new Uint8Array([1, 2, 3]),
+    }));
+    const executor = createWorkflowCompositionExecutor('fake', service);
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [campaignProduct],
+      resolveAsset: async () => {
+        assetReads += 1;
+        if (assetReads === 1) return new Promise<never>(() => undefined);
+        return material(new Uint8Array([137, 80, 78, 71]));
+      },
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: (_nodeId: string, attempt: number) => `asset-run-${attempt}`,
+    };
+
+    const blocked = store.runCampaignGenerate('output-square', options);
+    void blocked.catch(() => undefined);
+    await vi.waitFor(() => expect(assetReads).toBe(1));
+    const replacement = store.runCampaignGenerate('output-square', options);
+
+    await expect(blocked).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(replacement).resolves.toMatchObject({ committed: true });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ id: 'asset-run-1', attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({ id: 'asset-run-2', attempt: 2, status: 'succeeded', retryOfRunId: 'asset-run-1' }),
+    ]);
+    expect(service).toHaveBeenCalledOnce();
+  });
+
+  it('supersedes a run blocked forever while materializing the storyboard', async () => {
+    const store = campaignStore();
+    store.setStoryboardDataUrl('data:image/png;base64,AA==');
+    let storyboardReads = 0;
+    const service = vi.fn(async () => ({
+      kind: 'project-asset' as const,
+      asset: {
+        id: 'storyboard-replacement', name: 'Replacement.png',
+        relativePath: 'generated/storyboard-replacement.png', width: 1024, height: 1024, mime: 'image/png',
+      },
+      bytes: new Uint8Array([1, 2, 3]),
+    }));
+    const executor = createWorkflowCompositionExecutor('fake', service);
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      readStoryboard: async () => {
+        storyboardReads += 1;
+        if (storyboardReads === 1) return new Promise<never>(() => undefined);
+        return { bytes: new Uint8Array([137, 80, 78, 71]), relativePath: 'storyboards/campaign.png' };
+      },
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: (_nodeId: string, attempt: number) => `storyboard-run-${attempt}`,
+    };
+
+    const blocked = store.runCampaignGenerate('output-square', options);
+    void blocked.catch(() => undefined);
+    await vi.waitFor(() => expect(storyboardReads).toBe(1));
+    const replacement = store.runCampaignGenerate('output-square', options);
+
+    await expect(blocked).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(replacement).resolves.toMatchObject({ committed: true });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ id: 'storyboard-run-1', attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({
+        id: 'storyboard-run-2', attempt: 2, status: 'succeeded', retryOfRunId: 'storyboard-run-1',
+      }),
+    ]);
+    expect(service).toHaveBeenCalledOnce();
+  });
+
   it('does not overwrite workflow edits made while a Transform is running', async () => {
     const store = campaignStore();
     const deferred = deferredCampaignRun(store);
