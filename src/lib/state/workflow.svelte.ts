@@ -199,6 +199,7 @@ interface WorkflowSaveSubmission {
   storeRevision: number;
   sessionIdentity: number;
   projectIdentity: string;
+  pathIntentIdentity: number;
 }
 
 function workflowGraphBytes(graph: WorkflowGraphV2): string {
@@ -273,6 +274,9 @@ export class WorkflowStore {
   private directorPatchUndoStack: WorkflowDirectorPatchTransaction[] = [];
   private directorPatchRedoStack: WorkflowDirectorPatchTransaction[] = [];
   private savedWorkflowBytes = $state<string | null>(null);
+  private savePathIntentSequence = 0;
+  private activeSavePathIntentIdentity = 0;
+  private activeSavePathIntentTarget: string | null = null;
 
   constructor(options: WorkflowStoreOptions = {}) {
     this.graphIdGenerator = options.idGenerator;
@@ -1240,7 +1244,7 @@ export class WorkflowStore {
     if (!project.path) return null;
     const name = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
     const savedPath = this.savedPath;
-    const submission = this.captureSaveSubmission();
+    const submission = this.captureSaveSubmission(savedPath, savedPath === null);
     const relativePath = savedPath
       ? await project.saveDocumentToPath(savedPath, submission.bytes)
       : await project.saveDocument(name, submission.bytes);
@@ -1252,7 +1256,7 @@ export class WorkflowStore {
     if (!project.path) return null;
     this.name = cleanWorkflowName(name);
     this.bump();
-    const submission = this.captureSaveSubmission();
+    const submission = this.captureSaveSubmission(null, true);
     const relativePath = await project.saveDocument(`${this.name}.cxflow.json`, submission.bytes);
     this.reconcileSaveCompletion(submission, relativePath);
     return relativePath;
@@ -1308,6 +1312,8 @@ export class WorkflowStore {
     this.workflowSessionIdentity += 1;
     this.workflowMutationIdentity += 1;
     this.savedWorkflowBytes = null;
+    this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
+    this.activeSavePathIntentTarget = null;
     this.transformExecutions = {};
     this.activeTransformRuns.clear();
     this.pendingDirectorPatchReview = null;
@@ -1365,9 +1371,18 @@ export class WorkflowStore {
 
   private captureCurrentSavedBaseline(): void {
     this.savedWorkflowBytes = workflowGraphBytes(this.serialize());
+    this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
+    this.activeSavePathIntentTarget = this.savedPath;
   }
 
-  private captureSaveSubmission(): WorkflowSaveSubmission {
+  private captureSaveSubmission(
+    targetPath: string | null,
+    createsPath: boolean,
+  ): WorkflowSaveSubmission {
+    if (createsPath || targetPath !== this.activeSavePathIntentTarget) {
+      this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
+      this.activeSavePathIntentTarget = targetPath;
+    }
     const bytes = this.toBytes();
     return {
       bytes,
@@ -1375,6 +1390,7 @@ export class WorkflowStore {
       storeRevision: this.rev,
       sessionIdentity: this.workflowSessionIdentity,
       projectIdentity: project.identity,
+      pathIntentIdentity: this.activeSavePathIntentIdentity,
     };
   }
 
@@ -1384,7 +1400,9 @@ export class WorkflowStore {
   ): void {
     if (!relativePath
       || submission.sessionIdentity !== this.workflowSessionIdentity
-      || submission.projectIdentity !== project.identity) return;
+      || submission.projectIdentity !== project.identity
+      || submission.pathIntentIdentity !== this.activeSavePathIntentIdentity) return;
+    this.activeSavePathIntentTarget = relativePath;
     this.savedPath = relativePath;
     this.savedRev = submission.storeRevision;
     this.savedWorkflowBytes = submission.serializedBytes;

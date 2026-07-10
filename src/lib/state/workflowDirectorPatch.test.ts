@@ -391,6 +391,173 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     expect(store.dirty).toBe(true);
   });
 
+  it.each(['original-first', 'save-as-first'] as const)(
+    'keeps Save As path ownership when overlapping original and new-path writes finish %s',
+    async (completionOrder) => {
+      const store = storeWithAcceptedHistory();
+      store.setBriefObjective('brief', 'Edited before the original-path Save.');
+      const baselineRevision = store.savedRev;
+      const originalWrite = deferred<string>();
+      const saveAsWrite = deferred<string | null>();
+      vi.spyOn(project, 'saveDocumentToPath').mockReturnValue(originalWrite.promise);
+      vi.spyOn(project, 'saveDocument').mockReturnValue(saveAsWrite.promise);
+
+      const originalSave = store.save();
+      const saveAs = store.saveAs('Renamed Campaign');
+      expect(store.savedPath).toBe('workflows/campaign-with-history.cxflow.json');
+      expect(store.dirty).toBe(true);
+
+      if (completionOrder === 'original-first') {
+        originalWrite.resolve('workflows/campaign-with-history.cxflow.json');
+        await originalSave;
+        expect(store.savedPath).toBe('workflows/campaign-with-history.cxflow.json');
+        expect(store.savedRev).toBe(baselineRevision);
+        expect(store.dirty).toBe(true);
+        saveAsWrite.resolve('workflows/renamed-campaign.cxflow.json');
+        await saveAs;
+      } else {
+        saveAsWrite.resolve('workflows/renamed-campaign.cxflow.json');
+        await saveAs;
+        originalWrite.resolve('workflows/campaign-with-history.cxflow.json');
+        await originalSave;
+      }
+
+      expect(store.name).toBe('Renamed Campaign');
+      expect(store.savedPath).toBe('workflows/renamed-campaign.cxflow.json');
+      expect(store.dirty).toBe(false);
+    },
+  );
+
+  it.each(['first-first', 'second-first'] as const)(
+    'keeps the second Save As path when two new-path writes finish %s',
+    async (completionOrder) => {
+      const store = storeWithAcceptedHistory();
+      const writes = [deferred<string | null>(), deferred<string | null>()];
+      vi.spyOn(project, 'saveDocument')
+        .mockReturnValueOnce(writes[0].promise)
+        .mockReturnValueOnce(writes[1].promise);
+
+      const firstSaveAs = store.saveAs('First Campaign');
+      const secondSaveAs = store.saveAs('Second Campaign');
+
+      if (completionOrder === 'first-first') {
+        writes[0].resolve('workflows/first-campaign.cxflow.json');
+        await firstSaveAs;
+        expect(store.savedPath).toBe('workflows/campaign-with-history.cxflow.json');
+        expect(store.dirty).toBe(true);
+        writes[1].resolve('workflows/second-campaign.cxflow.json');
+        await secondSaveAs;
+      } else {
+        writes[1].resolve('workflows/second-campaign.cxflow.json');
+        await secondSaveAs;
+        writes[0].resolve('workflows/first-campaign.cxflow.json');
+        await firstSaveAs;
+      }
+
+      expect(store.name).toBe('Second Campaign');
+      expect(store.savedPath).toBe('workflows/second-campaign.cxflow.json');
+      expect(store.dirty).toBe(false);
+    },
+  );
+
+  it.each(['rejects', 'is cancelled'] as const)(
+    'does not resurrect an older path baseline when the newer Save As intent %s',
+    async (failureMode) => {
+      const store = storeWithAcceptedHistory();
+      store.setBriefObjective('brief', 'An edit submitted to the original path.');
+      const baselineRevision = store.savedRev;
+      const originalWrite = deferred<string>();
+      const saveAsWrite = deferred<string | null>();
+      vi.spyOn(project, 'saveDocumentToPath').mockReturnValue(originalWrite.promise);
+      vi.spyOn(project, 'saveDocument').mockReturnValue(saveAsWrite.promise);
+
+      const originalSave = store.save();
+      const saveAs = store.saveAs('Failed New Path');
+      if (failureMode === 'rejects') {
+        saveAsWrite.reject(new Error('Save As failed'));
+        await expect(saveAs).rejects.toThrow('Save As failed');
+      } else {
+        saveAsWrite.resolve(null);
+        await expect(saveAs).resolves.toBeNull();
+      }
+      originalWrite.resolve('workflows/campaign-with-history.cxflow.json');
+      await originalSave;
+
+      expect(store.name).toBe('Failed New Path');
+      expect(store.savedPath).toBe('workflows/campaign-with-history.cxflow.json');
+      expect(store.savedRev).toBe(baselineRevision);
+      expect(store.dirty).toBe(true);
+    },
+  );
+
+  it.each(['older-first', 'newer-first'] as const)(
+    'reconciles concurrent same-target Saves by disk completion order when they finish %s',
+    async (completionOrder) => {
+      const store = storeWithAcceptedHistory();
+      const writes = [deferred<string>(), deferred<string>()];
+      vi.spyOn(project, 'saveDocumentToPath')
+        .mockReturnValueOnce(writes[0].promise)
+        .mockReturnValueOnce(writes[1].promise);
+      store.setBriefObjective('brief', 'Older same-path snapshot.');
+      const olderBytes = bytes(store);
+      const olderSave = store.save();
+      store.setBriefObjective('brief', 'Newer same-path snapshot.');
+      const newerBytes = bytes(store);
+      const newerSave = store.save();
+
+      if (completionOrder === 'older-first') {
+        writes[0].resolve('workflows/campaign-with-history.cxflow.json');
+        await olderSave;
+        expect(store.dirty).toBe(true);
+        writes[1].resolve('workflows/campaign-with-history.cxflow.json');
+        await newerSave;
+        expect(store.dirty).toBe(false);
+      } else {
+        writes[1].resolve('workflows/campaign-with-history.cxflow.json');
+        await newerSave;
+        expect(store.dirty).toBe(false);
+        writes[0].resolve('workflows/campaign-with-history.cxflow.json');
+        await olderSave;
+        expect(store.dirty).toBe(true);
+      }
+
+      expect(bytes(store)).toBe(newerBytes);
+      store.setBriefObjective('brief', 'Older same-path snapshot.');
+      expect(bytes(store)).toBe(olderBytes);
+      expect(store.dirty).toBe(completionOrder === 'older-first');
+    },
+  );
+
+  it.each(['older-first', 'newer-first'] as const)(
+    'lets only the later unsaved Save establish a path when writes finish %s',
+    async (completionOrder) => {
+      const store = new WorkflowStore();
+      store.newFromTemplate('campaign-composer', 'Unsaved Campaign');
+      const writes = [deferred<string | null>(), deferred<string | null>()];
+      vi.spyOn(project, 'saveDocument')
+        .mockReturnValueOnce(writes[0].promise)
+        .mockReturnValueOnce(writes[1].promise);
+
+      const olderSave = store.save();
+      const newerSave = store.save();
+      if (completionOrder === 'older-first') {
+        writes[0].resolve('workflows/unsaved-campaign-first.cxflow.json');
+        await olderSave;
+        expect(store.savedPath).toBeNull();
+        writes[1].resolve('workflows/unsaved-campaign-second.cxflow.json');
+        await newerSave;
+      } else {
+        writes[1].resolve('workflows/unsaved-campaign-second.cxflow.json');
+        await newerSave;
+        writes[0].resolve('workflows/unsaved-campaign-first.cxflow.json');
+        await olderSave;
+      }
+
+      expect(store.savedPath).toBe('workflows/unsaved-campaign-second.cxflow.json');
+      expect(store.dirty).toBe(false);
+    },
+  );
+
   it('ignores save completion after another workflow is opened in the same store', async () => {
     const store = storeWithAcceptedHistory();
     const write = deferred<string>();
@@ -419,6 +586,29 @@ describe('WorkflowStore Director patch review lifecycle', () => {
       savedRev: store.savedRev,
       dirty: store.dirty,
     }).toEqual(opened);
+  });
+
+  it('ignores save completion after the active project changes', async () => {
+    const store = storeWithAcceptedHistory();
+    store.setBriefObjective('brief', 'Unsaved before project switch.');
+    const before = {
+      savedPath: store.savedPath,
+      savedRev: store.savedRev,
+      dirty: store.dirty,
+    };
+    const write = deferred<string>();
+    vi.spyOn(project, 'saveDocumentToPath').mockReturnValue(write.promise);
+    const saving = store.save();
+
+    project.current = { ...virtualProject, path: '/virtual/other-project' };
+    write.resolve('workflows/campaign-with-history.cxflow.json');
+    await saving;
+
+    expect({
+      savedPath: store.savedPath,
+      savedRev: store.savedRev,
+      dirty: store.dirty,
+    }).toEqual(before);
   });
 
   it('captures Save As rename bytes without marking a later edit clean', async () => {
