@@ -4,7 +4,10 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { directorActionSchema } from './director-action-schema.mjs';
-import { workflowDirectorGraphDraftSchema } from './workflow-director-schema.mjs';
+import {
+  workflowDirectorGraphDraftSchema,
+  workflowDirectorRevisionSchema,
+} from './workflow-director-schema.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -19,7 +22,7 @@ function writeStructuredOutput(path, value, schemaName) {
 }
 
 function usage() {
-  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
+  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -80,7 +83,7 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--output-schema') {
       options.outputSchema = requireValue(argv, index, arg);
-      if (!['director-action', 'workflow-draft'].includes(options.outputSchema)) {
+      if (!['director-action', 'workflow-draft', 'workflow-revision'].includes(options.outputSchema)) {
         throw new Error(`Unknown output schema: ${options.outputSchema}`);
       }
       index += 2;
@@ -245,7 +248,11 @@ async function main() {
       outputFormat: options.outputFile
         ? {
             type: 'json_schema',
-            schema: options.outputSchema === 'workflow-draft' ? workflowDirectorGraphDraftSchema : directorActionSchema,
+            schema: {
+              'director-action': directorActionSchema,
+              'workflow-draft': workflowDirectorGraphDraftSchema,
+              'workflow-revision': workflowDirectorRevisionSchema,
+            }[options.outputSchema],
           }
         : undefined,
       agentProgressSummaries: true,

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { workflowDirectorGraphDraftSchema } from '../../../scripts/workflow-director-schema.mjs';
+import {
+  workflowDirectorGraphDraftSchema,
+  workflowDirectorRevisionSchema,
+} from '../../../scripts/workflow-director-schema.mjs';
 import providerRuntimeWorkflow from '../../../.github/workflows/provider-runtimes.yml?raw';
 import {
   MANAGED_RUNTIME_PROTOCOL_VERSION,
@@ -27,11 +30,25 @@ describe('Workflow Director GraphDraft schema', () => {
   });
 
   it('versions and packages every shared schema dependency required by managed runners', () => {
-    expect(MANAGED_RUNTIME_PROTOCOL_VERSION).toBe(2);
+    expect(MANAGED_RUNTIME_PROTOCOL_VERSION).toBe(3);
     expect(MANAGED_RUNTIME_SHARED_BRIDGE_FILES).toEqual(expect.arrayContaining([
       'director-action-schema.mjs',
       'workflow-director-schema.mjs',
     ]));
-    expect(providerRuntimeWorkflow).toContain('default: "2.0.0"');
+    expect(providerRuntimeWorkflow).toContain('default: "3.0.0"');
+  });
+
+  it('defines a strict structured-output schema for current-workflow revisions', () => {
+    expect(workflowDirectorRevisionSchema.additionalProperties).toBe(false);
+    expect(workflowDirectorRevisionSchema.required).toEqual([
+      'version', 'sourceGraphRevision', 'summary', 'operations',
+    ]);
+    expect(workflowDirectorRevisionSchema.properties.sourceGraphRevision.additionalProperties).toBe(false);
+    const variants = workflowDirectorRevisionSchema.properties.operations.items.anyOf;
+    expect(variants).toHaveLength(6);
+    expect(variants.every((variant: { additionalProperties: boolean }) => variant.additionalProperties === false)).toBe(true);
+    expect(variants.map((variant: { properties: { op: { const: string } } }) => variant.properties.op.const)).toEqual([
+      'add-node', 'remove-node', 'configure-node', 'move-node', 'add-edge', 'remove-edge',
+    ]);
   });
 });

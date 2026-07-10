@@ -64,6 +64,9 @@
   import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
   import WorkflowDirectorDialog from './WorkflowDirectorDialog.svelte';
   import WorkflowDirectorRevisionDialog from './WorkflowDirectorRevisionDialog.svelte';
+  import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
+  import { createConfiguredWorkflowRevisionRequester } from '../integrations/workflowDirectorRevisionAdapters';
+  import type { WorkflowDirectorRevisionRequester } from '../workflow';
 
   type CodexProgressPayload = {
     runId: string;
@@ -116,6 +119,7 @@
   let paletteOpen = $state(false);
   let directorOpen = $state(false);
   let revisionDirectorOpen = $state(false);
+  let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -367,6 +371,13 @@
     } catch (e) {
       editor.flash('Workflow save failed: ' + ((e as Error)?.message ?? String(e)));
     }
+  }
+
+  function openRevisionDirector(): void {
+    revisionDirectorRequester = qaMode === 'provider-free'
+      ? createProviderFreeWorkflowRevisionRequester()
+      : createConfiguredWorkflowRevisionRequester(runOptions);
+    revisionDirectorOpen = true;
   }
 
   function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
@@ -1643,13 +1654,16 @@
       <div class="tray-head node-library">
         <span>Nodes</span>
         <div class="tray-head-actions">
-          {#if qaModeResolved && qaMode === 'provider-free'}
+          {#if qaModeResolved && (qaMode === 'provider-free' || desktop)}
             <button
               type="button"
               aria-label="Revise current workflow"
               aria-haspopup="dialog"
-              use:tooltip={{ text: 'Revise current workflow · QA Fake', placement: 'right' }}
-              onclick={() => (revisionDirectorOpen = true)}
+              use:tooltip={{
+                text: `Revise current workflow · ${qaMode === 'provider-free' ? 'QA Fake' : runOptions.directorProvider}`,
+                placement: 'right',
+              }}
+              onclick={openRevisionDirector}
             >
               <Icon svg={ArrowSync} size={14} />
             </button>
@@ -2385,8 +2399,14 @@
   />
 {/if}
 
-{#if revisionDirectorOpen}
-  <WorkflowDirectorRevisionDialog onClose={() => (revisionDirectorOpen = false)} />
+{#if revisionDirectorOpen && revisionDirectorRequester}
+  <WorkflowDirectorRevisionDialog
+    requester={revisionDirectorRequester}
+    onClose={() => {
+      revisionDirectorOpen = false;
+      revisionDirectorRequester = null;
+    }}
+  />
 {/if}
 
 <style>

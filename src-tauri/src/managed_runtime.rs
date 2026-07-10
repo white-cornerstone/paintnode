@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::ai::apply_ai_cli_environment;
 use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
 
-const RUNTIME_PROTOCOL_VERSION: u32 = 2;
+const RUNTIME_PROTOCOL_VERSION: u32 = 3;
 const DIRECTOR_ACTION_SCHEMA_FILE: &str = "bridge/director-action-schema.mjs";
 const WORKFLOW_DIRECTOR_SCHEMA_FILE: &str = "bridge/workflow-director-schema.mjs";
 const DEFAULT_MANIFEST_URL: &str =
@@ -273,7 +273,7 @@ fn release_for<'a>(
     if package.protocol_version != RUNTIME_PROTOCOL_VERSION {
         return Err(if package.protocol_version < RUNTIME_PROTOCOL_VERSION {
             format!(
-                "The published {provider} package uses outdated runtime protocol {}; PaintNode requires protocol {} for workflow drafting.",
+                "The published {provider} package uses outdated runtime protocol {}; PaintNode requires protocol {} for workflow Director output.",
                 package.protocol_version, RUNTIME_PROTOCOL_VERSION
             )
         } else {
@@ -307,7 +307,7 @@ fn local_status(provider: &str) -> ManagedRuntimeStatus {
     let incompatible_message = installed.as_ref().and_then(|item| {
         (item.protocol_version != RUNTIME_PROTOCOL_VERSION).then(|| {
             format!(
-                "Installed runtime protocol {} must be upgraded to protocol {} for workflow drafting.",
+                "Installed runtime protocol {} must be upgraded to protocol {} for workflow Director output.",
                 item.protocol_version, RUNTIME_PROTOCOL_VERSION
             )
         })
@@ -349,7 +349,7 @@ fn apply_available_release(
     {
         // Protocol compatibility is part of update identity. A protocol-1
         // package must upgrade even if a publisher accidentally reuses its
-        // packageVersion for the protocol-2 artifact.
+        // packageVersion for the newer-protocol artifact.
         status.state = "updateAvailable".into();
         status.authenticated = None;
     }
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_two_requires_every_shared_schema_bridge_file() {
+    fn current_protocol_requires_every_shared_schema_bridge_file() {
         let manifest = RuntimePackageManifest {
             provider: "codex".into(),
             package_version: "2.0.0".into(),
@@ -756,7 +756,7 @@ mod tests {
         };
         let error = release_for(&release, "codex").unwrap_err();
         assert!(error.contains("outdated runtime protocol 1"));
-        assert!(error.contains("requires protocol 2"));
+        assert!(error.contains("requires protocol 3"));
     }
 
     #[test]

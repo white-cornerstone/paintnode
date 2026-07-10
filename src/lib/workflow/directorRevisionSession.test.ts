@@ -147,6 +147,22 @@ describe('Workflow Director revision session', () => {
     expect(store.canRedoDirectorPatch).toBe(false);
   });
 
+  it('persists an accepted revision exactly through workflow save bytes and reopen', async () => {
+    const store = campaign();
+    const preview = await requestWorkflowDirectorRevisionPreview(
+      createProviderFreeWorkflowRevisionRequester(), store, 'Persist this revised brief.',
+    );
+    acceptWorkflowDirectorRevisionPreview(preview, store);
+    const saved = store.toBytes();
+
+    const reopened = new WorkflowStore();
+    reopened.openFromBytes(saved, 'workflows/revised.cxflow.json', 'Revised');
+
+    expect(reopened.toBytes()).toEqual(saved);
+    expect(reopened.graphSnapshot().runRecords).toEqual(store.graphSnapshot().runRecords);
+    expect(reopened.dirty).toBe(false);
+  });
+
   it('rejects acceptance when the live revision instruction changed after preview', async () => {
     const store = campaign();
     const before = bytes(store);

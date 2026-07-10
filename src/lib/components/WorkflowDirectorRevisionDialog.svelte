@@ -150,10 +150,17 @@
         <span><strong>Current-workflow revision</strong><small>This edits the open graph through a reviewable patch. It never creates a fresh replacement workflow.</small></span>
       </div>
 
-      <div class="qa-banner" role="status">
-        <strong>QA Fake · provider-free</strong>
-        <span>Deterministic revision fixture. No discovery, sign-in, AI provider, or image execution is invoked.</span>
-      </div>
+      {#if requester.providerFree}
+        <div class="qa-banner" role="status">
+          <strong>QA Fake · provider-free</strong>
+          <span>Deterministic revision fixture. No discovery, sign-in, AI provider, or image execution is invoked.</span>
+        </div>
+      {:else}
+        <div class="qa-banner configured" role="status">
+          <strong>{requester.label}</strong>
+          <span>Configured Director revision only. No image executor runs; every returned patch still requires review and acceptance.</span>
+        </div>
+      {/if}
 
       <label for="workflow-revision-instruction">Revision instruction</label>
       <textarea

@@ -17,7 +17,7 @@ export interface WorkflowDirectorRevisionRequest {
 
 export interface WorkflowDirectorRevisionRequester {
   readonly label: string;
-  readonly providerFree: true;
+  readonly providerFree: boolean;
   request(request: WorkflowDirectorRevisionRequest, signal?: AbortSignal): Promise<unknown>;
 }
 
@@ -158,7 +158,6 @@ export async function requestWorkflowDirectorRevisionPreview(
   if (normalizedInstruction.length > 1_000) {
     throw new Error('Director revision instructions must be 1,000 characters or fewer.');
   }
-  if (!requester.providerFree) throw new Error('This checkpoint accepts only an injected provider-free revision requester.');
   if (signal?.aborted) throw new WorkflowDirectorRevisionCancelledError();
   const session = target.captureDirectorSession();
   const graph = target.graphSnapshot();
