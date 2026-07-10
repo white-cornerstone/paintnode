@@ -40,6 +40,15 @@ function campaignStore(): WorkflowStore {
   return store;
 }
 
+function reviewedCampaignStore(): { store: WorkflowStore; reviewId: string } {
+  const store = campaignStore();
+  const reviewId = store.addCreatorNode('review');
+  store.disconnectNodes('transform-generate-square', 'output-square');
+  expect(store.connectPorts('transform-generate-square', 'result', reviewId, 'candidates')).toBe(true);
+  expect(store.connectPorts(reviewId, 'selected', 'output-square', 'source')).toBe(true);
+  return { store, reviewId };
+}
+
 function twoGenerateStore(): WorkflowStore {
   const seed = campaignStore();
   const graph = structuredClone(seed.serialize()) as WorkflowGraphV2;
@@ -492,6 +501,62 @@ describe('WorkflowStore selective execution integration', () => {
     expect(outcome.executedNodeIds).toEqual(['transform-generate-square']);
     expect(run.providerCalls()).toBe(1);
     expect(store.transformExecution('transform-generate-square').state).toBe('succeeded');
+  });
+
+  it('consumes the exact promoted Review result without invoking the provider or mutating Output binding', async () => {
+    const { store, reviewId } = reviewedCampaignStore();
+    const run = harness();
+    await store.runCandidateBranches('output-square', run.options(), {
+      branchGroupId: 'reviewed-output-group', count: 2, maxConcurrency: 1,
+    });
+    const [first, second] = store.reviewCandidates(reviewId);
+    await store.promoteCandidate(reviewId, first.candidateId, run.options());
+    const callsAfterBranches = run.providerCalls();
+
+    const firstPreflight = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+    expect(firstPreflight.stateByNodeId[reviewId]).toMatchObject({ state: 'cached', willExecute: false });
+    expect(firstPreflight.plan.executionNodeIds).toEqual([]);
+    expect(firstPreflight.plan.cachedResults).toContainEqual(expect.objectContaining({
+      nodeId: reviewId, outputIds: [first.output!.assetReferenceId],
+    }));
+    const graphBeforeFirstOutput = structuredClone(store.graphSnapshot());
+    const firstOutcome = await store.runReviewedOutput('output-square', run.options());
+    expect(firstOutcome.executedNodeIds).toEqual([]);
+    expect(firstOutcome.cachedNodeIds).toContain(reviewId);
+    expect(firstOutcome.results[reviewId]?.outputIds).toEqual([first.output!.assetReferenceId]);
+    expect(run.providerCalls()).toBe(callsAfterBranches);
+    expect(store.outputNode('output-square')).toMatchObject({
+      outputAssetId: null, outputRelativePath: null,
+    });
+    expect(store.graphSnapshot()).toEqual(graphBeforeFirstOutput);
+
+    await store.promoteCandidate(reviewId, second.candidateId, run.options());
+    const graphBeforeSecondOutput = structuredClone(store.graphSnapshot());
+    const secondOutcome = await store.runReviewedOutput('output-square', run.options());
+    expect(secondOutcome.executedNodeIds).toEqual([]);
+    expect(secondOutcome.results[reviewId]?.outputIds).toEqual([second.output!.assetReferenceId]);
+    expect(run.providerCalls()).toBe(callsAfterBranches);
+    expect(store.outputNode('output-square')).toMatchObject({
+      outputAssetId: null, outputRelativePath: null,
+    });
+    expect(store.graphSnapshot()).toEqual(graphBeforeSecondOutput);
+  });
+
+  it('blocks unpromoted or stale reviewed Output runs before provider execution', async () => {
+    const { store, reviewId } = reviewedCampaignStore();
+    const run = harness();
+    await store.runCandidateBranches('output-square', run.options(), {
+      branchGroupId: 'blocked-reviewed-output-group', count: 2, maxConcurrency: 1,
+    });
+    const [candidate] = store.reviewCandidates(reviewId);
+    const callsAfterBranches = run.providerCalls();
+    await expect(store.runReviewedOutput('output-square', run.options())).rejects.toThrow(/promot|choose/i);
+    expect(run.providerCalls()).toBe(callsAfterBranches);
+
+    await store.promoteCandidate(reviewId, candidate.candidateId, run.options());
+    store.setBriefObjective('brief', 'Changed after promotion.');
+    await expect(store.runReviewedOutput('output-square', run.options())).rejects.toThrow(/changed|stale|current/i);
+    expect(run.providerCalls()).toBe(callsAfterBranches);
   });
 
   it('rejects changed prepared material before the provider is invoked', async () => {

@@ -49,6 +49,12 @@ import {
   type WorkflowCandidateBranchExecutionOutcome,
   type WorkflowCandidateBranchGroup,
   type WorkflowCandidateSummary,
+  deriveWorkflowReviewCandidates,
+  promoteWorkflowCandidate,
+  type WorkflowReviewCandidate,
+  type WorkflowProjectAsset,
+  resolveWorkflowCampaignPath,
+  resolveWorkflowReviewTopology,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -122,6 +128,15 @@ interface ActiveWorkflowTransformRun {
   cancellation: Promise<WorkflowCancellationResult> | null;
   completion: Promise<void>;
   resolveCompletion: () => void;
+}
+
+interface WorkflowReviewVerification {
+  graphRevision: number;
+  projectIdentity: string | null;
+  assetFingerprint: string;
+  materialKey: string;
+  verifiedOutputIds: string[];
+  optionsIdentity: string;
 }
 
 export interface WorkflowAssetNode {
@@ -301,6 +316,7 @@ export class WorkflowStore {
   rev = $state(0);
   savedRev = $state(0);
   transformExecutions = $state<Record<string, WorkflowTransformExecutionState>>({});
+  reviewVerifications = $state<Record<string, WorkflowReviewVerification>>({});
   private graphDomain: WorkflowGraphDomain | null = null;
   private readonly graphIdGenerator: WorkflowIdGenerator | undefined;
   private readonly workflowGraphIdGenerator: (() => string) | undefined;
@@ -312,6 +328,7 @@ export class WorkflowStore {
   private readonly latestTransformRunSequences = new Map<string, number>();
   private readonly progressRouter = new WorkflowRunProgressRouter();
   private readonly selectivePreflightSnapshots = new WeakMap<object, WorkflowSelectivePreflightSnapshot>();
+  private readonly reviewVerificationSequences = new Map<string, number>();
   private activeSelectiveOperation: ActiveWorkflowSelectiveOperation | null = null;
   private selectiveLifecycleTail: Promise<void> = Promise.resolve();
 
@@ -1098,6 +1115,44 @@ export class WorkflowStore {
     }
   }
 
+  async runReviewedOutput(
+    outputNodeId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<WorkflowSelectiveExecutionOutcome> {
+    const path = resolveWorkflowCampaignPath(this.serialize(), { outputNodeId });
+    if (!path?.reviewNodeId) {
+      throw new WorkflowTransformExecutionError(
+        'INVALID_TRANSFORM_PATH', 'Reviewed Output execution requires one connected Review path.', 'Run Generate instead',
+      );
+    }
+    const preflight = await this.preflightSelectiveExecution('run-node', outputNodeId, options);
+    const blocked = preflight.stateByNodeId[path.reviewNodeId]?.state === 'blocked'
+      ? preflight.stateByNodeId[path.reviewNodeId]
+      : preflight.plan.preflight.find((entry) => entry.state === 'blocked');
+    if (blocked) {
+      throw new WorkflowTransformExecutionError('NOT_READY', blocked.reason.message, 'Resolve the Review block');
+    }
+    const outcome = await this.runSelectiveExecution(preflight, options, { maxConcurrency: 1 });
+    const result = outcome.results[path.reviewNodeId];
+    const resolution = this.reviewResolution(
+      path.reviewNodeId,
+      options.assets,
+      true,
+      options.currentProjectIdentity?.() ?? options.projectPath,
+    );
+    if (resolution.state !== 'ready'
+      || !result
+      || result.outputIds.length !== 1
+      || result.outputIds[0] !== resolution.output.assetReferenceId
+      || !outcome.cachedNodeIds.includes(path.reviewNodeId)
+      || outcome.executedNodeIds.includes(path.transformNodeId)) {
+      throw new WorkflowTransformExecutionError(
+        'NOT_READY', 'The promoted Review result changed before the Output could consume it.', 'Run Review verification again',
+      );
+    }
+    return outcome;
+  }
+
   async cancelSelectiveExecution(): Promise<WorkflowCancellationResult> {
     const operation = this.activeSelectiveOperation;
     if (!operation) {
@@ -1156,6 +1211,195 @@ export class WorkflowStore {
     return sourceNodeId ? groups.filter((group) => group.sourceNodeId === sourceNodeId) : groups;
   }
 
+  reviewCandidates(
+    reviewNodeId: string,
+    availableAssets?: readonly WorkflowProjectAsset[],
+    requireVerified = false,
+    projectIdentity?: string | null,
+  ): WorkflowReviewCandidate[] {
+    const graph = this.serialize();
+    const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
+    const verification = this.currentReviewVerification(reviewNodeId, availableAssets, projectIdentity);
+    const verified = new Set(verification?.verifiedOutputIds ?? []);
+    return deriveWorkflowReviewCandidates(graph, reviewNodeId, {
+      ...(topology.transformNodeId
+        ? { currentMaterialKeys: { [topology.transformNodeId]: verification?.materialKey ?? (requireVerified ? 'unverified' : '') } }
+        : {}),
+      ...(availableAssets ? {
+        isOutputAvailable: (output) => verification
+          ? verified.has(output.assetReferenceId)
+          : !requireVerified && availableAssets.some((asset) => (
+            asset.id === output.assetId && asset.relativePath === output.relativePath
+            && (!('exists' in asset) || asset.exists !== false)
+          )),
+      } : {}),
+    });
+  }
+
+  reviewResolution(
+    reviewNodeId: string,
+    availableAssets?: readonly WorkflowProjectAsset[],
+    requireVerified = false,
+    projectIdentity?: string | null,
+  ) {
+    const graph = this.serialize();
+    const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
+    const verification = this.currentReviewVerification(reviewNodeId, availableAssets, projectIdentity);
+    const verified = new Set(verification?.verifiedOutputIds ?? []);
+    return resolveWorkflowReviewTopology(graph, {
+      reviewNodeId,
+      ...(topology.transformNodeId
+        ? { currentMaterialKeys: { [topology.transformNodeId]: verification?.materialKey ?? (requireVerified ? 'unverified' : '') } }
+        : {}),
+      ...(availableAssets ? {
+        isOutputAvailable: (output) => verification
+          ? verified.has(output.assetReferenceId)
+          : !requireVerified && availableAssets.some((asset) => (
+            asset.id === output.assetId && asset.relativePath === output.relativePath
+            && (!('exists' in asset) || asset.exists !== false)
+          )),
+      } : {}),
+    });
+  }
+
+  async refreshReviewState(
+    reviewNodeId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<Readonly<WorkflowReviewVerification>> {
+    const sequence = (this.reviewVerificationSequences.get(reviewNodeId) ?? 0) + 1;
+    this.reviewVerificationSequences.set(reviewNodeId, sequence);
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
+    const optionsIdentity = this.reviewOptionsIdentity(options, projectIdentity);
+    if (this.reviewVerifications[reviewNodeId]?.optionsIdentity !== optionsIdentity) {
+      const { [reviewNodeId]: _stale, ...current } = this.reviewVerifications;
+      this.reviewVerifications = current;
+    }
+    const graph = this.serialize();
+    const graphRevision = this.graphRevision;
+    const storeRevision = this.rev;
+    const sessionIdentity = this.workflowSessionIdentity;
+    const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
+    if (!topology.transformNodeId || !topology.outputNodeId) throw new Error('Review requires one unambiguous campaign path.');
+    const prepared = await prepareCampaignGenerateTransform(graph, topology.outputNodeId, {
+      ...options,
+      allowUnpromotedReview: true,
+    });
+    const verifiedOutputIds: string[] = [];
+    for (const candidate of deriveWorkflowReviewCandidates(graph, reviewNodeId)) {
+      if (!candidate.output) continue;
+      const asset = options.assets.find((item) => (
+        item.id === candidate.output!.assetId && item.relativePath === candidate.output!.relativePath
+      ));
+      if (!asset) continue;
+      try {
+        const material = await options.resolveAsset(asset);
+        const bytes = material.bytes instanceof Uint8Array && material.bytes.length > 0 ? material.bytes : null;
+        if (bytes
+          && material.assetId === candidate.output.assetId
+          && material.relativePath === candidate.output.relativePath
+          && material.contentHash === candidate.output.contentHash
+          && workflowSha256Bytes(bytes) === candidate.output.contentHash) {
+          verifiedOutputIds.push(candidate.output.assetReferenceId);
+        }
+      } catch {
+        // Missing or unreadable candidate outputs remain recoverably unavailable.
+      }
+    }
+    if (this.reviewVerificationSequences.get(reviewNodeId) !== sequence) {
+      throw new Error('Review verification was superseded by newer execution options.');
+    }
+    if (this.graphRevision !== graphRevision || this.rev !== storeRevision
+      || this.workflowSessionIdentity !== sessionIdentity
+      || (options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
+      throw new Error('The workflow or project changed while Review state was being verified.');
+    }
+    const verification = Object.freeze({
+      graphRevision,
+      projectIdentity,
+      assetFingerprint: this.reviewAssetFingerprint(options.assets),
+      materialKey: prepared.materialKey,
+      verifiedOutputIds: Object.freeze([...verifiedOutputIds]) as unknown as string[],
+      optionsIdentity,
+    });
+    this.reviewVerifications = {
+      ...this.reviewVerifications,
+      [reviewNodeId]: verification,
+    };
+    return verification;
+  }
+
+  invalidateReviewState(reviewNodeIds: readonly string[]): void {
+    if (reviewNodeIds.length === 0) return;
+    const invalidated = new Set(reviewNodeIds);
+    for (const reviewNodeId of invalidated) {
+      const sequence = (this.reviewVerificationSequences.get(reviewNodeId) ?? 0) + 1;
+      this.reviewVerificationSequences.set(reviewNodeId, sequence);
+    }
+    this.reviewVerifications = Object.fromEntries(
+      Object.entries(this.reviewVerifications)
+        .filter(([reviewNodeId]) => !invalidated.has(reviewNodeId)),
+    );
+  }
+
+  async promoteCandidate(
+    reviewNodeId: string,
+    candidateId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<void> {
+    const sessionIdentity = this.workflowSessionIdentity;
+    const graphRevision = this.graphRevision;
+    const storeRevision = this.rev;
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
+    const graph = this.serialize();
+    const candidate = deriveWorkflowReviewCandidates(graph, reviewNodeId)
+      .find((item) => item.candidateId === candidateId);
+    if (!candidate?.output || candidate.state !== 'eligible') {
+      throw new Error('Only an available, current candidate can be promoted.');
+    }
+    const path = resolveWorkflowCampaignPath(graph, { transformNodeId: candidate.sourceNodeId });
+    if (!path || path.reviewNodeId !== reviewNodeId) {
+      throw new Error('The candidate is no longer connected to this Review.');
+    }
+    const prepared = await prepareCampaignGenerateTransform(graph, path.outputNodeId, {
+      ...options,
+      allowUnpromotedReview: true,
+    });
+    if (prepared.materialKey !== candidate.materialKey) {
+      throw new Error('The candidate is stale because its upstream creative material changed. Generate current branches first.');
+    }
+    const asset = options.assets.find((item) => (
+      item.id === candidate.output!.assetId && item.relativePath === candidate.output!.relativePath
+    ));
+    if (!asset) throw new Error('The candidate asset is unavailable. Restore it or choose another candidate.');
+    const material = await options.resolveAsset(asset);
+    const computed = material.bytes instanceof Uint8Array && material.bytes.length > 0
+      ? workflowSha256Bytes(material.bytes)
+      : null;
+    if (material.assetId !== candidate.output.assetId
+      || material.relativePath !== candidate.output.relativePath
+      || material.contentHash !== candidate.output.contentHash
+      || computed !== candidate.output.contentHash) {
+      throw new Error('The candidate asset changed and must be reviewed again.');
+    }
+    if (this.workflowSessionIdentity !== sessionIdentity
+      || this.graphRevision !== graphRevision
+      || this.rev !== storeRevision
+      || (options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
+      throw new Error('The workflow or project changed while promotion was being verified. Review the candidates again.');
+    }
+    const promoted = promoteWorkflowCandidate(graph, {
+      reviewNodeId,
+      candidateId,
+      id: `promotion-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+      promotedAt: options.clock?.() ?? Date.now(),
+      isOutputAvailable: () => true,
+    });
+    this.graphDomain = new WorkflowGraphDomain(promoted, { idGenerator: this.graphIdGenerator });
+    this.projectedGraphRevision = this.graphDomain.revision;
+    this.syncReactiveGraph(this.graphDomain);
+    this.bump();
+  }
+
   async runCandidateBranches(
     outputNodeId: string,
     options: WorkflowStoreRunOptions,
@@ -1211,8 +1455,7 @@ export class WorkflowStore {
   ): Promise<WorkflowTransformStoreOutcome> {
     const requestedSessionIdentity = this.workflowSessionIdentity;
     const initialGraph = this.serialize();
-    const outputEdge = initialGraph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
-    const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
+    const transformNodeId = resolveWorkflowCampaignPath(initialGraph, { outputNodeId })?.transformNodeId ?? 'transform';
     const previousStart = this.transformStartQueues.get(transformNodeId);
     let releaseStart!: () => void;
     const startHeld = new Promise<void>((resolve) => { releaseStart = resolve; });
@@ -1550,6 +1793,25 @@ export class WorkflowStore {
       isRunRecordReusable: () => false,
     });
     const materialKeys: Record<string, string> = {};
+    const reviewMaterialKeys: Record<string, string> = {};
+    const verifiedReviewOutputIds = new Set<string>();
+    for (const review of graph.nodes.filter((candidate) => (
+      candidate.type === 'review' && draft.requiredNodeIds.includes(candidate.id)
+    ))) {
+      try {
+        const verification = await this.refreshReviewState(review.id, options);
+        this.requireCurrentSelectiveSnapshot(snapshot, options);
+        const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId: review.id });
+        if (topology.transformNodeId) {
+          reviewMaterialKeys[topology.transformNodeId] = verification.materialKey;
+          materialKeys[topology.transformNodeId] = verification.materialKey;
+          verification.verifiedOutputIds.forEach((id) => verifiedReviewOutputIds.add(id));
+        }
+      } catch (error) {
+        if (operation.controller.signal.aborted) throw error;
+        // Final planning derives a recoverable Review block from missing verification.
+      }
+    }
     const restrictions: Array<{ nodeId: string; kind: 'unavailable'; reason: string }> = [];
     for (const transformNodeId of draft.executionNodeIds) {
       const outputNodeId = this.campaignOutputForTransform(graph, transformNodeId);
@@ -1557,7 +1819,7 @@ export class WorkflowStore {
         restrictions.push({
           nodeId: transformNodeId,
           kind: 'unavailable',
-          reason: 'Campaign Generate requires a directly connected Output.',
+          reason: 'Campaign Generate requires one unambiguous Output path, with at most one Review hop.',
         });
         continue;
       }
@@ -1629,6 +1891,8 @@ export class WorkflowStore {
       mode,
       nodeId,
       materialKeys,
+      reviewMaterialKeys,
+      isReviewOutputAvailable: (output) => verifiedReviewOutputIds.has(output.assetReferenceId),
       ...(restrictions.length > 0
         ? { executionRestrictions: createWorkflowExecutionRestrictions(restrictions) }
         : {}),
@@ -1750,13 +2014,45 @@ export class WorkflowStore {
   }
 
   private campaignOutputForTransform(graph: WorkflowGraphV2, transformNodeId: string): string | null {
-    const edge = graph.edges.find((candidate) => (
-      candidate.source.nodeId === transformNodeId
-      && candidate.source.portId === 'result'
-      && candidate.target.portId === 'source'
-      && graph.nodes.some((node) => node.id === candidate.target.nodeId && node.type === 'output')
-    ));
-    return edge?.target.nodeId ?? null;
+    return resolveWorkflowCampaignPath(graph, { transformNodeId })?.outputNodeId ?? null;
+  }
+
+  private reviewAssetFingerprint(assets: readonly WorkflowStoreRunOptions['assets'][number][]): string {
+    return JSON.stringify(assets.map((asset) => [
+      asset.id, asset.relativePath, asset.width ?? null, asset.height ?? null, asset.mime ?? null,
+      'exists' in asset ? asset.exists : true,
+    ]).sort(([left], [right]) => String(left).localeCompare(String(right))));
+  }
+
+  private reviewOptionsIdentity(options: WorkflowStoreRunOptions, projectIdentity: string | null): string {
+    return JSON.stringify({
+      provider: options.provider,
+      callerIdentity: options.selectiveExecutionIdentity?.trim() || null,
+      projectIdentity,
+      assets: this.reviewAssetFingerprint(options.assets),
+      executors: options.executors.map((executor) => ({
+        provider: executor.provider,
+        capabilities: [...executor.capabilities].sort(),
+        materialization: executor.materialization ?? null,
+        executor: {
+          id: executor.executor.id,
+          version: executor.executor.version,
+          requestSchemaVersion: executor.executor.requestSchemaVersion,
+        },
+      })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    });
+  }
+
+  private currentReviewVerification(
+    reviewNodeId: string,
+    assets?: readonly WorkflowProjectAsset[],
+    projectIdentity?: string | null,
+  ): WorkflowReviewVerification | null {
+    const verification = this.reviewVerifications[reviewNodeId];
+    if (!verification || verification.graphRevision !== this.graphRevision) return null;
+    if (projectIdentity !== undefined && verification.projectIdentity !== projectIdentity) return null;
+    if (assets && verification.assetFingerprint !== this.reviewAssetFingerprint(assets)) return null;
+    return verification;
   }
 
   private beginWorkflowSession(): void {
@@ -1766,6 +2062,7 @@ export class WorkflowStore {
     }
     this.workflowSessionIdentity += 1;
     this.transformExecutions = {};
+    this.reviewVerifications = {};
     this.activeTransformRuns.clear();
     this.transformStartQueues.clear();
     this.latestTransformRunSequences.clear();

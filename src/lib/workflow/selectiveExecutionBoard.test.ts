@@ -37,6 +37,11 @@ describe('Workflow Board selective execution UX contract', () => {
   it('communicates provider-neutral candidate branch count, state, lineage, and retry', () => {
     expect(boardSource).toContain('Generate branches');
     expect(boardSource).toContain('workflow.runCandidateBranches');
+    expect(boardSource).toContain("workflow.runReviewedOutput(targetOutput.id, context.options)");
+    expect(boardSource).toContain("resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id })");
+    expect(boardSource).toContain("workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity)");
+    expect(boardSource).toContain("reviewedOutput ? 'Use promoted'");
+    expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
     expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
     expect(boardSource).toContain('data-candidate-state={candidate.status}');
@@ -47,5 +52,23 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain(
       'if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);',
     );
+    expect(boardSource).toContain('role="tablist"');
+    expect(boardSource).toContain("event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'");
+    expect(boardSource).toContain('Promote this candidate');
+    expect(boardSource).toContain('<strong>Brief</strong>');
+    expect(boardSource).toContain('<strong>Art direction</strong>');
+    expect(boardSource).toContain('Provenance:');
+    expect(boardSource).toContain('aria-controls={`review-candidate-panel-${node.id}`}');
+    expect(boardSource).toContain('aria-labelledby={`review-candidate-tab-${node.id}-${reviewCandidate.candidateId}`}');
+    expect(boardSource).toContain('.focus()');
+    expect(boardSource).toContain('requireVerifiedReview: true');
+    expect(boardSource).toContain('reviewResolutions');
+    expect(boardSource).toContain('untrack(() => workflow.refreshReviewState');
+    expect(boardSource).toContain('const executionOptionsIdentity = workflowExecutionOptionsIdentity();');
+    expect(boardSource).toContain('reviewRefreshGate.shouldRefresh');
+    expect(boardSource).toContain('workflow.invalidateReviewState(reviewNodeIds)');
+    expect(boardSource).toContain('reviewRefreshGate.reset()');
+    expect(boardSource.indexOf('reviewRefreshGate.shouldRefresh'))
+      .toBeLessThan(boardSource.indexOf('const epoch = ++reviewVerificationEpoch'));
   });
 });

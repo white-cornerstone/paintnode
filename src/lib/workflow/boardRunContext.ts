@@ -8,6 +8,38 @@ export type WorkflowBoardProjectMaterialReader = (
   assetId: string,
 ) => Promise<WorkflowAssetMaterial>;
 
+export interface WorkflowReviewRefreshIdentityInput {
+  workflowId: string;
+  workflowRevision: number;
+  projectIdentity: string;
+  executionOptionsIdentity: string;
+  assetIdentity: readonly (readonly [string, string, boolean])[];
+}
+
+export function createWorkflowReviewRefreshIdentity(input: WorkflowReviewRefreshIdentityInput): string {
+  return workflowSha256Text(JSON.stringify({
+    workflowId: input.workflowId,
+    workflowRevision: input.workflowRevision,
+    projectIdentity: input.projectIdentity,
+    executionOptionsIdentity: input.executionOptionsIdentity,
+    assetIdentity: input.assetIdentity,
+  }));
+}
+
+export class WorkflowReviewRefreshGate {
+  #identity: string | null = null;
+
+  shouldRefresh(identity: string): boolean {
+    if (identity === this.#identity) return false;
+    this.#identity = identity;
+    return true;
+  }
+
+  reset(): void {
+    this.#identity = null;
+  }
+}
+
 export async function resolveWorkflowBoardProjectAsset(
   projectPath: string | null,
   asset: Readonly<WorkflowProjectAsset>,

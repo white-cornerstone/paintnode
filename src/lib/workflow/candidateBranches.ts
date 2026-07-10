@@ -1,4 +1,5 @@
 import { WorkflowGraphDomain } from './domain';
+import { resolveWorkflowCampaignPath } from './candidatePromotion';
 import { createWorkflowRunRecord, isFullWorkflowRunRecord, workflowSha256Text } from './provenance';
 import { safeWorkflowIdentifier } from './provenanceSafety';
 import type {
@@ -144,12 +145,9 @@ export function deriveWorkflowCandidateBranchGroups(graph: WorkflowGraphV2): Wor
 }
 
 function transformForOutput(graph: WorkflowGraphV2, outputNodeId: string): string {
-  const edge = graph.edges.find((candidate) => (
-    candidate.target.nodeId === outputNodeId && candidate.target.portId === 'source'
-  ));
-  const node = edge && graph.nodes.find((candidate) => candidate.id === edge.source.nodeId);
-  if (!node || node.type !== 'transform') throw new Error('Candidate branches require a connected Transform output.');
-  return node.id;
+  const path = resolveWorkflowCampaignPath(graph, { outputNodeId });
+  if (!path) throw new Error('Candidate branches require one unambiguous Transform to Output path, with at most one Review hop.');
+  return path.transformNodeId;
 }
 
 function maximumNodeAttempt(graph: WorkflowGraphV2, nodeId: string): number {
@@ -386,7 +384,10 @@ export async function executeWorkflowCandidateBranches(
     createWorkflowCandidateLineage(groupId, sourceNodeId, index + 1, count)
   ));
   const options = memoizedMaterialOptions(inputOptions);
-  const prepared = await prepareCampaignGenerateTransform(inputGraph, outputNodeId, options);
+  const prepared = await prepareCampaignGenerateTransform(inputGraph, outputNodeId, {
+    ...options,
+    allowUnpromotedReview: true,
+  });
   const firstNodeAttempt = maximumNodeAttempt(inputGraph, sourceNodeId) + 1;
   let storeTail: Promise<void> = Promise.resolve();
   const serializeStore: ExecuteCampaignGenerateOptions['storeAsset'] = (artifact) => {
@@ -412,7 +413,7 @@ export async function executeWorkflowCandidateBranches(
         terminalGraphs[index] = await executeCandidate(
           inputGraph,
           outputNodeId,
-          { ...options, storeAsset: serializeStore },
+          { ...options, storeAsset: serializeStore, allowUnpromotedReview: true },
           lineages[index],
           firstNodeAttempt + index,
           prepared.materialKey,
@@ -447,7 +448,10 @@ export async function retryWorkflowCandidateBranch(
     throw new Error('Only the latest failed or cancelled candidate attempt can be retried.');
   }
   const options = memoizedMaterialOptions(inputOptions);
-  const prepared = await prepareCampaignGenerateTransform(inputGraph, latest.target.nodeId, options);
+  const prepared = await prepareCampaignGenerateTransform(inputGraph, latest.target.nodeId, {
+    ...options,
+    allowUnpromotedReview: true,
+  });
   if (prepared.materialKey !== latest.materialKey) throw new Error('Candidate material changed; create a new branch group.');
   const lineage = createWorkflowCandidateLineage(
     latest.candidate!.branchGroupId,
@@ -469,7 +473,7 @@ export async function retryWorkflowCandidateBranch(
         terminal = await executeCandidate(
           inputGraph,
           latest.target.nodeId,
-          options,
+          { ...options, allowUnpromotedReview: true },
           lineage,
           nodeAttempt,
           prepared.materialKey,
