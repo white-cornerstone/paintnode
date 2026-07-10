@@ -3,7 +3,14 @@ import { WorkflowStore } from './workflow.svelte';
 import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
 import annotations from '../workflow/fixtures/v1/annotations.json';
 import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
-import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
+import {
+  WORKFLOW_GRAPH_VERSION,
+  buildWorkflowDirectorContext,
+  createWorkflowDirectorProposal,
+  type WorkflowDirectorGraphDraft,
+  type WorkflowGraphV2,
+  type WorkflowIdGenerator,
+} from '../workflow';
 import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
@@ -51,7 +58,72 @@ function deferredCampaignRun(store: WorkflowStore, currentProjectIdentity?: () =
   return { finish, run };
 }
 
+function directorProposal() {
+  const context = buildWorkflowDirectorContext({
+    brief: 'Create a square product launch.',
+    assets: [campaignProduct],
+    requestedOutputs: [{ id: 'square', name: 'Square 1:1', width: 1024, height: 1024 }],
+    capabilities: [{ id: 'generate', available: true, reason: null }],
+  });
+  const draft: WorkflowDirectorGraphDraft = {
+    version: 1,
+    name: 'Director Square',
+    summary: 'A product-led square campaign.',
+    nodes: [
+      { id: 'product', type: 'input', title: 'Product', assetId: campaignProduct.id, role: 'Hero product', required: true },
+      { id: 'brief', type: 'brief', title: 'Brief', objective: 'Launch the product.', guidance: 'Keep identity.' },
+      { id: 'art', type: 'art-direction', title: 'Art Direction', prompt: 'Premium studio lighting.' },
+      { id: 'generate', type: 'transform', title: 'Generate', capability: 'generate', instructions: 'Generate square.' },
+      { id: 'square', type: 'output', title: 'Square 1:1', width: 1024, height: 1024 },
+    ],
+    edges: [
+      { id: 'product-art', source: { nodeId: 'product', portId: 'asset' }, target: { nodeId: 'art', portId: 'assets' } },
+      { id: 'brief-art', source: { nodeId: 'brief', portId: 'prompt' }, target: { nodeId: 'art', portId: 'brief' } },
+      { id: 'art-generate', source: { nodeId: 'art', portId: 'layout' }, target: { nodeId: 'generate', portId: 'source' } },
+      { id: 'generate-square', source: { nodeId: 'generate', portId: 'result' }, target: { nodeId: 'square', portId: 'source' } },
+    ],
+  };
+  return createWorkflowDirectorProposal(draft, context, { graphId: 'director-square' }).proposal!;
+}
+
 describe('WorkflowStore graph adapter', () => {
+  it('accepts a validated Director proposal as one fresh dirty workflow session', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Previous workflow');
+    store.openFromBytes(store.toBytes(), 'workflows/previous.cxflow.json', 'Previous workflow');
+    const proposal = directorProposal();
+
+    store.applyDirectorProposal(proposal);
+
+    expect(store.graphSnapshot()).toEqual(proposal.graph);
+    expect(store.name).toBe('Director Square');
+    expect(store.savedPath).toBeNull();
+    expect(store.migrationSourcePath).toBeNull();
+    expect(store.requiresExplicitSave).toBe(false);
+    expect(store.active).toBe(true);
+    expect(store.selection).toEqual({ kind: 'composition' });
+    expect(store.rev).toBe(1);
+    expect(store.savedRev).toBe(0);
+    expect(store.dirty).toBe(true);
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Director Square');
+    expect(reopened.serialize()).toEqual(store.serialize());
+  });
+
+  it('rejects a non-acceptable Director proposal before mutating any workflow or session state', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.graphSnapshot();
+    const rev = store.rev;
+    const proposal = { ...directorProposal(), canAccept: false };
+
+    expect(() => store.applyDirectorProposal(proposal)).toThrow(/cannot be accepted/i);
+    expect(store.graphSnapshot()).toBe(before);
+    expect(store.name).toBe('Untouched');
+    expect(store.rev).toBe(rev);
+    expect(store.dirty).toBe(false);
+  });
   it('exposes fake Transform running/succeeded state and persists the bound Square output on reopen', async () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newFromTemplate('campaign-composer');

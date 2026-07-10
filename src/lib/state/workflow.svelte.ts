@@ -22,6 +22,7 @@ import {
   executeCampaignGenerateTransform,
   type ExecuteCampaignGenerateOptions,
   type WorkflowTransformExecutionOutcome,
+  type WorkflowDirectorProposal,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -319,6 +320,48 @@ export class WorkflowStore {
     this.projectedGraphRevision = this.graphDomain.revision;
     this.syncReactiveGraph(this.graphDomain);
     this.rev = 0;
+    this.savedRev = 0;
+  }
+
+  applyDirectorProposal(proposal: WorkflowDirectorProposal): void {
+    if (!proposal.canAccept || proposal.issues.length > 0) {
+      throw new Error('This AI Director proposal cannot be accepted until every validation issue is resolved.');
+    }
+    if (proposal.graph.nodes.some((node) => node.type === 'unsupported')
+      || proposal.graph.assetReferences.length > 0
+      || proposal.graph.runRecords.length > 0
+      || proposal.graph.nodes.some((node) => node.runRecordIds.length > 0)) {
+      throw new Error('This AI Director proposal cannot be accepted because it is not a fresh creator workflow.');
+    }
+    // Build and validate the complete replacement before touching session or
+    // reactive state. A failure therefore leaves the current workflow intact.
+    const nextDomain = new WorkflowGraphDomain(proposal.graph, { idGenerator: this.graphIdGenerator });
+    const primaryArtDirection = nextDomain.graph.nodes.find((node) => node.type === 'art-direction') ?? null;
+
+    this.beginWorkflowSession();
+    this.active = true;
+    ui.showWorkflow();
+    this.name = nextDomain.graph.metadata.name;
+    this.savedPath = null;
+    this.migrationSourcePath = null;
+    this.requiresExplicitSave = false;
+    this.connectionError = null;
+    this.tool = 'hand';
+    this.zoomMode = 'in';
+    this.selection = primaryArtDirection?.id === 'composition'
+      ? { kind: 'composition' }
+      : primaryArtDirection
+        ? { kind: 'creator', id: primaryArtDirection.id }
+        : null;
+    this.storyboardEditing = false;
+    this.storyboardTool = 'brush';
+    this.panX = nextDomain.graph.viewport.panX;
+    this.panY = nextDomain.graph.viewport.panY;
+    this.zoom = nextDomain.graph.viewport.zoom;
+    this.graphDomain = nextDomain;
+    this.projectedGraphRevision = nextDomain.revision;
+    this.syncReactiveGraph(nextDomain);
+    this.rev = 1;
     this.savedRev = 0;
   }
 

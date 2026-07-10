@@ -525,6 +525,10 @@ function materializeDraft(
   graphId: string,
 ): WorkflowGraphV2 {
   const counts = new Map<CreatorNodeType, number>();
+  const primaryArtDirectionId = draft.nodes.find((node) => node.type === 'art-direction')?.id ?? null;
+  const persistedNodeId = (draftNodeId: string): string => (
+    draftNodeId === primaryArtDirectionId ? 'composition' : draftNodeId
+  );
   const columns: Record<CreatorNodeType, number> = {
     input: 30,
     brief: 290,
@@ -537,7 +541,7 @@ function materializeDraft(
     const index = counts.get(node.type) ?? 0;
     counts.set(node.type, index + 1);
     return createCreatorNode(node.type, {
-      id: node.id,
+      id: persistedNodeId(node.id),
       title: node.title,
       position: { x: columns[node.type], y: 30 + index * 270 },
       replaceConfig: true,
@@ -550,7 +554,11 @@ function materializeDraft(
     metadata: { name: draft.name, sourceVersion: null, migrations: [] },
     viewport: { panX: 10, panY: 10, zoom: 0.55 },
     nodes,
-    edges: draft.edges.map((edge): WorkflowEdgeV2 => cloneValue(edge)),
+    edges: draft.edges.map((edge): WorkflowEdgeV2 => ({
+      id: edge.id,
+      source: { nodeId: persistedNodeId(edge.source.nodeId), portId: edge.source.portId },
+      target: { nodeId: persistedNodeId(edge.target.nodeId), portId: edge.target.portId },
+    })),
     assetReferences: [],
     runRecords: [],
   };
