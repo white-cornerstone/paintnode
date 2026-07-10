@@ -42,6 +42,13 @@ import {
   type WorkflowSelectiveExecutionOutcome,
   type WorkflowNodePreflight,
   type WorkflowRunRecordV1,
+  executeWorkflowCandidateBranches,
+  retryWorkflowCandidateBranch,
+  deriveWorkflowCandidateBranchGroups,
+  type WorkflowCandidateBranchExecutionOptions,
+  type WorkflowCandidateBranchExecutionOutcome,
+  type WorkflowCandidateBranchGroup,
+  type WorkflowCandidateSummary,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -51,6 +58,18 @@ export interface WorkflowTransformExecutionState {
 }
 
 export interface WorkflowTransformStoreOutcome extends WorkflowTransformExecutionOutcome {
+  committed: boolean;
+  commitMessage: string;
+}
+
+export interface WorkflowCandidateBranchStoreOutcome extends WorkflowCandidateBranchExecutionOutcome {
+  committed: boolean;
+  commitMessage: string;
+}
+
+export interface WorkflowCandidateRetryStoreOutcome {
+  graph: WorkflowGraphV2;
+  candidate: WorkflowCandidateSummary;
   committed: boolean;
   commitMessage: string;
 }
@@ -1132,6 +1151,60 @@ export class WorkflowStore {
     };
   }
 
+  candidateBranchGroups(sourceNodeId?: string): WorkflowCandidateBranchGroup[] {
+    const groups = deriveWorkflowCandidateBranchGroups(this.serialize());
+    return sourceNodeId ? groups.filter((group) => group.sourceNodeId === sourceNodeId) : groups;
+  }
+
+  async runCandidateBranches(
+    outputNodeId: string,
+    options: WorkflowStoreRunOptions,
+    branch: WorkflowCandidateBranchExecutionOptions,
+  ): Promise<WorkflowCandidateBranchStoreOutcome> {
+    const sessionIdentity = this.workflowSessionIdentity;
+    const graphRevision = this.graphRevision;
+    const storeRevision = this.rev;
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
+    const outcome = await executeWorkflowCandidateBranches(this.serialize(), outputNodeId, options, branch);
+    const commitMessage = this.workflowSessionIdentity !== sessionIdentity
+      ? 'The workflow session changed while candidate branches were running.'
+      : this.graphRevision !== graphRevision || this.rev !== storeRevision
+        ? 'The workflow changed while candidate branches were running.'
+        : (options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity
+          ? 'The active project changed while candidate branches were running.'
+          : '';
+    if (commitMessage) return { ...outcome, committed: false, commitMessage: `${commitMessage} Candidate assets remain in the project.` };
+    this.graphDomain = new WorkflowGraphDomain(outcome.graph, { idGenerator: this.graphIdGenerator });
+    this.projectedGraphRevision = this.graphDomain.revision;
+    this.syncReactiveGraph(this.graphDomain);
+    this.bump();
+    return { ...outcome, committed: true, commitMessage: `Preserved ${outcome.group.candidates.length} candidate branches.` };
+  }
+
+  async retryCandidateBranch(
+    candidateId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<WorkflowCandidateRetryStoreOutcome> {
+    const sessionIdentity = this.workflowSessionIdentity;
+    const graphRevision = this.graphRevision;
+    const storeRevision = this.rev;
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
+    const outcome = await retryWorkflowCandidateBranch(this.serialize(), candidateId, options, { maxConcurrency: 1 });
+    const commitMessage = this.workflowSessionIdentity !== sessionIdentity
+      ? 'The workflow session changed while the candidate retry was running.'
+      : this.graphRevision !== graphRevision || this.rev !== storeRevision
+        ? 'The workflow changed while the candidate retry was running.'
+        : (options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity
+          ? 'The active project changed while the candidate retry was running.'
+          : '';
+    if (commitMessage) return { ...outcome, committed: false, commitMessage: `${commitMessage} The candidate asset remains in the project.` };
+    this.graphDomain = new WorkflowGraphDomain(outcome.graph, { idGenerator: this.graphIdGenerator });
+    this.projectedGraphRevision = this.graphDomain.revision;
+    this.syncReactiveGraph(this.graphDomain);
+    this.bump();
+    return { ...outcome, committed: true, commitMessage: 'Candidate retry preserved.' };
+  }
+
   async runCampaignGenerate(
     outputNodeId: string,
     options: WorkflowStoreRunOptions,
@@ -1516,7 +1589,7 @@ export class WorkflowStore {
       if (!node) continue;
       for (const runId of node.runRecordIds) {
         const record = graph.runRecords.find((candidate) => candidate.id === runId);
-        if (!record || !isFullWorkflowRunRecord(record) || record.status !== 'succeeded'
+        if (!record || !isFullWorkflowRunRecord(record) || record.candidate || record.status !== 'succeeded'
           || record.materialKey !== materialKeys[transformNodeId] || record.outputs.length === 0) continue;
         let reusable = true;
         for (const output of record.outputs) {

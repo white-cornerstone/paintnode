@@ -119,6 +119,31 @@ describe('provider-free QA workflow executor', () => {
     });
   });
 
+  it('fails only candidate two attempt one for branch retry QA', async () => {
+    const loadPng = vi.fn(async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'branch-one-failure',
+    });
+    const context = (runId: string) => ({
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId,
+        nodeId: 'transform-generate-square',
+      },
+      reportProgress: vi.fn(),
+    });
+
+    await expect(executor.execute(
+      request(), context('candidate-2-abcdef0123456789abcd-attempt-1'),
+    )).rejects.toThrow(/candidate 2 failed safely/i);
+    await expect(executor.execute(
+      request(), context('candidate-2-abcdef0123456789abcd-attempt-2'),
+    )).resolves.toMatchObject({ kind: 'bytes' });
+    await expect(executor.execute(
+      request(), context('candidate-1-abcdef0123456789abcd-attempt-1'),
+    )).resolves.toMatchObject({ kind: 'bytes' });
+    expect(loadPng).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects any output contract other than the QA Square fixture before loading bytes', async () => {
     const loadPng = vi.fn();
     const invalid = request();

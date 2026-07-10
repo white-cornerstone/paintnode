@@ -121,6 +121,7 @@ interface WorkflowRunRecordSafetyShape {
   startedAt: number;
   finishedAt: number | null;
   outputs: Array<{ assetReferenceId: string; assetId: string; relativePath: string; contentHash: string; acceptedAt?: number }>;
+  candidate?: { version: 1; branchGroupId: string; candidateId: string; ordinal: number; requestedCount: number; sourceNodeId: string; attempt: number };
   retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
@@ -167,12 +168,32 @@ export function validateWorkflowRunRecordSafety(record: WorkflowRunRecordSafetyS
       record.status !== 'succeeded' || !nonnegativeSafeInteger(output.acceptedAt)
       || output.acceptedAt < record.startedAt || record.finishedAt === null || output.acceptedAt > record.finishedAt
     )) throw new Error('Accepted output time must fall within a successful run.');
+    if (record.candidate && output.acceptedAt !== undefined) {
+      throw new Error('Unpromoted candidate outputs cannot be accepted.');
+    }
   }
   if (new Set(record.outputs.map((output) => output.assetReferenceId)).size !== record.outputs.length) {
     throw new Error('Run outputs must have unique asset references.');
   }
   if (record.projectTaskId !== undefined) safeWorkflowIdentifier(record.projectTaskId, 'Project task ID');
   if (record.retryOfRunId !== undefined) safeWorkflowIdentifier(record.retryOfRunId, 'Retry run ID');
+  if (record.candidate) {
+    safeWorkflowIdentifier(record.candidate.branchGroupId, 'Candidate branch group ID');
+    safeWorkflowIdentifier(record.candidate.candidateId, 'Candidate ID');
+    safeWorkflowIdentifier(record.candidate.sourceNodeId, 'Candidate source node ID');
+    if (record.candidate.sourceNodeId !== record.nodeId) throw new Error('Candidate source node must own the run.');
+    if (!Number.isSafeInteger(record.candidate.requestedCount)
+      || record.candidate.requestedCount < 2 || record.candidate.requestedCount > 6) {
+      throw new Error('Candidate branch count must be between 2 and 6.');
+    }
+    if (!Number.isSafeInteger(record.candidate.ordinal)
+      || record.candidate.ordinal < 1 || record.candidate.ordinal > record.candidate.requestedCount) {
+      throw new Error('Candidate ordinal must identify a requested candidate.');
+    }
+    if (!Number.isSafeInteger(record.candidate.attempt) || record.candidate.attempt < 1) {
+      throw new Error('Candidate attempt must start at 1.');
+    }
+  }
   if (record.debugArtifactReference !== undefined) {
     requireProjectRelativeWorkflowReference(record.debugArtifactReference, 'Debug artifact reference');
   }

@@ -10,6 +10,7 @@ import {
 } from './provenance';
 import type {
   WorkflowGraphV2,
+  WorkflowCandidateLineageV1,
   WorkflowNodeV2,
   WorkflowRunExecutor,
   WorkflowRunProvider,
@@ -166,7 +167,10 @@ export interface ExecuteCampaignGenerateOptions {
   workflowSessionId?: string;
   signal?: AbortSignal;
   onProgress?: (event: Readonly<WorkflowRunProgressEvent>) => void;
+  cancelExecutionForRun?: (runId: string) => Promise<unknown>;
   retryOfRunId?: string;
+  candidateLineage?: WorkflowCandidateLineageV1;
+  runAttempt?: number;
   expectedMaterialKey?: string;
 }
 
@@ -343,13 +347,14 @@ function appendRunRecord(
   nodeId: string,
   record: WorkflowRunRecordV1,
 ): WorkflowGraphV2 {
-  return new WorkflowGraphDomain({
+  const candidate = {
     ...graph,
     nodes: graph.nodes.map((node) => node.id === nodeId
       ? { ...node, runRecordIds: [...node.runRecordIds, record.id] }
       : node),
     runRecords: [...graph.runRecords, record],
-  }).graph;
+  };
+  return record.candidate ? candidate : new WorkflowGraphDomain(candidate).graph;
 }
 
 function nextRunAttempt(graph: WorkflowGraphV2, node: WorkflowNodeV2): number {
@@ -364,12 +369,16 @@ function retryRunId(
   graph: WorkflowGraphV2,
   node: WorkflowNodeV2,
   requested: string | undefined,
+  candidateId?: string,
 ): string | undefined {
   if (requested !== undefined) return safeWorkflowIdentifier(requested, 'Retry run ID');
   const latest = node.runRecordIds
     .map((id) => graph.runRecords.find((record) => record.id === id))
     .filter(isFullWorkflowRunRecord)
     .filter((record) => record.status !== 'running')
+    .filter((record) => candidateId
+      ? record.candidate?.candidateId === candidateId
+      : !record.candidate)
     .at(-1);
   return latest?.status === 'failed' || latest?.status === 'cancelled' ? latest.id : undefined;
 }
@@ -491,7 +500,12 @@ async function campaignGenerateTransform(
     width: numberConfig(output, 'finalWidth'),
     height: numberConfig(output, 'finalHeight'),
   };
-  const attempt = nextRunAttempt(graph, transform);
+  const attempt = options.runAttempt ?? nextRunAttempt(graph, transform);
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT', 'The run attempt identity is invalid.', 'Retry Generate',
+    );
+  }
   const startedAt = prepareOnly ? 0 : (options.clock?.() ?? Date.now());
   const runId = prepareOnly
     ? 'workflow-preflight-run'
@@ -516,7 +530,9 @@ async function campaignGenerateTransform(
     );
   }
   const hash = options.hash ?? workflowSha256Text;
-  const retryOfRunId = retryRunId(graph, transform, options.retryOfRunId);
+  const retryOfRunId = retryRunId(
+    graph, transform, options.retryOfRunId, options.candidateLineage?.candidateId,
+  );
   const workflowSessionId = safeWorkflowIdentifier(
     options.workflowSessionId ?? 'workflow-session',
     'Workflow session ID',
@@ -588,6 +604,7 @@ async function campaignGenerateTransform(
     const cancelled = createWorkflowRunRecord({
       id: runId, nodeId: transform.id, attempt, status: 'cancelled', graph, material: cancellationMaterial,
       startedAt, finishedAt, outputs: [], retryOfRunId,
+      candidate: options.candidateLineage,
       failure: { code: 'CANCELLED', message: 'The attempt was cancelled.' },
     }, hash);
     reportProgress({ stage: 'cancelled', message: cancelled.failure!.message });
@@ -762,6 +779,7 @@ async function campaignGenerateTransform(
     finishedAt: null,
     outputs: [],
     retryOfRunId,
+    candidate: options.candidateLineage,
   }, hash);
   if (!prepareOnly && options.expectedMaterialKey
     && preparedRecord.materialKey !== options.expectedMaterialKey) {
@@ -807,6 +825,7 @@ async function campaignGenerateTransform(
     const failed = createWorkflowRunRecord({
       id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
       startedAt, finishedAt, outputs: [], retryOfRunId,
+      candidate: options.candidateLineage,
       failure: { code: 'EXECUTOR_ERROR', message: (error as Error)?.message ?? String(error) },
     }, hash);
     reportProgress({ stage: 'failed', message: failed.failure!.message });
@@ -884,6 +903,7 @@ async function campaignGenerateTransform(
     const failed = createWorkflowRunRecord({
       id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
       startedAt, finishedAt, outputs: [], retryOfRunId,
+      candidate: options.candidateLineage,
       failure: { code: failureCode, message: original?.message ?? (error as Error)?.message ?? String(error) },
     }, hash);
     reportProgress({ stage: 'failed', message: failed.failure!.message });
@@ -901,6 +921,7 @@ async function campaignGenerateTransform(
     const failed = createWorkflowRunRecord({
       id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
       startedAt, finishedAt, outputs: [], retryOfRunId,
+      candidate: options.candidateLineage,
       failure: { code: 'INVALID_EXECUTOR_RESULT', message: 'Generated asset fingerprint is unavailable.' },
     }, hash);
     reportProgress({ stage: 'failed', message: failed.failure!.message });
@@ -923,12 +944,13 @@ async function campaignGenerateTransform(
       startedAt,
       finishedAt,
       retryOfRunId,
+      candidate: options.candidateLineage,
       outputs: [{
         assetReferenceId: referenceId,
         assetId: asset.id,
         relativePath: asset.relativePath,
         contentHash: outputContentHash,
-        acceptedAt: finishedAt,
+        ...(options.candidateLineage ? {} : { acceptedAt: finishedAt }),
       }],
     }, hash);
     resultGraph = appendRunRecord({
@@ -961,6 +983,7 @@ async function campaignGenerateTransform(
     const failed = createWorkflowRunRecord({
       id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
       startedAt, finishedAt, outputs: [], retryOfRunId,
+      candidate: options.candidateLineage,
       failure: { code: 'INVALID_EXECUTOR_RESULT', message: (error as Error)?.message ?? String(error) },
     }, hash);
     reportProgress({ stage: 'failed', message: failed.failure!.message });
@@ -971,7 +994,7 @@ async function campaignGenerateTransform(
   }
   reportProgress({ stage: 'succeeded', message: 'Execution completed.' });
   return {
-    graph: new WorkflowGraphDomain(resultGraph).graph,
+    graph: options.candidateLineage ? resultGraph : new WorkflowGraphDomain(resultGraph).graph,
     plan,
     request: deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>,
     asset: cloneValue(asset),
