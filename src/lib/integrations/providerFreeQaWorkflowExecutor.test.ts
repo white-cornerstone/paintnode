@@ -56,6 +56,69 @@ describe('provider-free QA workflow executor', () => {
     }
   });
 
+  it('offers a cancellable slow scenario for native progress and cancellation QA', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const loadPng = vi.fn(async () => new Uint8Array(png));
+    const controller = new AbortController();
+    const progress: string[] = [];
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'slow-success',
+      progressSteps: 4,
+      stepDelayMs: 5,
+    });
+
+    const operation = executor.execute(request(), {
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId: 'qa-run', nodeId: 'transform-generate-square',
+      },
+      signal: controller.signal,
+      reportProgress: (event) => {
+        progress.push(event.message);
+        if (progress.length === 1) controller.abort();
+      },
+    });
+
+    await expect(operation).rejects.toThrow(/cancelled/i);
+    expect(progress[0]).toMatch(/slow provider-free QA/i);
+    expect(loadPng).not.toHaveBeenCalled();
+  });
+
+  it('completes the slow scenario with bounded structured progress when it is not cancelled', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const progress: Array<{ message: string; completed?: number; total?: number }> = [];
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', async () => png, {
+      scenario: 'slow-success',
+      progressSteps: 2,
+      stepDelayMs: 1,
+    });
+
+    await expect(executor.execute(request(), {
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId: 'qa-run', nodeId: 'transform-generate-square',
+      },
+      reportProgress: (event) => progress.push({ ...event }),
+    })).resolves.toMatchObject({ kind: 'bytes', bytes: png });
+    expect(progress).toEqual([
+      { message: 'Slow provider-free QA 1 of 2', completed: 0, total: 2 },
+      { message: 'Slow provider-free QA 2 of 2', completed: 1, total: 2 },
+    ]);
+  });
+
+  it('offers an actionable fixed failure without loading provider output bytes', async () => {
+    const loadPng = vi.fn();
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'failure',
+    });
+
+    await expect(executor.execute(request())).rejects.toThrow(
+      'QA Fake simulated a provider failure. Review the workflow inputs, then retry Generate.',
+    );
+    expect(loadPng).not.toHaveBeenCalled();
+    expect(executor.describeRun(request())).toEqual({
+      id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' },
+    });
+  });
+
   it('rejects any output contract other than the QA Square fixture before loading bytes', async () => {
     const loadPng = vi.fn();
     const invalid = request();

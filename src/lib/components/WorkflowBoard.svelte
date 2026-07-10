@@ -73,7 +73,10 @@
     createAntigravityWorkflowTransformExecutor,
     createCodexWorkflowTransformExecutor,
   } from '../integrations/workflowCompositionExecutors';
-  import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
+  import {
+    createProviderFreeQaWorkflowExecutor,
+    type ProviderFreeQaScenario,
+  } from '../integrations/providerFreeQaWorkflowExecutor';
 
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
@@ -103,6 +106,7 @@
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
   let qaModeResolved = $state(!desktop);
+  let qaScenario = $state<ProviderFreeQaScenario>('success');
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
@@ -198,6 +202,7 @@
       graphRevision: workflow.rev,
       projectIdentity: project.identity,
       provider: providerSelection.provider,
+      qaScenario,
       options: JSON.stringify(runOptions),
       keepAiDebugArtifacts: settings.value.workspace.keepAiDebugArtifacts,
       assets: assets.map((asset) => [asset.id, asset.relativePath, asset.exists]),
@@ -1557,6 +1562,7 @@
     return JSON.stringify({
       provider: providerSelection.provider,
       qaMode,
+      qaScenario,
       options: JSON.stringify(runOptions),
       keepAiDebugArtifacts: settings.value.workspace.keepAiDebugArtifacts,
       assets: assets.map((asset) => [asset.id, asset.relativePath, asset.exists]),
@@ -1573,7 +1579,7 @@
     const runAssets = assets.map((asset) => ({ ...asset }));
     const runIdGenerator = createWorkflowBoardRunIdGenerator(runId);
     const executors = runSelection.qaFake
-      ? [createProviderFreeQaWorkflowExecutor('provider-free')]
+      ? [createProviderFreeQaWorkflowExecutor('provider-free', undefined, { scenario: qaScenario })]
       : [
           createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
             runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
@@ -2464,9 +2470,24 @@
           {/if}
           <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
             {#if providerSelection.qaFake}
-              <div class="qa-fake-banner" role="status">
-                <strong>QA Fake</strong>
-                <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
+              <div class="qa-fake-banner">
+                <div role="status">
+                  <strong>QA Fake</strong>
+                  <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
+                </div>
+                <label>
+                  <span>Native QA scenario</span>
+                  <select
+                    aria-label="QA Fake scenario"
+                    disabled={busy || selectiveBusy}
+                    value={qaScenario}
+                    onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}
+                  >
+                    <option value="success">Success</option>
+                    <option value="slow-success">Slow / cancellable</option>
+                    <option value="failure">Failure / retry</option>
+                  </select>
+                </label>
               </div>
             {:else}
               <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveBusy || !providerSelection.ready} />
@@ -3247,8 +3268,20 @@
     color: #d8f3e3;
     font-size: 10px;
   }
+  .qa-fake-banner > div,
+  .qa-fake-banner label {
+    display: grid;
+    gap: 2px;
+  }
   .qa-fake-banner span {
     color: #acd5bd;
+  }
+  .qa-fake-banner label {
+    margin-top: 4px;
+  }
+  .qa-fake-banner select {
+    min-width: 0;
+    width: 100%;
   }
   .readiness-checklist {
     display: grid;
