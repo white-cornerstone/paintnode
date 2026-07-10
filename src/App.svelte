@@ -63,7 +63,13 @@
     saveWorkflowCommand,
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
-  import { isDesktop, quitApplication, setNativeMenuEnabledStates, takePendingOpenPaths } from './lib/integrations/desktop';
+  import {
+    isDesktop,
+    providerQaMode,
+    quitApplication,
+    setNativeMenuEnabledStates,
+    takePendingOpenPaths,
+  } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, TASKS_PANEL_MIN_HEIGHT, type PanelGroupId, type PanelId } from './lib/state/panels';
   import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
@@ -749,10 +755,18 @@
     const disposeKeyboard = installKeyboard();
     ui.contextualTaskBarVisible = settings.value.general.showContextualTaskBarOnStartup;
     if (settings.value.general.reopenLastProject) void project.restore();
-    // First-time desktop users get the AI setup wizard once; it marks itself seen.
-    if (shouldOfferAiSetup(settings.value, localStorage.getItem(AI_SETUP_STORAGE_KEY), desktop)) {
-      ui.open('aiSetup');
-    }
+    // First-time desktop users get the AI setup wizard once; provider-free QA
+    // deliberately starts at the workspace without probing or configuring AI.
+    void providerQaMode()
+      .catch(() => null)
+      .then((qaMode) => {
+        if (
+          qaMode !== 'provider-free' &&
+          shouldOfferAiSetup(settings.value, localStorage.getItem(AI_SETUP_STORAGE_KEY), desktop)
+        ) {
+          ui.open('aiSetup');
+        }
+      });
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
     let unlistenResize: UnlistenFn | null = null;

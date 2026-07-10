@@ -78,6 +78,9 @@ use crate::project::{
     add_asset, safe_file_name, safe_stem, store_generated_png_asset, write_asset_file,
     write_asset_file_with_file_name, ProjectAsset,
 };
+use crate::provider_executable::{
+    ensure_provider_launch_allowed, resolve_provider_executable, Provider,
+};
 
 /// Appended to the prompt when a candidate fails the protected-region drift
 /// gate: the model regenerated the scene instead of editing in place.
@@ -437,6 +440,7 @@ fn run_codex_with_progress(
     app: AppHandle,
     run_id: String,
 ) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Codex)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -554,29 +558,6 @@ pub(crate) fn run_codex_director_request(
     } else {
         Err(command_failure("Codex Director", &run.output))
     }
-}
-
-fn configured_or_default_codex_bin(bin: Option<String>) -> Result<String, String> {
-    if let Some(bin) = configured_codex_bin(bin) {
-        return Ok(bin);
-    }
-
-    let candidates = ["codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"];
-    for candidate in candidates {
-        let mut command = Command::new(candidate);
-        apply_ai_cli_environment(&mut command)
-            .arg("--version")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("CODEX_API_KEY");
-        if command.output().is_ok() {
-            return Ok(candidate.to_string());
-        }
-    }
-
-    Err(
-        "Codex CLI was not found. Install Codex, or enter the full path to the `codex` binary."
-            .into(),
-    )
 }
 
 fn configured_codex_bin(bin: Option<String>) -> Option<String> {
@@ -1144,6 +1125,23 @@ fn run_codex_direct_image_request(
     options: &CodexCommandOptions,
     job_path: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
+    run_codex_direct_image_request_with_guard(prompt, image_paths, size, options, job_path, || {
+        ensure_provider_launch_allowed(Provider::Codex)
+    })
+}
+
+fn run_codex_direct_image_request_with_guard<Guard>(
+    prompt: &str,
+    image_paths: &[PathBuf],
+    size: (u32, u32),
+    options: &CodexCommandOptions,
+    job_path: Option<&Path>,
+    guard: Guard,
+) -> Result<Vec<u8>, String>
+where
+    Guard: FnOnce() -> Result<(), String>,
+{
+    guard()?;
     let auth = load_codex_chatgpt_auth()?;
     let image_data_urls = image_paths
         .iter()
@@ -1922,8 +1920,12 @@ fn output_mentions_unsupported_json(output: &Output) -> bool {
 #[tauri::command]
 pub(crate) async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> CodexDetectionResult {
-        let codex_bin = match configured_or_default_codex_bin(bin) {
-            Ok(path) => path,
+        let resolved = match resolve_provider_executable(
+            Provider::Codex,
+            bin,
+            crate::managed_runtime::managed_executable("codex"),
+        ) {
+            Ok(resolved) => resolved,
             Err(error) => {
                 return CodexDetectionResult {
                     found: false,
@@ -1933,48 +1935,11 @@ pub(crate) async fn detect_codex(bin: Option<String>) -> Result<CodexDetectionRe
                 };
             }
         };
-
-        let mut command = Command::new(&codex_bin);
-        apply_ai_cli_environment(&mut command)
-            .arg("--version")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("CODEX_API_KEY");
-
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                let version = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        String::from_utf8_lossy(&output.stderr)
-                            .lines()
-                            .next()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                    });
-                CodexDetectionResult {
-                    found: true,
-                    path: Some(codex_bin),
-                    version,
-                    error: None,
-                }
-            }
-            Ok(output) => CodexDetectionResult {
-                found: false,
-                path: Some(codex_bin),
-                version: None,
-                error: Some(command_failure("Codex detection", &output)),
-            },
-            Err(error) => CodexDetectionResult {
-                found: false,
-                path: Some(codex_bin),
-                version: None,
-                error: Some(format!("Failed to launch Codex: {error}")),
-            },
+        CodexDetectionResult {
+            found: true,
+            path: Some(resolved.path),
+            version: Some(resolved.version),
+            error: None,
         }
     })
     .await
@@ -1986,14 +1951,17 @@ pub(crate) async fn discover_codex_capabilities(
     bin: Option<String>,
 ) -> Result<AiProviderCapabilitiesResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let resolved = match resolve_provider_executable(
+            Provider::Codex,
+            bin,
+            crate::managed_runtime::managed_executable("codex"),
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return fallback_codex_capabilities(Some(error)),
+        };
         let mut command = Command::new(codex_sdk_node());
         apply_ai_cli_environment(&mut command).arg(codex_capabilities_runner_script());
-        if let Some(bin) = configured_codex_bin(bin).or_else(|| {
-            crate::managed_runtime::managed_executable("codex")
-                .map(|path| path.to_string_lossy().into_owned())
-        }) {
-            command.arg("--codex-path").arg(bin);
-        }
+        command.arg("--codex-path").arg(resolved.path);
         command
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY");
@@ -5080,6 +5048,37 @@ mod tests {
         ] {
             assert!(!job.path().join(file_name).exists());
         }
+    }
+
+    #[test]
+    fn provider_free_blocks_direct_codex_http_before_auth_or_request_side_effects() {
+        let job = TempJobDir::new("paintnode-codex-provider-free-http-test").expect("temp dir");
+        let request_artifact = job.path().join(PAINTNODE_CODEX_IMAGE_REQUEST_FILE);
+        fs::write(&request_artifact, b"must remain untouched").expect("write sentinel");
+
+        let error = run_codex_direct_image_request_with_guard(
+            "must not be sent",
+            &[],
+            (1024, 1024),
+            &CodexCommandOptions::default(),
+            Some(job.path()),
+            || {
+                crate::provider_executable::ensure_provider_launch_allowed_in_mode(
+                    Provider::Codex,
+                    "provider-free",
+                )
+            },
+        )
+        .expect_err("provider-free direct HTTP request must be blocked");
+
+        assert_eq!(
+            error,
+            "Codex launch is disabled in provider-free native QA mode."
+        );
+        assert_eq!(
+            fs::read(&request_artifact).expect("sentinel remains"),
+            b"must remain untouched"
+        );
     }
 
     #[test]

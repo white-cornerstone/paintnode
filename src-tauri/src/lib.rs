@@ -4,6 +4,7 @@ mod managed_runtime;
 mod menu;
 mod png;
 mod project;
+mod provider_executable;
 #[cfg(test)]
 mod test_util;
 
@@ -65,6 +66,7 @@ pub fn run() {
             managed_runtime::managed_runtime_status,
             managed_runtime::install_managed_runtime,
             managed_runtime::login_managed_runtime,
+            provider_executable::provider_qa_mode,
             ai::codex::generate_codex_image,
             ai::codex::generate_codex_fill_image,
             ai::codex::generate_codex_retouch_image,

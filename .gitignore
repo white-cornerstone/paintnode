@@ -12,6 +12,8 @@ coverage
 !.env.example
 .env*.local
 .vite
+/src-tauri/.tauri.dev.json
+/src-tauri/.tauri.qa.json
 
 # Local AI-agent instructions. Keep the tracked examples as the public baseline.
 /AGENTS.md

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ai::apply_ai_cli_environment;
+use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
 
 const RUNTIME_PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_MANIFEST_URL: &str =
@@ -305,6 +306,11 @@ fn check_auth(provider: &str, package: &RuntimePackageManifest) -> Result<bool, 
     }
     let executable = managed_executable(provider)
         .ok_or_else(|| format!("Managed {provider} executable is missing."))?;
+    ensure_provider_launch_allowed(match provider {
+        "codex" => Provider::Codex,
+        "claude" => Provider::Claude,
+        _ => return Err(format!("Unsupported managed AI provider: {provider}")),
+    })?;
     let mut command = Command::new(executable);
     apply_ai_cli_environment(&mut command);
     command
@@ -597,6 +603,11 @@ pub(crate) async fn login_managed_runtime(
             .ok_or_else(|| format!("Install {provider} support before signing in."))?;
         let executable = managed_executable(&provider)
             .ok_or_else(|| format!("Managed {provider} executable is missing."))?;
+        ensure_provider_launch_allowed(match provider.as_str() {
+            "codex" => Provider::Codex,
+            "claude" => Provider::Claude,
+            _ => return Err(format!("Unsupported managed AI provider: {provider}")),
+        })?;
         emit_progress(
             &app,
             &provider,
