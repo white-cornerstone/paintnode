@@ -49,13 +49,31 @@ npm run qa:native:provider-e2e -- \
   --antigravity-path "$HOME/.local/bin/agy"
 ```
 
-The lane first exercises PaintNode's Rust resolver and runs only no-cost checks:
-`codex login status` and `agy models`. It then launches **PaintNode Repo QA —
-provider-e2e**, restricted to those two absolute paths. It does not submit an
-image-generation request. A missing executable, non-zero version exit, missing
-Codex login, or unavailable Antigravity model list fails with the provider and
-path identified before the uniquely bundled **PaintNode Blueprint QA — Provider
-E2E** app launches.
+Run the same fail-closed checks without building or launching PaintNode:
+
+```sh
+npm run qa:provider:doctor -- \
+  --codex-path /opt/homebrew/bin/codex \
+  --antigravity-path "$HOME/.local/bin/agy"
+```
+
+The doctor resolves npm-installed Codex launchers to their native executable,
+so the repo QA app never depends on a stale Node shim or a different `codex`
+earlier on `PATH`. On macOS it verifies the provider's code signature and
+expected vendor Team ID, rejects revoked or malware-blocked identities before
+execution, and applies bounded timeouts with whole-process-tree cleanup to
+`--version`, `codex login status`, and `agy models`. It requires an affirmative
+Codex login status and at least one available Antigravity model. These checks
+do not submit a prompt or image request.
+
+The full lane then hands the exact preflighted paths and version metadata to
+PaintNode's Rust resolver without re-executing the providers, and launches the
+uniquely identified **PaintNode Blueprint QA — Provider E2E** bundle. A missing
+executable, bad signature,
+revoked certificate, timed-out command, missing Codex login, or unavailable
+Antigravity model list fails with the provider and path identified before the
+app launches. The full lane still does not submit an image-generation request;
+the two billable Generate actions require explicit action-time approval.
 
 Do not bypass Gatekeeper, alter quarantine attributes, or remove a rejected
 provider install as part of QA. Fix or replace that install outside PaintNode.

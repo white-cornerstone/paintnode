@@ -17,11 +17,12 @@
     "build:quicklook": "node scripts/build-quicklook.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/*.test.mjs",
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "qa:native:provider-free": "node scripts/native-qa-app.mjs --mode provider-free",
+    "qa:provider:doctor": "node scripts/native-provider-e2e.mjs --preflight-only",
     "qa:native:provider-e2e": "node scripts/native-provider-e2e.mjs",
     "tauri:build": "tauri build",
     "tauri:build:mac:signed": "bash scripts/build-macos-signed.sh"
