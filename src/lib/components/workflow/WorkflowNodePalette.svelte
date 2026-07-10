@@ -49,13 +49,14 @@
     if (definition) onAdd(definition.type);
   }
 
-  function onSearchKeydown(event: KeyboardEvent): void {
+  function onPaletteKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape') {
       event.preventDefault();
       onClose();
       return;
     }
-    if (event.key === 'Enter') {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (event.key === 'Enter' && (target === searchInput || target?.dataset.paletteOption === '')) {
       event.preventDefault();
       choose();
       return;
@@ -63,10 +64,11 @@
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     activeIndex = paletteIndexAfterKey(activeIndex, event.key, items.length);
+    searchInput?.focus();
   }
 </script>
 
-<div class="node-palette" role="dialog" aria-label="Add workflow node">
+<div class="node-palette" role="dialog" aria-label="Add workflow node" tabindex="-1" onkeydown={onPaletteKeydown}>
   <header>
     <strong>Add node</strong>
     <button type="button" aria-label="Close node palette" use:tooltip={{ text: 'Close palette', placement: 'left' }} onclick={onClose}>
@@ -81,7 +83,6 @@
     aria-label="Search creator nodes"
     aria-controls="creator-node-options"
     aria-activedescendant={activeIndex >= 0 && items[activeIndex] ? optionId(items[activeIndex]) : undefined}
-    onkeydown={onSearchKeydown}
   />
   <div id="creator-node-options" class="node-options" role="listbox" aria-label="Creator node types">
     {#each items as definition, index (definition.type)}
@@ -89,9 +90,11 @@
         id={optionId(definition)}
         type="button"
         role="option"
+        data-palette-option=""
         aria-selected={index === activeIndex}
         class:active={index === activeIndex}
         onpointerenter={() => (activeIndex = index)}
+        onfocus={() => (activeIndex = index)}
         onclick={() => choose(index)}
       >
         <Icon svg={iconFor(definition.iconKey)} size={18} />

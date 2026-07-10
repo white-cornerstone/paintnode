@@ -1,47 +1,55 @@
 <script lang="ts">
   import { tooltip } from '../../actions/tooltip';
+  import type { WorkflowNodePort } from '../../workflow';
 
   let {
     title,
+    height,
+    inputs,
+    outputs,
     onStart,
     onFinish,
-    showInput = true,
-    showOutput = true,
-    inputLabel = 'Input',
-    outputLabel = 'Output',
   }: {
     title: string;
-    onStart: (event: PointerEvent) => void;
-    onFinish: (event: PointerEvent) => void;
-    showInput?: boolean;
-    showOutput?: boolean;
-    inputLabel?: string;
-    outputLabel?: string;
+    height: number;
+    inputs: readonly WorkflowNodePort[];
+    outputs: readonly WorkflowNodePort[];
+    onStart: (event: PointerEvent, portId: string) => void;
+    onFinish: (event: PointerEvent, portId: string) => void;
   } = $props();
+
+  function portTop(index: number, count: number): string {
+    return `${height * ((index + 1) / (count + 1))}px`;
+  }
 </script>
 
-{#if showInput}
+{#each inputs as port, index (port.id)}
   <button
     class="node-port input"
-    aria-label={`${inputLabel} for ${title}`}
-    use:tooltip={{ text: inputLabel, placement: 'left' }}
+    style={`top:${portTop(index, inputs.length)}`}
+    data-node-port-id={port.id}
+    data-node-port-direction="input"
+    aria-label={`${port.label} (${port.dataType}) for ${title}`}
+    use:tooltip={{ text: `${port.label} · ${port.dataType}`, placement: 'left' }}
     onpointerdown={(event) => event.stopPropagation()}
-    onpointerup={onFinish}
+    onpointerup={(event) => onFinish(event, port.id)}
   ></button>
-{/if}
-{#if showOutput}
+{/each}
+{#each outputs as port, index (port.id)}
   <button
     class="node-port output"
-    aria-label={`${outputLabel} from ${title}`}
-    use:tooltip={{ text: outputLabel, placement: 'right' }}
-    onpointerdown={onStart}
+    style={`top:${portTop(index, outputs.length)}`}
+    data-node-port-id={port.id}
+    data-node-port-direction="output"
+    aria-label={`${port.label} (${port.dataType}) from ${title}`}
+    use:tooltip={{ text: `${port.label} · ${port.dataType}`, placement: 'right' }}
+    onpointerdown={(event) => onStart(event, port.id)}
   ></button>
-{/if}
+{/each}
 
 <style>
   .node-port {
     position: absolute;
-    top: var(--port-y, 50%);
     z-index: 8;
     display: grid;
     place-items: center;

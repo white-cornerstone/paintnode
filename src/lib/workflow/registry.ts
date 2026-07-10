@@ -51,13 +51,33 @@ export interface CreateCreatorNodeOptions {
   portLabels?: Readonly<Record<string, string>>;
 }
 
-const noExecutor: CreatorExecutorAvailability = {
+function cloneValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(cloneValue) as T;
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValue(item)])) as T;
+  }
+  return value;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (Array.isArray(value)) {
+    value.forEach(deepFreeze);
+    return Object.freeze(value) as T;
+  }
+  if (typeof value === 'object' && value !== null) {
+    Object.values(value).forEach(deepFreeze);
+    return Object.freeze(value);
+  }
+  return value;
+}
+
+const noExecutor: CreatorExecutorAvailability = deepFreeze({
   status: 'not-required',
   capability: null,
   reason: null,
-};
+});
 
-export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = [
+export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFreeze([
   {
     type: 'input',
     label: 'Input',
@@ -201,7 +221,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = [
     },
     executor: noExecutor,
   },
-] as const;
+] satisfies CreatorNodeDefinition[]);
 
 export function createCreatorNodeRegistry(
   definitions: readonly CreatorNodeDefinition[],
@@ -211,20 +231,12 @@ export function createCreatorNodeRegistry(
     if (registry.has(definition.type)) {
       throw new Error(`Duplicate creator node definition: ${definition.type}`);
     }
-    registry.set(definition.type, definition);
+    registry.set(definition.type, deepFreeze(cloneValue(definition)));
   }
   return registry;
 }
 
 const definitionsByType = createCreatorNodeRegistry(CREATOR_NODE_DEFINITIONS);
-
-function cloneValue<T>(value: T): T {
-  if (Array.isArray(value)) return value.map(cloneValue) as T;
-  if (typeof value === 'object' && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValue(item)])) as T;
-  }
-  return value;
-}
 
 export function creatorNodeDefinition(type: CreatorNodeType): CreatorNodeDefinition {
   const definition = definitionsByType.get(type);

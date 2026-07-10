@@ -38,6 +38,26 @@ describe('creator node registry', () => {
     );
   });
 
+  it('exposes deeply immutable definitions and shared executor metadata', () => {
+    const transform = creatorNodeDefinition('transform');
+    const input = creatorNodeDefinition('input');
+    expect(Object.isFrozen(CREATOR_NODE_DEFINITIONS)).toBe(true);
+    expect(Object.isFrozen(transform)).toBe(true);
+    expect(Object.isFrozen(transform.defaultSize)).toBe(true);
+    expect(Object.isFrozen(transform.ports)).toBe(true);
+    expect(Object.isFrozen(transform.ports.inputs)).toBe(true);
+    expect(Object.isFrozen(transform.ports.inputs[0])).toBe(true);
+    expect(Object.isFrozen(transform.defaultConfig)).toBe(true);
+    expect(Object.isFrozen(transform.defaultConfig.advanced)).toBe(true);
+    expect(Object.isFrozen(transform.executor)).toBe(true);
+    expect(Object.isFrozen(input.executor)).toBe(true);
+
+    expect(() => {
+      (transform.ports.inputs[0] as { label: string }).label = 'Mutated';
+    }).toThrow(TypeError);
+    expect(creatorNodeDefinition('transform').ports.inputs[0].label).toBe('Directed composition');
+  });
+
   it('creates a framework-independent valid graph from registry defaults without provider palette types', () => {
     const nodes = types.map((type, index) => createCreatorNode(type, {
       id: `node-${type}`,

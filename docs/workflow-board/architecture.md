@@ -71,6 +71,16 @@ Art Direction, and Output experiences while using shared registry metadata and
 common chrome; Transform and Review can use the generic creator card until a
 focused component is justified.
 
+The board renders one physical handle for every persisted named port. Connection
+gestures carry the exact source and target `nodeId` plus `portId`; presentation
+must not collapse several ports into one inferred handle. Repeated palette adds
+use deterministic open placement rather than identical centre stacking.
+
+Persisted unsupported future nodes are projected as visible, non-runnable
+fallback cards and remain excluded from the creator palette. Their raw payload,
+ports, and configuration stay authoritative for saving even though the current
+version cannot connect or execute them.
+
 Executor availability has explicit semantics:
 
 - `not-required`: the node records direction, input, review-independent

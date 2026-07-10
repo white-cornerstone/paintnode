@@ -37,8 +37,15 @@
     type WorkflowConnection,
     type WorkflowCreatorNode,
     type WorkflowOutputNode,
+    type WorkflowUnsupportedNode,
   } from '../state/workflow.svelte';
-  import { creatorNodeDefinition, workflowReadiness, type CreatorNodeType } from '../workflow';
+  import {
+    creatorNodeDefinition,
+    findOpenCreatorNodePlacement,
+    workflowReadiness,
+    type CreatorNodeType,
+    type WorkflowNodePort,
+  } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
@@ -54,7 +61,7 @@
     provider?: string;
     detail?: string;
   };
-  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'viewport';
+  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {
     id: string;
@@ -74,19 +81,16 @@
   };
 
   const desktop = isDesktop();
-  const inputCreatorDefinition = creatorNodeDefinition('input');
   const briefCreatorDefinition = creatorNodeDefinition('brief');
-  const artDirectionCreatorDefinition = creatorNodeDefinition('art-direction');
-  const outputCreatorDefinition = creatorNodeDefinition('output');
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let busy = $state(false);
   let progress = $state('');
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
-  let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output'; id?: string; dx: number; dy: number } | null = null;
+  let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
-  let connecting = $state<{ from: WorkflowNodeId; x: number; y: number } | null>(null);
+  let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
   let overscrollX = $state(0);
   let overscrollY = $state(0);
   let overscrollReturning = $state(false);
@@ -326,6 +330,10 @@
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 
+  function creatorConfigString(config: Record<string, unknown>, key: string): string {
+    return typeof config[key] === 'string' ? config[key] : '';
+  }
+
   async function placeOutput(node: WorkflowOutputNode): Promise<void> {
     const outputAsset = outputAssetFor(node);
     if (!outputAsset) return;
@@ -346,15 +354,16 @@
 
   function dragPointerDown(
     event: PointerEvent,
-    type: 'asset' | 'prompt' | 'creator' | 'output',
-    node: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | undefined = undefined,
+    type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported',
+    node: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | WorkflowUnsupportedNode | undefined = undefined,
   ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
     const output = type === 'output' && node ? workflow.outputNode(node.id) : null;
-    const x = type === 'asset' || type === 'creator' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
-    const y = type === 'asset' || type === 'creator' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
+    const x = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
+    const y = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
     if (type === 'asset' && node) workflow.select({ kind: 'asset', id: node.id });
     else if (type === 'creator' && node) workflow.select({ kind: 'creator', id: node.id });
+    else if (type === 'unsupported' && node) workflow.select({ kind: 'unsupported', id: node.id });
     else workflow.select(type === 'prompt' ? { kind: 'composition' } : { kind: 'output', id: output?.id ?? 'output' });
     dragging = {
       type,
@@ -368,8 +377,8 @@
 
   function dragHandle(
     element: HTMLElement,
-    params: { type: 'asset' | 'prompt' | 'creator' | 'output'; node?: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode },
-  ): { update: (next: { type: 'asset' | 'prompt' | 'creator' | 'output'; node?: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode }) => void; destroy: () => void } {
+    params: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; node?: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | WorkflowUnsupportedNode },
+  ): { update: (next: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; node?: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | WorkflowUnsupportedNode }) => void; destroy: () => void } {
     let current = params;
     const onDown = (event: PointerEvent) => dragPointerDown(event, current.type, current.node);
     element.addEventListener('pointerdown', onDown);
@@ -409,6 +418,7 @@
       const y = point.y - dragging.dy;
       if (dragging.type === 'asset' && dragging.id) workflow.moveNode(dragging.id, x, y);
       else if (dragging.type === 'creator' && dragging.id) workflow.moveNode(dragging.id, x, y);
+      else if (dragging.type === 'unsupported' && dragging.id) workflow.moveNode(dragging.id, x, y);
       else if (dragging.type === 'prompt') workflow.movePrompt(x, y);
       else if (dragging.id) workflow.moveOutputNode(dragging.id, x, y);
     }
@@ -461,6 +471,15 @@
       ...workflow.creatorNodes.map((node) => ({
         id: node.id,
         kind: 'creator' as const,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        color: node.color,
+      })),
+      ...workflow.unsupportedNodes.map((node) => ({
+        id: node.id,
+        kind: 'unsupported' as const,
         x: node.x,
         y: node.y,
         width: node.width,
@@ -671,8 +690,8 @@
   }
 
   function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
-    const source = outputPortPoint(connection.from);
-    const target = inputPortPoint(connection.to);
+    const source = outputPortPoint(connection.from, connection.sourcePortId);
+    const target = inputPortPoint(connection.to, connection.targetPortId);
     if (!source || !target) return 'display:none';
     const x1 = mapX(source.x, map);
     const y1 = mapY(source.y, map);
@@ -751,32 +770,44 @@
     if (briefNode) return { x: briefNode.x, y: briefNode.y, width: briefNode.width, height: briefNode.height };
     const creatorNode = workflow.creatorNodes.find((item) => item.id === nodeId);
     if (creatorNode) return { x: creatorNode.x, y: creatorNode.y, width: creatorNode.width, height: creatorNode.height };
+    const unsupportedNode = workflow.unsupportedNodes.find((item) => item.id === nodeId);
+    if (unsupportedNode) return { x: unsupportedNode.x, y: unsupportedNode.y, width: unsupportedNode.width, height: unsupportedNode.height };
     const node = workflow.nodes.find((item) => item.id === nodeId);
     return node ? { x: node.x, y: node.y, width: node.width, height: node.height } : null;
   }
 
-  function inputPortPoint(nodeId: WorkflowNodeId): { x: number; y: number } | null {
-    const rect = workflowNodeRect(nodeId);
-    if (!rect) return null;
-    return { x: rect.x, y: rect.y + rect.height / 2 };
+  function workflowNodePorts(nodeId: WorkflowNodeId): { inputs: WorkflowNodePort[]; outputs: WorkflowNodePort[] } {
+    workflow.rev;
+    const node = workflow.graphSnapshot().nodes.find((item) => item.id === nodeId);
+    return node?.ports ?? { inputs: [], outputs: [] };
   }
 
-  function outputPortPoint(nodeId: WorkflowNodeId): { x: number; y: number } | null {
+  function inputPortPoint(nodeId: WorkflowNodeId, portId: string): { x: number; y: number } | null {
     const rect = workflowNodeRect(nodeId);
-    if (!rect) return null;
-    return { x: rect.x + rect.width, y: rect.y + rect.height / 2 };
+    const ports = workflowNodePorts(nodeId).inputs;
+    const index = ports.findIndex((port) => port.id === portId);
+    if (!rect || index < 0) return null;
+    return { x: rect.x, y: rect.y + rect.height * ((index + 1) / (ports.length + 1)) };
+  }
+
+  function outputPortPoint(nodeId: WorkflowNodeId, portId: string): { x: number; y: number } | null {
+    const rect = workflowNodeRect(nodeId);
+    const ports = workflowNodePorts(nodeId).outputs;
+    const index = ports.findIndex((port) => port.id === portId);
+    if (!rect || index < 0) return null;
+    return { x: rect.x + rect.width, y: rect.y + rect.height * ((index + 1) / (ports.length + 1)) };
   }
 
   function connectionPath(connection: WorkflowConnection): string {
-    const source = outputPortPoint(connection.from);
-    const target = inputPortPoint(connection.to);
+    const source = outputPortPoint(connection.from, connection.sourcePortId);
+    const target = inputPortPoint(connection.to, connection.targetPortId);
     if (!source || !target) return '';
     return routedPath(source, target);
   }
 
   function pendingConnectionPath(): string {
     if (!connecting) return '';
-    const source = outputPortPoint(connecting.from);
+    const source = outputPortPoint(connecting.from.nodeId, connecting.from.portId);
     if (!source) return '';
     return routedPath(source, { x: connecting.x, y: connecting.y });
   }
@@ -802,27 +833,34 @@
 
   async function addCreatorNodeFromPalette(type: CreatorNodeType): Promise<void> {
     const definition = creatorNodeDefinition(type);
-    const position = {
+    const preferred = {
       x: (boardWidth / 2 - workflow.panX) / workflow.zoom - definition.defaultSize.width / 2,
       y: (boardHeight / 2 - workflow.panY) / workflow.zoom - definition.defaultSize.height / 2,
     };
+    const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, workflowMapItems(), 20, {
+      x: -workflow.panX / workflow.zoom,
+      y: -workflow.panY / workflow.zoom,
+      width: boardWidth / workflow.zoom,
+      height: boardHeight / workflow.zoom,
+      padding: 12 / workflow.zoom,
+    });
     const nodeId = workflow.addCreatorNode(type, position);
     paletteOpen = false;
     await tick();
     requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workflow-node="${nodeId}"]`)?.focus());
   }
 
-  function startConnection(event: PointerEvent, from: WorkflowNodeId): void {
+  function startConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     const point = boardPoint(event);
     workflow.connectionError = null;
-    connecting = { from, x: point.x, y: point.y };
+    connecting = { from: { nodeId, portId }, x: point.x, y: point.y };
     event.stopPropagation();
   }
 
-  function finishConnection(event: PointerEvent, to: WorkflowNodeId): void {
+  function finishConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
     if (!connecting) return;
-    workflow.connect(connecting.from, to);
+    workflow.connectPorts(connecting.from.nodeId, connecting.from.portId, nodeId, portId);
     connecting = null;
     event.stopPropagation();
   }
@@ -1638,6 +1676,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               class:composition={item.kind === 'composition'}
               class:creator={item.kind === 'creator'}
               class:output={item.kind === 'output'}
+              class:unsupported={item.kind === 'unsupported'}
               class:included={item.included}
               style={mapRectStyle(item, workflowMapModel)}
             ></span>
@@ -1645,7 +1684,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
         </button>
         <div class="map-meta">
-          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + 1 + workflow.outputNodes.length} nodes</span>
+          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + 1 + workflow.outputNodes.length} nodes</span>
           <span>{Math.round(workflow.zoom * 100)}%</span>
         </div>
       </div>
@@ -1712,6 +1751,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 
         {#each workflow.nodes as node (node.id)}
           {@const asset = assetFor(node)}
+          {@const ports = workflowNodePorts(node.id)}
           <article
             class="asset-node"
             class:included={node.included}
@@ -1728,10 +1768,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           >
             <WorkflowNodePorts
               title={node.name}
-              showInput={false}
-              outputLabel={node.slotId ? `${node.name} visual input` : inputCreatorDefinition.ports.outputs[0]?.label}
-              onStart={(event) => startConnection(event, node.id)}
-              onFinish={(event) => finishConnection(event, node.id)}
+              height={node.height}
+              inputs={ports.inputs}
+              outputs={ports.outputs}
+              onStart={(event, portId) => startConnection(event, node.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, node.id, portId)}
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
@@ -1766,37 +1807,38 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </button>
               </div>
             </div>
-            <div class="node-preview" style={`height:${Math.max(64, node.height - (node.slotId ? 150 : 84))}px`}>
+            <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
               {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
             </div>
-            {#if node.slotId}
-              <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
-                <span>{node.required ? 'Required asset' : 'Optional asset'}</span>
-                <select
-                  aria-label={`Asset for ${node.name}`}
-                  data-workflow-required-slot={node.required ? '' : undefined}
-                  value={asset?.id ?? ''}
-                  onchange={(event) => workflow.assignAsset(
-                    node.id,
-                    assets.find((item) => item.id === event.currentTarget.value) ?? null,
-                  )}
-                >
-                  <option value="">Choose from project…</option>
-                  {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
-                </select>
-              </label>
-            {/if}
+            <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
+              <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
+              <select
+                aria-label={`Asset for ${node.name}`}
+                data-workflow-required-slot={node.required ? '' : undefined}
+                value={asset?.id ?? ''}
+                onchange={(event) => workflow.assignAsset(
+                  node.id,
+                  assets.find((item) => item.id === event.currentTarget.value) ?? null,
+                )}
+              >
+                <option value="">Choose from project…</option>
+                {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+              </select>
+            </label>
             <textarea
               aria-label={`Role for ${node.name}`}
               placeholder={node.guidance || 'role in composition'}
               value={node.note}
               onpointerdown={(event) => event.stopPropagation()}
-              oninput={(event) => workflow.setNodeNote(node.id, event.currentTarget.value)}
+              oninput={(event) => node.creatorInput
+                ? workflow.configureCreatorNode(node.id, { role: event.currentTarget.value })
+                : workflow.setNodeNote(node.id, event.currentTarget.value)}
             ></textarea>
           </article>
         {/each}
 
         {#each workflow.briefNodes as brief (brief.id)}
+          {@const ports = workflowNodePorts(brief.id)}
           <article
             class="brief-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === brief.id}
@@ -1812,10 +1854,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           >
             <WorkflowNodePorts
               title={brief.name}
-              showInput={false}
-              outputLabel={briefCreatorDefinition.ports.outputs[0]?.label}
-              onStart={(event) => startConnection(event, brief.id)}
-              onFinish={(event) => finishConnection(event, brief.id)}
+              height={brief.height}
+              inputs={ports.inputs}
+              outputs={ports.outputs}
+              onStart={(event, portId) => startConnection(event, brief.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, brief.id, portId)}
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
@@ -1848,12 +1891,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           >
             <WorkflowNodePorts
               title={node.name}
-              showInput={node.ports.inputs.length > 0}
-              showOutput={node.ports.outputs.length > 0}
-              inputLabel={node.ports.inputs.map((port) => `${port.label} (${port.dataType})`).join(', ')}
-              outputLabel={node.ports.outputs.map((port) => `${port.label} (${port.dataType})`).join(', ')}
-              onStart={(event) => startConnection(event, node.id)}
-              onFinish={(event) => finishConnection(event, node.id)}
+              height={node.height}
+              inputs={node.ports.inputs}
+              outputs={node.ports.outputs}
+              onStart={(event, portId) => startConnection(event, node.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, node.id, portId)}
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node }}>
@@ -1875,6 +1917,59 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             </div>
             <div class="creator-node-body">
               <p>{definition.description}</p>
+              {#if node.type === 'art-direction'}
+                <label class="creator-config-field">
+                  Direction prompt
+                  <textarea
+                    aria-label={`${node.name} direction prompt`}
+                    value={creatorConfigString(node.config, 'prompt')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { prompt: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {:else if node.type === 'transform'}
+                <label class="creator-config-field">
+                  Capability
+                  <select
+                    aria-label={`${node.name} capability`}
+                    value={creatorConfigString(node.config, 'capability')}
+                    onchange={(event) => workflow.configureCreatorNode(node.id, { capability: event.currentTarget.value })}
+                  >
+                    <option value="generate">Generate</option>
+                    <option value="edit">Edit</option>
+                    <option value="remove-background">Remove background</option>
+                    <option value="relight">Relight</option>
+                    <option value="upscale">Upscale</option>
+                  </select>
+                </label>
+                <label class="creator-config-field">
+                  Instructions
+                  <textarea
+                    aria-label={`${node.name} instructions`}
+                    value={creatorConfigString(node.config, 'instructions')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {:else if node.type === 'review'}
+                <label class="creator-config-field">
+                  Review mode
+                  <select
+                    aria-label={`${node.name} review mode`}
+                    value={creatorConfigString(node.config, 'mode')}
+                    onchange={(event) => workflow.configureCreatorNode(node.id, { mode: event.currentTarget.value })}
+                  >
+                    <option value="human">Human review</option>
+                    <option value="ai">AI-assisted review (draft)</option>
+                  </select>
+                </label>
+                <label class="creator-config-field">
+                  Review instructions
+                  <textarea
+                    aria-label={`${node.name} review instructions`}
+                    value={creatorConfigString(node.config, 'instructions')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {/if}
               {#if node.ports.inputs.length > 0}
                 <div class="creator-port-list">
                   <b>Inputs</b>
@@ -1899,6 +1994,40 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           </article>
         {/each}
 
+        {#each workflow.unsupportedNodes as node (node.id)}
+          <article
+            class="unsupported-node"
+            class:selected={workflow.selection?.kind === 'unsupported' && workflow.selection.id === node.id}
+            tabindex="-1"
+            data-workflow-node={node.id}
+            data-unsupported-node-type={node.unsupportedType}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; min-height:${node.height}px; --node-color:${node.color}`}
+            onfocus={() => workflow.select({ kind: 'unsupported', id: node.id })}
+            onpointerdown={(event) => {
+              workflow.select({ kind: 'unsupported', id: node.id });
+              event.stopPropagation();
+            }}
+          >
+            <div class="node-head">
+              <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>{node.name}</span>
+              <small>Unsupported</small>
+            </div>
+            <div class="creator-node-body">
+              <p>This “{node.unsupportedType}” node is preserved for a compatible future PaintNode version.</p>
+              {#if node.ports.inputs.length + node.ports.outputs.length > 0}
+                <div class="creator-port-list">
+                  <b>Preserved ports</b>
+                  {#each [...node.ports.inputs, ...node.ports.outputs] as port}
+                    <span>{port.label}<small>{port.dataType}</small></span>
+                  {/each}
+                </div>
+              {/if}
+              <p class="draft-reason" id={`unsupported-reason-${node.id}`}>PaintNode cannot safely connect or execute this node yet. Its raw payload will be saved unchanged.</p>
+              <button type="button" class="draft-run" disabled aria-describedby={`unsupported-reason-${node.id}`}>Run unavailable</button>
+            </div>
+          </article>
+        {/each}
+
         <article
           class="prompt-node"
           class:selected={workflow.selection?.kind === 'composition'}
@@ -1914,10 +2043,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
         >
           <WorkflowNodePorts
             title={compositionTitle()}
-            inputLabel={artDirectionCreatorDefinition.ports.inputs.map((port) => port.label).join(' and ')}
-            outputLabel={artDirectionCreatorDefinition.ports.outputs[0]?.label}
-            onStart={(event) => startConnection(event, 'composition')}
-            onFinish={(event) => finishConnection(event, 'composition')}
+            height={workflow.compositionHeight}
+            inputs={workflowNodePorts('composition').inputs}
+            outputs={workflowNodePorts('composition').outputs}
+            onStart={(event, portId) => startConnection(event, 'composition', portId)}
+            onFinish={(event, portId) => finishConnection(event, 'composition', portId)}
           />
           <div class="node-head">
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
@@ -2074,6 +2204,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
+          {@const ports = workflowNodePorts(outputNode.id)}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
@@ -2089,10 +2220,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           >
             <WorkflowNodePorts
               title={outputTitle(outputNode)}
-              showOutput={false}
-              inputLabel={outputCreatorDefinition.ports.inputs[0]?.label}
-              onStart={(event) => startConnection(event, outputNode.id)}
-              onFinish={(event) => finishConnection(event, outputNode.id)}
+              height={outputNode.height}
+              inputs={ports.inputs}
+              outputs={ports.outputs}
+              onStart={(event, portId) => startConnection(event, outputNode.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, outputNode.id, portId)}
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
@@ -2285,6 +2417,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     background: color-mix(in srgb, #59a2c8 28%, #4b4d52);
     border-color: color-mix(in srgb, #59a2c8 64%, #65686f);
   }
+  .map-node.unsupported {
+    border-style: dashed;
+    background: color-mix(in srgb, #d08b67 22%, #4b4d52);
+    border-color: color-mix(in srgb, #d08b67 65%, #65686f);
+  }
   .map-node.output {
     background: color-mix(in srgb, #6b7cff 28%, #4b4d52);
   }
@@ -2392,6 +2529,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .asset-node,
   .brief-node,
   .creator-node,
+  .unsupported-node,
   .prompt-node,
   .output-node {
     position: absolute;
@@ -2411,6 +2549,10 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .creator-node {
     width: 240px;
   }
+  .unsupported-node {
+    width: 240px;
+    border-style: dashed;
+  }
   .asset-node.included {
     border-color: color-mix(in srgb, var(--accent) 65%, #4b4d52);
     opacity: 1;
@@ -2425,6 +2567,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .brief-node.selected,
   .brief-node:focus-within,
   .creator-node.selected,
+  .unsupported-node.selected,
   .prompt-node.selected,
   .output-node.selected {
     border-color: var(--accent);
@@ -2451,7 +2594,8 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   }
   .node-drag-region small,
   .brief-node .node-head small,
-  .creator-node .node-head small {
+  .creator-node .node-head small,
+  .unsupported-node .node-head small {
     margin-left: 7px;
     color: var(--text-dim);
     font-size: 9px;
@@ -2572,6 +2716,26 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .creator-node-body > p {
     margin: 0;
     line-height: 1.35;
+  }
+  .creator-config-field {
+    display: grid;
+    gap: 4px;
+    padding: 0;
+    color: var(--text-dim);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .creator-config-field textarea,
+  .creator-config-field select {
+    width: 100%;
+    min-width: 0;
+    font-size: 10px;
+    text-transform: none;
+  }
+  .creator-config-field textarea {
+    min-height: 54px;
+    resize: vertical;
   }
   .creator-port-list {
     display: grid;
