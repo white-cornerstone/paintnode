@@ -37,6 +37,11 @@ describe('Workflow Board selective execution UX contract', () => {
   it('communicates provider-neutral candidate branch count, state, lineage, and retry', () => {
     expect(boardSource).toContain('Generate branches');
     expect(boardSource).toContain('workflow.runCandidateBranches');
+    expect(boardSource).toContain("workflow.runReviewedOutput(targetOutput.id, context.options)");
+    expect(boardSource).toContain("resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id })");
+    expect(boardSource).toContain("workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity)");
+    expect(boardSource).toContain("reviewedOutput ? 'Use promoted'");
+    expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
     expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
     expect(boardSource).toContain('data-candidate-state={candidate.status}');

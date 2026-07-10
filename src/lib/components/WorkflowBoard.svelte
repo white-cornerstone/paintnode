@@ -426,6 +426,14 @@
   }
 
   function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
+    const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: node.id });
+    if (path?.reviewNodeId) {
+      const resolution = workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity);
+      if (resolution.state !== 'ready') return null;
+      return assets.find((asset) => (
+        asset.id === resolution.output.assetId && asset.relativePath === resolution.output.relativePath
+      )) ?? null;
+    }
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 
@@ -1800,16 +1808,22 @@
       error = 'Wait for native QA mode detection before generating.';
       return;
     }
+    const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id });
+    const reviewedOutput = Boolean(path?.reviewNodeId);
     busy = true;
-    progress = providerSelection.qaFake
+    progress = reviewedOutput
+      ? 'Verifying promoted Review output…'
+      : providerSelection.qaFake
       ? 'Running deterministic QA Fake output…'
       : 'Preparing workflow assets...';
     const runId = createRunId();
     const context = createWorkflowExecutionContext(runId);
     const { runProjectPath, runProvider } = context;
     try {
-      activeTransformNodeId = workflow.incoming(targetOutput.id)
-        .find((connection) => connection.targetPortId === 'source')?.from ?? null;
+      activeTransformNodeId = reviewedOutput
+        ? null
+        : workflow.incoming(targetOutput.id)
+          .find((connection) => connection.targetPortId === 'source')?.from ?? null;
       const task = aiTasks.create({
         projectPath: runProjectPath,
         kind: 'workflow',
@@ -1823,8 +1837,16 @@
       });
       activeWorkflowTaskId = task.id;
       aiTasks.setCancel(task.id, async () => {
-        if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
+        if (reviewedOutput) await workflow.cancelSelectiveExecution();
+        else if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
       });
+      if (reviewedOutput) {
+        const outcome = await workflow.runReviewedOutput(targetOutput.id, context.options);
+        const summary = selectiveExecutionOutcomeSummary(outcome);
+        aiTasks.complete(task.id, `Promoted Review output ready · ${summary}`);
+        editor.flash('Promoted Review output is ready');
+        return;
+      }
       const outcome = await workflow.runCampaignGenerate(targetOutput.id, context.options);
       if (!outcome.committed) {
         if (project.path === runProjectPath) await project.refresh(runProjectPath);
@@ -2796,6 +2818,7 @@
           {@const outputAsset = outputAssetFor(outputNode)}
           {@const ports = workflowNodePorts(outputNode.id)}
           {@const targetReadiness = outputReadiness(outputNode.id)}
+          {@const reviewedOutput = Boolean(resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: outputNode.id })?.reviewNodeId)}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
@@ -2856,7 +2879,7 @@
               <div class="output-actions">
                 <button onclick={() => void generate(outputNode)} disabled={busy || selectiveUiState.busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
-                  {providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
+                  {reviewedOutput ? 'Use promoted' : providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
                 </button>
                 <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
                   <Icon svg={Open} size={14} />

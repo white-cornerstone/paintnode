@@ -1115,6 +1115,44 @@ export class WorkflowStore {
     }
   }
 
+  async runReviewedOutput(
+    outputNodeId: string,
+    options: WorkflowStoreRunOptions,
+  ): Promise<WorkflowSelectiveExecutionOutcome> {
+    const path = resolveWorkflowCampaignPath(this.serialize(), { outputNodeId });
+    if (!path?.reviewNodeId) {
+      throw new WorkflowTransformExecutionError(
+        'INVALID_TRANSFORM_PATH', 'Reviewed Output execution requires one connected Review path.', 'Run Generate instead',
+      );
+    }
+    const preflight = await this.preflightSelectiveExecution('run-node', outputNodeId, options);
+    const blocked = preflight.stateByNodeId[path.reviewNodeId]?.state === 'blocked'
+      ? preflight.stateByNodeId[path.reviewNodeId]
+      : preflight.plan.preflight.find((entry) => entry.state === 'blocked');
+    if (blocked) {
+      throw new WorkflowTransformExecutionError('NOT_READY', blocked.reason.message, 'Resolve the Review block');
+    }
+    const outcome = await this.runSelectiveExecution(preflight, options, { maxConcurrency: 1 });
+    const result = outcome.results[path.reviewNodeId];
+    const resolution = this.reviewResolution(
+      path.reviewNodeId,
+      options.assets,
+      true,
+      options.currentProjectIdentity?.() ?? options.projectPath,
+    );
+    if (resolution.state !== 'ready'
+      || !result
+      || result.outputIds.length !== 1
+      || result.outputIds[0] !== resolution.output.assetReferenceId
+      || !outcome.cachedNodeIds.includes(path.reviewNodeId)
+      || outcome.executedNodeIds.includes(path.transformNodeId)) {
+      throw new WorkflowTransformExecutionError(
+        'NOT_READY', 'The promoted Review result changed before the Output could consume it.', 'Run Review verification again',
+      );
+    }
+    return outcome;
+  }
+
   async cancelSelectiveExecution(): Promise<WorkflowCancellationResult> {
     const operation = this.activeSelectiveOperation;
     if (!operation) {

@@ -347,6 +347,12 @@ the Review revision and exact promoted run/output/content hash. Consequently,
 re-promotion stales only dependent downstream work; it does not stale or erase
 the candidate branch history.
 
+Running an Output connected through Review uses this selective cached-result
+path and never schedules the upstream Transform. Board preview and placement
+derive from the current verified Review result rather than copying the choice
+into mutable Output configuration. Direct Transform-to-Output paths retain the
+normal Generate behavior.
+
 The scheduler receives the global concurrency limit, provider key mapping, and
 per-provider limits from its boundary. It starts independently ready nodes in
 stable graph order. A failed executor blocks only dependent pending nodes;
