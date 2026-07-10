@@ -276,7 +276,6 @@ export interface ProjectAsset {
   width?: number | null;
   height?: number | null;
   mime?: string | null;
-  contentHash?: string | null;
   previewDataUrl?: string | null;
   exists: boolean;
 }

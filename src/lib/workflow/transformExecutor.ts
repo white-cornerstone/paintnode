@@ -10,7 +10,6 @@ export interface WorkflowProjectAsset {
   width?: number | null;
   height?: number | null;
   mime?: string | null;
-  contentHash?: string | null;
 }
 
 export interface WorkflowTransformSource {
