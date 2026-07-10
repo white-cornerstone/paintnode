@@ -10,7 +10,11 @@ import {
 } from './transformExecutor';
 import { isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
 
-const material = (bytes: Uint8Array) => ({ bytes, contentHash: workflowSha256Bytes(bytes) });
+const material = (
+  bytes: Uint8Array,
+  assetId = 'asset-product',
+  relativePath = 'assets/Product.png',
+) => ({ assetId, relativePath, bytes, contentHash: workflowSha256Bytes(bytes) });
 
 const productAsset: WorkflowProjectAsset = {
   id: 'asset-product',
@@ -220,6 +224,8 @@ describe('Campaign Composer Generate Transform execution', () => {
       executors: [createWorkflowCompositionExecutor('fake', service)],
       assets: [productAsset],
       resolveAsset: async () => ({
+        assetId: productAsset.id,
+        relativePath: productAsset.relativePath,
         bytes: new Uint8Array([137, 80, 78, 71]),
         contentHash: `sha256:${'8'.repeat(64)}`,
       }),
@@ -228,6 +234,60 @@ describe('Campaign Composer Generate Transform execution', () => {
       code: 'MISSING_ASSET',
       message: expect.stringMatching(/exact project material/i),
     });
+    expect(service).not.toHaveBeenCalled();
+  });
+
+  it('records the current manifest path returned with the resolved source material', async () => {
+    const requests: WorkflowTransformExecutionRequest[] = [];
+    const service = vi.fn(async (request: Readonly<WorkflowTransformExecutionRequest>) => {
+      requests.push(request as WorkflowTransformExecutionRequest);
+      return {
+        kind: 'project-asset' as const,
+        asset: {
+          id: 'canonical-result', name: 'Square.png', relativePath: 'generated/canonical.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([1, 2, 3]),
+      };
+    });
+    const result = await executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', service)],
+      assets: [productAsset],
+      resolveAsset: async () => material(
+        new Uint8Array([137, 80, 78, 71]),
+        productAsset.id,
+        'assets/renamed/Product.png',
+      ),
+      storeAsset: vi.fn(),
+    });
+
+    expect(requests[0]?.sources[0]).toMatchObject({
+      assetId: productAsset.id,
+      relativePath: 'assets/renamed/Product.png',
+    });
+    const recordedRun = result.graph.runRecords.at(-1);
+    expect(isFullWorkflowRunRecord(recordedRun!)).toBe(true);
+    if (!recordedRun || !isFullWorkflowRunRecord(recordedRun)) throw new Error('expected full run record');
+    expect(recordedRun.sourceAssets[0]).toMatchObject({
+      assetId: productAsset.id,
+      relativePath: 'assets/renamed/Product.png',
+    });
+  });
+
+  it('rejects a resolver remap to another asset ID before invoking the provider', async () => {
+    const service = vi.fn();
+    await expect(executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', service)],
+      assets: [productAsset],
+      resolveAsset: async () => material(
+        new Uint8Array([137, 80, 78, 71]),
+        'different-asset',
+        productAsset.relativePath,
+      ),
+      storeAsset: vi.fn(),
+    })).rejects.toMatchObject({ code: 'MISSING_ASSET' });
     expect(service).not.toHaveBeenCalled();
   });
 

@@ -10,7 +10,12 @@ import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
 import { createWorkflowCompositionExecutor } from '../workflow/transformExecutor';
 
-const material = (bytes: Uint8Array) => ({ bytes, contentHash: workflowSha256Bytes(bytes) });
+const material = (bytes: Uint8Array) => ({
+  assetId: 'product-asset',
+  relativePath: 'assets/product.png',
+  bytes,
+  contentHash: workflowSha256Bytes(bytes),
+});
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;

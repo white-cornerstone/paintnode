@@ -73,6 +73,8 @@ describe('provider-free QA workflow executor', () => {
     product.config.assetId = 'product';
     product.config.relativePath = 'assets/Product.png';
     const resolveAsset = vi.fn(async () => ({
+      assetId: 'product',
+      relativePath: 'assets/Product.png',
       bytes: null,
       contentHash: `sha256:${'5'.repeat(64)}`,
     }));

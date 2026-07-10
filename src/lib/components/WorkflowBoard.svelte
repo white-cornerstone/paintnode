@@ -1587,6 +1587,8 @@
             if (!runProjectPath) throw new Error('No project is open.');
             if (runSelection.qaFake) {
               return {
+                assetId: asset.id,
+                relativePath: asset.relativePath,
                 bytes: null,
                 contentHash: workflowSha256Text(`provider-free-qa-asset-v1:${asset.id}:${asset.relativePath}`),
               };

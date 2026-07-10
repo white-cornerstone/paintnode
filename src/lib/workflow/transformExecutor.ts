@@ -31,6 +31,8 @@ export interface WorkflowProjectAsset {
 }
 
 export interface WorkflowAssetMaterial {
+  assetId: string;
+  relativePath: string;
   bytes: Uint8Array | null;
   contentHash: string;
 }
@@ -426,6 +428,28 @@ export async function executeCampaignGenerateTransform(
       );
     }
     const material = await options.resolveAsset(asset);
+    let canonicalAssetId: string;
+    let canonicalRelativePath: string;
+    try {
+      canonicalAssetId = safeWorkflowIdentifier(material.assetId, 'Resolved source asset ID');
+      canonicalRelativePath = requireProjectRelativeWorkflowReference(
+        material.relativePath,
+        'Resolved source asset path',
+      );
+    } catch {
+      throw new WorkflowTransformExecutionError(
+        'MISSING_ASSET',
+        `${input.title} resolved to an invalid project asset identity.`,
+        `Refresh or replace the asset in ${input.title}`,
+      );
+    }
+    if (canonicalAssetId !== asset.id) {
+      throw new WorkflowTransformExecutionError(
+        'MISSING_ASSET',
+        `${input.title} resolved to a different project asset.`,
+        `Refresh or replace the asset in ${input.title}`,
+      );
+    }
     const claimedHash = canonicalContentHash(material.contentHash);
     const visualBytes = material.bytes instanceof Uint8Array && material.bytes.length > 0
       ? new Uint8Array(material.bytes)
@@ -451,8 +475,8 @@ export async function executeCampaignGenerateTransform(
       portId: edge.source.portId,
       name: input.title,
       role: textConfig(input, 'role'),
-      assetId: asset.id,
-      relativePath: asset.relativePath,
+      assetId: canonicalAssetId,
+      relativePath: canonicalRelativePath,
       contentHash,
       bytes: executor.materialization === 'metadata-only' ? new Uint8Array() : visualBytes!,
     });

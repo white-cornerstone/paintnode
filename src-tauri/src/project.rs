@@ -12,6 +12,7 @@ use std::process::Stdio;
 use std::time::SystemTime;
 
 use base64::Engine;
+use cap_fs_ext::{FollowSymlinks, OpenOptions, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use serde::Deserialize;
@@ -28,8 +29,11 @@ const PROJECT_MANIFEST: &str = "paintnode.project.json";
 const DEFAULT_PROJECT_DIR_NAME: &str = "PaintNode";
 
 const PROJECT_THUMBNAIL_MAX_EDGE: u32 = 160;
-const PROJECT_MATERIAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const PROJECT_MATERIAL_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const PROJECT_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const PROJECT_MATERIAL_ENVELOPE_MAGIC: &[u8; 8] = b"PNMATRAW";
+const PROJECT_MATERIAL_ENVELOPE_VERSION: u16 = 1;
+const PROJECT_MATERIAL_METADATA_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -125,9 +129,10 @@ pub(crate) struct StoredAssetResult {
     asset: ProjectAssetView,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub(crate) struct ProjectAssetMaterialResult {
+    asset_id: String,
+    relative_path: String,
     bytes: Vec<u8>,
     content_hash: String,
 }
@@ -778,15 +783,20 @@ fn ensure_no_project_symlink(dir: &Dir, relative: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn open_project_material_file(dir: &Dir, relative: &Path) -> Result<cap_std::fs::File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No).nonblock(true);
+    dir.open_with(relative, &options)
+        .map_err(|error| format!("Project material could not be opened safely: {error}"))
+}
+
 fn read_capability_file_once(
     dir: &Dir,
     relative: &Path,
     byte_limit: u64,
 ) -> Result<Vec<u8>, String> {
     ensure_no_project_symlink(dir, relative)?;
-    let mut file = dir
-        .open(relative)
-        .map_err(|error| format!("Project material could not be opened safely: {error}"))?;
+    let mut file = open_project_material_file(dir, relative)?;
     ensure_no_project_symlink(dir, relative)?;
     let metadata = file
         .metadata()
@@ -820,9 +830,7 @@ fn read_stable_capability_file(
 ) -> Result<Vec<u8>, String> {
     let bytes = read_capability_file_once(dir, relative, byte_limit)?;
     ensure_no_project_symlink(dir, relative)?;
-    let mut file = dir
-        .open(relative)
-        .map_err(|error| format!("Project material could not be reopened safely: {error}"))?;
+    let mut file = open_project_material_file(dir, relative)?;
     ensure_no_project_symlink(dir, relative)?;
     let metadata = file
         .metadata()
@@ -899,9 +907,45 @@ fn resolve_project_asset_material(
     let bytes = read_stable_capability_file(&dir, &relative, PROJECT_MATERIAL_MAX_BYTES)?;
     let content_hash = format!("sha256:{:x}", Sha256::digest(&bytes));
     Ok(ProjectAssetMaterialResult {
+        asset_id: asset.id,
+        relative_path: asset.relative_path,
         bytes,
         content_hash,
     })
+}
+
+fn encode_project_asset_material(material: ProjectAssetMaterialResult) -> Result<Vec<u8>, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Metadata<'a> {
+        asset_id: &'a str,
+        relative_path: &'a str,
+        content_hash: &'a str,
+    }
+    let metadata = serde_json::to_vec(&Metadata {
+        asset_id: &material.asset_id,
+        relative_path: &material.relative_path,
+        content_hash: &material.content_hash,
+    })
+    .map_err(|error| format!("Project material metadata could not be encoded: {error}"))?;
+    if metadata.len() > PROJECT_MATERIAL_METADATA_MAX_BYTES {
+        return Err("Project material metadata exceeds the safe envelope limit.".into());
+    }
+    if material.bytes.len() as u64 > PROJECT_MATERIAL_MAX_BYTES {
+        return Err("Project material exceeds the safe envelope limit.".into());
+    }
+    let metadata_len = u32::try_from(metadata.len())
+        .map_err(|_| "Project material metadata is too large.".to_string())?;
+    let material_len = u32::try_from(material.bytes.len())
+        .map_err(|_| "Project material is too large.".to_string())?;
+    let mut envelope = Vec::with_capacity(18 + metadata.len() + material.bytes.len());
+    envelope.extend_from_slice(PROJECT_MATERIAL_ENVELOPE_MAGIC);
+    envelope.extend_from_slice(&PROJECT_MATERIAL_ENVELOPE_VERSION.to_be_bytes());
+    envelope.extend_from_slice(&metadata_len.to_be_bytes());
+    envelope.extend_from_slice(&material_len.to_be_bytes());
+    envelope.extend_from_slice(&metadata);
+    envelope.extend_from_slice(&material.bytes);
+    Ok(envelope)
 }
 
 pub(crate) fn add_asset(
@@ -1018,9 +1062,11 @@ pub(crate) async fn project_read_asset(
 pub(crate) async fn project_resolve_asset_material(
     project_path: String,
     asset_id: String,
-) -> Result<ProjectAssetMaterialResult, String> {
+) -> Result<tauri::ipc::Response, String> {
     tauri::async_runtime::spawn_blocking(move || {
         resolve_project_asset_material(Path::new(project_path.trim()), &asset_id)
+            .and_then(encode_project_asset_material)
+            .map(tauri::ipc::Response::new)
     })
     .await
     .map_err(|error| format!("Task error: {error}"))?
@@ -1289,6 +1335,8 @@ mod tests {
 
         let result = resolve_project_asset_material(project.path(), "material").expect("material");
 
+        assert_eq!(result.asset_id, "material");
+        assert_eq!(result.relative_path, relative);
         assert_eq!(result.bytes, ONE_PIXEL_PNG);
         assert_eq!(
             result.content_hash,
@@ -1298,6 +1346,35 @@ mod tests {
             fs::read(project_manifest_path(project.path())).expect("manifest after"),
             before
         );
+    }
+
+    #[test]
+    fn project_asset_material_encodes_versioned_raw_binary_envelope() {
+        let content_hash = format!("sha256:{:x}", Sha256::digest(ONE_PIXEL_PNG));
+        let envelope = encode_project_asset_material(ProjectAssetMaterialResult {
+            asset_id: "material".into(),
+            relative_path: "assets/imported/material.png".into(),
+            bytes: ONE_PIXEL_PNG.to_vec(),
+            content_hash: content_hash.clone(),
+        })
+        .expect("envelope");
+
+        assert_eq!(&envelope[..8], PROJECT_MATERIAL_ENVELOPE_MAGIC);
+        assert_eq!(
+            u16::from_be_bytes(envelope[8..10].try_into().expect("version")),
+            PROJECT_MATERIAL_ENVELOPE_VERSION
+        );
+        let metadata_len =
+            u32::from_be_bytes(envelope[10..14].try_into().expect("metadata length")) as usize;
+        let material_len =
+            u32::from_be_bytes(envelope[14..18].try_into().expect("material length")) as usize;
+        assert_eq!(material_len, ONE_PIXEL_PNG.len());
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&envelope[18..18 + metadata_len]).expect("metadata");
+        assert_eq!(metadata["assetId"], "material");
+        assert_eq!(metadata["relativePath"], "assets/imported/material.png");
+        assert_eq!(metadata["contentHash"], content_hash);
+        assert_eq!(&envelope[18 + metadata_len..], ONE_PIXEL_PNG);
     }
 
     #[test]
@@ -1369,6 +1446,61 @@ mod tests {
             let error = resolve_project_asset_material(project.path(), id).expect_err("symlink");
             assert!(error.contains("symbolic link"), "{error}");
         }
+    }
+
+    #[cfg(unix)]
+    fn assert_material_resolution_finishes_bounded(
+        project_path: PathBuf,
+        asset_id: &'static str,
+    ) -> Result<ProjectAssetMaterialResult, String> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(resolve_project_asset_material(&project_path, asset_id));
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("special project files must be rejected without blocking")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_asset_material_rejects_asset_fifo_without_blocking() {
+        let project = TempJobDir::new("paintnode-material-asset-fifo").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative = "assets/imported/material.pipe";
+        let mut manifest = new_manifest(project.path());
+        manifest.assets.push(material_asset("fifo", relative));
+        save_manifest(project.path(), &manifest).expect("manifest");
+        let status = Command::new("mkfifo")
+            .arg(project.path().join(relative))
+            .status()
+            .expect("mkfifo");
+        assert!(status.success());
+
+        let error =
+            assert_material_resolution_finishes_bounded(project.path().to_path_buf(), "fifo")
+                .expect_err("FIFO asset");
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_asset_material_rejects_manifest_fifo_without_blocking() {
+        let project = TempJobDir::new("paintnode-material-manifest-fifo").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let status = Command::new("mkfifo")
+            .arg(project_manifest_path(project.path()))
+            .status()
+            .expect("mkfifo");
+        assert!(status.success());
+
+        let error =
+            assert_material_resolution_finishes_bounded(project.path().to_path_buf(), "fifo")
+                .expect_err("FIFO manifest");
+        assert!(error.contains("not a regular file"), "{error}");
     }
 
     #[test]

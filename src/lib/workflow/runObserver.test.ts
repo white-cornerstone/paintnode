@@ -69,7 +69,12 @@ describe('workflow async observer orchestration', () => {
           assets: [product],
           resolveAsset: async () => {
             const bytes = new Uint8Array([137, 80, 78, 71]);
-            return { bytes, contentHash: workflowSha256Bytes(bytes) };
+            return {
+              assetId: product.id,
+              relativePath: product.relativePath,
+              bytes,
+              contentHash: workflowSha256Bytes(bytes),
+            };
           },
           storeAsset: async () => { throw new Error('unused'); },
         }),
