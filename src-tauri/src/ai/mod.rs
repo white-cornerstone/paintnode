@@ -287,18 +287,33 @@ fn create_windows_provider_launch_gate() -> Result<ProviderLaunchGate, String> {
 
 #[cfg(any(windows, test))]
 fn release_provider_launch_gate(gate: &ProviderLaunchGate) -> Result<(), String> {
+    release_provider_launch_gate_with_timeout(gate, Duration::from_secs(10))
+}
+
+#[cfg(any(windows, test))]
+fn release_provider_launch_gate_with_timeout(
+    gate: &ProviderLaunchGate,
+    timeout: Duration,
+) -> Result<(), String> {
     gate.listener
         .set_nonblocking(true)
         .map_err(|error| format!("Could not prepare the provider launch channel: {error}"))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + timeout;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Provider wrapper did not authenticate before launch timeout.".into());
+        }
         match gate.listener.accept() {
             Ok((mut stream, peer)) => {
                 if !peer.ip().is_loopback() {
                     continue;
                 }
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("Could not secure provider launch input: {error}"))?;
+                stream
+                    .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
                     .map_err(|error| format!("Could not secure provider launch input: {error}"))?;
                 let mut received = Vec::new();
                 if Read::by_ref(&mut stream)
@@ -316,11 +331,6 @@ fn release_provider_launch_gate(gate: &ProviderLaunchGate) -> Result<(), String>
                 return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err(
-                        "Provider wrapper did not authenticate before launch timeout.".into(),
-                    );
-                }
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) => return Err(format!("Could not accept the provider wrapper: {error}")),
@@ -2285,6 +2295,37 @@ mod tests {
         let launched = std::cell::Cell::new(false);
         assert!(with_verified_provider_release(&release, || launched.set(true)).is_err());
         assert!(!launched.get());
+    }
+
+    #[test]
+    fn sustained_wrong_clients_cannot_extend_release_deadline() {
+        let secret = [13_u8; 32];
+        let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
+        let address = gate.listener.local_addr().expect("gate address");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attacker_stop = Arc::clone(&stop);
+        let attacker_attempts = Arc::clone(&attempts);
+        let attacker = thread::spawn(move || {
+            while !attacker_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok(mut stream) =
+                    TcpStream::connect_timeout(&address, Duration::from_millis(20))
+                {
+                    let _ = stream.write_all(&[99_u8; 32]);
+                    let _ = stream.shutdown(Shutdown::Write);
+                    attacker_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        let started = Instant::now();
+        let error = release_provider_launch_gate_with_timeout(&gate, Duration::from_millis(120))
+            .expect_err("wrong clients must not authenticate");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        attacker.join().expect("attacker thread");
+
+        assert!(error.contains("timeout"));
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
