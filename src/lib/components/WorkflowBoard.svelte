@@ -51,7 +51,7 @@
     type WorkflowStoryboardDescriptor,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
-  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
@@ -62,6 +62,7 @@
     createCodexWorkflowTransformExecutor,
   } from '../integrations/workflowCompositionExecutors';
   import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
+  import WorkflowDirectorDialog from './WorkflowDirectorDialog.svelte';
 
   type CodexProgressPayload = {
     runId: string;
@@ -112,6 +113,7 @@
   let boardEl = $state<HTMLDivElement>();
   let paletteButton = $state<HTMLButtonElement>();
   let paletteOpen = $state(false);
+  let directorOpen = $state(false);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -1638,17 +1640,28 @@
     <aside class="asset-tray">
       <div class="tray-head node-library">
         <span>Nodes</span>
-        <button
-          bind:this={paletteButton}
-          type="button"
-          aria-label="Add workflow node"
-          aria-haspopup="dialog"
-          aria-expanded={paletteOpen}
-          use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
-          onclick={() => (paletteOpen = !paletteOpen)}
-        >
-          <Icon svg={Add} size={14} />
-        </button>
+        <div class="tray-head-actions">
+          <button
+            type="button"
+            aria-label="Draft with AI Director"
+            aria-haspopup="dialog"
+            use:tooltip={{ text: 'Draft with AI Director', placement: 'right' }}
+            onclick={() => (directorOpen = true)}
+          >
+            <Icon svg={Sparkle} size={14} />
+          </button>
+          <button
+            bind:this={paletteButton}
+            type="button"
+            aria-label="Add workflow node"
+            aria-haspopup="dialog"
+            aria-expanded={paletteOpen}
+            use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
+            onclick={() => (paletteOpen = !paletteOpen)}
+          >
+            <Icon svg={Add} size={14} />
+          </button>
+        </div>
       </div>
       {#if paletteOpen}
         <WorkflowNodePalette
@@ -2346,6 +2359,19 @@
   </div>
 </section>
 
+{#if directorOpen}
+  <WorkflowDirectorDialog
+    {assets}
+    {runOptions}
+    {desktop}
+    {qaMode}
+    {qaModeResolved}
+    imageCapabilityAvailable={providerSelection.ready}
+    imageCapabilityReason={providerSelection.ready ? null : providerSelection.label}
+    onClose={() => (directorOpen = false)}
+  />
+{/if}
+
 <style>
   .workflow-shell {
     display: flex;
@@ -2386,6 +2412,11 @@
     font-weight: 700;
     text-transform: uppercase;
     color: var(--text-dim);
+  }
+  .tray-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
   .workflows {
     border-top: 1px solid var(--border);

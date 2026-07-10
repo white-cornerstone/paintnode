@@ -11,3 +11,4 @@ export * from './transformExecutor';
 export * from './runObserver';
 export * from './providerQaSelection';
 export * from './directorDraft';
+export * from './directorProposalSession';

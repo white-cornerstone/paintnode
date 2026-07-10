@@ -23,6 +23,7 @@ import {
   type ExecuteCampaignGenerateOptions,
   type WorkflowTransformExecutionOutcome,
   type WorkflowDirectorProposal,
+  type WorkflowDirectorSessionToken,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
@@ -239,6 +240,14 @@ export class WorkflowStore {
     return this.graphDomain?.revision ?? 0;
   }
 
+  captureDirectorSession(): WorkflowDirectorSessionToken {
+    return Object.freeze({
+      sessionIdentity: this.workflowSessionIdentity,
+      graphRevision: this.graphRevision,
+      storeRevision: this.rev,
+    });
+  }
+
   newBoard(name = 'Untitled Workflow'): void {
     this.beginWorkflowSession();
     this.active = true;
@@ -323,7 +332,17 @@ export class WorkflowStore {
     this.savedRev = 0;
   }
 
-  applyDirectorProposal(proposal: WorkflowDirectorProposal): void {
+  applyDirectorProposal(
+    proposal: WorkflowDirectorProposal,
+    expectedSession?: WorkflowDirectorSessionToken,
+  ): void {
+    if (expectedSession && (
+      expectedSession.sessionIdentity !== this.workflowSessionIdentity
+      || expectedSession.graphRevision !== this.graphRevision
+      || expectedSession.storeRevision !== this.rev
+    )) {
+      throw new Error('The workflow changed while this AI Director proposal was being reviewed. Draft again before accepting.');
+    }
     if (!proposal.canAccept || proposal.issues.length > 0) {
       throw new Error('This AI Director proposal cannot be accepted until every validation issue is resolved.');
     }

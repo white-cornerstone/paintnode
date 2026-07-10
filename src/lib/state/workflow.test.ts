@@ -124,6 +124,43 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.rev).toBe(rev);
     expect(store.dirty).toBe(false);
   });
+
+  it('rejects a Director proposal captured from a stale graph revision without changing bytes', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Working campaign');
+    const proposal = directorProposal();
+    const session = store.captureDirectorSession();
+    store.setPrompt('A newer art direction written after the Director request.');
+    const before = JSON.stringify(store.serialize());
+
+    expect(() => store.applyDirectorProposal(proposal, session)).toThrow(/workflow changed/i);
+    expect(JSON.stringify(store.serialize())).toBe(before);
+    expect(store.name).toBe('Working campaign');
+  });
+
+  it('rejects a Director proposal captured from a different workflow session', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'First session');
+    const session = store.captureDirectorSession();
+    store.newFromTemplate('asset-composition', 'Second session');
+    const before = JSON.stringify(store.serialize());
+
+    expect(() => store.applyDirectorProposal(directorProposal(), session)).toThrow(/workflow changed/i);
+    expect(JSON.stringify(store.serialize())).toBe(before);
+    expect(store.name).toBe('Second session');
+  });
+
+  it('rejects a Director proposal after non-domain workflow state changes', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Original name');
+    const session = store.captureDirectorSession();
+    store.setName('Renamed while previewing');
+    const before = JSON.stringify(store.serialize());
+
+    expect(() => store.applyDirectorProposal(directorProposal(), session)).toThrow(/workflow changed/i);
+    expect(JSON.stringify(store.serialize())).toBe(before);
+    expect(store.name).toBe('Renamed while previewing');
+  });
   it('exposes fake Transform running/succeeded state and persists the bound Square output on reopen', async () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newFromTemplate('campaign-composer');

@@ -91,7 +91,92 @@ function inputTitle(name: string): string {
   return name.replace(/\.[^.]+$/, '').trim() || 'Visual Input';
 }
 
+function isCampaignRequest(context: WorkflowDirectorContext): boolean {
+  const expected = [
+    ['Square 1:1', 1024, 1024],
+    ['Portrait 4:5', 1024, 1280],
+    ['Landscape 16:9', 1280, 720],
+  ];
+  return context.requestedOutputs.length === expected.length
+    && expected.every(([name, width, height], index) => {
+      const output = context.requestedOutputs[index];
+      return output?.name === name && output.width === width && output.height === height;
+    });
+}
+
+function providerFreeCampaignDraft(context: WorkflowDirectorContext): WorkflowDirectorGraphDraft {
+  const availableAssets = context.assets.filter((asset) => asset.available);
+  const slots = [
+    { id: 'product', title: 'Product', role: 'Hero product', required: true, assetId: availableAssets[0]?.id ?? null },
+    { id: 'subject', title: 'Subject', role: 'Optional person', required: false, assetId: availableAssets[1]?.id ?? null },
+    { id: 'style', title: 'Style', role: 'Optional brand style', required: false, assetId: availableAssets[2]?.id ?? null },
+  ] as const;
+  return {
+    version: 1,
+    name: 'QA Fake Campaign Proposal',
+    summary: 'A deterministic Campaign Composer-equivalent proposal for provider-free acceptance QA.',
+    nodes: [
+      ...slots.map((slot) => ({ ...slot, type: 'input' as const })),
+      {
+        id: 'brief',
+        type: 'brief',
+        title: 'Campaign Brief',
+        objective: context.brief,
+        guidance: 'Keep the product recognisable.',
+      },
+      {
+        id: 'composition',
+        type: 'art-direction',
+        title: 'Art Direction',
+        prompt: 'Keep product identity and brand cues consistent while adapting composition to each format.',
+      },
+      {
+        id: 'generate-square',
+        type: 'transform',
+        title: 'Generate Square',
+        capability: 'generate',
+        instructions: 'Generate the square campaign result.',
+      },
+      ...context.requestedOutputs.map((output) => ({
+        id: output.id,
+        type: 'output' as const,
+        title: output.name,
+        width: output.width,
+        height: output.height,
+      })),
+    ],
+    edges: [
+      ...slots.map((slot) => ({
+        id: `${slot.id}-composition`,
+        source: { nodeId: slot.id, portId: 'asset' },
+        target: { nodeId: 'composition', portId: 'assets' },
+      })),
+      {
+        id: 'brief-composition',
+        source: { nodeId: 'brief', portId: 'prompt' },
+        target: { nodeId: 'composition', portId: 'brief' },
+      },
+      {
+        id: 'composition-generate',
+        source: { nodeId: 'composition', portId: 'layout' },
+        target: { nodeId: 'generate-square', portId: 'source' },
+      },
+      {
+        id: 'generate-square-output',
+        source: { nodeId: 'generate-square', portId: 'result' },
+        target: { nodeId: context.requestedOutputs[0].id, portId: 'source' },
+      },
+      ...context.requestedOutputs.slice(1).map((output) => ({
+        id: `composition-${output.id}`,
+        source: { nodeId: 'composition', portId: 'layout' },
+        target: { nodeId: output.id, portId: 'source' },
+      })),
+    ],
+  };
+}
+
 export function providerFreeWorkflowDraft(context: WorkflowDirectorContext): WorkflowDirectorGraphDraft {
+  if (isCampaignRequest(context)) return providerFreeCampaignDraft(context);
   const asset = context.assets.find((item) => item.available) ?? null;
   const nodes: WorkflowDirectorGraphDraft['nodes'] = [
     ...(asset ? [{
