@@ -57,6 +57,10 @@ run(
 
 const runnerName = provider === 'codex' ? 'codex-sdk-runner.mjs' : 'claude-agent-runner.mjs';
 cpSync(resolve('scripts', runnerName), join(stage, 'bridge', runnerName));
+cpSync(
+  resolve('scripts', 'director-action-schema.mjs'),
+  join(stage, 'bridge', 'director-action-schema.mjs'),
+);
 if (provider === 'codex') {
   cpSync(resolve('scripts', 'codex-capabilities.mjs'), join(stage, 'bridge', 'codex-capabilities.mjs'));
 }
