@@ -141,9 +141,16 @@ integration, and migration risk.
 7. Begin Recipes & Portability only after selective execution and editor
    round-tripping are reliable.
 
-## First implementation slice
+## First MVP vertical slice
 
-The first code pull request should add only the pure WorkflowGraph v2 schema,
-validation, v1 migration, fixtures, and unit tests. It should not redesign the
-board UI or change generation behavior. This establishes the contract every
-later slice depends on and gives the team a safe migration checkpoint.
+After the Foundation contracts, the first executable MVP proof is Campaign
+Composer Product-to-Square. It adds one configured Generate Transform between
+Art Direction and Square Output, runs through the framework-independent
+executor interface, and binds the generated project asset back to both nodes.
+The proof must be runnable with a pure fake executor before real provider
+adapters are exercised.
+
+This slice intentionally excludes Director drafting, Review, branching,
+Portrait and Landscape execution, full provenance, and editor round-trip. Those
+remain separate MVP issues so the first execution path establishes one small,
+testable contract instead of another output-only special case.

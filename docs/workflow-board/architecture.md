@@ -103,6 +103,40 @@ Node executors call existing PaintNode AI, image-processing, project-asset, and
 document services through explicit interfaces. Executors do not directly
 manipulate UI state.
 
+The framework-independent Transform executor receives a detached request made
+from persisted graph data: Brief, Art Direction, Transform configuration,
+materialized Input assets, and the requested Output contract. It has no Svelte,
+editor, Tauri, picker, authentication, filesystem, or network imports. Those
+effects are injected at the boundary so the entire path can run with a fake
+executor and in-memory asset store.
+
+Provider-specific adapters live outside `src/lib/workflow/`. Codex and
+Antigravity adapters translate the same request into their existing composition
+services, skip AI Director for the first thin slice, pass target shape through
+provider parameters, and normalize the returned raster to the exact configured
+Output dimensions before it is stored. A stored result with missing or wrong
+dimensions is rejected and does not replace the graph's previous accepted
+output.
+
+### Campaign Composer thin-slice path
+
+The first executable path is deliberately narrow:
+
+`Product / optional Subject / optional Style -> Brief -> Art Direction -> Generate Transform -> Square Output`
+
+Only Square Output uses the Generate Transform in this slice. Portrait and
+Landscape remain structurally present for later branches. Saved v2 graphs that
+connect Art Direction directly to an Output continue to validate, serialize,
+and reopen, but that legacy direct edge cannot invoke the new Transform
+executor.
+
+The UI store owns transient `running`, `succeeded`, and `failed` presentation
+and commits a successful returned graph atomically. Per-Transform run tokens
+prevent an older overlapping run from overwriting a newer result. Placing the
+Square result is a separate editor action and reports success only when the
+editor returns a real inserted layer identifier; an absent active document is
+surfaced as a recovery action rather than a false success.
+
 ## WorkflowGraph v2
 
 The persisted graph should contain:
@@ -230,6 +264,12 @@ Start test-first with pure domain coverage:
 Browser tests should then cover the Campaign Composer happy path, keyboard
 graph operations, node editing, branch comparison, and reopening a saved
 workflow.
+
+Before browser automation is added, the Campaign Composer thin slice is covered
+through a pure fake-executor integration test that proves readiness, exact
+dependency planning, source materialization, execution, project-asset binding,
+serialization, and reopen without provider, authentication, picker, network,
+filesystem, editor, or Svelte side effects.
 
 ## Decisions to validate during Foundation
 

@@ -7,6 +7,8 @@ export type WorkflowReadinessCode =
   | 'required-assets'
   | 'brief'
   | 'art-direction'
+  | 'provider'
+  | 'transform'
   | 'outputs';
 
 export interface WorkflowReadinessAsset {
@@ -19,6 +21,9 @@ export interface WorkflowReadinessOptions {
   desktop: boolean;
   projectPath: string | null;
   assets: readonly WorkflowReadinessAsset[];
+  provider?: string | null;
+  supportedProviders?: readonly string[];
+  targetNodeId?: string | null;
 }
 
 export interface WorkflowReadinessItem {
@@ -118,10 +123,21 @@ function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOption
   );
 }
 
-function outputReadiness(graph: WorkflowGraphV2): WorkflowReadinessItem {
-  const outputs = graph.nodes.filter((node) => node.type === 'output');
+function targetOutputs(graph: WorkflowGraphV2, targetNodeId?: string | null): WorkflowNodeV2[] {
+  if (!targetNodeId) return graph.nodes.filter((node) => node.type === 'output');
+  const target = graph.nodes.find((node) => node.id === targetNodeId && node.type === 'output');
+  return target ? [target] : [];
+}
+
+function transformForOutput(graph: WorkflowGraphV2, output: WorkflowNodeV2): WorkflowNodeV2 | null {
+  const incoming = graph.edges.find((edge) => edge.target.nodeId === output.id && edge.target.portId === 'source');
+  return graph.nodes.find((node) => node.id === incoming?.source.nodeId && node.type === 'transform') ?? null;
+}
+
+function outputReadiness(graph: WorkflowGraphV2, targetNodeId?: string | null): WorkflowReadinessItem {
+  const outputs = targetOutputs(graph, targetNodeId);
   if (outputs.length === 0) {
-    return blocked('outputs', 'Outputs', 'Add at least one configured output.', 'Add an output');
+    return blocked('outputs', 'Outputs', targetNodeId ? 'The requested output is unavailable.' : 'Add at least one configured output.', targetNodeId ? 'Choose an available output' : 'Add an output');
   }
   const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
   for (const output of outputs) {
@@ -130,14 +146,71 @@ function outputReadiness(graph: WorkflowGraphV2): WorkflowReadinessItem {
     if (typeof width !== 'number' || width <= 0 || typeof height !== 'number' || height <= 0) {
       return blocked('outputs', 'Outputs', `${output.title} needs valid dimensions.`, `Configure ${output.title}`);
     }
+    const transform = transformForOutput(graph, output);
     const connected = graph.edges.some((edge) => (
-      edge.target.nodeId === output.id && artDirectionIds.has(edge.source.nodeId)
+      edge.target.nodeId === output.id && (artDirectionIds.has(edge.source.nodeId) || edge.source.nodeId === transform?.id)
     ));
     if (!connected) {
       return blocked('outputs', 'Outputs', `${output.title} is not connected to Art Direction.`, `Reconnect ${output.title}`);
     }
   }
   return complete('outputs', 'Outputs', `${outputs.length} configured ${outputs.length === 1 ? 'output is' : 'outputs are'} ready.`);
+}
+
+function transformReadiness(
+  graph: WorkflowGraphV2,
+  output: WorkflowNodeV2,
+  requiredForRun = false,
+): WorkflowReadinessItem | null {
+  const transform = transformForOutput(graph, output);
+  if (!transform) {
+    return requiredForRun
+      ? blocked(
+          'transform',
+          'Generate Transform',
+          `${output.title} is not connected through a Generate Transform.`,
+          `Add or reconnect a Generate Transform for ${output.title}`,
+        )
+      : null;
+  }
+  const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
+  const hasSource = graph.edges.some((edge) => (
+    edge.target.nodeId === transform.id
+    && edge.target.portId === 'source'
+    && edge.source.portId === 'layout'
+    && artDirectionIds.has(edge.source.nodeId)
+  ));
+  const hasResult = graph.edges.some((edge) => (
+    edge.source.nodeId === transform.id
+    && edge.source.portId === 'result'
+    && edge.target.nodeId === output.id
+    && edge.target.portId === 'source'
+  ));
+  if (textConfig(transform, 'capability') !== 'generate' || !hasSource || !hasResult) {
+    return blocked(
+      'transform',
+      'Generate Transform',
+      `${transform.title} must connect Art Direction to ${output.title} with the Generate capability.`,
+      `Reconnect ${transform.title} to ${output.title}`,
+    );
+  }
+  return complete('transform', 'Generate Transform', `${transform.title} is configured for ${output.title}.`);
+}
+
+function providerReadiness(
+  output: WorkflowNodeV2,
+  graph: WorkflowGraphV2,
+  options: WorkflowReadinessOptions,
+): WorkflowReadinessItem | null {
+  if (!transformForOutput(graph, output)) return null;
+  const provider = options.provider?.trim() ?? '';
+  if (!provider) {
+    return blocked('provider', 'Image provider', 'Choose an image provider for Generate.', 'Choose a supported image provider');
+  }
+  if (!(options.supportedProviders ?? []).includes(provider)) {
+    return blocked('provider', 'Image provider', `The provider “${provider}” cannot run this Generate Transform.`, 'Choose a supported image provider');
+  }
+  return complete('provider', 'Image provider', `${provider} can run this Generate Transform.`);
 }
 
 function briefReadiness(
@@ -175,6 +248,12 @@ export function workflowReadiness(
   const graph = new WorkflowGraphDomain(inputGraph).graph;
   const brief = graph.nodes.find((node) => node.type === 'brief');
   const artDirection = graph.nodes.find((node) => node.type === 'art-direction');
+  const outputs = targetOutputs(graph, options.targetNodeId);
+  const targetOutput = outputs[0];
+  const transform = targetOutput
+    ? transformReadiness(graph, targetOutput, Boolean(options.targetNodeId))
+    : null;
+  const provider = targetOutput ? providerReadiness(targetOutput, graph, options) : null;
   const items: WorkflowReadinessItem[] = [
     options.desktop
       ? complete('desktop', 'Desktop app', 'Workflow generation is available.')
@@ -187,7 +266,9 @@ export function workflowReadiness(
     textConfig(artDirection, 'prompt') || textConfig(artDirection, 'guidance')
       ? complete('art-direction', 'Art direction', 'Visual guidance is defined.')
       : blocked('art-direction', 'Art direction', 'Add composition, lighting, colour, or style guidance.', 'Add art-direction guidance'),
-    outputReadiness(graph),
+    ...(transform ? [transform] : []),
+    ...(provider ? [provider] : []),
+    outputReadiness(graph, options.targetNodeId),
   ];
   const nextAction = items.find((item) => item.status === 'blocked') ?? null;
   return { ready: nextAction === null, items, nextAction };

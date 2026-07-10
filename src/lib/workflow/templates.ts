@@ -181,11 +181,11 @@ function artDirectionNode(definition: WorkflowTemplateDefinition): WorkflowNodeV
   });
 }
 
-function outputNode(output: WorkflowTemplateOutput, index: number): WorkflowNodeV2 {
+function outputNode(output: WorkflowTemplateOutput, index: number, x = 925): WorkflowNodeV2 {
   return createCreatorNode('output', {
     id: `output-${output.id}`,
     title: output.name,
-    position: { x: 925, y: 30 + index * 256 },
+    position: { x, y: 30 + index * 256 },
     replaceConfig: true,
     config: {
       templateRole: 'configured-output',
@@ -199,6 +199,19 @@ function outputNode(output: WorkflowTemplateOutput, index: number): WorkflowNode
   });
 }
 
+function campaignGenerateTransform(): WorkflowNodeV2 {
+  return createCreatorNode('transform', {
+    id: 'transform-generate-square',
+    title: 'Generate Square',
+    position: { x: 925, y: 50 },
+    config: {
+      templateRole: 'campaign-generate-square',
+      capability: 'generate',
+      instructions: 'Generate the configured Square 1:1 campaign result from the Product, Brief, and Art Direction.',
+    },
+  });
+}
+
 export function instantiateWorkflowTemplate(
   id: WorkflowTemplateId,
   options: { name?: string; graphId?: string } = {},
@@ -207,7 +220,8 @@ export function instantiateWorkflowTemplate(
   const slots = definition.slots.map(assetSlotNode);
   const brief = briefNode(definition);
   const artDirection = artDirectionNode(definition);
-  const outputs = definition.outputs.map(outputNode);
+  const campaignTransform = id === 'campaign-composer' ? campaignGenerateTransform() : null;
+  const outputs = definition.outputs.map((output, index) => outputNode(output, index, campaignTransform ? 1195 : 925));
   const graph: WorkflowGraphV2 = {
     version: WORKFLOW_GRAPH_VERSION,
     id: options.graphId?.trim() || freshWorkflowGraphId(),
@@ -216,8 +230,8 @@ export function instantiateWorkflowTemplate(
       sourceVersion: null,
       migrations: [],
     },
-    viewport: { panX: 10, panY: 10, zoom: 0.72 },
-    nodes: [...slots, brief, artDirection, ...outputs],
+    viewport: { panX: 10, panY: 10, zoom: campaignTransform ? 0.62 : 0.72 },
+    nodes: [...slots, brief, artDirection, ...(campaignTransform ? [campaignTransform] : []), ...outputs],
     edges: [
       ...slots.map((slot) => ({
         id: `edge-${slot.id}-composition`,
@@ -229,11 +243,27 @@ export function instantiateWorkflowTemplate(
         source: { nodeId: 'brief', portId: 'prompt' },
         target: { nodeId: 'composition', portId: 'brief' },
       },
-      ...outputs.map((output) => ({
+      ...(campaignTransform ? [
+        {
+          id: 'edge-composition-transform-generate-square',
+          source: { nodeId: 'composition', portId: 'layout' },
+          target: { nodeId: campaignTransform.id, portId: 'source' },
+        },
+        {
+          id: 'edge-transform-generate-square-output-square',
+          source: { nodeId: campaignTransform.id, portId: 'result' },
+          target: { nodeId: 'output-square', portId: 'source' },
+        },
+        ...outputs.filter((output) => output.id !== 'output-square').map((output) => ({
+          id: `edge-composition-${output.id}`,
+          source: { nodeId: 'composition', portId: 'layout' },
+          target: { nodeId: output.id, portId: 'source' },
+        })),
+      ] : outputs.map((output) => ({
         id: `edge-composition-${output.id}`,
         source: { nodeId: 'composition', portId: 'layout' },
         target: { nodeId: output.id, portId: 'source' },
-      })),
+      }))),
     ],
     assetReferences: [],
     runRecords: [],

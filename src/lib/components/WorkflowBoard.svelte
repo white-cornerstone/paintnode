@@ -7,18 +7,15 @@
   import { tooltip } from '../actions/tooltip';
   import {
     codexConfigFromRunOptions,
-    composeCodexWorkflow,
-    composeAntigravityWorkflow,
     antigravityConfigFromRunOptions,
     isDesktop,
+    storeProjectAssetBytes,
     type ProjectAsset,
   } from '../integrations/desktop';
-  import { ratioLabel } from '../ai/imageModelCapabilities';
-  import { bytesToBitmap, canvasToPngBytes } from '../io';
+  import { bytesToBitmap } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
   import { modelToPlainText } from '../engine/text/model';
-  import { storyboardPlacementSummary } from '../engine/storyboard/analyze';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
   import { wheelZoomFactor } from '../engine/zoomGesture';
@@ -54,6 +51,10 @@
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
+  import {
+    createAntigravityWorkflowTransformExecutor,
+    createCodexWorkflowTransformExecutor,
+  } from '../integrations/workflowCompositionExecutors';
 
   type CodexProgressPayload = {
     runId: string;
@@ -147,8 +148,21 @@
       desktop,
       projectPath: project.path,
       assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+      provider: imageProvider,
+      supportedProviders: ['codex', 'antigravity'],
     });
   });
+
+  function outputReadiness(outputNodeId: string) {
+    return workflowReadiness(workflow.graphSnapshot(), {
+      desktop,
+      projectPath: project.path,
+      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+      provider: imageProvider,
+      supportedProviders: ['codex', 'antigravity'],
+      targetNodeId: outputNodeId,
+    });
+  }
   $effect(() => {
     const request = ui.workflowFocusRequest;
     if (request === 0 || request === handledFocusRequest) return;
@@ -342,11 +356,12 @@
       const result = await project.readAsset(outputAsset);
       const bytes = await (await fetch(result.dataUrl)).arrayBuffer();
       const bmp = await bytesToBitmap(new Uint8Array(bytes), outputAsset.mime ?? 'image/png');
-      editor.placeImage(bmp, bmp.width, bmp.height, outputAsset.name.replace(/\.[^.]+$/, ''), {
+      const placed = editor.placeImage(bmp, bmp.width, bmp.height, outputAsset.name.replace(/\.[^.]+$/, ''), {
         assetId: outputAsset.id,
         path: outputAsset.relativePath,
       });
       bmp.close();
+      if (!placed.layerId) throw new Error('Open or create an image document before placing the workflow output.');
       editor.flash(`Placed ${outputAsset.name}`);
     } catch (e) {
       editor.flash('Place output failed: ' + ((e as Error)?.message ?? String(e)));
@@ -1047,16 +1062,6 @@
     return annotations;
   }
 
-  function placementSummaryForCanvas(canvas: HTMLCanvasElement): string[] {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return [];
-    try {
-      return storyboardPlacementSummary(ctx.getImageData(0, 0, canvas.width, canvas.height));
-    } catch {
-      return [];
-    }
-  }
-
   function storyboardAnnotationsForDisplay(): AnnotationItem[] {
     const base = workflow.storyboardEditing && storyboardDoc
       ? storyboardDoc.annotations
@@ -1471,21 +1476,28 @@
     return connected ?? workflow.outputNodes[0];
   }
 
+  function outputForTransform(transformNodeId: string): WorkflowOutputNode | undefined {
+    return workflow.outgoing(transformNodeId)
+      .filter((connection) => connection.sourcePortId === 'result')
+      .map((connection) => workflow.outputNode(connection.to))
+      .find((output): output is WorkflowOutputNode => Boolean(output));
+  }
+
+  function transformOutputReadiness(transformNodeId: string) {
+    const output = outputForTransform(transformNodeId);
+    return output ? outputReadiness(output.id) : null;
+  }
+
   async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
     const targetOutput = targetOutputForGenerate(node);
     error = '';
-    const preflight = workflowReadiness(workflow.graphSnapshot(), {
-      desktop,
-      projectPath: project.path,
-      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
-    });
+    const preflight = outputReadiness(targetOutput.id);
     if (!preflight.ready) {
       error = preflight.nextAction
         ? `${preflight.nextAction.message} Next: ${preflight.nextAction.action}.`
         : 'Complete the workflow checklist before generating.';
       return;
     }
-    const sourceNodes = workflow.connectedAssetNodesTo('composition');
     busy = true;
     progress = 'Preparing workflow assets...';
     const runId = createRunId();
@@ -1502,94 +1514,38 @@
     }
 
     try {
-      if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
-      const sources = [];
-      let hasStoryboardSource = false;
-      let storyboardPlacementText = '';
-      if (storyboardCanvas && !isStoryboardBlank()) {
-        const storyboardSource = workflow.storyboardEditing && storyboardDoc
-          ? compositeToCanvas(storyboardDoc)
-          : storyboardCanvas;
-        storyboardPlacementText = placementSummaryForCanvas(storyboardSource)
-          .map((line, index) => `${index + 1}. ${line}`)
-          .join('\n');
-        sources.push({
-          name: 'Storyboard sketch - mandatory layout guide',
-          bytes: await canvasToPngBytes(storyboardSource),
-        });
-        hasStoryboardSource = true;
-        persistStoryboard();
-      }
-      const storyboardAnnotations = workflow.storyboardAnnotations
-        .map((annotation, index) => `${index + 1}. ${annotation}`)
-        .join('\n');
-      const boundSources = sourceNodes
-        .map((node) => ({ node, asset: assetFor(node) }))
-        .filter((item): item is { node: WorkflowAssetNode; asset: ProjectAsset } => item.asset !== null);
-      for (const [index, { node, asset }] of boundSources.entries()) {
-        sources.push({
-          name: node.note
-            ? `Mandatory asset ${index + 1}: ${node.name}. Role: ${node.note}`
-            : `Mandatory asset ${index + 1}: ${node.name}`,
-          bytes: await project.readFile({ ...asset, kind: 'generated', modifiedAt: asset.createdAt, size: 0, exists: true }),
-        });
-      }
-      if (!sources.length) throw new Error('Workflow asset files are missing.');
-      const requiredAssets = boundSources.map(({ node }, index) => `${index + 1}. ${node.name}${node.note ? ` - ${node.note}` : ''}`).join('\n');
-      const creativeBrief = workflow.briefNodes[0]?.objective.trim() ?? '';
-      const prompt = `${creativeBrief ? `Creative brief:\n${creativeBrief}\n\n` : ''}Art direction:
-${workflow.prompt.trim()}
-
-Final output aspect ratio: ${ratioLabel(targetOutput.finalWidth, targetOutput.finalHeight)}.
-
-Mandatory connected assets that must be visibly represented:
-${requiredAssets}
-
-${hasStoryboardSource ? `Storyboard requirement: input image 1 is the composition storyboard. Treat it as the primary spatial plan for the final image. Preserve the storyboard's relative placement, left/right ordering, approximate scale, subject pose, gesture direction, prop positions, foreground/background zones, and major empty areas. The storyboard is a rough semantic diagram, so do not copy its sketch/grid style; translate it into a polished final image using the connected assets and text prompt.` : ''}
-
-${storyboardPlacementText ? `Storyboard coordinate analysis extracted from the sketch pixels:
-${storyboardPlacementText}
-
-Use these coordinate notes as hard placement constraints. Keep the main subject/object centers in the same canvas region shown by the storyboard. If a major subject is detected in the left half or left third, do not move it to the right half in the final image unless the text explicitly says to override the storyboard.` : ''}
-
-${storyboardAnnotations ? `Storyboard text annotations extracted from editable layers:
-${storyboardAnnotations}
-
-These annotations are direct user instructions attached to the storyboard. Apply them to the nearest relevant region of the storyboard and treat them as higher priority than guessing from pixels alone.` : ''}
-
-Use the storyboard as the layout reference. This is a generative synthesis task, not a cut-and-paste pasteboard: reason from the connected assets and create a new coherent photo/image based on the text prompt. Use the assets as visual references for identity, subject appearance, prop/object appearance, environment, layout, lighting, and style. Do not blindly paste cropped source pixels together, and do not output only the background or only one source asset.
-
-Unless the user explicitly asks for an impossible or surreal composition, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction. If the user deliberately asks for something non-realistic, follow that request intentionally while keeping the result visually coherent.
-
-      Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
-      const result =
-        imageProvider === 'antigravity'
-          ? await composeAntigravityWorkflow(
-              antigravityConfigFromRunOptions(
-                runOptions,
-                project.path,
-                runId,
-                false,
-                settings.value.workspace.keepAiDebugArtifacts,
-              ),
-              prompt,
-              sources,
-            )
-          : await composeCodexWorkflow(
-              codexConfigFromRunOptions(
-                runOptions,
-                project.path,
-                runId,
-                false,
-                settings.value.workspace.keepAiDebugArtifacts,
-              ),
-              prompt,
-              sources,
-            );
-      if (result.asset) {
-        await project.refresh();
-        workflow.setOutput(result.asset, targetOutput.id);
-      }
+      const executor = imageProvider === 'antigravity'
+        ? createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+            runOptions, project.path, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          ))
+        : createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
+            runOptions, project.path, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          ));
+      await workflow.runCampaignGenerate(targetOutput.id, {
+        projectPath: project.path,
+        provider: imageProvider,
+        executors: [executor],
+        assets,
+        readAsset: (asset) => project.readFile({
+          ...asset,
+          kind: 'generated',
+          createdAt: 0,
+          modifiedAt: 0,
+          size: 0,
+          exists: true,
+        }),
+        storeAsset: async (artifact) => (await storeProjectAssetBytes({
+          projectPath: artifact.projectPath,
+          name: artifact.name,
+          bytes: artifact.bytes,
+          kind: 'generated',
+          prompt: artifact.prompt,
+          width: artifact.width,
+          height: artifact.height,
+          mime: artifact.mime,
+        })).asset,
+      });
+      await project.refresh();
       editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
@@ -1998,6 +1954,27 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                   {/each}
                 </div>
               {/if}
+              {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+                <button
+                  type="button"
+                  class="draft-run"
+                  disabled={busy || !transformOutputReadiness(node.id)?.ready}
+                  onclick={() => void generate(outputForTransform(node.id))}
+                >
+                  <Icon svg={PaintBrush} size={14} />
+                  Run Generate
+                </button>
+                <p class="transform-run-state" aria-live="polite">
+                  {workflow.transformExecution(node.id).state === 'idle'
+                    ? transformOutputReadiness(node.id)?.nextAction?.action ?? 'Ready to run'
+                    : workflow.transformExecution(node.id).message}
+                </p>
+              {:else if node.type === 'transform' && definition.executor.status === 'available'}
+                <p class="draft-reason" id={`draft-reason-${node.id}`}>
+                  Only the Generate capability is executable in this slice. Configure this Transform as Generate to run it.
+                </p>
+                <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
+              {/if}
               {#if definition.executor.status === 'draft-only'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
                 <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
@@ -2217,6 +2194,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
           {@const ports = workflowNodePorts(outputNode.id)}
+          {@const targetReadiness = outputReadiness(outputNode.id)}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
@@ -2274,7 +2252,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </div>
               </div>
               <div class="output-actions">
-                <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
+                <button onclick={() => void generate(outputNode)} disabled={busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
                   Generate
                 </button>
@@ -2283,9 +2261,9 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                   Place
                 </button>
               </div>
-              {#if !readiness.ready && readiness.nextAction}
+              {#if !targetReadiness.ready && targetReadiness.nextAction}
                 <p class="generate-block" id={`generate-block-${outputNode.id}`}>
-                  {readiness.nextAction.action}
+                  {targetReadiness.nextAction.action}
                 </p>
               {/if}
             </div>

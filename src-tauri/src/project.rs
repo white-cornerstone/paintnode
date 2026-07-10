@@ -72,6 +72,12 @@ impl ProjectAsset {
             mime: Some("image/png".into()),
         }
     }
+
+    pub(crate) fn with_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -81,9 +81,9 @@ describe('creator node registry', () => {
       advanced: { provider: null, model: null },
     });
     expect(creatorNodeDefinition('transform').executor).toMatchObject({
-      status: 'draft-only',
-      capability: 'configured-transform',
-      reason: expect.stringMatching(/not available yet/i),
+      status: 'available',
+      capability: 'generate',
+      reason: null,
     });
     expect(creatorNodeDefinition('review').executor.status).toBe('draft-only');
   });

@@ -19,7 +19,16 @@ import {
   createCreatorNode,
   type CreatorNodeType,
   validateCreatorNodeConfig,
+  executeCampaignGenerateTransform,
+  type ExecuteCampaignGenerateOptions,
+  type WorkflowTransformExecutionOutcome,
 } from '../workflow';
+
+export interface WorkflowTransformExecutionState {
+  state: 'idle' | 'running' | 'succeeded' | 'failed';
+  message: string;
+  assetId: string | null;
+}
 
 export interface WorkflowAssetNode {
   id: string;
@@ -197,10 +206,13 @@ export class WorkflowStore {
   outputRelativePath = $state<string | null>(null);
   rev = $state(0);
   savedRev = $state(0);
+  transformExecutions = $state<Record<string, WorkflowTransformExecutionState>>({});
   private graphDomain: WorkflowGraphDomain | null = null;
   private readonly graphIdGenerator: WorkflowIdGenerator | undefined;
   private readonly workflowGraphIdGenerator: (() => string) | undefined;
   private projectedGraphRevision = 0;
+  private transformRunSequence = 0;
+  private readonly activeTransformRuns = new Map<string, number>();
 
   constructor(options: WorkflowStoreOptions = {}) {
     this.graphIdGenerator = options.idGenerator;
@@ -268,6 +280,8 @@ export class WorkflowStore {
     this.outputRelativePath = null;
     this.rev = 0;
     this.savedRev = 0;
+    this.transformExecutions = {};
+    this.activeTransformRuns.clear();
     this.resetGraphDomain();
   }
 
@@ -296,6 +310,8 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain);
     this.rev = 0;
     this.savedRev = 0;
+    this.transformExecutions = {};
+    this.activeTransformRuns.clear();
   }
 
   show(): void {
@@ -876,6 +892,51 @@ export class WorkflowStore {
     return planWorkflowExecution(this.serialize(), targetNodeId, options);
   }
 
+  transformExecution(nodeId: string): WorkflowTransformExecutionState {
+    return this.transformExecutions[nodeId] ?? { state: 'idle', message: '', assetId: null };
+  }
+
+  async runCampaignGenerate(
+    outputNodeId: string,
+    options: ExecuteCampaignGenerateOptions,
+  ): Promise<WorkflowTransformExecutionOutcome> {
+    const graph = this.serialize();
+    const outputEdge = graph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
+    const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
+    const run = ++this.transformRunSequence;
+    this.activeTransformRuns.set(transformNodeId, run);
+    this.transformExecutions = {
+      ...this.transformExecutions,
+      [transformNodeId]: { state: 'running', message: 'Generating…', assetId: null },
+    };
+    try {
+      const outcome = await executeCampaignGenerateTransform(graph, outputNodeId, options);
+      if (this.activeTransformRuns.get(transformNodeId) === run) {
+        this.graphDomain = new WorkflowGraphDomain(outcome.graph, { idGenerator: this.graphIdGenerator });
+        this.projectedGraphRevision = this.graphDomain.revision;
+        this.syncReactiveGraph(this.graphDomain);
+        this.bump();
+        this.transformExecutions = {
+          ...this.transformExecutions,
+          [transformNodeId]: {
+            state: 'succeeded', message: 'Generated', assetId: outcome.asset.id,
+          },
+        };
+      }
+      return outcome;
+    } catch (error) {
+      if (this.activeTransformRuns.get(transformNodeId) === run) {
+        this.transformExecutions = {
+          ...this.transformExecutions,
+          [transformNodeId]: {
+            state: 'failed', message: (error as Error)?.message ?? String(error), assetId: null,
+          },
+        };
+      }
+      throw error;
+    }
+  }
+
   openFromBytes(bytes: Uint8Array, savedPath: string | null, fallbackName: string): void {
     const text = new TextDecoder().decode(bytes);
     const result = readWorkflowGraph(JSON.parse(text));
@@ -904,6 +965,8 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain, legacyProjection);
     this.rev = 0;
     this.savedRev = 0;
+    this.transformExecutions = {};
+    this.activeTransformRuns.clear();
   }
 
   async save(): Promise<string | null> {

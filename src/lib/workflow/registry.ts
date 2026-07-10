@@ -171,9 +171,9 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
       advanced: { provider: null, model: null, options: {} },
     },
     executor: {
-      status: 'draft-only',
-      capability: 'configured-transform',
-      reason: 'Transform execution is not available yet. Keep this node in the draft for a later executable slice.',
+      status: 'available',
+      capability: 'generate',
+      reason: null,
     },
   },
   {

@@ -8,6 +8,7 @@ import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
+import { createWorkflowCompositionExecutor } from '../workflow/transformExecutor';
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -15,6 +16,84 @@ function ids(): WorkflowIdGenerator {
 }
 
 describe('WorkflowStore graph adapter', () => {
+  it('exposes fake Transform running/succeeded state and persists the bound Square output on reopen', async () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer');
+    const product = {
+      id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png',
+      createdAt: 1, exists: true, width: 1200, height: 1200, mime: 'image/png',
+    } satisfies ProjectAsset;
+    store.assignAsset('slot-product', product);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project',
+      provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => {
+        await gate;
+        return {
+          kind: 'project-asset',
+          asset: {
+            id: 'result-square', name: 'Square.png', relativePath: 'generated/Square.png',
+            width: 1024, height: 1024, mime: 'image/png',
+          },
+        };
+      })],
+      assets: [product],
+      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      storeAsset: async () => { throw new Error('bytes store should not run'); },
+    });
+
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'running' });
+    finish();
+    await run;
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'succeeded', assetId: 'result-square',
+    });
+    expect(store.outputNode('output-square')).toMatchObject({
+      outputAssetId: 'result-square', outputRelativePath: 'generated/Square.png',
+    });
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Campaign');
+    expect(reopened.outputNode('output-square')).toMatchObject({
+      outputAssetId: 'result-square', outputRelativePath: 'generated/Square.png',
+    });
+  });
+
+  it('keeps the newest overlapping Transform result when an older run finishes late', async () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer');
+    const product = {
+      id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png',
+      createdAt: 1, exists: true, width: 1200, height: 1200, mime: 'image/png',
+    } satisfies ProjectAsset;
+    store.assignAsset('slot-product', product);
+    const resolvers: Array<(id: string) => void> = [];
+    const executor = createWorkflowCompositionExecutor('fake', () => new Promise((resolve) => {
+      resolvers.push((assetId) => resolve({
+        kind: 'project-asset',
+        asset: {
+          id: assetId, name: `${assetId}.png`, relativePath: `generated/${assetId}.png`,
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+      }));
+    }));
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [product],
+      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      storeAsset: async () => { throw new Error('unused'); },
+    };
+    const older = store.runCampaignGenerate('output-square', options);
+    const newer = store.runCampaignGenerate('output-square', options);
+    await Promise.resolve();
+    resolvers[1]('newer');
+    await newer;
+    resolvers[0]('older');
+    await older;
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('newer');
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded', assetId: 'newer' });
+  });
   it('adds every creator registry node and preserves exact config and port identity on reopen', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard('Palette additions');
@@ -168,6 +247,8 @@ describe('WorkflowStore graph adapter', () => {
       desktop: true,
       projectPath: '/tmp/project',
       assets: [{ id: 'product-asset', relativePath: 'assets/product.png', exists: true }],
+      provider: 'fake',
+      supportedProviders: ['fake'],
     };
     expect(workflowReadiness(store.graphSnapshot(), options).ready).toBe(false);
     expect(store.planExecution('output-square', { maxConcurrency: 2 }).blocked).not.toEqual([]);

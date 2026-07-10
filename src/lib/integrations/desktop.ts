@@ -760,6 +760,7 @@ export async function composeCodexWorkflow(
   config: CodexGeneratorConfig,
   prompt: string,
   sources: WorkflowSourceImage[],
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex workflow composition is only available in the desktop app.');
@@ -776,6 +777,8 @@ export async function composeCodexWorkflow(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
     runId,
   });
 }
@@ -911,6 +914,7 @@ export async function composeAntigravityWorkflow(
   config: AntigravityGeneratorConfig,
   prompt: string,
   sources: WorkflowSourceImage[],
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity workflow composition is only available in the desktop app.');
@@ -923,6 +927,8 @@ export async function composeAntigravityWorkflow(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
     runId,
   });
 }
