@@ -147,12 +147,10 @@
   let selectiveTargetNodeId = $state<string | null>(null);
   let selectiveMode = $state<WorkflowSelectiveRunMode | null>(null);
   let selectiveOutcome = $state<WorkflowSelectiveExecutionOutcome | null>(null);
-  let selectiveBusy = $state(false);
   let selectiveRunning = $state(false);
   let selectiveMessage = $state('');
   let selectiveError = $state('');
   let lastSelectiveContextIdentity = '';
-  let selectiveRequestSequence = 0;
   let boardDestroyed = false;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1542,9 +1540,8 @@
   }
 
   function invalidateSelectivePreview(): void {
-    selectiveRequestSequence += 1;
-    if (selectiveBusy && !selectiveRunning) void workflow.cancelSelectiveExecution();
-    selectiveUiState.clear();
+    if (selectiveUiState.busy && !selectiveRunning) void workflow.cancelSelectiveExecution();
+    selectiveUiState.invalidatePreview();
     selectiveOutcome = null;
     selectiveTargetNodeId = null;
     selectiveMode = null;
@@ -1644,32 +1641,31 @@
 
   async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
     invalidateSelectivePreview();
-    const requestSequence = selectiveRequestSequence;
     selectiveTargetNodeId = nodeId;
     selectiveMode = mode;
     if (!providerSelection.ready || !providerSelection.provider) {
       selectiveError = providerSelection.label;
       return;
     }
+    const previewEpoch = selectiveUiState.beginPreview();
     if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
     if (storyboardCanvas) persistStoryboard();
-    selectiveBusy = true;
     selectiveMessage = 'Preparing selective run preview…';
     const runId = createRunId();
     try {
       const context = createWorkflowExecutionContext(runId);
       selectiveUiState.runOptions = context.options;
       const preflight = await workflow.preflightSelectiveExecution(mode, nodeId, context.options);
-      if (requestSequence !== selectiveRequestSequence) return;
+      if (!selectiveUiState.isCurrentPreview(previewEpoch)) return;
       selectiveUiState.capture(preflight, context.options);
       selectiveMessage = selectiveExecutionPreviewSummary(preflight.plan.preflight);
     } catch (cause) {
-      if (requestSequence !== selectiveRequestSequence) return;
+      if (!selectiveUiState.isCurrentPreview(previewEpoch)) return;
       selectiveUiState.runOptions = null;
       selectiveError = (cause as Error)?.message ?? String(cause);
       selectiveMessage = '';
     } finally {
-      if (requestSequence === selectiveRequestSequence) selectiveBusy = false;
+      selectiveUiState.settlePreview(previewEpoch);
     }
   }
 
@@ -1682,7 +1678,7 @@
       selectiveError = availability.reason;
       return;
     }
-    selectiveBusy = true;
+    selectiveUiState.beginRun();
     selectiveRunning = true;
     busy = true;
     selectiveError = '';
@@ -1720,7 +1716,7 @@
       aiTasks.setCancel(task.id, null);
       activeWorkflowTaskId = null;
       busy = false;
-      selectiveBusy = false;
+      selectiveUiState.settleRun();
       lastSelectiveContextIdentity = selectivePreviewContextIdentity();
       selectiveRunning = false;
       progress = '';
@@ -2223,13 +2219,13 @@
                 <div class="selective-node-actions" role="group" aria-label="Preview selective run">
                   <button
                     type="button"
-                    disabled={busy || selectiveBusy || !providerSelection.ready}
+                    disabled={busy || selectiveUiState.busy || !providerSelection.ready}
                     aria-describedby={`selective-action-reason-${node.id}`}
                     onclick={() => void previewSelectiveExecution('run-node', node.id)}
                   >Run this node</button>
                   <button
                     type="button"
-                    disabled={busy || selectiveBusy || !providerSelection.ready}
+                    disabled={busy || selectiveUiState.busy || !providerSelection.ready}
                     aria-describedby={`selective-action-reason-${node.id}`}
                     onclick={() => void previewSelectiveExecution('run-from-here', node.id)}
                   >Run from here</button>
@@ -2249,14 +2245,14 @@
                       <div class="selective-preview-actions">
                         <button
                           type="button"
-                          disabled={selectiveBusy || !runAvailability.enabled}
+                          disabled={selectiveUiState.busy || !runAvailability.enabled}
                           aria-describedby={`selective-run-reason-${node.id}`}
                           onclick={() => void confirmSelectiveExecution()}
                         >Confirm selective run</button>
                         <button type="button" onclick={() => void cancelSelectiveExecution()}>Cancel</button>
                       </div>
                       <p id={`selective-run-reason-${node.id}`}>{runAvailability.reason}</p>
-                    {:else if selectiveBusy}
+                    {:else if selectiveUiState.busy}
                       <button type="button" onclick={() => void cancelSelectiveExecution()}>Cancel</button>
                     {:else if selectiveOutcome}
                       <button type="button" onclick={invalidateSelectivePreview}>Dismiss</button>
@@ -2476,7 +2472,7 @@
                   <span>Native QA scenario</span>
                   <select
                     aria-label="QA Fake scenario"
-                    disabled={busy || selectiveBusy}
+                    disabled={busy || selectiveUiState.busy}
                     value={qaScenario}
                     onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}
                   >
@@ -2487,7 +2483,7 @@
                 </label>
               </div>
             {:else}
-              <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveBusy || !providerSelection.ready} />
+              <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveUiState.busy || !providerSelection.ready} />
             {/if}
           </div>
           <div class="readiness-checklist" role="group" aria-label="Generate checklist" tabindex="-1" data-workflow-checklist onpointerdown={(event) => event.stopPropagation()}>
@@ -2576,7 +2572,7 @@
                 </div>
               </div>
               <div class="output-actions">
-                <button onclick={() => void generate(outputNode)} disabled={busy || selectiveBusy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
+                <button onclick={() => void generate(outputNode)} disabled={busy || selectiveUiState.busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
                   {providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
                 </button>

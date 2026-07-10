@@ -228,6 +228,49 @@ describe('WorkflowStore selective execution integration', () => {
     },
   );
 
+  it('settles an invalidated deferred Board preview without letting it clobber an immediate replacement', async () => {
+    const store = campaignStore();
+    const run = harness();
+    const uiState = new WorkflowSelectiveUiState();
+    const normalResolve = run.resolveAsset.getMockImplementation()!;
+    let deferFirstMaterial = true;
+    run.resolveAsset.mockImplementation(async (asset) => {
+      if (deferFirstMaterial) {
+        deferFirstMaterial = false;
+        return new Promise(() => undefined);
+      }
+      return normalResolve(asset);
+    });
+    const options = run.options();
+    const firstEpoch = uiState.beginPreview();
+    const firstPreview = store.preflightSelectiveExecution('run-from-here', 'composition', options);
+    const firstSettled = firstPreview.then(
+      (preflight) => ({ preflight }),
+      (error) => ({ error }),
+    );
+    while (deferFirstMaterial) await Promise.resolve();
+
+    uiState.invalidatePreview();
+    void store.cancelSelectiveExecution();
+    expect(uiState.busy).toBe(false);
+
+    const replacementEpoch = uiState.beginPreview();
+    const replacement = await store.preflightSelectiveExecution('run-from-here', 'composition', options);
+    if (uiState.isCurrentPreview(replacementEpoch)) uiState.capture(replacement, options);
+    uiState.settlePreview(replacementEpoch);
+    uiState.settlePreview(firstEpoch);
+
+    expect(await firstSettled).toMatchObject({ error: { code: 'CANCELLED' } });
+    expect(uiState.busy).toBe(false);
+    expect(uiState.preflight).toBe(replacement);
+    expect(uiState.runOptions).toBe(options);
+    expect(run.providerCalls()).toBe(0);
+
+    const outcome = await store.runSelectiveExecution(uiState.preflight!, uiState.runOptions!);
+    expect(outcome.failures).toEqual({});
+    expect(run.providerCalls()).toBe(1);
+  });
+
   it.each([
     ['provider', { provider: 'replacement', selectiveExecutionIdentity: 'provider=fake;quality=standard' }],
     ['run options', { selectiveExecutionIdentity: 'provider=fake;quality=high' }],
