@@ -12,11 +12,13 @@ pub(crate) mod workflow_director;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
-#[cfg(windows)]
-use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
+#[cfg(any(windows, test))]
+use std::io::Write;
+#[cfg(any(windows, test))]
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -232,76 +234,131 @@ pub(crate) fn ai_run_cancelled(run_id: &str) -> bool {
 }
 
 /// Prepare provider bridges for tree-scoped cancellation. Unix starts a new
-/// process group. Windows starts a PaintNode wrapper blocked on an inherited
-/// anonymous pipe. Only after the parent assigns that wrapper to a
-/// kill-on-close Job Object does it write the release token through its
-/// non-inherited pipe handle. Windows associates every later descendant with
-/// that job by default; breakaway is not enabled. This removes both the
-/// spawn-to-assignment race and spoofable named/file gates.
+/// process group. Windows starts a PaintNode wrapper blocked on an
+/// authenticated loopback channel. Only after the parent assigns that wrapper
+/// to a kill-on-close Job Object does it send the release token. The OS owns
+/// the unique endpoint, no handles are inherited, and stdin remains untouched.
+/// Windows associates every later descendant with that job by default;
+/// breakaway is not enabled.
 #[cfg(windows)]
 const PROVIDER_WRAPPER_ARG: &str = "--paintnode-ai-provider-wrapper";
 #[cfg(any(windows, test))]
 const PROVIDER_WRAPPER_RELEASE_TOKEN: &[u8] = b"paintnode-provider-job-assigned-v1";
 
 pub(crate) struct ProviderLaunchGate {
-    #[cfg(windows)]
-    writer: File,
+    #[cfg(any(windows, test))]
+    listener: TcpListener,
+    #[cfg(any(windows, test))]
+    secret: [u8; 32],
+}
+
+#[cfg(any(windows, test))]
+fn encode_provider_gate_secret(secret: &[u8; 32]) -> String {
+    secret.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(any(windows, test))]
+fn decode_provider_gate_secret(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Provider launch channel secret is invalid.".into());
+    }
+    let mut secret = [0_u8; 32];
+    for (index, byte) in secret.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "Provider launch channel secret is invalid.".to_string())?;
+    }
+    Ok(secret)
+}
+
+#[cfg(any(windows, test))]
+fn create_provider_launch_gate(secret: [u8; 32]) -> Result<ProviderLaunchGate, String> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| format!("Could not reserve the provider launch channel: {error}"))?;
+    Ok(ProviderLaunchGate { listener, secret })
 }
 
 #[cfg(windows)]
-fn create_windows_provider_launch_pipe() -> Result<(ProviderLaunchGate, File), String> {
-    use std::os::windows::io::{FromRawHandle, RawHandle};
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
-    };
-    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows_sys::Win32::System::Pipes::CreatePipe;
+fn create_windows_provider_launch_gate() -> Result<ProviderLaunchGate, String> {
+    let mut secret = [0_u8; 32];
+    getrandom::fill(&mut secret)
+        .map_err(|error| format!("Could not secure the provider launch channel: {error}"))?;
+    create_provider_launch_gate(secret)
+}
 
-    unsafe {
-        let mut reader: HANDLE = std::ptr::null_mut();
-        let mut writer: HANDLE = std::ptr::null_mut();
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: std::ptr::null_mut(),
-            bInheritHandle: 1,
-        };
-        if CreatePipe(&mut reader, &mut writer, std::ptr::addr_of!(attributes), 0) == 0 {
-            return Err(format!(
-                "Could not create the Windows provider launch pipe: {}",
-                std::io::Error::last_os_error()
-            ));
+#[cfg(any(windows, test))]
+fn release_provider_launch_gate(gate: &ProviderLaunchGate) -> Result<(), String> {
+    gate.listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Could not prepare the provider launch channel: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match gate.listener.accept() {
+            Ok((mut stream, peer)) => {
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .map_err(|error| format!("Could not secure provider launch input: {error}"))?;
+                let mut received = Vec::new();
+                if Read::by_ref(&mut stream)
+                    .take(64)
+                    .read_to_end(&mut received)
+                    .is_err()
+                    || received.as_slice() != gate.secret
+                {
+                    continue;
+                }
+                stream
+                    .write_all(PROVIDER_WRAPPER_RELEASE_TOKEN)
+                    .and_then(|_| stream.shutdown(Shutdown::Write))
+                    .map_err(|error| format!("Could not release the provider wrapper: {error}"))?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(
+                        "Provider wrapper did not authenticate before launch timeout.".into(),
+                    );
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(format!("Could not accept the provider wrapper: {error}")),
         }
-        if SetHandleInformation(writer, HANDLE_FLAG_INHERIT, 0) == 0 {
-            let error = std::io::Error::last_os_error();
-            let _ = CloseHandle(reader);
-            let _ = CloseHandle(writer);
-            return Err(format!(
-                "Could not secure the Windows provider launch pipe: {error}"
-            ));
-        }
-        Ok((
-            ProviderLaunchGate {
-                writer: File::from_raw_handle(writer as RawHandle),
-            },
-            File::from_raw_handle(reader as RawHandle),
-        ))
     }
 }
 
 #[cfg(any(windows, test))]
-fn with_verified_provider_launch_signal<R, T>(
-    reader: &mut R,
-    launch: impl FnOnce() -> T,
-) -> Result<T, String>
-where
-    R: Read,
-{
-    let mut signal = Vec::new();
-    reader
+fn connect_provider_launch_gate(address: &str, secret: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let address = address
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| "Provider launch channel address is invalid.".to_string())?;
+    if !address.ip().is_loopback() {
+        return Err("Provider launch channel must use loopback.".into());
+    }
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
+        .map_err(|error| format!("Could not connect to the provider launch channel: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("Could not configure the provider launch channel: {error}"))?;
+    stream
+        .write_all(secret)
+        .and_then(|_| stream.shutdown(Shutdown::Write))
+        .map_err(|error| format!("Could not authenticate the provider wrapper: {error}"))?;
+    let mut response = Vec::new();
+    stream
         .take(128)
-        .read_to_end(&mut signal)
-        .map_err(|error| format!("Could not read the provider launch signal: {error}"))?;
-    if signal != PROVIDER_WRAPPER_RELEASE_TOKEN {
+        .read_to_end(&mut response)
+        .map_err(|error| format!("Could not read the provider launch release: {error}"))?;
+    Ok(response)
+}
+
+#[cfg(any(windows, test))]
+fn with_verified_provider_release<T>(
+    release: &[u8],
+    launch: impl FnOnce() -> T,
+) -> Result<T, String> {
+    if release != PROVIDER_WRAPPER_RELEASE_TOKEN {
         return Err("Provider launch was not released by its assigned process tree.".into());
     }
     Ok(launch())
@@ -330,16 +387,22 @@ pub(crate) fn configure_ai_process_group(
             .map(|(name, value)| (name.to_os_string(), value.map(ToOwned::to_owned)))
             .collect::<Vec<_>>();
         let current_dir = command.get_current_dir().map(Path::to_path_buf);
-        let (gate, reader) = create_windows_provider_launch_pipe()?;
+        let gate = create_windows_provider_launch_gate()?;
+        let address = gate
+            .listener
+            .local_addr()
+            .map_err(|error| format!("Could not inspect the provider launch channel: {error}"))?;
+        let secret = encode_provider_gate_secret(&gate.secret);
         let mut wrapper =
             Command::new(std::env::current_exe().map_err(|error| {
                 format!("Could not locate PaintNode provider wrapper: {error}")
             })?);
         wrapper
             .arg(PROVIDER_WRAPPER_ARG)
+            .arg(address.to_string())
+            .arg(secret)
             .arg(program)
             .args(args)
-            .stdin(std::process::Stdio::from(reader))
             .creation_flags(CREATE_NEW_PROCESS_GROUP);
         if let Some(current_dir) = current_dir {
             wrapper.current_dir(current_dir);
@@ -363,9 +426,29 @@ pub(crate) fn run_provider_process_wrapper_if_requested() -> Option<i32> {
     if args.next()?.to_str() != Some(PROVIDER_WRAPPER_ARG) {
         return None;
     }
+    let address = args.next()?.to_string_lossy().into_owned();
+    let secret = match args
+        .next()
+        .and_then(|value| value.to_str().map(str::to_string))
+        .ok_or_else(|| "Provider launch channel secret is missing.".to_string())
+        .and_then(|value| decode_provider_gate_secret(&value))
+    {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(70);
+        }
+    };
     let program = args.next()?;
     let forwarded = args.collect::<Vec<_>>();
-    let status = match with_verified_provider_launch_signal(&mut std::io::stdin().lock(), || {
+    let release = match connect_provider_launch_gate(&address, &secret) {
+        Ok(release) => release,
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(70);
+        }
+    };
+    let status = match with_verified_provider_release(&release, || {
         Command::new(program).args(forwarded).status()
     }) {
         Ok(Ok(status)) => status,
@@ -466,6 +549,27 @@ impl Drop for AiProcessTree {
     }
 }
 
+#[cfg(windows)]
+fn abort_windows_provider_wrapper(
+    child: &mut Child,
+    launch_gate: &mut Option<ProviderLaunchGate>,
+    message: String,
+) -> String {
+    // Closing the listener first independently makes the blocked wrapper fail
+    // closed even if direct process termination fails.
+    drop(launch_gate.take());
+    let _ = child.kill();
+    let deadline = Instant::now() + OUTPUT_READER_JOIN_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return message,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => return format!("{message} Provider wrapper reap timed out."),
+            Err(error) => return format!("{message} Could not reap provider wrapper: {error}"),
+        }
+    }
+}
+
 pub(crate) fn track_ai_process_tree(
     child: &mut Child,
     launch_gate: Option<ProviderLaunchGate>,
@@ -487,13 +591,17 @@ pub(crate) fn track_ai_process_tree(
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
 
+        let mut launch_gate = launch_gate;
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
+            let message = format!(
                 "Could not create Windows provider Job Object: {}",
                 std::io::Error::last_os_error()
+            );
+            return Err(abort_windows_provider_wrapper(
+                child,
+                &mut launch_gate,
+                message,
             ));
         }
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -511,28 +619,35 @@ pub(crate) fn track_ai_process_tree(
             // back to an untracked provider process tree.
             let error = std::io::Error::last_os_error();
             let _ = CloseHandle(job);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "Could not isolate the Windows provider process tree: {error}"
+            return Err(abort_windows_provider_wrapper(
+                child,
+                &mut launch_gate,
+                format!("Could not isolate the Windows provider process tree: {error}"),
             ));
         }
-        let mut launch_gate = launch_gate.ok_or_else(|| {
-            let _ = CloseHandle(job);
-            let _ = child.kill();
-            let _ = child.wait();
-            "Windows provider wrapper launch gate is missing.".to_string()
-        })?;
-        if let Err(error) = launch_gate.writer.write_all(PROVIDER_WRAPPER_RELEASE_TOKEN) {
+        let gate = match launch_gate.take() {
+            Some(gate) => gate,
+            None => {
+                let _ = TerminateJobObject(job, 1);
+                let _ = CloseHandle(job);
+                return Err(abort_windows_provider_wrapper(
+                    child,
+                    &mut launch_gate,
+                    "Windows provider wrapper launch gate is missing.".into(),
+                ));
+            }
+        };
+        if let Err(error) = release_provider_launch_gate(&gate) {
+            drop(gate);
             let _ = TerminateJobObject(job, 1);
             let _ = CloseHandle(job);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "Could not release the isolated Windows provider wrapper pipe: {error}"
+            return Err(abort_windows_provider_wrapper(
+                child,
+                &mut launch_gate,
+                format!("Could not release the isolated Windows provider wrapper: {error}"),
             ));
         }
-        drop(launch_gate);
+        drop(gate);
         Ok(AiProcessTree { job })
     }
 }
@@ -2125,20 +2240,66 @@ mod tests {
     }
 
     #[test]
-    fn invalid_or_preexisting_launch_signal_never_reaches_provider_launch() {
+    fn authenticated_loopback_gate_rejects_spoofing_and_releases_exact_wrapper() {
+        let secret = [7_u8; 32];
+        assert_eq!(
+            decode_provider_gate_secret(&encode_provider_gate_secret(&secret)),
+            Ok(secret)
+        );
+        let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
+        let address = gate
+            .listener
+            .local_addr()
+            .expect("gate address")
+            .to_string();
+        let wrong_address = address.clone();
+        let wrong =
+            thread::spawn(move || connect_provider_launch_gate(&wrong_address, &[8_u8; 32]));
+        thread::sleep(Duration::from_millis(20));
+        let correct = thread::spawn(move || connect_provider_launch_gate(&address, &secret));
+
+        release_provider_launch_gate(&gate).expect("release authenticated wrapper");
+
+        assert_ne!(
+            wrong.join().expect("wrong client").unwrap_or_default(),
+            PROVIDER_WRAPPER_RELEASE_TOKEN
+        );
+        let release = correct
+            .join()
+            .expect("correct client")
+            .expect("release token");
+        assert_eq!(release, PROVIDER_WRAPPER_RELEASE_TOKEN);
+    }
+
+    #[test]
+    fn dropped_assignment_gate_fails_closed_without_launch() {
+        let secret = [11_u8; 32];
+        let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
+        let address = gate
+            .listener
+            .local_addr()
+            .expect("gate address")
+            .to_string();
+        drop(gate);
+        let release = connect_provider_launch_gate(&address, &secret).unwrap_or_default();
+        let launched = std::cell::Cell::new(false);
+        assert!(with_verified_provider_release(&release, || launched.set(true)).is_err());
+        assert!(!launched.get());
+    }
+
+    #[test]
+    fn invalid_or_preexisting_release_never_reaches_provider_launch() {
         let launched = std::cell::Cell::new(false);
         for signal in [
             b"".as_slice(),
             b"assigned",
             b"paintnode-provider-job-assigned-v1-extra",
         ] {
-            let mut reader = std::io::Cursor::new(signal);
-            let result = with_verified_provider_launch_signal(&mut reader, || launched.set(true));
+            let result = with_verified_provider_release(signal, || launched.set(true));
             assert!(result.is_err());
             assert!(!launched.get());
         }
-        let mut reader = std::io::Cursor::new(PROVIDER_WRAPPER_RELEASE_TOKEN);
-        with_verified_provider_launch_signal(&mut reader, || launched.set(true))
+        with_verified_provider_release(PROVIDER_WRAPPER_RELEASE_TOKEN, || launched.set(true))
             .expect("exact parent signal");
         assert!(launched.get());
     }
@@ -2153,14 +2314,20 @@ mod tests {
             .expect("Windows gate");
         let args = command.get_args().collect::<Vec<_>>();
         assert_eq!(args[0], std::ffi::OsStr::new(PROVIDER_WRAPPER_ARG));
-        assert_eq!(args[1], std::ffi::OsStr::new("cmd.exe"));
+        assert_eq!(args[3], std::ffi::OsStr::new("cmd.exe"));
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_job_object_kills_descendant_after_bridge_exit() {
-        let (gate, _gate_reader) =
-            create_windows_provider_launch_pipe().expect("anonymous launch pipe");
+        let secret = [9_u8; 32];
+        let gate = create_provider_launch_gate(secret).expect("loopback launch gate");
+        let address = gate
+            .listener
+            .local_addr()
+            .expect("gate address")
+            .to_string();
+        let wrapper = thread::spawn(move || connect_provider_launch_gate(&address, &secret));
         let mut command = Command::new("cmd.exe");
         command
             .args([
@@ -2173,6 +2340,10 @@ mod tests {
             .stderr(std::process::Stdio::null());
         let mut child = command.spawn().expect("spawn delayed bridge");
         let mut tree = track_ai_process_tree(&mut child, Some(gate)).expect("assign job");
+        assert_eq!(
+            wrapper.join().expect("wrapper").expect("release"),
+            PROVIDER_WRAPPER_RELEASE_TOKEN
+        );
         let mut stream = child.stdout.take().expect("bridge stdout");
         let reader = thread::spawn(move || {
             let mut bytes = Vec::new();

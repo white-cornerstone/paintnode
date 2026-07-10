@@ -2449,6 +2449,7 @@ version = "0.2.4"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "getrandom 0.4.3",
  "image",
  "libc",
  "log",
