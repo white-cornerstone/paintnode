@@ -509,6 +509,11 @@ export async function detectCodex(bin?: string): Promise<CodexDetectionResult> {
   });
 }
 
+export async function providerQaMode(): Promise<'provider-free' | 'provider-e2e' | null> {
+  if (!isDesktop()) return null;
+  return invoke<'provider-free' | 'provider-e2e' | null>('provider_qa_mode');
+}
+
 export async function discoverCodexCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
   if (!isDesktop()) {
     throw new Error('Codex capability discovery is only available in the desktop app.');

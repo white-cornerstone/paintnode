@@ -76,6 +76,7 @@ use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_byte
 use crate::project::{
     add_asset, safe_stem, store_generated_png_asset, write_asset_file, ProjectAsset,
 };
+use crate::provider_executable::{resolve_provider_executable, Provider};
 
 #[derive(Debug, Default)]
 struct AntigravityCommandOptions {
@@ -1557,27 +1558,7 @@ fn run_antigravity_with_progress(
 }
 
 fn configured_or_default_antigravity_bin(bin: Option<String>) -> Result<String, String> {
-    if let Some(bin) = bin.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
-        return Ok(bin);
-    }
-
-    let mut candidates = vec!["agy".to_string()];
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(format!("{home}/.local/bin/agy"));
-    }
-    candidates.extend([
-        "/opt/homebrew/bin/agy".to_string(),
-        "/usr/local/bin/agy".to_string(),
-    ]);
-    for candidate in candidates {
-        let mut command = Command::new(&candidate);
-        apply_ai_cli_environment(&mut command).arg("--version");
-        if command.output().is_ok() {
-            return Ok(candidate.to_string());
-        }
-    }
-
-    Err("Antigravity CLI was not found. Install Antigravity CLI, or enter the full path to the `agy` binary.".into())
+    resolve_provider_executable(Provider::Antigravity, bin, None).map(|resolved| resolved.path)
 }
 
 fn antigravity_command_options(
@@ -2446,8 +2427,8 @@ pub(crate) async fn detect_antigravity(
     bin: Option<String>,
 ) -> Result<CodexDetectionResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> CodexDetectionResult {
-        let antigravity_bin = match configured_or_default_antigravity_bin(bin) {
-            Ok(path) => path,
+        let resolved = match resolve_provider_executable(Provider::Antigravity, bin, None) {
+            Ok(resolved) => resolved,
             Err(error) => {
                 return CodexDetectionResult {
                     found: false,
@@ -2457,6 +2438,7 @@ pub(crate) async fn detect_antigravity(
                 };
             }
         };
+        let antigravity_bin = resolved.path;
 
         let job_path =
             std::env::temp_dir().join(format!("paintnode-antigravity-detect-{}", now_id()));
@@ -2467,10 +2449,7 @@ pub(crate) async fn detect_antigravity(
             Ok(()) => CodexDetectionResult {
                 found: true,
                 path: Some(antigravity_bin.clone()),
-                version: Some(format!(
-                    "Antigravity {}",
-                    antigravity_cli_version(&antigravity_bin)
-                )),
+                version: Some(format!("Antigravity {}", resolved.version)),
                 error: None,
             },
             Err(error) => CodexDetectionResult {
