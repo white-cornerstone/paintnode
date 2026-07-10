@@ -22,6 +22,21 @@ export interface WorkflowTransformSource {
   bytes: Uint8Array;
 }
 
+export interface WorkflowStoryboardDescriptor {
+  dataUrl: string | null;
+  oraPath: string | null;
+  width: number;
+  height: number;
+  annotations: readonly string[];
+  annotationItems: readonly unknown[];
+  annotationsVisible: boolean;
+}
+
+export interface WorkflowStoryboardMaterialization extends WorkflowStoryboardDescriptor {
+  placementConstraints: readonly string[];
+  source: { name: string; bytes: Uint8Array } | null;
+}
+
 export interface WorkflowTransformExecutionRequest {
   workflowId: string;
   nodeId: string;
@@ -37,6 +52,7 @@ export interface WorkflowTransformExecutionRequest {
   };
   prompt: string;
   sources: readonly WorkflowTransformSource[];
+  storyboard: WorkflowStoryboardMaterialization | null;
   output: {
     nodeId: string;
     title: string;
@@ -82,6 +98,7 @@ export interface ExecuteCampaignGenerateOptions {
   executors: readonly WorkflowNodeExecutor[];
   assets: readonly WorkflowProjectAsset[];
   readAsset: (asset: Readonly<WorkflowProjectAsset>) => Promise<Uint8Array>;
+  readStoryboard?: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => Promise<Uint8Array | null>;
   storeAsset: (request: Readonly<WorkflowAssetStoreRequest>) => Promise<WorkflowProjectAsset>;
   idGenerator?: () => string;
 }
@@ -154,6 +171,59 @@ function recordConfig(node: WorkflowNodeV2, key: string): Record<string, unknown
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? cloneValue(value as Record<string, unknown>)
     : {};
+}
+
+function optionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function unknownArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? cloneValue(value) : [];
+}
+
+function storyboardDescriptor(node: WorkflowNodeV2): WorkflowStoryboardDescriptor | null {
+  const nested = recordConfig(node, 'storyboard');
+  const dataUrl = optionalText(node.config.storyboardDataUrl ?? nested.dataUrl);
+  const oraPath = optionalText(node.config.storyboardOraPath ?? nested.oraPath);
+  const annotations = stringArray(node.config.storyboardAnnotations ?? nested.annotations);
+  const annotationItems = unknownArray(node.config.storyboardAnnotationItems ?? nested.annotationItems);
+  if (!dataUrl && !oraPath && annotations.length === 0 && annotationItems.length === 0) return null;
+  const widthValue = node.config.storyboardWidth ?? nested.width;
+  const heightValue = node.config.storyboardHeight ?? nested.height;
+  return {
+    dataUrl,
+    oraPath,
+    width: typeof widthValue === 'number' && widthValue > 0 ? widthValue : 1024,
+    height: typeof heightValue === 'number' && heightValue > 0 ? heightValue : 768,
+    annotations,
+    annotationItems,
+    annotationsVisible: (node.config.storyboardAnnotationsVisible ?? nested.annotationsVisible) !== false,
+  };
+}
+
+function annotationItemConstraints(
+  items: readonly unknown[],
+  width: number,
+  height: number,
+): string[] {
+  return items.flatMap((item, index) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const record = item as Record<string, unknown>;
+    const text = typeof record.text === 'string' ? record.text.trim() : '';
+    if (!text || record.visible === false) return [];
+    const x = typeof record.x === 'number' ? record.x : 0;
+    const y = typeof record.y === 'number' ? record.y : 0;
+    const itemWidth = typeof record.width === 'number' ? record.width : 0;
+    const itemHeight = typeof record.height === 'number' ? record.height : 0;
+    const xPercent = Math.round(((x + itemWidth / 2) / Math.max(1, width)) * 100);
+    const yPercent = Math.round(((y + itemHeight / 2) / Math.max(1, height)) * 100);
+    const kind = typeof record.kind === 'string' ? record.kind : 'annotation';
+    return [`Annotation ${index + 1} at ${xPercent}% x, ${yPercent}% y (${kind}): ${text}`];
+  });
 }
 
 function requireTransformPath(graph: WorkflowGraphV2, outputNodeId: string): {
@@ -284,10 +354,33 @@ export async function executeCampaignGenerateTransform(
   const briefText = textConfig(brief ?? artDirection, brief ? 'objective' : 'prompt');
   const artDirectionText = textConfig(artDirection, 'prompt');
   const transformInstructions = textConfig(transform, 'instructions');
+  const storyboard = storyboardDescriptor(artDirection);
+  const placementConstraints = storyboard ? [
+    'Treat the storyboard as the primary spatial plan. Preserve relative placement, ordering, scale, pose, prop positions, foreground and background zones, and intentional empty areas.',
+    ...storyboard.annotations,
+    ...annotationItemConstraints(storyboard.annotationItems, storyboard.width, storyboard.height),
+  ] : [];
+  const storyboardBytes = storyboard && (storyboard.dataUrl || storyboard.oraPath)
+    ? await options.readStoryboard?.(deepFreeze(cloneValue(storyboard)) as Readonly<WorkflowStoryboardDescriptor>) ?? null
+    : null;
+  const materializedStoryboard: WorkflowStoryboardMaterialization | null = storyboard ? {
+    ...storyboard,
+    placementConstraints,
+    source: storyboardBytes ? {
+      name: 'Storyboard sketch - mandatory layout guide',
+      bytes: new Uint8Array(storyboardBytes),
+    } : null,
+  } : null;
   const prompt = [
     briefText ? `Creative brief:\n${briefText}` : '',
     `Art direction:\n${artDirectionText}`,
     transformInstructions ? `Transform instructions:\n${transformInstructions}` : '',
+    sources.length > 0
+      ? `Mandatory connected visual inputs:\n${sources.map((source, index) => `${index + 1}. ${source.name}${source.role ? ` - ${source.role}` : ''}`).join('\n')}`
+      : '',
+    placementConstraints.length > 0
+      ? `Storyboard placement constraints:\n${placementConstraints.map((item, index) => `${index + 1}. ${item}`).join('\n')}`
+      : '',
     `Final output shape: ${output.title}.`,
   ].filter(Boolean).join('\n\n');
   const request: WorkflowTransformExecutionRequest = {
@@ -301,6 +394,7 @@ export async function executeCampaignGenerateTransform(
     transform: { capability, instructions: transformInstructions, advanced },
     prompt,
     sources,
+    storyboard: materializedStoryboard,
     output: {
       nodeId: output.id,
       title: output.title,

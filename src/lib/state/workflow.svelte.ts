@@ -30,6 +30,15 @@ export interface WorkflowTransformExecutionState {
   assetId: string | null;
 }
 
+export interface WorkflowTransformStoreOutcome extends WorkflowTransformExecutionOutcome {
+  committed: boolean;
+  commitMessage: string;
+}
+
+export interface WorkflowStoreRunOptions extends ExecuteCampaignGenerateOptions {
+  currentProjectIdentity?: () => string | null;
+}
+
 export interface WorkflowAssetNode {
   id: string;
   assetId: string | null;
@@ -212,6 +221,7 @@ export class WorkflowStore {
   private readonly workflowGraphIdGenerator: (() => string) | undefined;
   private projectedGraphRevision = 0;
   private transformRunSequence = 0;
+  private workflowSessionIdentity = 0;
   private readonly activeTransformRuns = new Map<string, number>();
 
   constructor(options: WorkflowStoreOptions = {}) {
@@ -229,6 +239,7 @@ export class WorkflowStore {
   }
 
   newBoard(name = 'Untitled Workflow'): void {
+    this.beginWorkflowSession();
     this.active = true;
     ui.showWorkflow();
     this.name = cleanWorkflowName(name);
@@ -280,12 +291,11 @@ export class WorkflowStore {
     this.outputRelativePath = null;
     this.rev = 0;
     this.savedRev = 0;
-    this.transformExecutions = {};
-    this.activeTransformRuns.clear();
     this.resetGraphDomain();
   }
 
   newFromTemplate(templateId: WorkflowTemplateId, name?: string): void {
+    this.beginWorkflowSession();
     const graph = instantiateWorkflowTemplate(templateId, {
       name,
       graphId: this.workflowGraphIdGenerator?.(),
@@ -310,8 +320,6 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain);
     this.rev = 0;
     this.savedRev = 0;
-    this.transformExecutions = {};
-    this.activeTransformRuns.clear();
   }
 
   show(): void {
@@ -321,6 +329,7 @@ export class WorkflowStore {
   }
 
   close(): void {
+    this.beginWorkflowSession();
     this.active = false;
     ui.showDocument();
   }
@@ -898,9 +907,13 @@ export class WorkflowStore {
 
   async runCampaignGenerate(
     outputNodeId: string,
-    options: ExecuteCampaignGenerateOptions,
-  ): Promise<WorkflowTransformExecutionOutcome> {
+    options: WorkflowStoreRunOptions,
+  ): Promise<WorkflowTransformStoreOutcome> {
     const graph = this.serialize();
+    const sessionIdentity = this.workflowSessionIdentity;
+    const graphRevision = this.graphRevision;
+    const storeRevision = this.rev;
+    const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
     const outputEdge = graph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
     const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
     const run = ++this.transformRunSequence;
@@ -911,6 +924,29 @@ export class WorkflowStore {
     };
     try {
       const outcome = await executeCampaignGenerateTransform(graph, outputNodeId, options);
+      let commitMessage = '';
+      if (this.workflowSessionIdentity !== sessionIdentity) {
+        commitMessage = 'The workflow session changed while Generate was running. The result was not applied.';
+      } else if (this.activeTransformRuns.get(transformNodeId) !== run) {
+        commitMessage = 'A newer Generate run replaced this result before it could be applied.';
+      } else if (this.graphRevision !== graphRevision || this.rev !== storeRevision) {
+        commitMessage = 'The workflow changed while Generate was running. The result was not applied.';
+      } else if ((options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
+        commitMessage = 'The active project changed while Generate was running. The result was not applied.';
+      }
+      if (commitMessage) {
+        commitMessage += ` The generated asset remains available at ${outcome.asset.relativePath}.`;
+        if (
+          this.workflowSessionIdentity === sessionIdentity
+          && this.activeTransformRuns.get(transformNodeId) === run
+        ) {
+          this.transformExecutions = {
+            ...this.transformExecutions,
+            [transformNodeId]: { state: 'failed', message: commitMessage, assetId: null },
+          };
+        }
+        return { ...outcome, committed: false, commitMessage };
+      }
       if (this.activeTransformRuns.get(transformNodeId) === run) {
         this.graphDomain = new WorkflowGraphDomain(outcome.graph, { idGenerator: this.graphIdGenerator });
         this.projectedGraphRevision = this.graphDomain.revision;
@@ -923,7 +959,7 @@ export class WorkflowStore {
           },
         };
       }
-      return outcome;
+      return { ...outcome, committed: true, commitMessage: 'Generated result applied.' };
     } catch (error) {
       if (this.activeTransformRuns.get(transformNodeId) === run) {
         this.transformExecutions = {
@@ -944,6 +980,7 @@ export class WorkflowStore {
       const details = result.issues.map((issue) => `${issue.path || 'workflow'}: ${issue.message}`).join('; ');
       throw new Error(`Workflow file is not a supported PaintNode workflow. ${details}`);
     }
+    this.beginWorkflowSession();
     this.active = true;
     ui.showWorkflow();
     this.tool = 'hand';
@@ -965,8 +1002,6 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain, legacyProjection);
     this.rev = 0;
     this.savedRev = 0;
-    this.transformExecutions = {};
-    this.activeTransformRuns.clear();
   }
 
   async save(): Promise<string | null> {
@@ -1042,6 +1077,12 @@ export class WorkflowStore {
       idGenerator: this.graphIdGenerator,
     });
     this.projectedGraphRevision = this.graphDomain.revision;
+  }
+
+  private beginWorkflowSession(): void {
+    this.workflowSessionIdentity += 1;
+    this.transformExecutions = {};
+    this.activeTransformRuns.clear();
   }
 
   private requireGraphDomain(): WorkflowGraphDomain {

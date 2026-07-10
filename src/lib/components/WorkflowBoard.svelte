@@ -9,10 +9,11 @@
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
     isDesktop,
+    readProjectFile,
     storeProjectAssetBytes,
     type ProjectAsset,
   } from '../integrations/desktop';
-  import { bytesToBitmap } from '../io';
+  import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
   import { modelToPlainText } from '../engine/text/model';
@@ -21,6 +22,7 @@
   import { wheelZoomFactor } from '../engine/zoomGesture';
   import { compositeToCanvas } from '../engine/compositor';
   import { saveOra } from '../ora/save';
+  import { loadOra } from '../ora/load';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
@@ -43,6 +45,7 @@
     workflowReadiness,
     type CreatorNodeType,
     type WorkflowNodePort,
+    type WorkflowStoryboardDescriptor,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
@@ -1489,6 +1492,8 @@
   }
 
   async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
+    if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
+    if (storyboardCanvas) persistStoryboard();
     const targetOutput = targetOutputForGenerate(node);
     error = '';
     const preflight = outputReadiness(targetOutput.id);
@@ -1501,6 +1506,7 @@
     busy = true;
     progress = 'Preparing workflow assets...';
     const runId = createRunId();
+    const runProjectPath = project.path;
     stopProgress?.();
     stopProgress = null;
     try {
@@ -1514,26 +1520,34 @@
     }
 
     try {
-      const executor = imageProvider === 'antigravity'
-        ? createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
-            runOptions, project.path, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-          ))
-        : createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
-            runOptions, project.path, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-          ));
-      await workflow.runCampaignGenerate(targetOutput.id, {
-        projectPath: project.path,
+      const executors = [
+        createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
+          runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+        )),
+        createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+          runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+        )),
+      ];
+      const outcome = await workflow.runCampaignGenerate(targetOutput.id, {
+        projectPath: runProjectPath,
         provider: imageProvider,
-        executors: [executor],
+        executors,
         assets,
-        readAsset: (asset) => project.readFile({
-          ...asset,
-          kind: 'generated',
-          createdAt: 0,
-          modifiedAt: 0,
-          size: 0,
-          exists: true,
-        }),
+        currentProjectIdentity: () => project.identity,
+        readAsset: (asset) => {
+          if (!runProjectPath) throw new Error('No project is open.');
+          return readProjectFile(runProjectPath, asset.relativePath);
+        },
+        readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
+          if (storyboard.dataUrl) {
+            return new Uint8Array(await (await fetch(storyboard.dataUrl)).arrayBuffer());
+          }
+          if (!storyboard.oraPath) return null;
+          if (!runProjectPath) throw new Error('No project is open.');
+          const bytes = await readProjectFile(runProjectPath, storyboard.oraPath);
+          const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
+        },
         storeAsset: async (artifact) => (await storeProjectAssetBytes({
           projectPath: artifact.projectPath,
           name: artifact.name,
@@ -1545,6 +1559,11 @@
           mime: artifact.mime,
         })).asset,
       });
+      if (!outcome.committed) {
+        if (project.path === runProjectPath) await project.refresh(runProjectPath);
+        error = outcome.commitMessage;
+        return;
+      }
       await project.refresh();
       editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {

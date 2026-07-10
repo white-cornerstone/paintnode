@@ -83,6 +83,31 @@ describe('workflow readiness', () => {
     });
   });
 
+  it('uses the persisted Transform provider override for target readiness', () => {
+    const graph = bindProduct();
+    const transform = graph.nodes.find((node) => node.id === 'transform-generate-square')!;
+    transform.config.advanced = { provider: 'antigravity', model: 'gemini-3.1-flash-image' };
+    const supported = workflowReadiness(graph, {
+      ...readyOptions(),
+      provider: 'codex',
+      supportedProviders: ['codex', 'antigravity'],
+      targetNodeId: 'output-square',
+    });
+    expect(supported.ready).toBe(true);
+    expect(supported.items.find((item) => item.code === 'provider')?.message).toMatch(/antigravity/i);
+
+    transform.config.advanced = { provider: 'saved-unsupported-provider' };
+    const unsupported = workflowReadiness(graph, {
+      ...readyOptions(),
+      provider: 'codex',
+      supportedProviders: ['codex', 'antigravity'],
+      targetNodeId: 'output-square',
+    });
+    expect(unsupported.nextAction).toMatchObject({
+      code: 'provider', action: 'Choose a supported image provider',
+    });
+  });
+
   it('blocks missing, disconnected, and stale required asset bindings with a specific next action', () => {
     const missing = workflowReadiness(instantiateWorkflowTemplate('campaign-composer'), readyOptions());
     expect(missing.items.find((item) => item.code === 'required-assets')).toMatchObject({

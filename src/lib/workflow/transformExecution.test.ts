@@ -202,6 +202,65 @@ describe('Campaign Composer Generate Transform execution', () => {
     }
   });
 
+  it('materializes persisted storyboard intent and placement constraints through an injected boundary', async () => {
+    const graph = boundCampaign();
+    const composition = graph.nodes.find((node) => node.id === 'composition')!;
+    composition.config = {
+      ...composition.config,
+      storyboardDataUrl: 'data:image/png;base64,c3Rvcnlib2FyZA==',
+      storyboardWidth: 1440,
+      storyboardHeight: 900,
+      storyboardOraPath: 'storyboards/campaign.ora',
+      storyboardAnnotations: ['at 20% x, 35% y (subject): keep the product left'],
+      storyboardAnnotationItems: [{ id: 'note-1', x: 0.2, y: 0.35, text: 'Keep the product left' }],
+      storyboardAnnotationsVisible: true,
+    };
+    const readStoryboard = vi.fn(async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    let seen!: WorkflowTransformExecutionRequest;
+    await executeCampaignGenerateTransform(graph, 'output-square', {
+      projectPath: '/virtual/project',
+      provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async (request) => {
+        seen = request;
+        return {
+          kind: 'project-asset',
+          asset: {
+            id: 'storyboard-result', name: 'square.png', relativePath: 'generated/square.png',
+            width: 1024, height: 1024, mime: 'image/png',
+          },
+        };
+      })],
+      assets: [productAsset],
+      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      readStoryboard,
+      storeAsset: vi.fn(),
+    });
+
+    expect(readStoryboard).toHaveBeenCalledWith(expect.objectContaining({
+      dataUrl: 'data:image/png;base64,c3Rvcnlib2FyZA==',
+      oraPath: 'storyboards/campaign.ora',
+      width: 1440,
+      height: 900,
+    }));
+    expect(seen.storyboard).toMatchObject({
+      dataUrl: 'data:image/png;base64,c3Rvcnlib2FyZA==',
+      oraPath: 'storyboards/campaign.ora',
+      annotations: ['at 20% x, 35% y (subject): keep the product left'],
+      annotationItems: [{ id: 'note-1', x: 0.2, y: 0.35, text: 'Keep the product left' }],
+      source: {
+        name: 'Storyboard sketch - mandatory layout guide',
+        bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+      },
+    });
+    expect(seen.storyboard?.placementConstraints).toEqual(expect.arrayContaining([
+      expect.stringMatching(/primary spatial plan/i),
+      'at 20% x, 35% y (subject): keep the product left',
+    ]));
+    expect(seen.prompt).toMatch(/primary spatial plan/i);
+    expect(seen.prompt).toContain('keep the product left');
+    expect(seen.prompt).not.toMatch(/1440|900/);
+  });
+
   it('explains missing-project and unsupported-provider actions before any injected side effect', async () => {
     const graph = boundCampaign();
     const readAsset = vi.fn();
@@ -255,5 +314,45 @@ describe('Campaign Composer Generate Transform execution', () => {
     });
     expect(service).not.toHaveBeenCalled();
     expect(readAsset).not.toHaveBeenCalled();
+  });
+
+  it('selects a saved Antigravity override exactly when the current UI default is Codex', async () => {
+    const graph = boundCampaign();
+    graph.nodes.find((node) => node.id === 'transform-generate-square')!.config.advanced = {
+      provider: 'antigravity',
+      model: 'gemini-3.1-flash-image',
+      options: { imageSize: '2K', compressionQuality: 88 },
+    };
+    const codex = vi.fn();
+    const antigravity = vi.fn(async () => ({
+      kind: 'project-asset' as const,
+      asset: {
+        id: 'antigravity-square', name: 'square.png', relativePath: 'generated/square.png',
+        width: 1024, height: 1024, mime: 'image/png',
+      },
+    }));
+    const outcome = await executeCampaignGenerateTransform(graph, 'output-square', {
+      projectPath: '/virtual/project',
+      provider: 'codex',
+      executors: [
+        createWorkflowCompositionExecutor('codex', codex),
+        createWorkflowCompositionExecutor('antigravity', antigravity),
+      ],
+      assets: [productAsset],
+      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      storeAsset: vi.fn(),
+    });
+
+    expect(codex).not.toHaveBeenCalled();
+    expect(antigravity).toHaveBeenCalledOnce();
+    expect(outcome.request).toMatchObject({
+      provider: 'antigravity',
+      transform: {
+        advanced: {
+          provider: 'antigravity', model: 'gemini-3.1-flash-image',
+          options: { imageSize: '2K', compressionQuality: 88 },
+        },
+      },
+    });
   });
 });

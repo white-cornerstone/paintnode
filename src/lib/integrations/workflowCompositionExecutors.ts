@@ -9,7 +9,78 @@ import {
   createWorkflowCompositionExecutor,
   WorkflowTransformExecutionError,
   type WorkflowNodeExecutor,
+  type WorkflowTransformExecutionRequest,
 } from '../workflow/transformExecutor';
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringOverride<T>(value: unknown, fallback: T): T {
+  return typeof value === 'string' && value.trim() ? value as T : fallback;
+}
+
+function numberOverride<T>(value: unknown, fallback: T): T {
+  return typeof value === 'number' && Number.isFinite(value) ? value as T : fallback;
+}
+
+function codexConfigForRequest(
+  config: CodexGeneratorConfig,
+  request: Readonly<WorkflowTransformExecutionRequest>,
+): CodexGeneratorConfig {
+  const advanced = request.transform.advanced;
+  const options = record(advanced.options);
+  return {
+    ...config,
+    model: stringOverride(advanced.model, config.model),
+    reasoningEffort: stringOverride(options.reasoningEffort, config.reasoningEffort),
+    serviceTier: stringOverride(options.serviceTier, config.serviceTier),
+    imageQuality: stringOverride(options.imageQuality, config.imageQuality),
+    imageModeration: stringOverride(options.imageModeration, config.imageModeration),
+    autonomyLevel: stringOverride(options.autonomyLevel, config.autonomyLevel),
+    editChecksLevel: numberOverride(options.editChecksLevel, config.editChecksLevel),
+    directorMode: 'skip',
+  };
+}
+
+function antigravityConfigForRequest(
+  config: AntigravityGeneratorConfig,
+  request: Readonly<WorkflowTransformExecutionRequest>,
+): AntigravityGeneratorConfig {
+  const advanced = request.transform.advanced;
+  const options = record(advanced.options);
+  return {
+    ...config,
+    model: stringOverride(options.agentModel, config.model),
+    approvalMode: stringOverride(options.approvalMode, config.approvalMode),
+    imageModel: stringOverride(advanced.model, config.imageModel),
+    imageSize: stringOverride(options.imageSize, config.imageSize),
+    personGeneration: stringOverride(options.personGeneration, config.personGeneration),
+    prominentPeople: stringOverride(options.prominentPeople, config.prominentPeople),
+    compressionQuality: numberOverride(options.compressionQuality, config.compressionQuality),
+    advancedJson: stringOverride(options.advancedJson, config.advancedJson),
+    safetyFiltering: stringOverride(options.safetyFiltering, config.safetyFiltering),
+    safetyHarassment: stringOverride(options.safetyHarassment, config.safetyHarassment),
+    safetyHateSpeech: stringOverride(options.safetyHateSpeech, config.safetyHateSpeech),
+    safetySexuallyExplicit: stringOverride(options.safetySexuallyExplicit, config.safetySexuallyExplicit),
+    safetyDangerousContent: stringOverride(options.safetyDangerousContent, config.safetyDangerousContent),
+    autonomyLevel: stringOverride(options.autonomyLevel, config.autonomyLevel),
+    editChecksLevel: numberOverride(options.editChecksLevel, config.editChecksLevel),
+    directorMode: 'skip',
+  };
+}
+
+function providerSources(request: Readonly<WorkflowTransformExecutionRequest>) {
+  return [
+    ...(request.storyboard?.source ? [{
+      name: request.storyboard.source.name,
+      bytes: request.storyboard.source.bytes,
+    }] : []),
+    ...request.sources.map((source) => ({ name: source.name, bytes: source.bytes })),
+  ];
+}
 
 function resultAsset(result: GeneratedImageResult) {
   const asset = result.asset;
@@ -26,9 +97,9 @@ function resultAsset(result: GeneratedImageResult) {
 export function createCodexWorkflowTransformExecutor(config: CodexGeneratorConfig): WorkflowNodeExecutor {
   return createWorkflowCompositionExecutor('codex', async (request) => resultAsset(
     await composeCodexWorkflow(
-      { ...config, directorMode: 'skip' },
+      codexConfigForRequest(config, request),
       request.prompt,
-      request.sources.map((source) => ({ name: source.name, bytes: source.bytes })),
+      providerSources(request),
       request.output,
     ),
   ));
@@ -37,9 +108,9 @@ export function createCodexWorkflowTransformExecutor(config: CodexGeneratorConfi
 export function createAntigravityWorkflowTransformExecutor(config: AntigravityGeneratorConfig): WorkflowNodeExecutor {
   return createWorkflowCompositionExecutor('antigravity', async (request) => resultAsset(
     await composeAntigravityWorkflow(
-      { ...config, directorMode: 'skip' },
+      antigravityConfigForRequest(config, request),
       request.prompt,
-      request.sources.map((source) => ({ name: source.name, bytes: source.bytes })),
+      providerSources(request),
       request.output,
     ),
   ));

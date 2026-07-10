@@ -110,6 +110,14 @@ editor, Tauri, picker, authentication, filesystem, or network imports. Those
 effects are injected at the boundary so the entire path can run with a fake
 executor and in-memory asset store.
 
+Persisted storyboard intent is part of that request rather than incidental UI
+state. Its data URL or project-relative ORA reference, canvas metadata,
+annotations, annotation items, visibility, and provider-neutral placement
+constraints are detached with the graph snapshot. The UI boundary materializes
+the persisted visual into PNG bytes; adapters send it before other visual
+inputs and keep the authored spatial constraints in the prompt without exposing
+pixel dimensions.
+
 Provider-specific adapters live outside `src/lib/workflow/`. Codex and
 Antigravity adapters translate the same request into their existing composition
 services, skip AI Director for the first thin slice, pass target shape through
@@ -117,6 +125,12 @@ provider parameters, and normalize the returned raster to the exact configured
 Output dimensions before it is stored. A stored result with missing or wrong
 dimensions is rejected and does not replace the graph's previous accepted
 output.
+
+A Transform's persisted `advanced.provider`, `advanced.model`, and recognized
+`advanced.options` override current UI defaults. The executor selects only the
+matching provider adapter; it never falls back silently. Boundary-owned values
+such as project path, run identity, and Director mode cannot be replaced by a
+saved options object.
 
 ### Campaign Composer thin-slice path
 
@@ -132,7 +146,12 @@ executor.
 
 The UI store owns transient `running`, `succeeded`, and `failed` presentation
 and commits a successful returned graph atomically. Per-Transform run tokens
-prevent an older overlapping run from overwriting a newer result. Placing the
+prevent an older overlapping run from overwriting a newer result. Before
+binding, the store rechecks the workflow session identity, domain and reactive
+graph revisions, active run token, and project identity captured at start. A
+workflow edit, open/new/close action, project switch, or newer run makes the
+result non-committable; the current graph is preserved and the board cannot
+announce success. Placing the
 Square result is a separate editor action and reports success only when the
 editor returns a real inserted layer identifier; an absent active document is
 surfaced as a recovery action rather than a false success.

@@ -15,6 +15,42 @@ function ids(): WorkflowIdGenerator {
   return (kind) => `${kind}-test-${++sequence}`;
 }
 
+const campaignProduct = {
+  id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png',
+  createdAt: 1, exists: true, width: 1200, height: 1200, mime: 'image/png',
+} satisfies ProjectAsset;
+
+function campaignStore(): WorkflowStore {
+  const store = new WorkflowStore({ idGenerator: ids() });
+  store.newFromTemplate('campaign-composer');
+  store.assignAsset('slot-product', campaignProduct);
+  return store;
+}
+
+function deferredCampaignRun(store: WorkflowStore, currentProjectIdentity?: () => string | null) {
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => { finish = resolve; });
+  const run = store.runCampaignGenerate('output-square', {
+    projectPath: '/virtual/project',
+    provider: 'fake',
+    executors: [createWorkflowCompositionExecutor('fake', async () => {
+      await gate;
+      return {
+        kind: 'project-asset',
+        asset: {
+          id: 'deferred-result', name: 'Square.png', relativePath: 'generated/Square.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+      };
+    })],
+    assets: [campaignProduct],
+    readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+    storeAsset: async () => { throw new Error('unused'); },
+    currentProjectIdentity,
+  });
+  return { finish, run };
+}
+
 describe('WorkflowStore graph adapter', () => {
   it('exposes fake Transform running/succeeded state and persists the bound Square output on reopen', async () => {
     const store = new WorkflowStore({ idGenerator: ids() });
@@ -46,7 +82,7 @@ describe('WorkflowStore graph adapter', () => {
 
     expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'running' });
     finish();
-    await run;
+    expect((await run).committed).toBe(true);
     expect(store.transformExecution('transform-generate-square')).toMatchObject({
       state: 'succeeded', assetId: 'result-square',
     });
@@ -88,11 +124,56 @@ describe('WorkflowStore graph adapter', () => {
     const newer = store.runCampaignGenerate('output-square', options);
     await Promise.resolve();
     resolvers[1]('newer');
-    await newer;
+    expect((await newer).committed).toBe(true);
     resolvers[0]('older');
-    await older;
+    expect((await older).committed).toBe(false);
     expect(store.outputNode('output-square')?.outputAssetId).toBe('newer');
     expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded', assetId: 'newer' });
+  });
+
+  it('does not overwrite workflow edits made while a Transform is running', async () => {
+    const store = campaignStore();
+    const deferred = deferredCampaignRun(store);
+    store.setBriefObjective('brief', 'Edited while the provider was running.');
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome.committed).toBe(false);
+    expect(outcome.commitMessage).toMatch(/workflow changed/i);
+    expect(outcome.commitMessage).toContain('generated/Square.png');
+    expect(store.briefNodes[0].objective).toBe('Edited while the provider was running.');
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'failed' });
+  });
+
+  it.each(['new', 'open', 'close'] as const)('does not bind a late result after the workflow session is %s', async (action) => {
+    const store = campaignStore();
+    const originalBytes = store.toBytes();
+    const deferred = deferredCampaignRun(store);
+    if (action === 'new') store.newFromTemplate('campaign-composer', 'New session');
+    else if (action === 'open') store.openFromBytes(originalBytes, null, 'Reopened session');
+    else store.close();
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome.committed).toBe(false);
+    expect(outcome.commitMessage).toMatch(/session changed/i);
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
+    if (action === 'new') expect(store.name).toBe('New session');
+    if (action === 'close') expect(store.active).toBe(false);
+  });
+
+  it('does not bind a late result after the active project identity changes', async () => {
+    const store = campaignStore();
+    let projectIdentity = 'project-session-a:/virtual/project';
+    const deferred = deferredCampaignRun(store, () => projectIdentity);
+    projectIdentity = 'project-session-b:/other/project';
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome.committed).toBe(false);
+    expect(outcome.commitMessage).toMatch(/project changed/i);
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
   });
   it('adds every creator registry node and preserves exact config and port identity on reopen', () => {
     const store = new WorkflowStore({ idGenerator: ids() });

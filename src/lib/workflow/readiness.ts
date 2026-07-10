@@ -202,8 +202,14 @@ function providerReadiness(
   graph: WorkflowGraphV2,
   options: WorkflowReadinessOptions,
 ): WorkflowReadinessItem | null {
-  if (!transformForOutput(graph, output)) return null;
-  const provider = options.provider?.trim() ?? '';
+  const transform = transformForOutput(graph, output);
+  if (!transform) return null;
+  const advanced = transform.config.advanced;
+  const configuredProvider = typeof advanced === 'object' && advanced !== null && !Array.isArray(advanced)
+    && typeof (advanced as Record<string, unknown>).provider === 'string'
+    ? ((advanced as Record<string, unknown>).provider as string).trim()
+    : '';
+  const provider = configuredProvider || options.provider?.trim() || '';
   if (!provider) {
     return blocked('provider', 'Image provider', 'Choose an image provider for Generate.', 'Choose a supported image provider');
   }

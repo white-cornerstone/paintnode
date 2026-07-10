@@ -24,9 +24,14 @@ class ProjectStore {
   current = $state<ProjectState | null>(null);
   busy = $state(false);
   error = $state('');
+  private identityRevision = 0;
 
   get path(): string | null {
     return this.current?.path ?? null;
+  }
+
+  get identity(): string {
+    return `${this.identityRevision}:${this.path ?? ''}`;
   }
 
   async restore(): Promise<void> {
@@ -201,11 +206,13 @@ class ProjectStore {
   }
 
   setProject(state: ProjectState): void {
+    if (state.path !== this.path) this.identityRevision += 1;
     this.current = state;
     localStorage.setItem(KEY, state.path);
   }
 
   clear(): void {
+    if (this.current) this.identityRevision += 1;
     this.current = null;
     localStorage.removeItem(KEY);
   }
