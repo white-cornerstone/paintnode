@@ -648,7 +648,7 @@
         ui.open('aiUpscale');
         break;
       case 'app:workflow-board':
-        workflow.newBoard();
+        ui.openNew('workflow');
         break;
       case 'app:zoom-in':
         editor.viewport?.zoomBy(1.25);

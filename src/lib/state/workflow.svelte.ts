@@ -13,6 +13,8 @@ import {
   type WorkflowGraphV2,
   type WorkflowIdGenerator,
   type WorkflowNodeV2,
+  instantiateWorkflowTemplate,
+  type WorkflowTemplateId,
 } from '../workflow';
 
 export interface WorkflowAssetNode {
@@ -27,6 +29,21 @@ export interface WorkflowAssetNode {
   color: string;
   included: boolean;
   note: string;
+  slotId: string | null;
+  required: boolean;
+  guidance: string;
+}
+
+export interface WorkflowBriefNode {
+  id: string;
+  name: string;
+  objective: string;
+  guidance: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
 }
 
 export interface WorkflowConnection {
@@ -93,6 +110,7 @@ function defaultOutputNode(): WorkflowOutputNode {
 
 export interface WorkflowStoreOptions {
   idGenerator?: WorkflowIdGenerator;
+  workflowGraphIdGenerator?: () => string;
 }
 
 export class WorkflowStore {
@@ -132,6 +150,7 @@ export class WorkflowStore {
   storyboardAnnotationItems = $state<AnnotationItem[]>([]);
   storyboardAnnotationsVisible = $state(true);
   nodes = $state<WorkflowAssetNode[]>([]);
+  briefNodes = $state<WorkflowBriefNode[]>([]);
   connections = $state<WorkflowConnection[]>([]);
   outputAssetId = $state<string | null>(null);
   outputRelativePath = $state<string | null>(null);
@@ -139,10 +158,12 @@ export class WorkflowStore {
   savedRev = $state(0);
   private graphDomain: WorkflowGraphDomain | null = null;
   private readonly graphIdGenerator: WorkflowIdGenerator | undefined;
+  private readonly workflowGraphIdGenerator: (() => string) | undefined;
   private projectedGraphRevision = 0;
 
   constructor(options: WorkflowStoreOptions = {}) {
     this.graphIdGenerator = options.idGenerator;
+    this.workflowGraphIdGenerator = options.workflowGraphIdGenerator;
   }
 
   get dirty(): boolean {
@@ -192,12 +213,40 @@ export class WorkflowStore {
     this.storyboardAnnotationItems = [];
     this.storyboardAnnotationsVisible = true;
     this.nodes = [];
+    this.briefNodes = [];
     this.connections = [{ id: this.nextGraphId('edge'), from: 'composition', to: 'output' }];
     this.outputAssetId = null;
     this.outputRelativePath = null;
     this.rev = 0;
     this.savedRev = 0;
     this.resetGraphDomain();
+  }
+
+  newFromTemplate(templateId: WorkflowTemplateId, name?: string): void {
+    const graph = instantiateWorkflowTemplate(templateId, {
+      name,
+      graphId: this.workflowGraphIdGenerator?.(),
+    });
+    this.active = true;
+    ui.showWorkflow();
+    this.name = graph.metadata.name;
+    this.savedPath = null;
+    this.migrationSourcePath = null;
+    this.requiresExplicitSave = false;
+    this.connectionError = null;
+    this.tool = 'hand';
+    this.zoomMode = 'in';
+    this.selection = { kind: 'composition' };
+    this.storyboardEditing = false;
+    this.storyboardTool = 'brush';
+    this.panX = graph.viewport.panX;
+    this.panY = graph.viewport.panY;
+    this.zoom = graph.viewport.zoom;
+    this.graphDomain = new WorkflowGraphDomain(graph, { idGenerator: this.graphIdGenerator });
+    this.projectedGraphRevision = this.graphDomain.revision;
+    this.syncReactiveGraph(this.graphDomain);
+    this.rev = 0;
+    this.savedRev = 0;
   }
 
   show(): void {
@@ -599,6 +648,24 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, note }));
   }
 
+  assignAsset(id: string, asset: ProjectAsset | null): void {
+    const node = this.requireGraphDomain().node(id);
+    if (!node || node.type !== 'input') return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, {
+      ...node.config,
+      assetId: asset?.id ?? null,
+      relativePath: asset?.relativePath ?? null,
+    }));
+  }
+
+  setBriefObjective(id: string, objective: string): void {
+    const node = this.requireGraphDomain().node(id);
+    if (!node || node.type !== 'brief') return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, objective }));
+  }
+
   selectedLabel(): string {
     const selection = this.selection;
     if (selection?.kind === 'asset') {
@@ -778,13 +845,25 @@ export class WorkflowStore {
     const domain = this.requireGraphDomain();
     const source = domain.node(from);
     const target = domain.node(to);
-    const sourcePort = source?.ports.outputs[0];
-    const targetPort = target?.ports.inputs[0];
-    if (!source || !target || !sourcePort || !targetPort) return null;
-    return {
+    if (!source || !target) return null;
+    let compatible: Pick<WorkflowEdgeV2, 'source' | 'target'> | null = null;
+    for (const sourcePort of source.ports.outputs) {
+      for (const targetPort of target.ports.inputs) {
+        if (sourcePort.dataType !== targetPort.dataType) continue;
+        const endpoints = {
+          source: { nodeId: from, portId: sourcePort.id },
+          target: { nodeId: to, portId: targetPort.id },
+        };
+        compatible ??= endpoints;
+        if (domain.validateConnection(endpoints).ok) return endpoints;
+      }
+    }
+    const sourcePort = source.ports.outputs[0];
+    const targetPort = target.ports.inputs[0];
+    return compatible ?? (sourcePort && targetPort ? {
       source: { nodeId: from, portId: sourcePort.id },
       target: { nodeId: to, portId: targetPort.id },
-    };
+    } : null);
   }
 
   private resetGraphDomain(): void {
@@ -958,8 +1037,24 @@ export class WorkflowStore {
           note: typeof node.config.note === 'string'
             ? node.config.note
             : typeof node.config.role === 'string' ? node.config.role : '',
+          slotId: typeof node.config.slotId === 'string' ? node.config.slotId : null,
+          required: node.config.required === true,
+          guidance: typeof node.config.role === 'string' ? node.config.role : '',
         };
       });
+    this.briefNodes = domain.graph.nodes
+      .filter((node) => node.type === 'brief')
+      .map((node) => ({
+        id: node.id,
+        name: node.title,
+        objective: typeof node.config.objective === 'string' ? node.config.objective : '',
+        guidance: typeof node.config.guidance === 'string' ? node.config.guidance : '',
+        x: roundLegacyGeometry ? roundWorkflowNumber(node.position.x) : node.position.x,
+        y: roundLegacyGeometry ? roundWorkflowNumber(node.position.y) : node.position.y,
+        width: node.size.width,
+        height: node.size.height,
+        color: node.color,
+      }));
     this.outputNodes = domain.graph.nodes
       .filter((node) => node.type === 'output' || node.config.legacyKind === 'output')
       .map((node) => {

@@ -36,20 +36,22 @@ class ProjectStore {
     await ui.withLoading('Loading project…', () => this.refresh(path));
   }
 
-  async openFolder(): Promise<void> {
+  async openFolder(): Promise<boolean> {
     this.error = '';
     if (!isDesktop()) {
       this.error = 'Projects are available in the desktop app.';
-      return;
+      return false;
     }
     this.busy = true;
     try {
       // Pick first: the indicator should cover the scan, not the OS dialog.
       const selected = await pickProjectFolder();
-      if (!selected) return;
+      if (!selected) return false;
       this.setProject(await ui.withLoading('Opening project…', () => openProjectFolderAt(selected)));
+      return true;
     } catch (e) {
       this.error = (e as Error)?.message ?? String(e);
+      return false;
     } finally {
       this.busy = false;
     }

@@ -26,6 +26,7 @@ export type DialogId =
 export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust';
 export type AiAutoAdjustKind = 'tone' | 'contrast' | 'color';
 export type ColorPickerTarget = 'foreground' | 'background';
+export type NewDialogTab = 'image' | 'workflow' | 'project';
 
 export type FontEmbedChoice = 'embed' | 'system' | null;
 export type SaveChangesChoice = 'save' | 'discard' | 'cancel';
@@ -46,6 +47,7 @@ class UiState {
   cursor = $state<{ x: number; y: number } | null>(null);
   zoom = $state(1);
   dialog = $state<DialogId | null>(null);
+  newDialogTab = $state<NewDialogTab>('image');
   colorPickerTarget = $state<ColorPickerTarget | null>(null);
   aiTaskDialog = $state<{ kind: AiTaskDialogKind; id: string } | null>(null);
   aiAutoAdjustKind = $state<AiAutoAdjustKind>('tone');
@@ -54,6 +56,7 @@ class UiState {
   workspaceFocusHintVisible = $state(false);
   contextualTaskBarVisible = $state(true);
   contextualTaskBarResetToken = $state(0);
+  workflowFocusRequest = $state(0);
 
   // Background waits (project scan, document decode) surfaced in the status bar.
   // Null until a wait outlives the tracker's anti-flash delay, so short waits
@@ -75,7 +78,16 @@ class UiState {
 
   open(id: DialogId): void {
     this.aiTaskDialog = null;
+    if (id === 'new') this.newDialogTab = 'image';
     this.dialog = id;
+  }
+  openNew(tab: NewDialogTab = 'image'): void {
+    this.aiTaskDialog = null;
+    this.newDialogTab = tab;
+    this.dialog = 'new';
+  }
+  requestWorkflowFocus(): void {
+    this.workflowFocusRequest += 1;
   }
   openAiGenerate(prefillPrompt: string | null = null): void {
     this.aiGeneratePrefill = prefillPrompt;
