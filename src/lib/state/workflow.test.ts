@@ -6,6 +6,8 @@ import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
 import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
+import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
+import type { ProjectAsset } from '../integrations/desktop';
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -13,6 +15,89 @@ function ids(): WorkflowIdGenerator {
 }
 
 describe('WorkflowStore graph adapter', () => {
+  it('adds every creator registry node and preserves exact config and port identity on reopen', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Palette additions');
+    const types: CreatorNodeType[] = ['input', 'brief', 'art-direction', 'transform', 'review', 'output'];
+    const added = types.map((type, index) => store.addCreatorNode(type, { x: 50 + index * 250, y: 500 }));
+    const graph = store.graphSnapshot();
+
+    for (const [index, nodeId] of added.entries()) {
+      const expected = createCreatorNode(types[index], {
+        id: nodeId,
+        position: { x: 50 + index * 250, y: 500 },
+      });
+      expect(graph.nodes.find((node) => node.id === nodeId)).toEqual(expected);
+    }
+    expect([
+      store.nodes.find((node) => node.id === added[0])?.id,
+      store.briefNodes.find((node) => node.id === added[1])?.id,
+      store.creatorNodes.find((node) => node.id === added[2])?.id,
+      store.creatorNodes.find((node) => node.id === added[3])?.id,
+      store.creatorNodes.find((node) => node.id === added[4])?.id,
+      store.outputNodes.find((node) => node.id === added[5])?.id,
+    ]).toEqual(added);
+    expect(store.creatorNodes.map((node) => node.type)).toEqual(['art-direction', 'transform', 'review']);
+    expect(store.selection).toEqual({ kind: 'output', id: added.at(-1) });
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Palette additions');
+    expect(reopened.serialize()).toEqual(store.serialize());
+    expect(reopened.creatorNodes.map((node) => node.type)).toEqual(['art-direction', 'transform', 'review']);
+  });
+
+  it('rejects invalid creator additions atomically before the graph domain mutates', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Atomic palette add');
+    const before = store.graphSnapshot();
+
+    expect(() => store.addCreatorNode('transform', { x: 100, y: 200 }, {
+      capability: '',
+      instructions: '',
+      advanced: 'codex',
+    })).toThrow(/invalid transform configuration/i);
+    expect(store.graphSnapshot()).toBe(before);
+    expect(store.rev).toBe(0);
+  });
+
+  it('updates meaningful creator configuration fields and generic input asset bindings', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Creator controls');
+    const inputId = store.addCreatorNode('input');
+    const artId = store.addCreatorNode('art-direction');
+    const transformId = store.addCreatorNode('transform');
+    const reviewId = store.addCreatorNode('review');
+    const asset = { id: 'asset-1', name: 'Reference.png', relativePath: 'assets/Reference.png' } as ProjectAsset;
+
+    store.assignAsset(inputId, asset);
+    store.configureCreatorNode(inputId, { role: 'Hero product reference' });
+    store.configureCreatorNode(artId, { prompt: 'Top-lit editorial layout' });
+    store.configureCreatorNode(transformId, { capability: 'relight', instructions: 'Warm key light' });
+    store.configureCreatorNode(reviewId, { mode: 'human', instructions: 'Prefer legibility' });
+
+    expect(store.graphSnapshot().nodes.find((node) => node.id === inputId)?.config).toMatchObject({
+      assetId: 'asset-1', relativePath: 'assets/Reference.png', role: 'Hero product reference',
+    });
+    expect(store.creatorNodes.find((node) => node.id === artId)?.config.prompt).toBe('Top-lit editorial layout');
+    expect(store.creatorNodes.find((node) => node.id === transformId)?.config).toMatchObject({ capability: 'relight', instructions: 'Warm key light' });
+    expect(store.creatorNodes.find((node) => node.id === reviewId)?.config).toMatchObject({ mode: 'human', instructions: 'Prefer legibility' });
+  });
+
+  it('connects the exact named typed ports requested by the board', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Exact ports');
+    const inputId = store.addCreatorNode('input');
+    const briefId = store.addCreatorNode('brief');
+    const artId = store.addCreatorNode('art-direction');
+
+    expect(store.connectPorts(inputId, 'asset', artId, 'assets')).toBe(true);
+    expect(store.connectPorts(briefId, 'prompt', artId, 'brief')).toBe(true);
+    expect(store.graphSnapshot().edges.slice(-2).map((edge) => ({ source: edge.source, target: edge.target }))).toEqual([
+      { source: { nodeId: inputId, portId: 'asset' }, target: { nodeId: artId, portId: 'assets' } },
+      { source: { nodeId: briefId, portId: 'prompt' }, target: { nodeId: artId, portId: 'brief' } },
+    ]);
+  });
+
   it.each(WORKFLOW_TEMPLATES)('installs and round-trips the $name template through the graph adapter', (template) => {
     const store = new WorkflowStore({
       idGenerator: ids(),
@@ -466,7 +551,16 @@ describe('WorkflowStore graph adapter', () => {
     graph.runRecords = [{ id: 'run-composition', nodeId: 'composition', status: 'succeeded' }];
     const store = new WorkflowStore({ idGenerator: ids() });
     store.openFromBytes(new TextEncoder().encode(JSON.stringify(graph)), 'workflows/future.cxflow.json', 'Future');
+    expect(store.unsupportedNodes).toEqual([
+      expect.objectContaining({
+        id: 'future',
+        unsupportedType: 'future',
+        runnable: false,
+        config: graph.nodes.at(-1)?.config,
+      }),
+    ]);
     store.setPrompt('Still preserved');
+    store.addCreatorNode('review', { x: 360, y: 500 });
 
     expect(store.serialize().nodes.find((node) => node.id === 'future')).toEqual(graph.nodes.at(-1));
     expect(store.serialize().runRecords).toEqual(graph.runRecords);

@@ -1,4 +1,5 @@
 import { WorkflowGraphDomain } from './domain';
+import { createCreatorNode } from './registry';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowNodeV2 } from './schema';
 
 export type WorkflowTemplateId = 'blank' | 'asset-composition' | 'campaign-composer';
@@ -122,17 +123,14 @@ export function workflowTemplate(id: WorkflowTemplateId): WorkflowTemplateDefini
 }
 
 function assetSlotNode(slot: WorkflowTemplateSlot, index: number): WorkflowNodeV2 {
-  return {
+  return createCreatorNode('input', {
     id: `slot-${slot.id}`,
-    type: 'input',
     title: slot.name,
     position: { x: 30, y: 30 + index * 274 },
     size: { width: 220, height: 250 },
     color: slot.required ? '#3f4b5c' : '#3a3c42',
-    ports: {
-      inputs: [],
-      outputs: [{ id: 'asset', label: slot.name, dataType: 'asset-reference' }],
-    },
+    portLabels: { asset: slot.name },
+    replaceConfig: true,
     config: {
       templateRole: 'asset-slot',
       slotId: slot.id,
@@ -141,48 +139,32 @@ function assetSlotNode(slot: WorkflowTemplateSlot, index: number): WorkflowNodeV
       assetId: null,
       relativePath: null,
     },
-    runRecordIds: [],
-  };
+  });
 }
 
 function briefNode(definition: WorkflowTemplateDefinition): WorkflowNodeV2 {
   const y = 30 + Math.max(0, definition.slots.length - 1) * 137;
-  return {
+  return createCreatorNode('brief', {
     id: 'brief',
-    type: 'brief',
     title: definition.id === 'campaign-composer' ? 'Campaign Brief' : 'Creative Brief',
     position: { x: 280, y },
-    size: { width: 245, height: 188 },
-    color: '#4a4059',
-    ports: {
-      inputs: [],
-      outputs: [{ id: 'prompt', label: 'Brief', dataType: 'prompt' }],
-    },
+    replaceConfig: true,
     config: {
       templateRole: 'brief',
       objective: definition.brief,
       guidance: 'State the outcome, audience, and non-negotiable content for this workflow.',
     },
-    runRecordIds: [],
-  };
+  });
 }
 
 function artDirectionNode(definition: WorkflowTemplateDefinition): WorkflowNodeV2 {
   const height = Math.max(408, 220 + definition.slots.length * 32);
-  return {
+  return createCreatorNode('art-direction', {
     id: 'composition',
-    type: 'art-direction',
     title: 'Art Direction',
     position: { x: 555, y: 30 },
     size: { width: 340, height },
-    color: '#3a3c42',
-    ports: {
-      inputs: [
-        { id: 'assets', label: 'Visual inputs', dataType: 'asset-reference', multiple: true },
-        { id: 'brief', label: 'Brief', dataType: 'prompt', required: true },
-      ],
-      outputs: [{ id: 'layout', label: 'Directed composition', dataType: 'layout' }],
-    },
+    replaceConfig: true,
     config: {
       templateRole: 'art-direction',
       legacyKind: 'composition',
@@ -196,22 +178,15 @@ function artDirectionNode(definition: WorkflowTemplateDefinition): WorkflowNodeV
       storyboardAnnotationItems: [],
       storyboardAnnotationsVisible: true,
     },
-    runRecordIds: [],
-  };
+  });
 }
 
 function outputNode(output: WorkflowTemplateOutput, index: number): WorkflowNodeV2 {
-  return {
+  return createCreatorNode('output', {
     id: `output-${output.id}`,
-    type: 'output',
     title: output.name,
     position: { x: 925, y: 30 + index * 256 },
-    size: { width: 220, height: 232 },
-    color: '#3a3c42',
-    ports: {
-      inputs: [{ id: 'source', label: 'Directed composition', dataType: 'layout', required: true }],
-      outputs: [],
-    },
+    replaceConfig: true,
     config: {
       templateRole: 'configured-output',
       legacyKind: 'output',
@@ -221,8 +196,7 @@ function outputNode(output: WorkflowTemplateOutput, index: number): WorkflowNode
       outputAssetId: null,
       outputRelativePath: null,
     },
-    runRecordIds: [],
-  };
+  });
 }
 
 export function instantiateWorkflowTemplate(

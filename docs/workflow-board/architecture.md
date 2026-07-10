@@ -50,6 +50,53 @@ Each creator-level node type has a focused component registered through a node
 definition. The board owns common chrome, selection, ports, connections, and
 run-state presentation.
 
+The framework-independent creator node registry is the source of truth for the
+six creator-facing node definitions: labels, descriptions, search terms,
+default geometry and configuration, named typed ports, validation, and executor
+capability/availability metadata. Definitions must be unique; registry
+construction rejects duplicate node types instead of accepting `Map`
+last-write-wins behavior.
+
+Persisted `WorkflowGraph v2` nodes remain authoritative after creation. Registry
+defaults seed a newly added node, but they do not rewrite saved titles,
+geometry, ports, configuration, or unknown future-node payloads when a workflow
+is reopened. Templates may use the same factory while supplying their existing
+persisted values; their v2 output is kept under exact golden compatibility
+tests.
+
+The searchable node palette and board components own presentation and keyboard
+focus behavior. They consume registry metadata without importing or invoking a
+provider. The board may retain focused creator UI for established Input, Brief,
+Art Direction, and Output experiences while using shared registry metadata and
+common chrome; Transform and Review can use the generic creator card until a
+focused component is justified.
+
+The board renders one physical handle for every persisted named port. Connection
+gestures carry the exact source and target `nodeId` plus `portId`; presentation
+must not collapse several ports into one inferred handle. Repeated palette adds
+use deterministic open placement rather than identical centre stacking. The
+persisted node size is also the rendered card frame used by ports, the map, and
+placement; content that exceeds that frame scrolls internally. When no visible
+slot remains, the board recentres the newly added node before moving focus to it.
+
+Persisted unsupported future nodes are projected as visible, non-runnable
+fallback cards and remain excluded from the creator palette. Their raw payload,
+ports, and configuration stay authoritative for saving even though the current
+version cannot connect or execute them.
+
+Executor availability has explicit semantics:
+
+- `not-required`: the node records direction, input, review-independent
+  metadata, or delivery intent and has no direct Run action;
+- `available`: an execution adapter for the declared capability is wired and
+  may expose Run when graph readiness also permits it;
+- `draft-only`: the node is safe to create and persist, but Run stays disabled
+  with a creator-facing reason until its adapter exists.
+
+Provider and model choices are configuration of a Transform node's advanced
+controls, not registry node types or palette entries. Capability metadata does
+not itself import an adapter or cause execution side effects.
+
 ### Execution adapters
 
 Node executors call existing PaintNode AI, image-processing, project-asset, and

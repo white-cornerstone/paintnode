@@ -5,3 +5,5 @@ export * from './migration';
 export * from './schema';
 export * from './templates';
 export * from './readiness';
+export * from './registry';
+export * from './palette';

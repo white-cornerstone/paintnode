@@ -13,8 +13,12 @@ import {
   type WorkflowGraphV2,
   type WorkflowIdGenerator,
   type WorkflowNodeV2,
+  type WorkflowNodePort,
   instantiateWorkflowTemplate,
   type WorkflowTemplateId,
+  createCreatorNode,
+  type CreatorNodeType,
+  validateCreatorNodeConfig,
 } from '../workflow';
 
 export interface WorkflowAssetNode {
@@ -32,6 +36,7 @@ export interface WorkflowAssetNode {
   slotId: string | null;
   required: boolean;
   guidance: string;
+  creatorInput: boolean;
 }
 
 export interface WorkflowBriefNode {
@@ -46,10 +51,39 @@ export interface WorkflowBriefNode {
   color: string;
 }
 
+export interface WorkflowCreatorNode {
+  id: string;
+  type: 'art-direction' | 'transform' | 'review';
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  ports: { inputs: WorkflowNodePort[]; outputs: WorkflowNodePort[] };
+  config: Record<string, unknown>;
+}
+
 export interface WorkflowConnection {
   id: string;
   from: string;
   to: string;
+  sourcePortId: string;
+  targetPortId: string;
+}
+
+export interface WorkflowUnsupportedNode {
+  id: string;
+  name: string;
+  unsupportedType: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  ports: { inputs: WorkflowNodePort[]; outputs: WorkflowNodePort[] };
+  config: Record<string, unknown>;
+  runnable: false;
 }
 
 export interface WorkflowOutputNode {
@@ -67,7 +101,12 @@ export interface WorkflowOutputNode {
 }
 
 export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
-export type WorkflowSelection = { kind: 'asset'; id: string } | { kind: 'composition' } | { kind: 'output'; id: string };
+export type WorkflowSelection =
+  | { kind: 'asset'; id: string }
+  | { kind: 'creator'; id: string }
+  | { kind: 'unsupported'; id: string }
+  | { kind: 'composition' }
+  | { kind: 'output'; id: string };
 export type WorkflowZoomMode = 'in' | 'out';
 export type StoryboardTool = 'brush' | 'eraser';
 
@@ -151,6 +190,8 @@ export class WorkflowStore {
   storyboardAnnotationsVisible = $state(true);
   nodes = $state<WorkflowAssetNode[]>([]);
   briefNodes = $state<WorkflowBriefNode[]>([]);
+  creatorNodes = $state<WorkflowCreatorNode[]>([]);
+  unsupportedNodes = $state<WorkflowUnsupportedNode[]>([]);
   connections = $state<WorkflowConnection[]>([]);
   outputAssetId = $state<string | null>(null);
   outputRelativePath = $state<string | null>(null);
@@ -214,7 +255,15 @@ export class WorkflowStore {
     this.storyboardAnnotationsVisible = true;
     this.nodes = [];
     this.briefNodes = [];
-    this.connections = [{ id: this.nextGraphId('edge'), from: 'composition', to: 'output' }];
+    this.creatorNodes = [];
+    this.unsupportedNodes = [];
+    this.connections = [{
+      id: this.nextGraphId('edge'),
+      from: 'composition',
+      to: 'output',
+      sourcePortId: 'layout',
+      targetPortId: 'source',
+    }];
     this.outputAssetId = null;
     this.outputRelativePath = null;
     this.rev = 0;
@@ -330,11 +379,35 @@ export class WorkflowStore {
     this.tool = 'hand';
   }
 
+  addCreatorNode(
+    type: CreatorNodeType,
+    position?: { x: number; y: number },
+    config?: Record<string, unknown>,
+  ): string {
+    const domain = this.requireGraphDomain();
+    const node = createCreatorNode(type, {
+      id: this.nextGraphId('node'),
+      position: position
+        ? { x: roundWorkflowNumber(position.x), y: roundWorkflowNumber(position.y) }
+        : undefined,
+      config,
+    });
+    this.publishGraphMutation(domain, domain.addNode(node));
+    this.selection = type === 'input'
+      ? { kind: 'asset', id: node.id }
+      : type === 'output'
+        ? { kind: 'output', id: node.id }
+        : { kind: 'creator', id: node.id };
+    this.tool = 'hand';
+    return node.id;
+  }
+
   removeNode(id: string): void {
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
     this.publishGraphMutation(domain, domain.removeNode(id));
-    if (this.selection?.kind === 'asset' && this.selection.id === id) this.selection = null;
+    if ((this.selection?.kind === 'asset' || this.selection?.kind === 'creator' || this.selection?.kind === 'unsupported' || this.selection?.kind === 'output')
+      && this.selection.id === id) this.selection = null;
   }
 
   moveNode(id: string, x: number, y: number): void {
@@ -548,6 +621,15 @@ export class WorkflowStore {
           : `Node "${target.title}" does not expose an input port.`;
       return false;
     }
+    return this.connectPorts(from, endpoints.source.portId, to, endpoints.target.portId);
+  }
+
+  connectPorts(from: string, sourcePortId: string, to: string, targetPortId: string): boolean {
+    const domain = this.requireGraphDomain();
+    const endpoints = {
+      source: { nodeId: from, portId: sourcePortId },
+      target: { nodeId: to, portId: targetPortId },
+    };
     const validation = domain.validateConnection(endpoints);
     if (!validation.ok) {
       this.connectionError = validation.message;
@@ -583,6 +665,8 @@ export class WorkflowStore {
       id: edge.id,
       from: edge.source.nodeId,
       to: edge.target.nodeId,
+      sourcePortId: edge.source.portId,
+      targetPortId: edge.target.portId,
     }));
   }
 
@@ -591,6 +675,8 @@ export class WorkflowStore {
       id: edge.id,
       from: edge.source.nodeId,
       to: edge.target.nodeId,
+      sourcePortId: edge.source.portId,
+      targetPortId: edge.target.portId,
     }));
   }
 
@@ -659,6 +745,18 @@ export class WorkflowStore {
     }));
   }
 
+  configureCreatorNode(id: string, update: Record<string, unknown>): void {
+    const node = this.requireGraphDomain().node(id);
+    if (!node || node.type === 'unsupported') return;
+    const config = { ...node.config, ...update };
+    const issues = validateCreatorNodeConfig(node.type, config);
+    if (issues.length > 0) {
+      throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
+    }
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, config));
+  }
+
   setBriefObjective(id: string, objective: string): void {
     const node = this.requireGraphDomain().node(id);
     if (!node || node.type !== 'brief') return;
@@ -673,6 +771,8 @@ export class WorkflowStore {
     }
     if (selection?.kind === 'composition') return this.compositionName;
     if (selection?.kind === 'output') return this.outputNode(selection.id)?.name ?? '';
+    if (selection?.kind === 'creator') return this.requireGraphDomain().node(selection.id)?.title ?? '';
+    if (selection?.kind === 'unsupported') return this.unsupportedNodes.find((node) => node.id === selection.id)?.name ?? '';
     return '';
   }
 
@@ -683,6 +783,8 @@ export class WorkflowStore {
     }
     if (selection?.kind === 'composition') return this.compositionColor;
     if (selection?.kind === 'output') return this.outputNode(selection.id)?.color ?? '#3a3c42';
+    if (selection?.kind === 'creator') return this.requireGraphDomain().node(selection.id)?.color ?? '#3a3c42';
+    if (selection?.kind === 'unsupported') return this.unsupportedNodes.find((node) => node.id === selection.id)?.color ?? '#3a3c42';
     return '#3a3c42';
   }
 
@@ -703,6 +805,10 @@ export class WorkflowStore {
       nodeId = selection.id;
       displayName = name.trim();
       fallback = 'Output';
+    } else if (selection?.kind === 'creator') {
+      nodeId = selection.id;
+      displayName = name.trim();
+      fallback = this.requireGraphDomain().node(nodeId)?.title ?? 'Node';
     } else {
       return;
     }
@@ -723,6 +829,8 @@ export class WorkflowStore {
     } else if (selection?.kind === 'composition') {
       nodeId = 'composition';
     } else if (selection?.kind === 'output') {
+      nodeId = selection.id;
+    } else if (selection?.kind === 'creator') {
       nodeId = selection.id;
     } else {
       return;
@@ -1040,6 +1148,7 @@ export class WorkflowStore {
           slotId: typeof node.config.slotId === 'string' ? node.config.slotId : null,
           required: node.config.required === true,
           guidance: typeof node.config.role === 'string' ? node.config.role : '',
+          creatorInput: node.config.creatorRole === 'input',
         };
       });
     this.briefNodes = domain.graph.nodes
@@ -1054,6 +1163,45 @@ export class WorkflowStore {
         width: node.size.width,
         height: node.size.height,
         color: node.color,
+      }));
+    this.creatorNodes = domain.graph.nodes
+      .filter((node): node is WorkflowNodeV2 & { type: WorkflowCreatorNode['type'] } => (
+        node.type === 'transform'
+        || node.type === 'review'
+        || (node.type === 'art-direction' && node.id !== 'composition')
+      ))
+      .map((node) => ({
+        id: node.id,
+        type: node.type,
+        name: node.title,
+        x: roundLegacyGeometry ? roundWorkflowNumber(node.position.x) : node.position.x,
+        y: roundLegacyGeometry ? roundWorkflowNumber(node.position.y) : node.position.y,
+        width: node.size.width,
+        height: node.size.height,
+        color: node.color,
+        ports: {
+          inputs: node.ports.inputs.map((port) => ({ ...port })),
+          outputs: node.ports.outputs.map((port) => ({ ...port })),
+        },
+        config: { ...node.config },
+      }));
+    this.unsupportedNodes = domain.graph.nodes
+      .filter((node) => node.type === 'unsupported')
+      .map((node) => ({
+        id: node.id,
+        name: node.title,
+        unsupportedType: typeof node.config.unsupportedType === 'string' ? node.config.unsupportedType : 'unknown',
+        x: roundLegacyGeometry ? roundWorkflowNumber(node.position.x) : node.position.x,
+        y: roundLegacyGeometry ? roundWorkflowNumber(node.position.y) : node.position.y,
+        width: node.size.width,
+        height: node.size.height,
+        color: node.color,
+        ports: {
+          inputs: node.ports.inputs.map((port) => ({ ...port })),
+          outputs: node.ports.outputs.map((port) => ({ ...port })),
+        },
+        config: { ...node.config },
+        runnable: false as const,
       }));
     this.outputNodes = domain.graph.nodes
       .filter((node) => node.type === 'output' || node.config.legacyKind === 'output')
@@ -1085,6 +1233,8 @@ export class WorkflowStore {
       id: edge.id,
       from: edge.source.nodeId,
       to: edge.target.nodeId,
+      sourcePortId: edge.source.portId,
+      targetPortId: edge.target.portId,
     }));
     const firstOutput = this.outputNodes[0] ?? defaultOutputNode();
     this.outputName = firstOutput.name;

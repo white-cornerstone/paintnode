@@ -30,13 +30,29 @@
   import { aiRunOptionsFromSettings } from '../state/settings';
   import { aiRunningLabel, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
-  import { workflow, type WorkflowAssetNode, type WorkflowBriefNode, type WorkflowConnection, type WorkflowOutputNode } from '../state/workflow.svelte';
-  import { workflowReadiness } from '../workflow';
+  import {
+    workflow,
+    type WorkflowAssetNode,
+    type WorkflowBriefNode,
+    type WorkflowConnection,
+    type WorkflowCreatorNode,
+    type WorkflowOutputNode,
+    type WorkflowUnsupportedNode,
+  } from '../state/workflow.svelte';
+  import {
+    creatorNodeDefinition,
+    creatorNodeFitsPlacementBounds,
+    findOpenCreatorNodePlacement,
+    workflowReadiness,
+    type CreatorNodeType,
+    type WorkflowNodePort,
+  } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
+  import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
 
   type CodexProgressPayload = {
@@ -46,7 +62,7 @@
     provider?: string;
     detail?: string;
   };
-  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'output' | 'viewport';
+  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {
     id: string;
@@ -66,15 +82,16 @@
   };
 
   const desktop = isDesktop();
+  const briefCreatorDefinition = creatorNodeDefinition('brief');
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let busy = $state(false);
   let progress = $state('');
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
-  let dragging: { type: 'asset' | 'prompt' | 'output'; id?: string; dx: number; dy: number } | null = null;
+  let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
-  let connecting = $state<{ from: WorkflowNodeId; x: number; y: number } | null>(null);
+  let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
   let overscrollX = $state(0);
   let overscrollY = $state(0);
   let overscrollReturning = $state(false);
@@ -82,6 +99,8 @@
   let sketching = false;
   let altDown = $state(false);
   let boardEl = $state<HTMLDivElement>();
+  let paletteButton = $state<HTMLButtonElement>();
+  let paletteOpen = $state(false);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -312,6 +331,10 @@
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 
+  function creatorConfigString(config: Record<string, unknown>, key: string): string {
+    return typeof config[key] === 'string' ? config[key] : '';
+  }
+
   async function placeOutput(node: WorkflowOutputNode): Promise<void> {
     const outputAsset = outputAssetFor(node);
     if (!outputAsset) return;
@@ -332,14 +355,16 @@
 
   function dragPointerDown(
     event: PointerEvent,
-    type: 'asset' | 'prompt' | 'output',
-    node: WorkflowAssetNode | WorkflowOutputNode | undefined = undefined,
+    type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported',
+    node: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | WorkflowUnsupportedNode | undefined = undefined,
   ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
     const output = type === 'output' && node ? workflow.outputNode(node.id) : null;
-    const x = type === 'asset' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
-    const y = type === 'asset' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
+    const x = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
+    const y = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
     if (type === 'asset' && node) workflow.select({ kind: 'asset', id: node.id });
+    else if (type === 'creator' && node) workflow.select({ kind: 'creator', id: node.id });
+    else if (type === 'unsupported' && node) workflow.select({ kind: 'unsupported', id: node.id });
     else workflow.select(type === 'prompt' ? { kind: 'composition' } : { kind: 'output', id: output?.id ?? 'output' });
     dragging = {
       type,
@@ -353,8 +378,8 @@
 
   function dragHandle(
     element: HTMLElement,
-    params: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode | WorkflowOutputNode },
-  ): { update: (next: { type: 'asset' | 'prompt' | 'output'; node?: WorkflowAssetNode | WorkflowOutputNode }) => void; destroy: () => void } {
+    params: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; node?: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | WorkflowUnsupportedNode },
+  ): { update: (next: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; node?: WorkflowAssetNode | WorkflowBriefNode | WorkflowCreatorNode | WorkflowOutputNode | WorkflowUnsupportedNode }) => void; destroy: () => void } {
     let current = params;
     const onDown = (event: PointerEvent) => dragPointerDown(event, current.type, current.node);
     element.addEventListener('pointerdown', onDown);
@@ -393,6 +418,8 @@
       const x = point.x - dragging.dx;
       const y = point.y - dragging.dy;
       if (dragging.type === 'asset' && dragging.id) workflow.moveNode(dragging.id, x, y);
+      else if (dragging.type === 'creator' && dragging.id) workflow.moveNode(dragging.id, x, y);
+      else if (dragging.type === 'unsupported' && dragging.id) workflow.moveNode(dragging.id, x, y);
       else if (dragging.type === 'prompt') workflow.movePrompt(x, y);
       else if (dragging.id) workflow.moveOutputNode(dragging.id, x, y);
     }
@@ -436,6 +463,24 @@
       ...workflow.briefNodes.map((node) => ({
         id: node.id,
         kind: 'brief' as const,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        color: node.color,
+      })),
+      ...workflow.creatorNodes.map((node) => ({
+        id: node.id,
+        kind: 'creator' as const,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        color: node.color,
+      })),
+      ...workflow.unsupportedNodes.map((node) => ({
+        id: node.id,
+        kind: 'unsupported' as const,
         x: node.x,
         y: node.y,
         width: node.width,
@@ -646,8 +691,8 @@
   }
 
   function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
-    const source = outputPortPoint(connection.from);
-    const target = inputPortPoint(connection.to);
+    const source = outputPortPoint(connection.from, connection.sourcePortId);
+    const target = inputPortPoint(connection.to, connection.targetPortId);
     if (!source || !target) return 'display:none';
     const x1 = mapX(source.x, map);
     const y1 = mapY(source.y, map);
@@ -724,32 +769,46 @@
     if (outputNode) return { x: outputNode.x, y: outputNode.y, width: outputNode.width, height: outputNode.height };
     const briefNode = workflow.briefNodes.find((item) => item.id === nodeId);
     if (briefNode) return { x: briefNode.x, y: briefNode.y, width: briefNode.width, height: briefNode.height };
+    const creatorNode = workflow.creatorNodes.find((item) => item.id === nodeId);
+    if (creatorNode) return { x: creatorNode.x, y: creatorNode.y, width: creatorNode.width, height: creatorNode.height };
+    const unsupportedNode = workflow.unsupportedNodes.find((item) => item.id === nodeId);
+    if (unsupportedNode) return { x: unsupportedNode.x, y: unsupportedNode.y, width: unsupportedNode.width, height: unsupportedNode.height };
     const node = workflow.nodes.find((item) => item.id === nodeId);
     return node ? { x: node.x, y: node.y, width: node.width, height: node.height } : null;
   }
 
-  function inputPortPoint(nodeId: WorkflowNodeId): { x: number; y: number } | null {
-    const rect = workflowNodeRect(nodeId);
-    if (!rect) return null;
-    return { x: rect.x, y: rect.y + rect.height / 2 };
+  function workflowNodePorts(nodeId: WorkflowNodeId): { inputs: WorkflowNodePort[]; outputs: WorkflowNodePort[] } {
+    workflow.rev;
+    const node = workflow.graphSnapshot().nodes.find((item) => item.id === nodeId);
+    return node?.ports ?? { inputs: [], outputs: [] };
   }
 
-  function outputPortPoint(nodeId: WorkflowNodeId): { x: number; y: number } | null {
+  function inputPortPoint(nodeId: WorkflowNodeId, portId: string): { x: number; y: number } | null {
     const rect = workflowNodeRect(nodeId);
-    if (!rect) return null;
-    return { x: rect.x + rect.width, y: rect.y + rect.height / 2 };
+    const ports = workflowNodePorts(nodeId).inputs;
+    const index = ports.findIndex((port) => port.id === portId);
+    if (!rect || index < 0) return null;
+    return { x: rect.x, y: rect.y + rect.height * ((index + 1) / (ports.length + 1)) };
+  }
+
+  function outputPortPoint(nodeId: WorkflowNodeId, portId: string): { x: number; y: number } | null {
+    const rect = workflowNodeRect(nodeId);
+    const ports = workflowNodePorts(nodeId).outputs;
+    const index = ports.findIndex((port) => port.id === portId);
+    if (!rect || index < 0) return null;
+    return { x: rect.x + rect.width, y: rect.y + rect.height * ((index + 1) / (ports.length + 1)) };
   }
 
   function connectionPath(connection: WorkflowConnection): string {
-    const source = outputPortPoint(connection.from);
-    const target = inputPortPoint(connection.to);
+    const source = outputPortPoint(connection.from, connection.sourcePortId);
+    const target = inputPortPoint(connection.to, connection.targetPortId);
     if (!source || !target) return '';
     return routedPath(source, target);
   }
 
   function pendingConnectionPath(): string {
     if (!connecting) return '';
-    const source = outputPortPoint(connecting.from);
+    const source = outputPortPoint(connecting.from.nodeId, connecting.from.portId);
     if (!source) return '';
     return routedPath(source, { x: connecting.x, y: connecting.y });
   }
@@ -767,17 +826,49 @@
     })[0];
   }
 
-  function startConnection(event: PointerEvent, from: WorkflowNodeId): void {
+  async function closeNodePalette(): Promise<void> {
+    paletteOpen = false;
+    await tick();
+    paletteButton?.focus();
+  }
+
+  async function addCreatorNodeFromPalette(type: CreatorNodeType): Promise<void> {
+    const definition = creatorNodeDefinition(type);
+    const preferred = {
+      x: (boardWidth / 2 - workflow.panX) / workflow.zoom - definition.defaultSize.width / 2,
+      y: (boardHeight / 2 - workflow.panY) / workflow.zoom - definition.defaultSize.height / 2,
+    };
+    const visibleBounds = {
+      x: -workflow.panX / workflow.zoom,
+      y: -workflow.panY / workflow.zoom,
+      width: boardWidth / workflow.zoom,
+      height: boardHeight / workflow.zoom,
+      padding: 12 / workflow.zoom,
+    };
+    const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, workflowMapItems(), 20, visibleBounds);
+    const nodeId = workflow.addCreatorNode(type, position);
+    paletteOpen = false;
+    if (!creatorNodeFitsPlacementBounds(position, definition.defaultSize, visibleBounds)) {
+      centerBoardAt(
+        position.x + definition.defaultSize.width / 2,
+        position.y + definition.defaultSize.height / 2,
+      );
+    }
+    await tick();
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workflow-node="${nodeId}"]`)?.focus());
+  }
+
+  function startConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     const point = boardPoint(event);
     workflow.connectionError = null;
-    connecting = { from, x: point.x, y: point.y };
+    connecting = { from: { nodeId, portId }, x: point.x, y: point.y };
     event.stopPropagation();
   }
 
-  function finishConnection(event: PointerEvent, to: WorkflowNodeId): void {
+  function finishConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
     if (!connecting) return;
-    workflow.connect(connecting.from, to);
+    workflow.connectPorts(connecting.from.nodeId, connecting.from.portId, nodeId, portId);
     connecting = null;
     event.stopPropagation();
   }
@@ -1525,6 +1616,26 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 <section class="workflow-shell">
   <div class="workflow-main">
     <aside class="asset-tray">
+      <div class="tray-head node-library">
+        <span>Nodes</span>
+        <button
+          bind:this={paletteButton}
+          type="button"
+          aria-label="Add workflow node"
+          aria-haspopup="dialog"
+          aria-expanded={paletteOpen}
+          use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
+          onclick={() => (paletteOpen = !paletteOpen)}
+        >
+          <Icon svg={Add} size={14} />
+        </button>
+      </div>
+      {#if paletteOpen}
+        <WorkflowNodePalette
+          onAdd={(type) => void addCreatorNodeFromPalette(type)}
+          onClose={() => void closeNodePalette()}
+        />
+      {/if}
       <div class="tray-head">
         <span>Assets</span>
         <button
@@ -1571,7 +1682,9 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               class:asset={item.kind === 'asset'}
               class:brief={item.kind === 'brief'}
               class:composition={item.kind === 'composition'}
+              class:creator={item.kind === 'creator'}
               class:output={item.kind === 'output'}
+              class:unsupported={item.kind === 'unsupported'}
               class:included={item.included}
               style={mapRectStyle(item, workflowMapModel)}
             ></span>
@@ -1579,7 +1692,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
         </button>
         <div class="map-meta">
-        <span>{workflow.nodes.length + workflow.briefNodes.length + 1 + workflow.outputNodes.length} nodes</span>
+          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + 1 + workflow.outputNodes.length} nodes</span>
           <span>{Math.round(workflow.zoom * 100)}%</span>
         </div>
       </div>
@@ -1646,11 +1759,16 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 
         {#each workflow.nodes as node (node.id)}
           {@const asset = assetFor(node)}
+          {@const ports = workflowNodePorts(node.id)}
           <article
             class="asset-node"
             class:included={node.included}
             class:selected={workflow.selection?.kind === 'asset' && workflow.selection.id === node.id}
-            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; min-height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
+            tabindex="-1"
+            data-workflow-node={node.id}
+            data-creator-node-type="input"
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
+            onfocus={() => workflow.select({ kind: 'asset', id: node.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'asset', id: node.id });
               event.stopPropagation();
@@ -1658,10 +1776,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           >
             <WorkflowNodePorts
               title={node.name}
-              showInput={false}
-              outputLabel={node.slotId ? `${node.name} visual input` : 'Asset reference'}
-              onStart={(event) => startConnection(event, node.id)}
-              onFinish={(event) => finishConnection(event, node.id)}
+              height={node.height}
+              inputs={ports.inputs}
+              outputs={ports.outputs}
+              onStart={(event, portId) => startConnection(event, node.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, node.id, portId)}
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
@@ -1696,12 +1815,12 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </button>
               </div>
             </div>
-            <div class="node-preview" style={`height:${Math.max(64, node.height - (node.slotId ? 150 : 84))}px`}>
-              {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
-            </div>
-            {#if node.slotId}
+            <div class="specialized-node-body asset-node-body">
+              <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
+                {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+              </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
-                <span>{node.required ? 'Required asset' : 'Optional asset'}</span>
+                <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
                 <select
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
@@ -1715,47 +1834,220 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                   {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
                 </select>
               </label>
-            {/if}
-            <textarea
-              aria-label={`Role for ${node.name}`}
-              placeholder={node.guidance || 'role in composition'}
-              value={node.note}
-              onpointerdown={(event) => event.stopPropagation()}
-              oninput={(event) => workflow.setNodeNote(node.id, event.currentTarget.value)}
-            ></textarea>
+              <textarea
+                aria-label={`Role for ${node.name}`}
+                placeholder={node.guidance || 'role in composition'}
+                value={node.note}
+                onpointerdown={(event) => event.stopPropagation()}
+                oninput={(event) => node.creatorInput
+                  ? workflow.configureCreatorNode(node.id, { role: event.currentTarget.value })
+                  : workflow.setNodeNote(node.id, event.currentTarget.value)}
+              ></textarea>
+            </div>
           </article>
         {/each}
 
         {#each workflow.briefNodes as brief (brief.id)}
+          {@const ports = workflowNodePorts(brief.id)}
           <article
             class="brief-node"
-            style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; min-height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
+            class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === brief.id}
+            tabindex="-1"
+            data-workflow-node={brief.id}
+            data-creator-node-type="brief"
+            style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
+            onfocus={() => workflow.select({ kind: 'creator', id: brief.id })}
+            onpointerdown={(event) => {
+              workflow.select({ kind: 'creator', id: brief.id });
+              event.stopPropagation();
+            }}
           >
             <WorkflowNodePorts
               title={brief.name}
-              showInput={false}
-              outputLabel="Creative brief"
-              onStart={(event) => startConnection(event, brief.id)}
-              onFinish={(event) => finishConnection(event, brief.id)}
+              height={brief.height}
+              inputs={ports.inputs}
+              outputs={ports.outputs}
+              onStart={(event, portId) => startConnection(event, brief.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, brief.id, portId)}
             />
             <div class="node-head">
-              <span>{brief.name}</span>
-              <small>Brief</small>
+              <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
+              <small>{briefCreatorDefinition.label}</small>
             </div>
-            <p>{brief.guidance}</p>
-            <textarea
-              aria-label={`${brief.name} objective`}
-              placeholder="Outcome, audience, and non-negotiables…"
-              value={brief.objective}
-              oninput={(event) => workflow.setBriefObjective(brief.id, event.currentTarget.value)}
-            ></textarea>
+            <div class="specialized-node-body brief-node-body">
+              <p>{brief.guidance}</p>
+              <textarea
+                aria-label={`${brief.name} objective`}
+                placeholder="Outcome, audience, and non-negotiables…"
+                value={brief.objective}
+                oninput={(event) => workflow.setBriefObjective(brief.id, event.currentTarget.value)}
+              ></textarea>
+            </div>
+          </article>
+        {/each}
+
+        {#each workflow.creatorNodes as node (node.id)}
+          {@const definition = creatorNodeDefinition(node.type)}
+          <article
+            class="creator-node"
+            class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
+            tabindex="-1"
+            data-workflow-node={node.id}
+            data-creator-node-type={node.type}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
+            onfocus={() => workflow.select({ kind: 'creator', id: node.id })}
+            onpointerdown={(event) => {
+              workflow.select({ kind: 'creator', id: node.id });
+              event.stopPropagation();
+            }}
+          >
+            <WorkflowNodePorts
+              title={node.name}
+              height={node.height}
+              inputs={node.ports.inputs}
+              outputs={node.ports.outputs}
+              onStart={(event, portId) => startConnection(event, node.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, node.id, portId)}
+            />
+            <div class="node-head">
+              <span class="node-drag-region" use:dragHandle={{ type: 'creator', node }}>
+                {node.name}
+                <small>{definition.label}</small>
+              </span>
+              <div class="node-tools">
+                <button
+                  type="button"
+                  aria-label={`Remove ${node.name}`}
+                  use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.removeNode(node.id);
+                  }}
+                ><Icon svg={Delete} size={13} /></button>
+              </div>
+            </div>
+            <div class="creator-node-body">
+              <p>{definition.description}</p>
+              {#if node.type === 'art-direction'}
+                <label class="creator-config-field">
+                  Direction prompt
+                  <textarea
+                    aria-label={`${node.name} direction prompt`}
+                    value={creatorConfigString(node.config, 'prompt')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { prompt: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {:else if node.type === 'transform'}
+                <label class="creator-config-field">
+                  Capability
+                  <select
+                    aria-label={`${node.name} capability`}
+                    value={creatorConfigString(node.config, 'capability')}
+                    onchange={(event) => workflow.configureCreatorNode(node.id, { capability: event.currentTarget.value })}
+                  >
+                    <option value="generate">Generate</option>
+                    <option value="edit">Edit</option>
+                    <option value="remove-background">Remove background</option>
+                    <option value="relight">Relight</option>
+                    <option value="upscale">Upscale</option>
+                  </select>
+                </label>
+                <label class="creator-config-field">
+                  Instructions
+                  <textarea
+                    aria-label={`${node.name} instructions`}
+                    value={creatorConfigString(node.config, 'instructions')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {:else if node.type === 'review'}
+                <label class="creator-config-field">
+                  Review mode
+                  <select
+                    aria-label={`${node.name} review mode`}
+                    value={creatorConfigString(node.config, 'mode')}
+                    onchange={(event) => workflow.configureCreatorNode(node.id, { mode: event.currentTarget.value })}
+                  >
+                    <option value="human">Human review</option>
+                    <option value="ai">AI-assisted review (draft)</option>
+                  </select>
+                </label>
+                <label class="creator-config-field">
+                  Review instructions
+                  <textarea
+                    aria-label={`${node.name} review instructions`}
+                    value={creatorConfigString(node.config, 'instructions')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {/if}
+              {#if node.ports.inputs.length > 0}
+                <div class="creator-port-list">
+                  <b>Inputs</b>
+                  {#each node.ports.inputs as port (port.id)}
+                    <span>{port.label}<small>{port.dataType}{port.required ? ' · required' : ''}{port.multiple ? ' · multiple' : ''}</small></span>
+                  {/each}
+                </div>
+              {/if}
+              {#if node.ports.outputs.length > 0}
+                <div class="creator-port-list">
+                  <b>Outputs</b>
+                  {#each node.ports.outputs as port (port.id)}
+                    <span>{port.label}<small>{port.dataType}{port.multiple ? ' · multiple' : ''}</small></span>
+                  {/each}
+                </div>
+              {/if}
+              {#if definition.executor.status === 'draft-only'}
+                <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
+                <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
+              {/if}
+            </div>
+          </article>
+        {/each}
+
+        {#each workflow.unsupportedNodes as node (node.id)}
+          <article
+            class="unsupported-node"
+            class:selected={workflow.selection?.kind === 'unsupported' && workflow.selection.id === node.id}
+            tabindex="-1"
+            data-workflow-node={node.id}
+            data-unsupported-node-type={node.unsupportedType}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}`}
+            onfocus={() => workflow.select({ kind: 'unsupported', id: node.id })}
+            onpointerdown={(event) => {
+              workflow.select({ kind: 'unsupported', id: node.id });
+              event.stopPropagation();
+            }}
+          >
+            <div class="node-head">
+              <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>{node.name}</span>
+              <small>Unsupported</small>
+            </div>
+            <div class="creator-node-body">
+              <p>This “{node.unsupportedType}” node is preserved for a compatible future PaintNode version.</p>
+              {#if node.ports.inputs.length + node.ports.outputs.length > 0}
+                <div class="creator-port-list">
+                  <b>Preserved ports</b>
+                  {#each [...node.ports.inputs, ...node.ports.outputs] as port}
+                    <span>{port.label}<small>{port.dataType}</small></span>
+                  {/each}
+                </div>
+              {/if}
+              <p class="draft-reason" id={`unsupported-reason-${node.id}`}>PaintNode cannot safely connect or execute this node yet. Its raw payload will be saved unchanged.</p>
+              <button type="button" class="draft-run" disabled aria-describedby={`unsupported-reason-${node.id}`}>Run unavailable</button>
+            </div>
           </article>
         {/each}
 
         <article
           class="prompt-node"
           class:selected={workflow.selection?.kind === 'composition'}
+          tabindex="-1"
+          data-workflow-node="composition"
+          data-creator-node-type="art-direction"
           style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
+          onfocus={() => workflow.select({ kind: 'composition' })}
           onpointerdown={(event) => {
             workflow.select({ kind: 'composition' });
             event.stopPropagation();
@@ -1763,10 +2055,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
         >
           <WorkflowNodePorts
             title={compositionTitle()}
-            inputLabel="Visual inputs and creative brief"
-            outputLabel="Directed composition"
-            onStart={(event) => startConnection(event, 'composition')}
-            onFinish={(event) => finishConnection(event, 'composition')}
+            height={workflow.compositionHeight}
+            inputs={workflowNodePorts('composition').inputs}
+            outputs={workflowNodePorts('composition').outputs}
+            onStart={(event, portId) => startConnection(event, 'composition', portId)}
+            onFinish={(event, portId) => finishConnection(event, 'composition', portId)}
           />
           <div class="node-head">
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
@@ -1923,10 +2216,15 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
+          {@const ports = workflowNodePorts(outputNode.id)}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
-            style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
+            tabindex="-1"
+            data-workflow-node={outputNode.id}
+            data-creator-node-type="output"
+            style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; height:${outputNode.height}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
+            onfocus={() => workflow.select({ kind: 'output', id: outputNode.id })}
             onpointerdown={(event) => {
               workflow.select({ kind: 'output', id: outputNode.id });
               event.stopPropagation();
@@ -1934,10 +2232,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           >
             <WorkflowNodePorts
               title={outputTitle(outputNode)}
-              showOutput={false}
-              inputLabel="Directed composition"
-              onStart={(event) => startConnection(event, outputNode.id)}
-              onFinish={(event) => finishConnection(event, outputNode.id)}
+              height={outputNode.height}
+              inputs={ports.inputs}
+              outputs={ports.outputs}
+              onStart={(event, portId) => startConnection(event, outputNode.id, portId)}
+              onFinish={(event, portId) => finishConnection(event, outputNode.id, portId)}
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
@@ -1955,39 +2254,41 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 ><Icon svg={Delete} size={13} /></button>
               </div>
             </div>
-            <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
-              {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
-            </div>
-            <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
-              <label>
-                Width
-                <input type="number" min="64" step="1" value={outputNode.finalWidth} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, event.currentTarget.valueAsNumber, outputNode.finalHeight)} />
-              </label>
-              <label>
-                Height
-                <input type="number" min="64" step="1" value={outputNode.finalHeight} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, outputNode.finalWidth, event.currentTarget.valueAsNumber)} />
-              </label>
-              <div class="preset-row">
-                <button type="button" onclick={() => applyOutputPreset(outputNode, 1024, 1024)}>1:1</button>
-                <button type="button" onclick={() => applyOutputPreset(outputNode, 1792, 1024)}>Banner</button>
-                <button type="button" onclick={() => applyOutputPreset(outputNode, 1080, 1920)}>IG</button>
+            <div class="specialized-node-body output-node-body">
+              <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
+                {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
               </div>
+              <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+                <label>
+                  Width
+                  <input type="number" min="64" step="1" value={outputNode.finalWidth} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, event.currentTarget.valueAsNumber, outputNode.finalHeight)} />
+                </label>
+                <label>
+                  Height
+                  <input type="number" min="64" step="1" value={outputNode.finalHeight} oninput={(event) => workflow.setOutputFinalSize(outputNode.id, outputNode.finalWidth, event.currentTarget.valueAsNumber)} />
+                </label>
+                <div class="preset-row">
+                  <button type="button" onclick={() => applyOutputPreset(outputNode, 1024, 1024)}>1:1</button>
+                  <button type="button" onclick={() => applyOutputPreset(outputNode, 1792, 1024)}>Banner</button>
+                  <button type="button" onclick={() => applyOutputPreset(outputNode, 1080, 1920)}>IG</button>
+                </div>
+              </div>
+              <div class="output-actions">
+                <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
+                  <Icon svg={PaintBrush} size={14} />
+                  Generate
+                </button>
+                <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
+                  <Icon svg={Open} size={14} />
+                  Place
+                </button>
+              </div>
+              {#if !readiness.ready && readiness.nextAction}
+                <p class="generate-block" id={`generate-block-${outputNode.id}`}>
+                  {readiness.nextAction.action}
+                </p>
+              {/if}
             </div>
-            <div class="output-actions">
-              <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
-                <Icon svg={PaintBrush} size={14} />
-                Generate
-              </button>
-              <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
-                <Icon svg={Open} size={14} />
-                Place
-              </button>
-            </div>
-            {#if !readiness.ready && readiness.nextAction}
-              <p class="generate-block" id={`generate-block-${outputNode.id}`}>
-                {readiness.nextAction.action}
-              </p>
-            {/if}
           </article>
         {/each}
       </div>
@@ -2016,6 +2317,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     min-height: 0;
   }
   .asset-tray {
+    position: relative;
     width: 248px;
     flex: none;
     display: flex;
@@ -2037,6 +2339,9 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   }
   .workflows {
     border-top: 1px solid var(--border);
+  }
+  .node-library {
+    border-bottom: 1px solid var(--border);
   }
   .asset-list {
     flex: 1 1 auto;
@@ -2121,6 +2426,15 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .map-node.brief {
     background: color-mix(in srgb, #a77ad1 30%, #4b4d52);
     border-color: color-mix(in srgb, #a77ad1 68%, #65686f);
+  }
+  .map-node.creator {
+    background: color-mix(in srgb, #59a2c8 28%, #4b4d52);
+    border-color: color-mix(in srgb, #59a2c8 64%, #65686f);
+  }
+  .map-node.unsupported {
+    border-style: dashed;
+    background: color-mix(in srgb, #d08b67 22%, #4b4d52);
+    border-color: color-mix(in srgb, #d08b67 65%, #65686f);
   }
   .map-node.output {
     background: color-mix(in srgb, #6b7cff 28%, #4b4d52);
@@ -2228,6 +2542,8 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   }
   .asset-node,
   .brief-node,
+  .creator-node,
+  .unsupported-node,
   .prompt-node,
   .output-node {
     position: absolute;
@@ -2244,6 +2560,21 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .brief-node {
     width: 245px;
   }
+  .creator-node {
+    width: 240px;
+  }
+  .asset-node,
+  .brief-node,
+  .creator-node,
+  .unsupported-node,
+  .output-node {
+    display: flex;
+    flex-direction: column;
+  }
+  .unsupported-node {
+    width: 240px;
+    border-style: dashed;
+  }
   .asset-node.included {
     border-color: color-mix(in srgb, var(--accent) 65%, #4b4d52);
     opacity: 1;
@@ -2255,7 +2586,10 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     width: 210px;
   }
   .asset-node.selected,
+  .brief-node.selected,
   .brief-node:focus-within,
+  .creator-node.selected,
+  .unsupported-node.selected,
   .prompt-node.selected,
   .output-node.selected {
     border-color: var(--accent);
@@ -2264,6 +2598,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
       0 12px 30px rgba(0, 0, 0, 0.28);
   }
   .node-head {
+    flex: none;
     justify-content: space-between;
     height: 32px;
     padding: 0 8px;
@@ -2281,7 +2616,9 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     cursor: grab;
   }
   .node-drag-region small,
-  .brief-node .node-head small {
+  .brief-node .node-head small,
+  .creator-node .node-head small,
+  .unsupported-node .node-head small {
     margin-left: 7px;
     color: var(--text-dim);
     font-size: 9px;
@@ -2391,6 +2728,81 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     color: var(--text-dim);
     font-size: 10px;
     line-height: 1.35;
+  }
+  .creator-node-body {
+    display: grid;
+    flex: 1 1 auto;
+    gap: 8px;
+    min-height: 0;
+    overflow: auto;
+    padding: 9px;
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .specialized-node-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .creator-node-body > p {
+    margin: 0;
+    line-height: 1.35;
+  }
+  .creator-config-field {
+    display: grid;
+    gap: 4px;
+    padding: 0;
+    color: var(--text-dim);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .creator-config-field textarea,
+  .creator-config-field select {
+    width: 100%;
+    min-width: 0;
+    font-size: 10px;
+    text-transform: none;
+  }
+  .creator-config-field textarea {
+    min-height: 54px;
+    resize: none;
+  }
+  .asset-node textarea,
+  .brief-node textarea {
+    resize: none;
+  }
+  .creator-port-list {
+    display: grid;
+    gap: 4px;
+  }
+  .creator-port-list b {
+    color: var(--text-bright);
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+  .creator-port-list span {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 7px;
+    color: var(--text);
+  }
+  .creator-port-list small {
+    color: var(--text-dim);
+    font-size: 9px;
+    text-align: right;
+  }
+  .creator-node-body .draft-reason {
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, #ffd38a 30%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, #ffd38a 7%, transparent);
+    color: #e8c98f;
+  }
+  .draft-run {
+    width: 100%;
   }
   .brief-node textarea {
     min-height: 105px;
