@@ -4,9 +4,21 @@ import assetsStoryboard from './fixtures/v1/assets-storyboard.json';
 import annotations from './fixtures/v1/annotations.json';
 import multipleOutputs from './fixtures/v1/multiple-outputs.json';
 import { migrateWorkflowFileV1 } from './migration';
+import { WorkflowGraphDomain } from './domain';
 import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from './schema';
 
 describe('WorkflowFile v1 to WorkflowGraph v2 migration', () => {
+  it.each([
+    ['blank', blank],
+    ['assets and storyboard', assetsStoryboard],
+    ['annotations', annotations],
+    ['multiple outputs', multipleOutputs],
+  ])('produces a strictly valid acyclic graph for the %s v1 fixture', (_name, fixture) => {
+    const migrated = migrateWorkflowFileV1(structuredClone(fixture));
+
+    expect(() => new WorkflowGraphDomain(migrated)).not.toThrow();
+  });
+
   it('migrates a blank workflow without mutating the source', () => {
     const source = structuredClone(blank);
     const migrated = migrateWorkflowFileV1(source);
@@ -166,5 +178,38 @@ describe('WorkflowFile v1 to WorkflowGraph v2 migration', () => {
     expect(() => migrateWorkflowFileV1({ version: 1, name: 'Broken', nodes: 'not-an-array' })).toThrow(
       /nodes must be an array/,
     );
+  });
+
+  it('deterministically keeps valid legacy dependencies and drops invalid reverse links', () => {
+    const source = structuredClone(assetsStoryboard) as Record<string, unknown>;
+    source.connections = [
+      { id: 'valid-input', from: 'asset-product', to: 'composition' },
+      { id: 'reverse-input', from: 'composition', to: 'asset-product' },
+      { id: 'valid-output', from: 'composition', to: 'output' },
+      { id: 'reverse-output', from: 'output', to: 'composition' },
+      { id: 'missing-node', from: 'missing', to: 'output' },
+    ];
+
+    const migrated = migrateWorkflowFileV1(source);
+
+    expect(migrated.edges.map((edge) => edge.id)).toEqual(['valid-input', 'valid-output']);
+    expect(() => new WorkflowGraphDomain(migrated)).not.toThrow();
+  });
+
+  it('drops legacy links that would duplicate dependencies or form cycles', () => {
+    const source = structuredClone(blank) as Record<string, unknown>;
+    source.connections = [
+      { id: 'forward', from: 'composition', to: 'output' },
+      { id: 'duplicate', from: 'composition', to: 'output' },
+      { id: 'reverse-cycle', from: 'output', to: 'composition' },
+      { id: 'self-cycle', from: 'composition', to: 'composition' },
+    ];
+
+    const first = migrateWorkflowFileV1(source);
+    const second = migrateWorkflowFileV1(source);
+
+    expect(first.edges.map((edge) => edge.id)).toEqual(['forward']);
+    expect(second).toEqual(first);
+    expect(() => new WorkflowGraphDomain(first)).not.toThrow();
   });
 });

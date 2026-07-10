@@ -1,4 +1,5 @@
 import { migrateWorkflowFileV1, WorkflowMigrationError } from './migration';
+import { WorkflowDomainError, WorkflowGraphDomain } from './domain';
 import {
   WORKFLOW_GRAPH_VERSION,
   parseWorkflowGraphV2,
@@ -20,17 +21,64 @@ function versionFrom(input: unknown): number | null {
   return typeof version === 'number' && Number.isFinite(version) ? version : null;
 }
 
+function domainIssue(error: WorkflowDomainError, graph: WorkflowGraphV2): WorkflowValidationIssue {
+  const edgeIndex = error.details.edgeIndex;
+  if (typeof edgeIndex === 'number') {
+    return {
+      path: `edges[${edgeIndex}]`,
+      message: `${error.code}: ${error.message}`,
+      severity: 'error',
+    };
+  }
+  const nodeId = error.details.nodeId;
+  const nodeIndex = typeof nodeId === 'string'
+    ? graph.nodes.findIndex((node) => node.id === nodeId)
+    : -1;
+  if (nodeIndex >= 0) {
+    const direction = error.details.direction;
+    const suffix = direction === 'input' || direction === 'output'
+      ? `.ports.${direction}s`
+      : '';
+    return {
+      path: `nodes[${nodeIndex}]${suffix}`,
+      message: `${error.code}: ${error.message}`,
+      severity: 'error',
+    };
+  }
+  return { path: '', message: `${error.code}: ${error.message}`, severity: 'error' };
+}
+
+function validateLoadedGraph(
+  graph: WorkflowGraphV2,
+  sourceVersion: number,
+  requiresExplicitSave: boolean,
+  issues: WorkflowValidationIssue[] = [],
+): WorkflowReadResult {
+  try {
+    const domain = new WorkflowGraphDomain(graph);
+    return {
+      ok: true,
+      graph: domain.graph,
+      sourceVersion,
+      requiresExplicitSave,
+      issues,
+    };
+  } catch (error) {
+    if (!(error instanceof WorkflowDomainError)) throw error;
+    return {
+      ok: false,
+      sourceVersion,
+      requiresExplicitSave: false,
+      issues: [...issues, domainIssue(error, graph)],
+    };
+  }
+}
+
 export function readWorkflowGraph(input: unknown): WorkflowReadResult {
   const sourceVersion = versionFrom(input);
   if (sourceVersion === 1) {
     try {
-      return {
-        ok: true,
-        graph: migrateWorkflowFileV1(input),
-        sourceVersion,
-        requiresExplicitSave: true,
-        issues: [],
-      };
+      return validateLoadedGraph(migrateWorkflowFileV1(input), sourceVersion, true);
     } catch (error) {
       const migrationError = error instanceof WorkflowMigrationError
         ? error
@@ -46,9 +94,11 @@ export function readWorkflowGraph(input: unknown): WorkflowReadResult {
 
   if (sourceVersion === WORKFLOW_GRAPH_VERSION) {
     const parsed = parseWorkflowGraphV2(input);
+    if (parsed.ok && parsed.value) {
+      return validateLoadedGraph(parsed.value, sourceVersion, false, parsed.issues);
+    }
     return {
-      ok: parsed.ok,
-      graph: parsed.value,
+      ok: false,
       sourceVersion,
       requiresExplicitSave: false,
       issues: parsed.issues,
