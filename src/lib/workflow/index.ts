@@ -10,3 +10,4 @@ export * from './palette';
 export * from './transformExecutor';
 export * from './runObserver';
 export * from './providerQaSelection';
+export * from './directorDraft';
