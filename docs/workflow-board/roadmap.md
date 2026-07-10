@@ -75,6 +75,11 @@ editable multi-format outputs.
 - Open a node result in the editor and return the edited result.
 - Campaign Composer template with guided activation.
 
+Selective execution is delivered as a pure planner and injected scheduler.
+Progress and cancellation integrate around that executor boundary; they do not
+reimplement dependency closure, preflight, cache reuse, provider limits, or
+failure propagation in the board store.
+
 ### Exit gate
 
 A new user can complete the flagship workflow without manually constructing a

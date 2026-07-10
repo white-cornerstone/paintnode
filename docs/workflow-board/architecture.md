@@ -247,6 +247,52 @@ allowing accidental cycles.
 7. Mark downstream results stale when a material input changes.
 8. Never delete an accepted result merely because a new branch or rerun starts.
 
+### Selective planning and execution
+
+Selective execution is a framework-independent two-stage contract:
+
+- **Run this node** plans the selected node and the upstream closure required
+  to satisfy it. An exact reusable result may satisfy an upstream dependency,
+  so work behind that cached boundary is not scheduled.
+- **Run from here** treats the selected node and every reachable downstream
+  node as affected work. It also includes side-branch upstream dependencies
+  required by a reachable merge or configured Output.
+
+The planner receives a detached snapshot of the current material key for every
+required node. These are the same keys persisted by the provenance contract;
+the selective planner does not calculate a second cache identity. A persisted
+successful run is reusable only when its material key matches exactly and the
+caller explicitly verifies that every referenced output artifact is still
+available and current. Missing verification, an exception while checking, a
+missing artifact, an invalid key, or a mismatched key is a cache miss. There is
+no process-global cache or separate trust metadata.
+
+Preflight reports the active execution frontier in stable graph order:
+
+- `planned` has no reusable result and will execute;
+- `cached` has an exact verified result and will be reused;
+- `stale` has a successful result for different material and will execute;
+- `blocked` cannot execute, with a missing-input, disabled-node, unsupported,
+  or upstream-blocked recovery reason.
+
+Planning never mutates run history. A material change is represented by the
+new current key, so only that node and downstream nodes whose own keys changed
+become stale. Successful or accepted results on unrelated branches remain
+available.
+
+The scheduler receives the global concurrency limit, provider key mapping, and
+per-provider limits from its boundary. It starts independently ready nodes in
+stable graph order. A failed executor blocks only dependent pending nodes;
+already-ready unrelated work continues and is returned with the failure and
+blocked-node outcome. Zero, missing, or invalid provider capacity is a
+configuration error raised before the first executor call.
+
+Progress and cancellation remain owned by the adjacent runtime work. That
+integration should wrap the injected node executor and consume the plan and
+outcome; it must not duplicate closure, cache, preflight, or scheduling rules
+inside UI state. The selective foundation has no Svelte, provider, network,
+filesystem, editor, or computer-use dependency.
+
 Node states:
 
 - `blocked`
@@ -309,6 +355,9 @@ Start test-first with pure domain coverage:
 6. stale propagation and cache keys;
 7. run-state transitions and failure recovery;
 8. serialization round trips and forward-compatible unknown nodes.
+9. selective closures, exact cache hit and miss behavior, stale isolation,
+   disabled blockers, deterministic ready order, provider concurrency, and
+   branch-local executor failure.
 
 Browser tests should then cover the Campaign Composer happy path, keyboard
 graph operations, node editing, branch comparison, and reopening a saved
