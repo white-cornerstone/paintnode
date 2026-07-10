@@ -343,6 +343,13 @@ export interface StoredAssetResult {
   asset: ProjectAsset;
 }
 
+export interface ProjectAssetMaterial {
+  assetId: string;
+  relativePath: string;
+  bytes: Uint8Array;
+  contentHash: string;
+}
+
 export interface SavedDocumentResult {
   relativePath: string;
   name: string;
@@ -509,9 +516,16 @@ export async function detectCodex(bin?: string): Promise<CodexDetectionResult> {
   });
 }
 
-export async function providerQaMode(): Promise<'provider-free' | 'provider-e2e' | null> {
+export type ProviderQaMode = 'provider-free' | 'provider-e2e' | null;
+
+export async function providerQaMode(): Promise<ProviderQaMode> {
   if (!isDesktop()) return null;
-  return invoke<'provider-free' | 'provider-e2e' | null>('provider_qa_mode');
+  return invoke<ProviderQaMode>('provider_qa_mode');
+}
+
+export async function providerFreeQaSquarePng(): Promise<Uint8Array> {
+  if (!isDesktop()) throw new Error('Provider-free QA output is available only in the desktop QA app.');
+  return new Uint8Array(await invoke<number[]>('provider_free_qa_square_png'));
 }
 
 export async function discoverCodexCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
@@ -760,6 +774,7 @@ export async function composeCodexWorkflow(
   config: CodexGeneratorConfig,
   prompt: string,
   sources: WorkflowSourceImage[],
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex workflow composition is only available in the desktop app.');
@@ -776,6 +791,8 @@ export async function composeCodexWorkflow(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
     runId,
   });
 }
@@ -911,6 +928,7 @@ export async function composeAntigravityWorkflow(
   config: AntigravityGeneratorConfig,
   prompt: string,
   sources: WorkflowSourceImage[],
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity workflow composition is only available in the desktop app.');
@@ -923,6 +941,8 @@ export async function composeAntigravityWorkflow(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
     runId,
   });
 }
@@ -969,6 +989,74 @@ export async function storeProjectAssetBytes(args: {
 export async function readProjectAsset(projectPath: string, assetId: string): Promise<StoredAssetResult> {
   if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
   return invoke<StoredAssetResult>('project_read_asset', { projectPath, assetId });
+}
+
+export async function resolveProjectAssetMaterial(
+  projectPath: string,
+  assetId: string,
+): Promise<ProjectAssetMaterial> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  const result = await invoke<ArrayBuffer>('project_resolve_asset_material', {
+    projectPath,
+    assetId,
+  });
+  return parseProjectAssetMaterialEnvelope(result);
+}
+
+const PROJECT_MATERIAL_MAGIC = new TextEncoder().encode('PNMATRAW');
+const PROJECT_MATERIAL_HEADER_BYTES = 18;
+const PROJECT_MATERIAL_METADATA_MAX_BYTES = 4 * 1024;
+const PROJECT_MATERIAL_MAX_BYTES = 32 * 1024 * 1024;
+
+export function parseProjectAssetMaterialEnvelope(raw: ArrayBuffer | Uint8Array): ProjectAssetMaterial {
+  const envelope = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  if (envelope.length < PROJECT_MATERIAL_HEADER_BYTES
+    || !PROJECT_MATERIAL_MAGIC.every((byte, index) => envelope[index] === byte)) {
+    throw new Error('Project material response has an invalid header.');
+  }
+  const view = new DataView(envelope.buffer, envelope.byteOffset, envelope.byteLength);
+  const version = view.getUint16(8, false);
+  const metadataLength = view.getUint32(10, false);
+  const materialLength = view.getUint32(14, false);
+  if (version !== 1
+    || metadataLength > PROJECT_MATERIAL_METADATA_MAX_BYTES
+    || materialLength > PROJECT_MATERIAL_MAX_BYTES
+    || PROJECT_MATERIAL_HEADER_BYTES + metadataLength + materialLength !== envelope.length) {
+    throw new Error('Project material response has invalid lengths or version.');
+  }
+  const metadataStart = PROJECT_MATERIAL_HEADER_BYTES;
+  const metadataEnd = metadataStart + metadataLength;
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+      envelope.subarray(metadataStart, metadataEnd),
+    )) as unknown;
+  } catch {
+    throw new Error('Project material response metadata is invalid.');
+  }
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+    throw new Error('Project material response metadata is invalid.');
+  }
+  const record = metadata as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== 3 || keys[0] !== 'assetId' || keys[1] !== 'contentHash' || keys[2] !== 'relativePath') {
+    throw new Error('Project material response metadata is invalid.');
+  }
+  const assetId = typeof record.assetId === 'string' ? record.assetId : '';
+  const relativePath = typeof record.relativePath === 'string' ? record.relativePath : '';
+  const contentHash = typeof record.contentHash === 'string' ? record.contentHash : '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(assetId) || assetId.includes('..')
+    || !relativePath || relativePath.startsWith('/') || relativePath.startsWith('~')
+    || relativePath.includes('\\') || relativePath.split('/').some((part) => !part || part === '.' || part === '..' || part.includes(':'))
+    || !/^sha256:[0-9a-f]{64}$/.test(contentHash)) {
+    throw new Error('Project material response identity is invalid.');
+  }
+  return {
+    assetId,
+    relativePath,
+    contentHash,
+    bytes: envelope.slice(metadataEnd),
+  };
 }
 
 export async function revealProjectPath(projectPath: string, assetId?: string | null): Promise<void> {

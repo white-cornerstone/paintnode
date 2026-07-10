@@ -30,12 +30,13 @@ describe('Creative Blueprint Foundation exit gate', () => {
       const first = planWorkflowExecution(graph, outputId, { maxConcurrency: 4 });
       const second = planWorkflowExecution(graph, outputId, { maxConcurrency: 4 });
       expect(first).toEqual(second);
+      const squareTransform = outputId === 'output-square' ? ['transform-generate-square'] : [];
       expect(first).toEqual({
         targetNodeId: outputId,
-        requiredNodeIds: [...roots, 'composition', outputId],
+        requiredNodeIds: [...roots, 'composition', ...squareTransform, outputId],
         cachedNodeIds: [],
-        executionOrder: [...roots, 'composition', outputId],
-        batches: [roots, ['composition'], [outputId]],
+        executionOrder: [...roots, 'composition', ...squareTransform, outputId],
+        batches: [roots, ['composition'], ...squareTransform.map((nodeId) => [nodeId]), [outputId]],
         blocked: [],
       });
       plans.set(outputId, first);
@@ -70,6 +71,7 @@ describe('Creative Blueprint Foundation exit gate', () => {
     const productAffected = [
       'slot-product',
       'composition',
+      'transform-generate-square',
       'output-square',
       'output-portrait',
       'output-landscape',

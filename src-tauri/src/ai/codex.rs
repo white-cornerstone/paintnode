@@ -4786,6 +4786,8 @@ pub(crate) async fn compose_codex_workflow(
     image_quality: Option<String>,
     image_moderation: Option<String>,
     autonomy_level: Option<String>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a composition prompt.".into());
@@ -4793,6 +4795,7 @@ pub(crate) async fn compose_codex_workflow(
     if sources.is_empty() {
         return Err("Add at least one asset node before generating.".into());
     }
+    let target_dimensions = validate_optional_target_dimensions(target_width, target_height)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let mut codex_options = codex_command_options(
@@ -4822,7 +4825,11 @@ pub(crate) async fn compose_codex_workflow(
             temp_job = TempJobDir::new("paintnode-workflow")?;
             temp_job.path().to_path_buf()
         };
-        write_codex_imagegen_options(&job_path, (0, 0), &codex_options)?;
+        write_codex_imagegen_options(
+            &job_path,
+            target_dimensions.unwrap_or((0, 0)),
+            &codex_options,
+        )?;
 
         let mut source_names = Vec::new();
         let mut image_paths = Vec::new();
@@ -4856,13 +4863,18 @@ pub(crate) async fn compose_codex_workflow(
             &run_id,
             "Requesting PaintNode Codex workflow composition",
         );
-        let bytes = run_codex_direct_image_request(
+        let raw_bytes = run_codex_direct_image_request(
             &prompt_text,
             &image_paths,
-            (0, 0),
+            target_dimensions.unwrap_or((0, 0)),
             &codex_options,
             Some(&job_path),
         )?;
+        let bytes = if let Some(target) = target_dimensions {
+            cover_crop_png_to_dimensions(&raw_bytes, target, "Codex workflow result")?.0
+        } else {
+            raw_bytes
+        };
         let result_path = job_path.join("result.png");
         fs::write(&result_path, &bytes)
             .map_err(|e| format!("Failed to write composed image: {e}"))?;
@@ -4872,6 +4884,8 @@ pub(crate) async fn compose_codex_workflow(
             emit_codex_progress(&app, &run_id, "Saving composed image to the project");
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
+            let dimensions = png_dimensions_from_bytes(&bytes)
+                .ok_or_else(|| "Codex workflow result PNG dimensions are invalid.".to_string())?;
             let asset = ProjectAsset::generated_png(
                 id,
                 relative_path,
@@ -4881,7 +4895,8 @@ pub(crate) async fn compose_codex_workflow(
                 ),
                 Some(prompt.trim().into()),
                 Some("result.png".into()),
-            );
+            )
+            .with_dimensions(dimensions.0, dimensions.1);
             Some(add_asset(&project_dir, asset)?)
         } else {
             None

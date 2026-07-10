@@ -17,6 +17,27 @@ detection, capability discovery, execution, and managed-runtime auth probes are
 disabled. Use this exact bundle identity for routine workflow-board interaction
 and Computer Use validation.
 
+Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
+Fake** Generate path after native QA mode detection completes. It creates a
+deterministic 1024 x 1024 PNG in memory and stores it through the normal project
+asset store. It never invokes Codex, Antigravity, provider authentication,
+pickers, network requests, or visual-input file reads. The command that creates
+the PNG rejects normal and provider-E2E modes.
+
+Manual Creative Blueprint checkpoint:
+
+1. Open a project folder that already contains a Product asset.
+2. Create Campaign Composer and assign Product; leave optional Subject and
+   Style empty.
+3. Confirm the green QA Fake notice, run Square, and observe Running then
+   Generated on the Transform card.
+4. Confirm Square preview and asset binding, save the workflow, reopen it, and
+   confirm the binding remains.
+5. Open or create an image document and use Place; success is valid only when a
+   real layer is inserted.
+
+Normal PaintNode and **Provider E2E** never expose this fake executor.
+
 ## Explicit provider E2E
 
 Pass canonical, trusted executables rather than relying on the GUI process

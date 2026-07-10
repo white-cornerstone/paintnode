@@ -4675,6 +4675,8 @@ pub(crate) async fn compose_antigravity_workflow(
     safety_sexually_explicit: Option<String>,
     safety_dangerous_content: Option<String>,
     autonomy_level: Option<String>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a composition prompt.".into());
@@ -4682,6 +4684,7 @@ pub(crate) async fn compose_antigravity_workflow(
     if sources.is_empty() {
         return Err("Add at least one asset node before generating.".into());
     }
+    let target_dimensions = validate_optional_target_dimensions(target_width, target_height)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let antigravity_bin = configured_or_default_antigravity_bin(bin)?;
@@ -4757,7 +4760,13 @@ pub(crate) async fn compose_antigravity_workflow(
             "Generating workflow composition through Antigravity image backend",
         );
         let result_path = job_path.join("result.png");
-        let bytes = run_antigravity_direct_image(
+        let aspect_ratio = target_dimensions.and_then(antigravity_closest_aspect_label);
+        let provider_size = aspect_ratio.as_deref().and_then(|aspect| {
+            target_dimensions
+                .and_then(|target| antigravity_output_target(aspect, target))
+                .map(|(tier, _)| tier.to_string())
+        });
+        let raw_bytes = run_antigravity_direct_image(
             &app,
             &run_id,
             &antigravity_bin,
@@ -4765,17 +4774,25 @@ pub(crate) async fn compose_antigravity_workflow(
             AntigravityImageRequestSpec {
                 prompt: prompt_text.clone(),
                 image_paths: source_paths,
-                aspect_ratio: None,
-                image_size: None,
+                aspect_ratio,
+                image_size: provider_size,
             },
             &options,
         )?;
+        let bytes = if let Some(target) = target_dimensions {
+            cover_crop_png_to_dimensions(&raw_bytes, target, "Antigravity workflow result")?.0
+        } else {
+            raw_bytes
+        };
         fs::write(&result_path, &bytes)
             .map_err(|e| format!("Failed to write Antigravity workflow result: {e}"))?;
         let data_url = png_data_url(&bytes)?;
         let asset = if let Some(project_dir) = project_dir {
             let (id, relative_path) =
                 write_asset_file(&project_dir, "generated", prompt.trim(), "png", &bytes)?;
+            let dimensions = png_dimensions_from_bytes(&bytes).ok_or_else(|| {
+                "Antigravity workflow result PNG dimensions are invalid.".to_string()
+            })?;
             Some(add_asset(
                 &project_dir,
                 ProjectAsset::generated_png(
@@ -4787,7 +4804,8 @@ pub(crate) async fn compose_antigravity_workflow(
                     ),
                     Some(prompt.trim().into()),
                     Some("result.png".into()),
-                ),
+                )
+                .with_dimensions(dimensions.0, dimensions.1),
             )?)
         } else {
             None

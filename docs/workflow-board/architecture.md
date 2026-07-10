@@ -103,6 +103,89 @@ Node executors call existing PaintNode AI, image-processing, project-asset, and
 document services through explicit interfaces. Executors do not directly
 manipulate UI state.
 
+The framework-independent Transform executor receives a detached request made
+from persisted graph data: Brief, Art Direction, Transform configuration,
+materialized Input assets, and the requested Output contract. It has no Svelte,
+editor, Tauri, picker, authentication, filesystem, or network imports. Those
+effects are injected at the boundary so the entire path can run with a fake
+executor and in-memory asset store.
+
+Persisted storyboard intent is part of that request rather than incidental UI
+state. Its data URL or project-relative ORA reference, canvas metadata,
+annotations, annotation items, visibility, and provider-neutral placement
+constraints are detached with the graph snapshot. The UI boundary materializes
+the persisted visual into PNG bytes; adapters send it before other visual
+inputs and keep the authored spatial constraints in the prompt without exposing
+pixel dimensions.
+
+Provider-specific adapters live outside `src/lib/workflow/`. Codex and
+Antigravity adapters translate the same request into their existing composition
+services, skip AI Director for the first thin slice, pass target shape through
+provider parameters, and normalize the returned raster to the exact configured
+Output dimensions before it is stored. A stored result with missing or wrong
+dimensions is rejected and does not replace the graph's previous accepted
+output.
+
+A Transform's persisted `advanced.provider`, `advanced.model`, and recognized
+`advanced.options` override current UI defaults. The executor selects only the
+matching provider adapter; it never falls back silently. Boundary-owned values
+such as project path, run identity, and Director mode cannot be replaced by a
+saved options object.
+
+### Campaign Composer thin-slice path
+
+The first executable path is deliberately narrow:
+
+`Product / optional Subject / optional Style -> Brief -> Art Direction -> Generate Transform -> Square Output`
+
+Only Square Output uses the Generate Transform in this slice. Portrait and
+Landscape remain structurally present for later branches. Saved v2 graphs that
+connect Art Direction directly to an Output continue to validate, serialize,
+and reopen, but that legacy direct edge cannot invoke the new Transform
+executor.
+
+The UI store owns transient queued/running progress and commits terminal
+cancelled, failed, or successful run records atomically. Progress events are
+runtime-only, sanitized, strictly sequenced, and routed by the complete
+workflow-session, workflow, run, and node identity; they are never serialized.
+Per-Transform run tokens prevent an older overlapping run from overwriting a
+newer result. Before
+binding, the store rechecks the workflow session identity, domain and reactive
+graph revisions, active run token, and project identity captured at start. A
+workflow edit, open/new/close action, project switch, or newer run makes the
+result non-committable; the current graph is preserved and the board cannot
+announce success.
+
+Cancellation aborts the executor signal synchronously and closes progress
+routing before asking the provider to terminate. Provider termination is
+hard-bounded; failure or timeout becomes a safe detach, and the detached
+promise's late progress, output, or failure is ignored. Opening a different
+workflow or starting a newer attempt applies the same abort-and-detach rule.
+Retry creates a new attempt linked to the latest failed or cancelled attempt on
+the same node and preserves all earlier accepted outputs. A legacy persisted
+`running` record is normalized on load or serialization to a stable failed
+attempt with the creator-safe `INTERRUPTED` recovery message. New executions do
+not persist a running record, so saving during execution cannot reopen into a
+permanent spinner.
+
+Placing the
+Square result is a separate editor action and reports success only when the
+editor returns a real inserted layer identifier; an absent active document is
+surfaced as a recovery action rather than a false success.
+
+Progress observation must not delay that baseline capture. The board starts
+listener registration, invokes the store run synchronously before awaiting the
+listener, and disposes the listener after the run even when registration
+resolves late. Target, assets, provider adapters and options, project path, and
+project identity are therefore snapshots of the click that started the run.
+
+The isolated native `provider-free` QA bundle may expose one visibly labelled
+`QA Fake` executor for manual state-path validation. Native mode resolution must
+complete before Generate is enabled. The fake returns only a deterministic
+Square PNG, uses metadata-only inputs, and writes solely through the normal
+project result store. Its Rust command rejects normal and `provider-e2e` modes;
+those modes never construct or advertise the fake executor.
+
 ## WorkflowGraph v2
 
 The persisted graph should contain:
@@ -163,6 +246,94 @@ allowing accidental cycles.
 6. Persist run records and project assets as each node completes.
 7. Mark downstream results stale when a material input changes.
 8. Never delete an accepted result merely because a new branch or rerun starts.
+
+### Selective planning and execution
+
+Selective execution is a framework-independent two-stage contract:
+
+- **Run this node** plans the selected node and the upstream closure required
+  to satisfy it. An exact reusable result may satisfy an upstream dependency,
+  so work behind that cached boundary is not scheduled.
+- **Run from here** treats the selected node and every reachable downstream
+  node as affected work. It also includes side-branch upstream dependencies
+  required by a reachable merge or configured Output.
+
+The planner receives a detached snapshot of the current material key for every
+unblocked `available` node. These are the same keys persisted by the provenance
+contract;
+the selective planner does not calculate a second cache identity. A persisted
+successful run is reusable only when its material key matches exactly and the
+caller explicitly verifies that every referenced output artifact is still
+available and current. Missing verification, an exception while checking, a
+missing artifact, an invalid key, or a mismatched key is a cache miss. There is
+no process-global cache or separate trust metadata.
+
+Preflight reports the active execution frontier in stable graph order:
+
+- `planned` is satisfied structural context or has no reusable result;
+- `cached` has an exact verified result and will be reused;
+- `stale` has a successful result for different material and will execute;
+- `blocked` cannot execute, with a missing-input, disabled-node, unsupported,
+  or upstream-blocked recovery reason.
+
+Every preflight entry also says whether it will produce an executor call.
+Registry disposition is explicit: `not-required` nodes such as Input, Brief,
+Art Direction, and Output remain visible as satisfied material context;
+`available` capability nodes may execute or reuse a result; and `unavailable`
+capability nodes block with their creator-facing recovery reason. A normal
+Campaign output run therefore executes Generate, not every structural node on
+the path. Planning continues through a propagated blocker so preflight exposes
+the disabled or missing-input root cause as well as affected downstream nodes.
+The default disposition is derived from the creator registry and the node's
+configured capability. A Transform cannot execute merely because its node type
+is `transform`: the configured capability must match the registry's available
+capability. A boundary may inject a stricter disposition, but unsupported Edit,
+Relight, or Remove Background configurations remain blocked until their real
+executor is registered.
+Execution restrictions are monotonic: they may demote or disable a
+registry-available capability, but cannot promote `draft-only`, unsupported, or
+`not-required` definitions into executable work.
+Trusted boundary code normalizes detached restriction data into an opaque
+branded value. The planner accepts only that value and reads its internal
+snapshot by identity, without reflecting on caller objects. A proxy around the
+opaque value is rejected as an invalid boundary value without invoking its
+prototype, key, or descriptor traps.
+
+Planning never mutates run history. A material change is represented by the
+new current key, so only that node and downstream nodes whose own keys changed
+become stale. Successful or accepted results on unrelated branches remain
+available.
+
+The scheduler receives the global concurrency limit, provider key mapping, and
+per-provider limits from its boundary. It starts independently ready nodes in
+stable graph order. A failed executor blocks only dependent pending nodes;
+already-ready unrelated work continues and is returned with the failure and
+blocked-node outcome. Raw executor errors are replaced by a safe generic
+failure unless the boundary injects a validated sanitizer. Zero, missing, or
+invalid provider capacity is a configuration error raised before the first
+executor call, and exceptions from provider mapping are converted to the same
+stable safe boundary without exposing paths, credentials, or adapter details.
+Provider limits are read, validated, and checked for consistency for every
+planned executor during this preflight, then scheduling uses only the detached
+snapshot. A stateful getter or proxy cannot change capacity after validation.
+
+Executor results are accepted only as the exact `{ cacheKey, outputIds }`
+shape, with the planned key, unique nonblank identities, no cross-node identity
+collision, and an injected ownership check proving that every output belongs
+to the current node and project. Extra metadata and foreign output identities
+are failures. Each executor-owned result is detached and deeply frozen exactly
+once before shape, material, collision, or ownership validation; every later
+decision and the committed result use only that snapshot. Stateful getters or
+proxies cannot change a value between validation and commit. The returned
+outcome strictly projects those fields into another detached deeply frozen
+snapshot; callers cannot mutate result arrays, failure records, or outcome
+collections after execution.
+
+Progress and cancellation remain owned by the adjacent runtime work. That
+integration should wrap the injected node executor and consume the plan and
+outcome; it must not duplicate closure, cache, preflight, or scheduling rules
+inside UI state. The selective foundation has no Svelte, provider, network,
+filesystem, editor, or computer-use dependency.
 
 Node states:
 
@@ -226,10 +397,19 @@ Start test-first with pure domain coverage:
 6. stale propagation and cache keys;
 7. run-state transitions and failure recovery;
 8. serialization round trips and forward-compatible unknown nodes.
+9. selective closures, exact cache hit and miss behavior, stale isolation,
+   disabled blockers, deterministic ready order, provider concurrency, and
+   branch-local executor failure.
 
 Browser tests should then cover the Campaign Composer happy path, keyboard
 graph operations, node editing, branch comparison, and reopening a saved
 workflow.
+
+Before browser automation is added, the Campaign Composer thin slice is covered
+through a pure fake-executor integration test that proves readiness, exact
+dependency planning, source materialization, execution, project-asset binding,
+serialization, and reopen without provider, authentication, picker, network,
+filesystem, editor, or Svelte side effects.
 
 ## Decisions to validate during Foundation
 

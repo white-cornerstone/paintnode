@@ -27,7 +27,7 @@ describe('workflow templates', () => {
   it.each([
     ['blank', '05ec353fb4ef34ad'],
     ['asset-composition', 'ff5fdd72010519eb'],
-    ['campaign-composer', 'c9186efe61cff7a5'],
+    ['campaign-composer', 'b8db122e8011e8aa'],
   ] as const)('keeps the exact persisted v2 golden for %s', (id, expectedHash) => {
     const graph = instantiateWorkflowTemplate(id, { graphId: `golden-${id}`, name: `Golden ${id}` });
     expect(goldenHash(JSON.stringify(graph))).toBe(expectedHash);
@@ -47,6 +47,7 @@ describe('workflow templates', () => {
     expect(first.nodes.filter((node) => node.type === 'brief')).toHaveLength(1);
     expect(first.nodes.filter((node) => node.type === 'art-direction')).toHaveLength(1);
     expect(first.nodes.filter((node) => node.type === 'output')).toHaveLength(outputCount);
+    expect(first.nodes.filter((node) => node.type === 'transform')).toHaveLength(id === 'campaign-composer' ? 1 : 0);
 
     const serialized = serializeWorkflowGraphV2(first);
     const parsed = parseWorkflowGraphV2(JSON.parse(serialized));
@@ -119,7 +120,12 @@ describe('workflow templates', () => {
       const graph = instantiateWorkflowTemplate(definition.id, { name: `Test ${definition.name}` });
       const domain = new WorkflowGraphDomain(graph);
       expect(graph.metadata.name).toBe(`Test ${definition.name}`);
-      expect(domain.graph.edges).toHaveLength(graph.nodes.filter((node) => node.type === 'input').length + 1 + definition.outputs.length);
+      expect(domain.graph.edges).toHaveLength(
+        graph.nodes.filter((node) => node.type === 'input').length
+          + 1
+          + definition.outputs.length
+          + (definition.id === 'campaign-composer' ? 1 : 0),
+      );
       expect(domain.graph.nodes.find((node) => node.type === 'brief')?.ports.outputs).toEqual([
         { id: 'prompt', label: 'Brief', dataType: 'prompt' },
       ]);
@@ -137,5 +143,36 @@ describe('workflow templates', () => {
         );
       }
     }
+  });
+
+  it('routes only Campaign Composer Square through the configured Generate Transform', () => {
+    const graph = instantiateWorkflowTemplate('campaign-composer');
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: { nodeId: 'composition', portId: 'layout' },
+        target: { nodeId: 'transform-generate-square', portId: 'source' },
+      }),
+      expect.objectContaining({
+        source: { nodeId: 'transform-generate-square', portId: 'result' },
+        target: { nodeId: 'output-square', portId: 'source' },
+      }),
+    ]));
+    expect(graph.edges).not.toContainEqual(expect.objectContaining({
+      source: { nodeId: 'composition', portId: 'layout' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    }));
+  });
+
+  it('continues to parse and round-trip a pre-Generate v2 Campaign Composer graph', () => {
+    const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
+    graph.nodes = graph.nodes.filter((node) => node.id !== 'transform-generate-square');
+    graph.edges = graph.edges.filter((edge) => !edge.id.includes('transform-generate-square'));
+    graph.edges.push({
+      id: 'edge-composition-output-square',
+      source: { nodeId: 'composition', portId: 'layout' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    });
+    const parsed = parseWorkflowGraphV2(JSON.parse(serializeWorkflowGraphV2(graph)));
+    expect(parsed).toMatchObject({ ok: true, value: graph });
   });
 });

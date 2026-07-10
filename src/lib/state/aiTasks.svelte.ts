@@ -4,8 +4,8 @@ import type { WorkflowSourceImage } from '../integrations/desktop';
 
 const TASKS_STORAGE_PREFIX = 'paintnode.aiTasks.';
 
-export type AiTaskKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust';
-export type AiTaskStatus = 'running' | 'completed' | 'error';
+export type AiTaskKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust' | 'workflow';
+export type AiTaskStatus = 'running' | 'completed' | 'cancelled' | 'error';
 
 export interface GenerateTaskDetail {
   kind: 'generate';
@@ -68,7 +68,13 @@ export interface DecoupleTaskDetail {
   notes: string;
 }
 
-export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail | AutoAdjustTaskDetail;
+export interface WorkflowTaskDetail {
+  kind: 'workflow';
+  providerLabel: string;
+  outputName: string;
+}
+
+export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail | AutoAdjustTaskDetail | WorkflowTaskDetail;
 
 /** Live sub-task progress for placement-split runs (in-memory, like `progress`). */
 export interface AiTaskPartProgress {
@@ -100,6 +106,7 @@ export interface AiTask {
   detail: AiTaskDetail;
   partProgress: AiTaskPartProgress | null;
   retry: (() => Promise<void> | void) | null;
+  cancel: (() => Promise<void> | void) | null;
 }
 
 export interface AiTaskDraft {
@@ -126,7 +133,7 @@ function createTaskId(kind: AiTaskKind): string {
   return `${kind}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-type StoredAiTask = Omit<AiTask, 'retry' | 'partProgress'>;
+type StoredAiTask = Omit<AiTask, 'retry' | 'cancel' | 'partProgress'>;
 
 function storageKey(projectPath: string): string {
   return `${TASKS_STORAGE_PREFIX}${encodeURIComponent(projectPath)}`;
@@ -136,8 +143,8 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
   if (!isRecord(value)) return null;
   const kind = value.kind;
   const status = value.status;
-  if (kind !== 'generate' && kind !== 'retouch' && kind !== 'upscale' && kind !== 'decouple' && kind !== 'autoAdjust') return null;
-  if (status !== 'running' && status !== 'completed' && status !== 'error') return null;
+  if (kind !== 'generate' && kind !== 'retouch' && kind !== 'upscale' && kind !== 'decouple' && kind !== 'autoAdjust' && kind !== 'workflow') return null;
+  if (status !== 'running' && status !== 'completed' && status !== 'cancelled' && status !== 'error') return null;
   const detail = value.detail;
   if (!isRecord(detail) || detail.kind !== kind) return null;
   const id = typeof value.id === 'string' ? value.id : createTaskId(kind);
@@ -185,7 +192,7 @@ function storedDetailFrom(detail: AiTaskDetail): AiTaskDetail {
   };
 }
 
-class AiTaskStore {
+export class AiTaskStore {
   private allTasks = $state<AiTask[]>([]);
   private activeProjectPath = $state<string | null>(null);
   private loadedProjectPaths = new Set<string>();
@@ -221,6 +228,7 @@ class AiTaskStore {
       detail: draft.detail,
       partProgress: null,
       retry: null,
+      cancel: null,
     };
     this.allTasks.unshift(task);
     this.persistProject(projectPath);
@@ -284,6 +292,23 @@ class AiTaskStore {
     task.retry = retry;
   }
 
+  setCancel(id: string, cancel: (() => Promise<void> | void) | null): void {
+    const task = this.find(id);
+    if (!task) return;
+    task.cancel = cancel;
+  }
+
+  canCancel(task: AiTask): boolean {
+    return task.status === 'running' && task.cancel !== null;
+  }
+
+  async cancel(id: string): Promise<void> {
+    const task = this.find(id);
+    if (!task || !this.canCancel(task)) return;
+    task.progress = 'Cancelling…';
+    await task.cancel?.();
+  }
+
   complete(id: string, progress = 'Completed'): void {
     const task = this.find(id);
     if (!task) return;
@@ -294,6 +319,19 @@ class AiTaskStore {
     // Release the closure: Retry is only offered on error, and retry closures
     // can pin document-sized canvases for the rest of the session.
     task.retry = null;
+    task.cancel = null;
+    this.persistProject(task.projectPath);
+  }
+
+  markCancelled(id: string, progress = 'Cancelled'): void {
+    const task = this.find(id);
+    if (!task) return;
+    task.status = 'cancelled';
+    task.progress = progress;
+    task.error = '';
+    task.completedAt = Date.now();
+    task.retry = null;
+    task.cancel = null;
     this.persistProject(task.projectPath);
   }
 
@@ -304,6 +342,7 @@ class AiTaskStore {
     task.error = error;
     task.progress = error.split('\n')[0] || 'Failed';
     task.completedAt = Date.now();
+    task.cancel = null;
     this.persistProject(task.projectPath);
   }
 
@@ -330,7 +369,7 @@ class AiTaskStore {
 
   open(id: string): void {
     const task = this.find(id);
-    if (!task) return;
+    if (!task || task.kind === 'workflow') return;
     ui.openAiTask(task.kind, id);
   }
 
@@ -339,14 +378,16 @@ class AiTaskStore {
     // Clears everything the panel currently shows: the active project's tasks
     // plus project-less (null-path) tasks.
     this.allTasks = this.allTasks.filter(
-      (task) => (task.projectPath !== projectPath && task.projectPath !== null) || task.status !== 'completed',
+      (task) => (task.projectPath !== projectPath && task.projectPath !== null)
+        || (task.status !== 'completed' && task.status !== 'cancelled'),
     );
     this.persistProject(projectPath);
   }
 
   clearCompletedTask(id: string): void {
     const task = this.find(id);
-    this.allTasks = this.allTasks.filter((item) => item.id !== id || item.status !== 'completed');
+    this.allTasks = this.allTasks.filter((item) => item.id !== id
+      || (item.status !== 'completed' && item.status !== 'cancelled'));
     this.persistProject(task?.projectPath ?? this.activeProjectPath);
   }
 
@@ -363,7 +404,7 @@ class AiTaskStore {
     this.allTasks = this.allTasks.filter(
       (task) =>
         (task.projectPath !== projectPath && task.projectPath !== null) ||
-        (task.status !== 'completed' && task.status !== 'error'),
+        (task.status !== 'completed' && task.status !== 'cancelled' && task.status !== 'error'),
     );
     this.persistProject(projectPath);
   }
@@ -385,7 +426,7 @@ class AiTaskStore {
         .map((item) => storedTaskFrom(item, projectPath))
         .filter((task): task is StoredAiTask => !!task)
         .filter((task) => !existingIds.has(task.id))
-        .map((task) => ({ ...task, partProgress: null, retry: null }));
+        .map((task) => ({ ...task, partProgress: null, retry: null, cancel: null }));
       this.allTasks = [...this.allTasks, ...loaded].sort((a, b) => b.startedAt - a.startedAt);
       this.persistProject(projectPath);
     } catch {
@@ -397,7 +438,7 @@ class AiTaskStore {
     if (!projectPath || typeof localStorage === 'undefined') return;
     const serializable: StoredAiTask[] = this.allTasks
       .filter((task) => task.projectPath === projectPath)
-      .map(({ retry, partProgress, ...task }) => ({
+      .map(({ retry, cancel, partProgress, ...task }) => ({
         ...task,
         detail: storedDetailFrom(task.detail),
       }));

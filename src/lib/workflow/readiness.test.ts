@@ -8,6 +8,8 @@ function readyOptions(): WorkflowReadinessOptions {
     desktop: true,
     projectPath: '/tmp/project',
     assets: [{ id: 'product-asset', relativePath: 'assets/product.png', exists: true }],
+    provider: 'fake',
+    supportedProviders: ['fake'],
   };
 }
 
@@ -43,6 +45,67 @@ describe('workflow readiness', () => {
     const result = workflowReadiness(bindProduct(), readyOptions());
     expect(result.ready).toBe(true);
     expect(result.items.find((item) => item.code === 'required-assets')).toMatchObject({ status: 'complete' });
+  });
+
+  it('scopes Transform and provider readiness to the requested output', () => {
+    const graph = bindProduct();
+    const square = workflowReadiness(graph, {
+      ...readyOptions(), provider: 'unsupported', targetNodeId: 'output-square',
+    });
+    expect(square.ready).toBe(false);
+    expect(square.nextAction).toMatchObject({
+      code: 'provider', action: 'Choose a supported image provider',
+    });
+
+    const portrait = workflowReadiness(graph, {
+      ...readyOptions(), provider: 'unsupported', targetNodeId: 'output-portrait',
+    });
+    expect(portrait.ready).toBe(false);
+    expect(portrait.nextAction).toMatchObject({
+      code: 'transform', action: 'Add or reconnect a Generate Transform for Portrait 4:5',
+    });
+    expect(portrait.items.some((item) => item.code === 'provider')).toBe(false);
+  });
+
+  it('blocks a pre-Generate direct output with a recoverable Transform action before a run', () => {
+    const graph = bindProduct();
+    graph.nodes = graph.nodes.filter((node) => node.id !== 'transform-generate-square');
+    graph.edges = graph.edges.filter((edge) => !edge.id.includes('transform-generate-square'));
+    graph.edges.push({
+      id: 'legacy-direct-square',
+      source: { nodeId: 'composition', portId: 'layout' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    });
+    const result = workflowReadiness(graph, { ...readyOptions(), targetNodeId: 'output-square' });
+    expect(result.ready).toBe(false);
+    expect(result.nextAction).toMatchObject({
+      code: 'transform', action: 'Add or reconnect a Generate Transform for Square 1:1',
+    });
+  });
+
+  it('uses the persisted Transform provider override for target readiness', () => {
+    const graph = bindProduct();
+    const transform = graph.nodes.find((node) => node.id === 'transform-generate-square')!;
+    transform.config.advanced = { provider: 'antigravity', model: 'gemini-3.1-flash-image' };
+    const supported = workflowReadiness(graph, {
+      ...readyOptions(),
+      provider: 'codex',
+      supportedProviders: ['codex', 'antigravity'],
+      targetNodeId: 'output-square',
+    });
+    expect(supported.ready).toBe(true);
+    expect(supported.items.find((item) => item.code === 'provider')?.message).toMatch(/antigravity/i);
+
+    transform.config.advanced = { provider: 'saved-unsupported-provider' };
+    const unsupported = workflowReadiness(graph, {
+      ...readyOptions(),
+      provider: 'codex',
+      supportedProviders: ['codex', 'antigravity'],
+      targetNodeId: 'output-square',
+    });
+    expect(unsupported.nextAction).toMatchObject({
+      code: 'provider', action: 'Choose a supported image provider',
+    });
   });
 
   it('blocks missing, disconnected, and stale required asset bindings with a specific next action', () => {

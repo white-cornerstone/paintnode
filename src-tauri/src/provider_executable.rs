@@ -365,6 +365,25 @@ pub(crate) fn provider_qa_mode() -> Option<String> {
     }
 }
 
+fn provider_free_qa_square_png_in_mode(qa_mode: &str) -> Result<Vec<u8>, String> {
+    if qa_mode != "provider-free" {
+        return Err("QA Fake output is available only in provider-free native QA mode.".into());
+    }
+    let image = image::RgbaImage::from_fn(1024, 1024, |x, y| {
+        let grid = ((x / 128) + (y / 128)) % 2;
+        let red = if grid == 0 { 38 } else { 69 };
+        let green = ((x * 160) / 1023) as u8 + 60;
+        let blue = ((y * 150) / 1023) as u8 + 70;
+        image::Rgba([red, green, blue, 255])
+    });
+    crate::png::encode_rgba_png(image, "provider-free QA Square")
+}
+
+#[tauri::command]
+pub(crate) fn provider_free_qa_square_png() -> Result<Vec<u8>, String> {
+    provider_free_qa_square_png_in_mode(&std::env::var(QA_MODE_ENV).unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +394,25 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    #[test]
+    fn provider_free_qa_square_is_exact_deterministic_png_and_mode_gated() {
+        let first =
+            provider_free_qa_square_png_in_mode("provider-free").expect("provider-free QA PNG");
+        let second = provider_free_qa_square_png_in_mode("provider-free")
+            .expect("deterministic provider-free QA PNG");
+        assert_eq!(first, second);
+        assert_eq!(
+            crate::png::png_dimensions_from_bytes(&first),
+            Some((1024, 1024))
+        );
+        assert!(crate::png::decode_png_rgba(&first, "provider-free QA Square").is_ok());
+
+        for mode in ["", "provider-e2e", "unexpected"] {
+            assert!(provider_free_qa_square_png_in_mode(mode)
+                .expect_err("non-provider-free modes must be rejected")
+                .contains("only in provider-free"));
+        }
+    }
     #[cfg(unix)]
     fn executable(path: &std::path::Path, body: &str) {
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write fake provider");

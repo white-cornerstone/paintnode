@@ -1,35 +1,37 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import {
     codexConfigFromRunOptions,
-    composeCodexWorkflow,
-    composeAntigravityWorkflow,
     antigravityConfigFromRunOptions,
+    cancelAiRun,
     isDesktop,
+    providerQaMode,
+    readProjectFile,
+    resolveProjectAssetMaterial,
+    storeProjectAssetBytes,
     type ProjectAsset,
   } from '../integrations/desktop';
-  import { ratioLabel } from '../ai/imageModelCapabilities';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
   import { modelToPlainText } from '../engine/text/model';
-  import { storyboardPlacementSummary } from '../engine/storyboard/analyze';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
   import { wheelZoomFactor } from '../engine/zoomGesture';
   import { compositeToCanvas } from '../engine/compositor';
   import { saveOra } from '../ora/save';
+  import { loadOra } from '../ora/load';
   import { editor } from '../state/editor.svelte';
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { aiRunningLabel, imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import {
     workflow,
     type WorkflowAssetNode,
@@ -37,15 +39,27 @@
     type WorkflowConnection,
     type WorkflowCreatorNode,
     type WorkflowOutputNode,
+    type WorkflowStoreRunOptions,
     type WorkflowUnsupportedNode,
   } from '../state/workflow.svelte';
+  import { WorkflowSelectiveUiState } from '../state/workflowSelectiveUiState.svelte';
   import {
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
+    createWorkflowBoardRunIdGenerator,
     findOpenCreatorNodePlacement,
+    resolveWorkflowBoardProjectAsset,
+    resolveWorkflowStoryboardRead,
+    selectiveExecutionOutcomeSummary,
+    selectiveExecutionPreviewSummary,
+    selectiveExecutionRunAvailability,
+    workflowProviderSelection,
     workflowReadiness,
     type CreatorNodeType,
     type WorkflowNodePort,
+    type WorkflowSelectiveExecutionOutcome,
+    type WorkflowSelectiveRunMode,
+    type WorkflowStoryboardDescriptor,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
@@ -53,15 +67,17 @@
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
+  import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
+  import {
+    createAntigravityWorkflowTransformExecutor,
+    createCodexWorkflowTransformExecutor,
+  } from '../integrations/workflowCompositionExecutors';
+  import {
+    createProviderFreeQaWorkflowExecutor,
+    type ProviderFreeQaScenario,
+  } from '../integrations/providerFreeQaWorkflowExecutor';
 
-  type CodexProgressPayload = {
-    runId: string;
-    message: string;
-    kind?: string;
-    provider?: string;
-    detail?: string;
-  };
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {
@@ -88,6 +104,10 @@
   let progress = $state('');
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
+  let qaModeResolved = $state(!desktop);
+  let qaScenario = $state<ProviderFreeQaScenario>('success');
+  const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
@@ -121,7 +141,17 @@
   let storyboardLast = { x: 0, y: 0 };
   let storyboardAnnotationDraft = $state<AnnotationItem | null>(null);
   let storyboardAnnotationDragStart: { x: number; y: number } | null = null;
-  let stopProgress: UnlistenFn | null = null;
+  let activeTransformNodeId = $state<string | null>(null);
+  let activeWorkflowTaskId = $state<string | null>(null);
+  const selectiveUiState = new WorkflowSelectiveUiState();
+  let selectiveTargetNodeId = $state<string | null>(null);
+  let selectiveMode = $state<WorkflowSelectiveRunMode | null>(null);
+  let selectiveOutcome = $state<WorkflowSelectiveExecutionOutcome | null>(null);
+  let selectiveRunning = $state(false);
+  let selectiveMessage = $state('');
+  let selectiveError = $state('');
+  let lastSelectiveContextIdentity = '';
+  let boardDestroyed = false;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
   let handledFocusRequest = 0;
@@ -147,8 +177,43 @@
       desktop,
       projectPath: project.path,
       assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+      provider: providerSelection.provider,
+      supportedProviders: providerSelection.supportedProviders,
     });
   });
+
+  function outputReadiness(outputNodeId: string) {
+    return workflowReadiness(workflow.graphSnapshot(), {
+      desktop,
+      projectPath: project.path,
+      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+      provider: providerSelection.provider,
+      supportedProviders: providerSelection.supportedProviders,
+      targetNodeId: outputNodeId,
+    });
+  }
+
+  function selectivePreviewContextIdentity(): string {
+    workflow.rev;
+    return JSON.stringify({
+      graphRevision: workflow.rev,
+      projectIdentity: project.identity,
+      provider: providerSelection.provider,
+      qaScenario,
+      options: JSON.stringify(runOptions),
+      keepAiDebugArtifacts: settings.value.workspace.keepAiDebugArtifacts,
+      assets: assets.map((asset) => [asset.id, asset.relativePath, asset.exists]),
+    });
+  }
+
+  $effect(() => {
+    const identity = selectivePreviewContextIdentity();
+    if (lastSelectiveContextIdentity && identity !== lastSelectiveContextIdentity && !selectiveRunning) {
+      invalidateSelectivePreview();
+    }
+    lastSelectiveContextIdentity = identity;
+  });
+
   $effect(() => {
     const request = ui.workflowFocusRequest;
     if (request === 0 || request === handledFocusRequest) return;
@@ -168,13 +233,25 @@
   });
 
   onDestroy(() => {
+    boardDestroyed = true;
     endStoryboardEditSession();
-    stopProgress?.();
     if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
 
   onMount(() => {
+    if (desktop) {
+      void providerQaMode()
+        .then((mode) => {
+          if (!boardDestroyed) qaMode = mode;
+        })
+        .catch(() => {
+          if (!boardDestroyed) qaMode = null;
+        })
+        .finally(() => {
+          if (!boardDestroyed) qaModeResolved = true;
+        });
+    }
     const flushBeforeSave = () => {
       if (editor.textEdit) editor.commitActiveText();
       if (workflow.storyboardEditing && storyboardDoc) persistStoryboardFromDoc();
@@ -342,11 +419,12 @@
       const result = await project.readAsset(outputAsset);
       const bytes = await (await fetch(result.dataUrl)).arrayBuffer();
       const bmp = await bytesToBitmap(new Uint8Array(bytes), outputAsset.mime ?? 'image/png');
-      editor.placeImage(bmp, bmp.width, bmp.height, outputAsset.name.replace(/\.[^.]+$/, ''), {
+      const placed = editor.placeImage(bmp, bmp.width, bmp.height, outputAsset.name.replace(/\.[^.]+$/, ''), {
         assetId: outputAsset.id,
         path: outputAsset.relativePath,
       });
       bmp.close();
+      if (!placed.layerId) throw new Error('Open or create an image document before placing the workflow output.');
       editor.flash(`Placed ${outputAsset.name}`);
     } catch (e) {
       editor.flash('Place output failed: ' + ((e as Error)?.message ?? String(e)));
@@ -1047,16 +1125,6 @@
     return annotations;
   }
 
-  function placementSummaryForCanvas(canvas: HTMLCanvasElement): string[] {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return [];
-    try {
-      return storyboardPlacementSummary(ctx.getImageData(0, 0, canvas.width, canvas.height));
-    } catch {
-      return [];
-    }
-  }
-
   function storyboardAnnotationsForDisplay(): AnnotationItem[] {
     const base = workflow.storyboardEditing && storyboardDoc
       ? storyboardDoc.annotations
@@ -1471,135 +1539,262 @@
     return connected ?? workflow.outputNodes[0];
   }
 
+  function invalidateSelectivePreview(): void {
+    if (selectiveUiState.busy && !selectiveRunning) void workflow.cancelSelectiveExecution();
+    selectiveUiState.invalidatePreview();
+    selectiveOutcome = null;
+    selectiveTargetNodeId = null;
+    selectiveMode = null;
+    selectiveMessage = '';
+    selectiveError = '';
+  }
+
+  function preflightForNode(nodeId: string) {
+    return selectiveUiState.preflight?.stateByNodeId[nodeId] ?? null;
+  }
+
+  function workflowExecutionOptionsIdentity(): string {
+    return JSON.stringify({
+      provider: providerSelection.provider,
+      qaMode,
+      qaScenario,
+      options: JSON.stringify(runOptions),
+      keepAiDebugArtifacts: settings.value.workspace.keepAiDebugArtifacts,
+      assets: assets.map((asset) => [asset.id, asset.relativePath, asset.exists]),
+    });
+  }
+
+  function createWorkflowExecutionContext(runId: string) {
+    const runSelection = providerSelection;
+    if (!runSelection.ready || !runSelection.provider) {
+      throw new Error('Wait for native QA mode detection before preparing execution.');
+    }
+    const runProjectPath = project.path;
+    const runProvider = runSelection.provider;
+    const runAssets = assets.map((asset) => ({ ...asset }));
+    const runIdGenerator = createWorkflowBoardRunIdGenerator(runId);
+    const executors = runSelection.qaFake
+      ? [createProviderFreeQaWorkflowExecutor('provider-free', undefined, { scenario: qaScenario })]
+      : [
+          createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+          createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+        ];
+    const options: WorkflowStoreRunOptions = {
+      projectPath: runProjectPath,
+      provider: runProvider,
+      executors,
+      assets: runAssets,
+      selectiveExecutionIdentity: workflowExecutionOptionsIdentity(),
+      currentProjectIdentity: () => project.identity,
+      runIdGenerator,
+      ...(runSelection.qaFake ? {} : {
+        cancelExecutionForRun: async (attemptRunId: string) => {
+          await cancelAiRun(attemptRunId);
+          return { disposition: 'detached' as const };
+        },
+      }),
+      onProgress: (event) => {
+        progress = event.message;
+        if (activeWorkflowTaskId) aiTasks.setProgress(activeWorkflowTaskId, event.message);
+      },
+      resolveAsset: (asset) => resolveWorkflowBoardProjectAsset(runProjectPath, asset, resolveProjectAssetMaterial),
+      readStoryboard: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => resolveWorkflowStoryboardRead(
+        storyboard,
+        {
+          readEmbedded: async (dataUrl) => new Uint8Array(await (await fetch(dataUrl)).arrayBuffer()),
+          readOra: async (relativePath) => {
+            if (!runProjectPath) throw new Error('No project is open.');
+            const bytes = await readProjectFile(runProjectPath, relativePath);
+            const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+            return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
+          },
+        },
+      ),
+      storeAsset: async (artifact) => (await storeProjectAssetBytes({
+        projectPath: artifact.projectPath,
+        name: artifact.name,
+        bytes: artifact.bytes,
+        kind: 'generated',
+        prompt: artifact.prompt,
+        width: artifact.width,
+        height: artifact.height,
+        mime: artifact.mime,
+      })).asset,
+    };
+    return { runProjectPath, runProvider, options };
+  }
+
+  async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
+    invalidateSelectivePreview();
+    selectiveTargetNodeId = nodeId;
+    selectiveMode = mode;
+    if (!providerSelection.ready || !providerSelection.provider) {
+      selectiveError = providerSelection.label;
+      return;
+    }
+    const previewEpoch = selectiveUiState.beginPreview();
+    if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
+    if (storyboardCanvas) persistStoryboard();
+    selectiveMessage = 'Preparing selective run preview…';
+    const runId = createRunId();
+    try {
+      const context = createWorkflowExecutionContext(runId);
+      selectiveUiState.runOptions = context.options;
+      const preflight = await workflow.preflightSelectiveExecution(mode, nodeId, context.options);
+      if (!selectiveUiState.isCurrentPreview(previewEpoch)) return;
+      selectiveUiState.capture(preflight, context.options);
+      selectiveMessage = selectiveExecutionPreviewSummary(preflight.plan.preflight);
+    } catch (cause) {
+      if (!selectiveUiState.isCurrentPreview(previewEpoch)) return;
+      selectiveUiState.runOptions = null;
+      selectiveError = (cause as Error)?.message ?? String(cause);
+      selectiveMessage = '';
+    } finally {
+      selectiveUiState.settlePreview(previewEpoch);
+    }
+  }
+
+  async function confirmSelectiveExecution(): Promise<void> {
+    const preflight = selectiveUiState.preflight;
+    const options = selectiveUiState.runOptions;
+    if (!preflight || !options || !selectiveTargetNodeId) return;
+    const availability = selectiveExecutionRunAvailability(preflight.plan.preflight);
+    if (!availability.enabled) {
+      selectiveError = availability.reason;
+      return;
+    }
+    selectiveUiState.beginRun();
+    selectiveRunning = true;
+    busy = true;
+    selectiveError = '';
+    progress = 'Running selective workflow…';
+    const task = aiTasks.create({
+      projectPath: options.projectPath,
+      kind: 'workflow',
+      title: `Workflow: ${selectiveMode === 'run-node' ? 'Run this node' : 'Run from here'}`,
+      subtitle: options.provider,
+      progress,
+      detail: {
+        kind: 'workflow', providerLabel: options.provider, outputName: 'Selective execution',
+      },
+    });
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => {
+      await workflow.cancelSelectiveExecution();
+    });
+    try {
+      const outcome = await workflow.runSelectiveExecution(preflight, options, { maxConcurrency: 1 });
+      selectiveUiState.clear();
+      selectiveOutcome = outcome;
+      selectiveMessage = selectiveExecutionOutcomeSummary(outcome);
+      if (outcome.executedNodeIds.length > 0 && options.projectPath) await project.refresh(options.projectPath);
+      if (outcome.cancelledNodeIds.length > 0) aiTasks.markCancelled(task.id);
+      else if (Object.keys(outcome.failures).length > 0) aiTasks.fail(task.id, selectiveMessage);
+      else aiTasks.complete(task.id, selectiveMessage);
+      editor.flash(selectiveMessage);
+    } catch (cause) {
+      selectiveUiState.clear();
+      selectiveError = (cause as Error)?.message ?? String(cause);
+      if ((cause as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(task.id);
+      else aiTasks.fail(task.id, selectiveError);
+    } finally {
+      aiTasks.setCancel(task.id, null);
+      activeWorkflowTaskId = null;
+      busy = false;
+      selectiveUiState.settleRun();
+      lastSelectiveContextIdentity = selectivePreviewContextIdentity();
+      selectiveRunning = false;
+      progress = '';
+    }
+  }
+
+  async function cancelSelectiveExecution(): Promise<void> {
+    selectiveMessage = selectiveRunning ? 'Cancelling selective run…' : 'Cancelling preview…';
+    if (activeWorkflowTaskId) await aiTasks.cancel(activeWorkflowTaskId);
+    else await workflow.cancelSelectiveExecution();
+    if (!selectiveRunning) invalidateSelectivePreview();
+  }
+
   async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
+    if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
+    if (storyboardCanvas) persistStoryboard();
     const targetOutput = targetOutputForGenerate(node);
     error = '';
-    const preflight = workflowReadiness(workflow.graphSnapshot(), {
-      desktop,
-      projectPath: project.path,
-      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
-    });
+    const preflight = outputReadiness(targetOutput.id);
     if (!preflight.ready) {
       error = preflight.nextAction
         ? `${preflight.nextAction.message} Next: ${preflight.nextAction.action}.`
         : 'Complete the workflow checklist before generating.';
       return;
     }
-    const sourceNodes = workflow.connectedAssetNodesTo('composition');
-    busy = true;
-    progress = 'Preparing workflow assets...';
-    const runId = createRunId();
-    stopProgress?.();
-    stopProgress = null;
-    try {
-      stopProgress = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-        if (event.payload.runId === runId && event.payload.message.trim()) {
-          progress = event.payload.message.trim();
-        }
-      });
-    } catch {
-      progress = aiRunningLabel(imageProvider);
+    if (!providerSelection.ready || !providerSelection.provider) {
+      error = 'Wait for native QA mode detection before generating.';
+      return;
     }
-
+    busy = true;
+    progress = providerSelection.qaFake
+      ? 'Running deterministic QA Fake output…'
+      : 'Preparing workflow assets...';
+    const runId = createRunId();
+    const context = createWorkflowExecutionContext(runId);
+    const { runProjectPath, runProvider } = context;
     try {
-      if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
-      const sources = [];
-      let hasStoryboardSource = false;
-      let storyboardPlacementText = '';
-      if (storyboardCanvas && !isStoryboardBlank()) {
-        const storyboardSource = workflow.storyboardEditing && storyboardDoc
-          ? compositeToCanvas(storyboardDoc)
-          : storyboardCanvas;
-        storyboardPlacementText = placementSummaryForCanvas(storyboardSource)
-          .map((line, index) => `${index + 1}. ${line}`)
-          .join('\n');
-        sources.push({
-          name: 'Storyboard sketch - mandatory layout guide',
-          bytes: await canvasToPngBytes(storyboardSource),
-        });
-        hasStoryboardSource = true;
-        persistStoryboard();
+      activeTransformNodeId = workflow.incoming(targetOutput.id)
+        .find((connection) => connection.targetPortId === 'source')?.from ?? null;
+      const task = aiTasks.create({
+        projectPath: runProjectPath,
+        kind: 'workflow',
+        title: `Workflow: ${targetOutput.name || 'Generate output'}`,
+        subtitle: runProvider,
+        progress,
+        runId,
+        detail: {
+          kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
+        },
+      });
+      activeWorkflowTaskId = task.id;
+      aiTasks.setCancel(task.id, async () => {
+        if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
+      });
+      const outcome = await workflow.runCampaignGenerate(targetOutput.id, context.options);
+      if (!outcome.committed) {
+        if (project.path === runProjectPath) await project.refresh(runProjectPath);
+        error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
+        return;
       }
-      const storyboardAnnotations = workflow.storyboardAnnotations
-        .map((annotation, index) => `${index + 1}. ${annotation}`)
-        .join('\n');
-      const boundSources = sourceNodes
-        .map((node) => ({ node, asset: assetFor(node) }))
-        .filter((item): item is { node: WorkflowAssetNode; asset: ProjectAsset } => item.asset !== null);
-      for (const [index, { node, asset }] of boundSources.entries()) {
-        sources.push({
-          name: node.note
-            ? `Mandatory asset ${index + 1}: ${node.name}. Role: ${node.note}`
-            : `Mandatory asset ${index + 1}: ${node.name}`,
-          bytes: await project.readFile({ ...asset, kind: 'generated', modifiedAt: asset.createdAt, size: 0, exists: true }),
-        });
-      }
-      if (!sources.length) throw new Error('Workflow asset files are missing.');
-      const requiredAssets = boundSources.map(({ node }, index) => `${index + 1}. ${node.name}${node.note ? ` - ${node.note}` : ''}`).join('\n');
-      const creativeBrief = workflow.briefNodes[0]?.objective.trim() ?? '';
-      const prompt = `${creativeBrief ? `Creative brief:\n${creativeBrief}\n\n` : ''}Art direction:
-${workflow.prompt.trim()}
-
-Final output aspect ratio: ${ratioLabel(targetOutput.finalWidth, targetOutput.finalHeight)}.
-
-Mandatory connected assets that must be visibly represented:
-${requiredAssets}
-
-${hasStoryboardSource ? `Storyboard requirement: input image 1 is the composition storyboard. Treat it as the primary spatial plan for the final image. Preserve the storyboard's relative placement, left/right ordering, approximate scale, subject pose, gesture direction, prop positions, foreground/background zones, and major empty areas. The storyboard is a rough semantic diagram, so do not copy its sketch/grid style; translate it into a polished final image using the connected assets and text prompt.` : ''}
-
-${storyboardPlacementText ? `Storyboard coordinate analysis extracted from the sketch pixels:
-${storyboardPlacementText}
-
-Use these coordinate notes as hard placement constraints. Keep the main subject/object centers in the same canvas region shown by the storyboard. If a major subject is detected in the left half or left third, do not move it to the right half in the final image unless the text explicitly says to override the storyboard.` : ''}
-
-${storyboardAnnotations ? `Storyboard text annotations extracted from editable layers:
-${storyboardAnnotations}
-
-These annotations are direct user instructions attached to the storyboard. Apply them to the nearest relevant region of the storyboard and treat them as higher priority than guessing from pixels alone.` : ''}
-
-Use the storyboard as the layout reference. This is a generative synthesis task, not a cut-and-paste pasteboard: reason from the connected assets and create a new coherent photo/image based on the text prompt. Use the assets as visual references for identity, subject appearance, prop/object appearance, environment, layout, lighting, and style. Do not blindly paste cropped source pixels together, and do not output only the background or only one source asset.
-
-Unless the user explicitly asks for an impossible or surreal composition, preserve normal real-world structure: plausible anatomy, object scale, perspective, lighting, shadows, occlusion, contact, and physical interaction. If the user deliberately asks for something non-realistic, follow that request intentionally while keeping the result visually coherent.
-
-      Human anatomy quality gate: if the final image contains a person, the arms, wrists, hands, palms, and fingers must be natural and unbroken. For a held prop, show one clean believable grip with no duplicated palms, extra hands, fused fingers, missing fingers, or broken joints. Regenerate/refine before finishing if this quality gate is not met.`;
-      const result =
-        imageProvider === 'antigravity'
-          ? await composeAntigravityWorkflow(
-              antigravityConfigFromRunOptions(
-                runOptions,
-                project.path,
-                runId,
-                false,
-                settings.value.workspace.keepAiDebugArtifacts,
-              ),
-              prompt,
-              sources,
-            )
-          : await composeCodexWorkflow(
-              codexConfigFromRunOptions(
-                runOptions,
-                project.path,
-                runId,
-                false,
-                settings.value.workspace.keepAiDebugArtifacts,
-              ),
-              prompt,
-              sources,
-            );
-      if (result.asset) {
-        await project.refresh();
-        workflow.setOutput(result.asset, targetOutput.id);
-      }
+      await project.refresh();
+      aiTasks.complete(task.id, 'Workflow generation completed');
       editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
-      editor.flash('Workflow generation failed');
+      const cancelled = (e as { code?: unknown })?.code === 'CANCELLED';
+      if (activeWorkflowTaskId) {
+        if (cancelled) aiTasks.markCancelled(activeWorkflowTaskId);
+        else aiTasks.fail(activeWorkflowTaskId, error);
+      }
+      editor.flash(cancelled ? 'Workflow generation cancelled' : 'Workflow generation failed');
     } finally {
+      if (activeWorkflowTaskId) aiTasks.setCancel(activeWorkflowTaskId, null);
       busy = false;
+      activeTransformNodeId = null;
+      activeWorkflowTaskId = null;
       progress = '';
-      stopProgress?.();
-      stopProgress = null;
     }
+  }
+
+  async function cancelGenerate(): Promise<void> {
+    if (activeWorkflowTaskId) {
+      await aiTasks.cancel(activeWorkflowTaskId);
+      return;
+    }
+    if (!activeTransformNodeId) return;
+    progress = 'Cancelling…';
+    await workflow.cancelCampaignGenerate(activeTransformNodeId);
   }
 </script>
 
@@ -1815,6 +2010,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </button>
               </div>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="specialized-node-body asset-node-body">
               <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
                 {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
@@ -1874,6 +2070,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
               <small>{briefCreatorDefinition.label}</small>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
               <p>{brief.guidance}</p>
               <textarea
@@ -1888,6 +2085,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
 
         {#each workflow.creatorNodes as node (node.id)}
           {@const definition = creatorNodeDefinition(node.type)}
+          {@const transformRunState = workflow.transformExecution(node.id)}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -1927,6 +2125,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 ><Icon svg={Delete} size={13} /></button>
               </div>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>{definition.description}</p>
               {#if node.type === 'art-direction'}
@@ -1998,6 +2197,63 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                   {/each}
                 </div>
               {/if}
+              {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+                {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
+                  <p
+                    class="selective-running-state"
+                    data-workflow-selective-running-state={transformRunState.state}
+                    aria-live="polite"
+                  ><strong>{transformRunState.state}</strong> {transformRunState.message}</p>
+                {/if}
+                <div class="selective-node-actions" role="group" aria-label="Preview selective run">
+                  <button
+                    type="button"
+                    disabled={busy || selectiveUiState.busy || !providerSelection.ready}
+                    aria-describedby={`selective-action-reason-${node.id}`}
+                    onclick={() => void previewSelectiveExecution('run-node', node.id)}
+                  >Run this node</button>
+                  <button
+                    type="button"
+                    disabled={busy || selectiveUiState.busy || !providerSelection.ready}
+                    aria-describedby={`selective-action-reason-${node.id}`}
+                    onclick={() => void previewSelectiveExecution('run-from-here', node.id)}
+                  >Run from here</button>
+                </div>
+                <p class="transform-run-state" id={`selective-action-reason-${node.id}`}>
+                  {providerSelection.ready
+                    ? 'Preview planned, cached, blocked, and stale nodes before anything executes.'
+                    : providerSelection.label}
+                </p>
+                {#if selectiveTargetNodeId === node.id}
+                  <div class="selective-preview" aria-label="Confirm selective run" aria-live="polite">
+                    <strong>{selectiveMode === 'run-node' ? 'Run this node' : 'Run from here'} preview</strong>
+                    {#if selectiveMessage}<p>{selectiveMessage}</p>{/if}
+                    {#if selectiveError}<p class="selective-error">{selectiveError}</p>{/if}
+                    {#if selectiveUiState.preflight}
+                      {@const runAvailability = selectiveExecutionRunAvailability(selectiveUiState.preflight.plan.preflight)}
+                      <div class="selective-preview-actions">
+                        <button
+                          type="button"
+                          disabled={selectiveUiState.busy || !runAvailability.enabled}
+                          aria-describedby={`selective-run-reason-${node.id}`}
+                          onclick={() => void confirmSelectiveExecution()}
+                        >Confirm selective run</button>
+                        <button type="button" onclick={() => void cancelSelectiveExecution()}>Cancel</button>
+                      </div>
+                      <p id={`selective-run-reason-${node.id}`}>{runAvailability.reason}</p>
+                    {:else if selectiveUiState.busy}
+                      <button type="button" onclick={() => void cancelSelectiveExecution()}>Cancel</button>
+                    {:else if selectiveOutcome}
+                      <button type="button" onclick={invalidateSelectivePreview}>Dismiss</button>
+                    {/if}
+                  </div>
+                {/if}
+              {:else if node.type === 'transform' && definition.executor.status === 'available'}
+                <p class="draft-reason" id={`draft-reason-${node.id}`}>
+                  Only the Generate capability is executable in this slice. Configure this Transform as Generate to run it.
+                </p>
+                <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
+              {/if}
               {#if definition.executor.status === 'draft-only'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
                 <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
@@ -2024,6 +2280,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>{node.name}</span>
               <small>Unsupported</small>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>This “{node.unsupportedType}” node is preserved for a compatible future PaintNode version.</p>
               {#if node.ports.inputs.length + node.ports.outputs.length > 0}
@@ -2067,6 +2324,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
           </div>
+          <WorkflowNodePreflight entry={preflightForNode('composition')} />
           <div
             class="storyboard"
             class:editing={workflow.storyboardEditing}
@@ -2186,14 +2444,36 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if imageProvider === 'antigravity'}
+          {#if !providerSelection.qaFake && imageProvider === 'antigravity'}
             <label>
               <span>Antigravity auth helper</span>
               <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
             </label>
           {/if}
           <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
-            <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+            {#if providerSelection.qaFake}
+              <div class="qa-fake-banner">
+                <div role="status">
+                  <strong>QA Fake</strong>
+                  <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
+                </div>
+                <label>
+                  <span>Native QA scenario</span>
+                  <select
+                    aria-label="QA Fake scenario"
+                    disabled={busy || selectiveUiState.busy}
+                    value={qaScenario}
+                    onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}
+                  >
+                    <option value="success">Success</option>
+                    <option value="slow-success">Slow / cancellable</option>
+                    <option value="failure">Failure / retry</option>
+                  </select>
+                </label>
+              </div>
+            {:else}
+              <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveUiState.busy || !providerSelection.ready} />
+            {/if}
           </div>
           <div class="readiness-checklist" role="group" aria-label="Generate checklist" tabindex="-1" data-workflow-checklist onpointerdown={(event) => event.stopPropagation()}>
             <div class="checklist-head">
@@ -2210,13 +2490,19 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               </div>
             {/each}
           </div>
-          {#if busy}<p class="progress">{progress}</p>{/if}
+          {#if busy}
+            <p class="progress">
+              {progress}
+              <button type="button" onclick={() => void cancelGenerate()}>Cancel</button>
+            </p>
+          {/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
           {@const ports = workflowNodePorts(outputNode.id)}
+          {@const targetReadiness = outputReadiness(outputNode.id)}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
@@ -2254,6 +2540,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 ><Icon svg={Delete} size={13} /></button>
               </div>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(outputNode.id)} />
             <div class="specialized-node-body output-node-body">
               <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
                 {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
@@ -2274,18 +2561,18 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </div>
               </div>
               <div class="output-actions">
-                <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
+                <button onclick={() => void generate(outputNode)} disabled={busy || selectiveUiState.busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
-                  Generate
+                  {providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
                 </button>
                 <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
                   <Icon svg={Open} size={14} />
                   Place
                 </button>
               </div>
-              {#if !readiness.ready && readiness.nextAction}
+              {#if !targetReadiness.ready && targetReadiness.nextAction}
                 <p class="generate-block" id={`generate-block-${outputNode.id}`}>
-                  {readiness.nextAction.action}
+                  {targetReadiness.nextAction.action}
                 </p>
               {/if}
             </div>
@@ -2804,6 +3091,53 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .draft-run {
     width: 100%;
   }
+  .selective-node-actions,
+  .selective-preview-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .selective-node-actions button,
+  .selective-preview-actions button {
+    min-width: 0;
+    padding: 5px;
+    font-size: 10px;
+  }
+  .selective-preview {
+    display: grid;
+    gap: 6px;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 8%, #252629);
+  }
+  .selective-preview strong {
+    color: var(--text-bright);
+    font-size: 10px;
+  }
+  .selective-preview p {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.35;
+  }
+  .selective-preview .selective-error {
+    color: #ffb0b0;
+  }
+  .selective-running-state {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 5px;
+    align-items: baseline;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    color: var(--text);
+  }
+  .selective-running-state strong {
+    color: #a9d5ff;
+    text-transform: uppercase;
+  }
   .brief-node textarea {
     min-height: 105px;
   }
@@ -2904,6 +3238,32 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     display: flex;
     justify-content: flex-start;
     padding: 0 8px 8px;
+  }
+  .qa-fake-banner {
+    display: grid;
+    gap: 2px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 1px solid #48795e;
+    border-radius: 4px;
+    background: #20382a;
+    color: #d8f3e3;
+    font-size: 10px;
+  }
+  .qa-fake-banner > div,
+  .qa-fake-banner label {
+    display: grid;
+    gap: 2px;
+  }
+  .qa-fake-banner span {
+    color: #acd5bd;
+  }
+  .qa-fake-banner label {
+    margin-top: 4px;
+  }
+  .qa-fake-banner select {
+    min-width: 0;
+    width: 100%;
   }
   .readiness-checklist {
     display: grid;
