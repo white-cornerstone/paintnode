@@ -111,6 +111,7 @@
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
   let selectedReviewCandidates = $state<Record<string, string>>({});
+  let reviewVerificationEpoch = 0;
   let activeCandidateController: AbortController | null = null;
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
@@ -1633,6 +1634,30 @@
     return { runProjectPath, runProvider, options };
   }
 
+  $effect(() => {
+    workflow.rev;
+    project.identity;
+    const assetIdentity = assets.map((asset) => [asset.id, asset.relativePath, asset.exists]);
+    const reviewNodeIds = workflow.graphSnapshot().nodes
+      .filter((node) => node.type === 'review')
+      .map((node) => node.id);
+    const ready = providerSelection.ready && Boolean(providerSelection.provider);
+    const epoch = ++reviewVerificationEpoch;
+    if (!ready || reviewNodeIds.length === 0) return;
+    void (async () => {
+      const context = createWorkflowExecutionContext(createRunId());
+      void assetIdentity;
+      for (const reviewNodeId of reviewNodeIds) {
+        try {
+          await workflow.refreshReviewState(reviewNodeId, context.options);
+        } catch {
+          // The node remains recoverably stale/unavailable until a current snapshot verifies.
+        }
+        if (epoch !== reviewVerificationEpoch || boardDestroyed) return;
+      }
+    })();
+  });
+
   async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
     invalidateSelectivePreview();
     selectiveTargetNodeId = nodeId;
@@ -1798,27 +1823,26 @@
   }
 
   function selectedReviewCandidate(nodeId: string) {
-    const candidates = workflow.reviewCandidates(nodeId, assets);
+    const candidates = workflow.reviewCandidates(nodeId, assets, true, project.identity);
     const selectedId = selectedReviewCandidates[nodeId];
     return candidates.find((candidate) => candidate.candidateId === selectedId) ?? candidates[0] ?? null;
   }
 
-  function switchReviewCandidate(nodeId: string, direction: -1 | 1): void {
-    const candidates = workflow.reviewCandidates(nodeId, assets);
-    if (candidates.length === 0) return;
-    const current = selectedReviewCandidate(nodeId);
-    const index = Math.max(0, candidates.findIndex((candidate) => candidate.candidateId === current?.candidateId));
-    selectedReviewCandidates[nodeId] = candidates[(index + direction + candidates.length) % candidates.length].candidateId;
-  }
-
-  function reviewCandidateKeydown(event: KeyboardEvent, nodeId: string): void {
+  async function reviewCandidateKeydown(event: KeyboardEvent, nodeId: string): Promise<void> {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
     event.preventDefault();
-    const candidates = workflow.reviewCandidates(nodeId, assets);
+    const candidates = workflow.reviewCandidates(nodeId, assets, true, project.identity);
     if (candidates.length === 0) return;
-    if (event.key === 'Home' || event.key === 'End') {
-      selectedReviewCandidates[nodeId] = candidates[event.key === 'Home' ? 0 : candidates.length - 1].candidateId;
-    } else switchReviewCandidate(nodeId, event.key === 'ArrowLeft' ? -1 : 1);
+    const current = selectedReviewCandidate(nodeId);
+    const currentIndex = Math.max(0, candidates.findIndex((candidate) => candidate.candidateId === current?.candidateId));
+    const next = event.key === 'Home'
+      ? candidates[0]
+      : event.key === 'End'
+        ? candidates.at(-1)!
+        : candidates[(currentIndex + (event.key === 'ArrowLeft' ? -1 : 1) + candidates.length) % candidates.length];
+    selectedReviewCandidates[nodeId] = next.candidateId;
+    await tick();
+    document.getElementById(`review-candidate-tab-${nodeId}-${next.candidateId}`)?.focus();
   }
 
   async function promoteReviewCandidate(nodeId: string): Promise<void> {
@@ -2305,9 +2329,9 @@
                     oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
                   ></textarea>
                 </label>
-                {@const reviewCandidates = workflow.reviewCandidates(node.id, assets)}
+                {@const reviewCandidates = workflow.reviewCandidates(node.id, assets, true, project.identity)}
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
-                {@const reviewResolution = workflow.reviewResolution(node.id, assets)}
+                {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
                   <p class="review-resolution" data-review-state={reviewResolution.state}>
                     {reviewResolution.state === 'ready'
@@ -2319,12 +2343,14 @@
                     role="tablist"
                     tabindex="-1"
                     aria-label="Concept candidates"
-                    onkeydown={(event) => reviewCandidateKeydown(event, node.id)}
+                    onkeydown={(event) => void reviewCandidateKeydown(event, node.id)}
                   >
                     {#each reviewCandidates as candidate (candidate.candidateId)}
                       <button
                         type="button"
                         role="tab"
+                        id={`review-candidate-tab-${node.id}-${candidate.candidateId}`}
+                        aria-controls={`review-candidate-panel-${node.id}`}
                         aria-selected={candidate.candidateId === reviewCandidate?.candidateId}
                         tabindex={candidate.candidateId === reviewCandidate?.candidateId ? 0 : -1}
                         data-candidate-state={candidate.state}
@@ -2333,7 +2359,13 @@
                     {/each}
                   </div>
                   {#if reviewCandidate}
-                    <div class="review-candidate-context" role="tabpanel" tabindex="0">
+                    <div
+                      class="review-candidate-context"
+                      role="tabpanel"
+                      id={`review-candidate-panel-${node.id}`}
+                      aria-labelledby={`review-candidate-tab-${node.id}-${reviewCandidate.candidateId}`}
+                      tabindex="0"
+                    >
                       <p><strong>Brief</strong> {reviewCandidate.brief || 'No brief recorded.'}</p>
                       <p><strong>Art direction</strong> {reviewCandidate.artDirection || 'No art direction recorded.'}</p>
                       <small>

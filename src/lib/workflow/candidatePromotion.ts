@@ -39,6 +39,7 @@ export type WorkflowReviewBlockCode =
   | 'REVIEW_TOPOLOGY_INVALID'
   | 'PROMOTION_REQUIRED'
   | 'PROMOTION_STALE'
+  | 'PROMOTED_LINEAGE_INVALID'
   | 'PROMOTED_RUN_MISSING'
   | 'PROMOTED_OUTPUT_UNAVAILABLE';
 
@@ -59,17 +60,16 @@ export type WorkflowReviewTopologyResolution = {
 
 function reviewTopology(graph: WorkflowGraphV2, reviewNodeId: string) {
   const review = graph.nodes.find((node) => node.id === reviewNodeId && node.type === 'review');
-  const incomingEdges = graph.edges.filter((edge) => (
-    edge.target.nodeId === reviewNodeId && edge.target.portId === 'candidates' && edge.source.portId === 'result'
-  ));
+  const incomingEdges = graph.edges.filter((edge) => edge.target.nodeId === reviewNodeId && edge.target.portId === 'candidates');
   const incoming = incomingEdges.length === 1 ? incomingEdges[0] : undefined;
-  const transform = graph.nodes.find((node) => node.id === incoming?.source.nodeId && node.type === 'transform');
-  const outgoingEdges = graph.edges.filter((edge) => (
-    edge.source.nodeId === reviewNodeId && edge.source.portId === 'selected' && edge.target.portId === 'source'
-    && graph.nodes.some((node) => node.id === edge.target.nodeId && node.type === 'output')
-  ));
+  const transform = incoming?.source.portId === 'result'
+    ? graph.nodes.find((node) => node.id === incoming.source.nodeId && node.type === 'transform')
+    : undefined;
+  const outgoingEdges = graph.edges.filter((edge) => edge.source.nodeId === reviewNodeId && edge.source.portId === 'selected');
   const outgoing = outgoingEdges.length === 1 ? outgoingEdges[0] : undefined;
-  const output = graph.nodes.find((node) => node.id === outgoing?.target.nodeId && node.type === 'output');
+  const output = outgoing?.target.portId === 'source'
+    ? graph.nodes.find((node) => node.id === outgoing.target.nodeId && node.type === 'output')
+    : undefined;
   return { review, transform, output, valid: Boolean(review && transform && output && incomingEdges.length === 1 && outgoingEdges.length === 1) };
 }
 
@@ -210,6 +210,9 @@ export function resolveWorkflowReviewTopology(
   if (!run || !isFullWorkflowRunRecord(run) || run.status !== 'succeeded') {
     return blocked('PROMOTED_RUN_MISSING', 'The promoted candidate run is no longer available.', 'Promote another candidate');
   }
+  if (promotion.sourceNodeId !== transform.id) {
+    return blocked('PROMOTED_LINEAGE_INVALID', 'The promoted candidate belongs to a different Transform than this Review.', 'Review and promote a connected candidate');
+  }
   const currentMaterial = options.currentMaterialKeys?.[transform.id];
   if ((currentMaterial && currentMaterial !== promotion.materialKey)
     || createWorkflowReviewNodeRevision(graph, review.id) !== promotion.reviewNodeRevision) {
@@ -282,16 +285,12 @@ export function resolveWorkflowCampaignPath(
         }
       }
       if (target?.type === 'review' && edge.target.portId === 'candidates') {
-        const outgoing = graph.edges.filter((item) => (
-          item.source.nodeId === target.id && item.source.portId === 'selected' && item.target.portId === 'source'
-          && graph.nodes.some((node) => node.id === item.target.nodeId && node.type === 'output')
-        ));
-        for (const reviewEdge of outgoing) {
-          if (!selector.outputNodeId || reviewEdge.target.nodeId === selector.outputNodeId) {
-            matches.push({
-              transformNodeId: transform.id, reviewNodeId: target.id, outputNodeId: reviewEdge.target.nodeId,
-            });
-          }
+        const topology = reviewTopology(graph, target.id);
+        if (topology.valid && topology.transform?.id === transform.id && topology.output
+          && (!selector.outputNodeId || topology.output.id === selector.outputNodeId)) {
+          matches.push({
+            transformNodeId: transform.id, reviewNodeId: target.id, outputNodeId: topology.output.id,
+          });
         }
       }
     }

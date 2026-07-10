@@ -64,6 +64,8 @@ export interface WorkflowSelectiveExecutionRequest {
   materialKeys: Readonly<Record<string, string>>;
   executionRestrictions?: WorkflowExecutionRestrictions;
   isRunRecordReusable?: (record: Readonly<WorkflowRunRecordV1>) => boolean;
+  reviewMaterialKeys?: Readonly<Record<string, string>>;
+  isReviewOutputAvailable?: (output: Readonly<WorkflowRunRecordV1['outputs'][number]>) => boolean;
 }
 
 export interface WorkflowSelectiveExecutionPlan {
@@ -425,7 +427,11 @@ export function planSelectiveWorkflowExecution(
     if (!required.has(node.id)) continue;
     let registryDisposition = registryExecutionDisposition(node);
     if (node.type === 'review') {
-      const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: node.id });
+      const resolution = resolveWorkflowReviewTopology(graph, {
+        reviewNodeId: node.id,
+        currentMaterialKeys: request.reviewMaterialKeys,
+        isOutputAvailable: request.isReviewOutputAvailable,
+      });
       if (resolution.state === 'ready') {
         registryDisposition = { kind: 'available' };
         promotedReviewResults.set(node.id, {

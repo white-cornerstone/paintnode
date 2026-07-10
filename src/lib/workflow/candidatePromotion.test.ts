@@ -195,4 +195,19 @@ describe('workflow candidate promotion', () => {
     expect(resolveWorkflowReviewTopology(graph, { reviewNodeId: 'review-concepts' }))
       .toMatchObject({ state: 'blocked', reason: { code: 'REVIEW_TOPOLOGY_INVALID' } });
   });
+
+  it('blocks a promotion whose source is no longer the Transform connected to Review', async () => {
+    const graph = await reviewGraph();
+    const candidate = deriveWorkflowReviewCandidates(graph, 'review-concepts')[0];
+    const promoted = promoteWorkflowCandidate(graph, {
+      reviewNodeId: 'review-concepts', candidateId: candidate.candidateId,
+      id: 'promotion-reconnected', promotedAt: 1000,
+    });
+    const reconnected = structuredClone(promoted);
+    const original = reconnected.nodes.find((node) => node.id === 'transform-generate-square')!;
+    reconnected.nodes.push({ ...structuredClone(original), id: 'transform-replacement', runRecordIds: [] });
+    reconnected.edges.find((edge) => edge.id === 'edge-transform-review')!.source.nodeId = 'transform-replacement';
+    expect(resolveWorkflowReviewTopology(reconnected, { reviewNodeId: 'review-concepts' }))
+      .toMatchObject({ state: 'blocked', reason: { code: 'PROMOTED_LINEAGE_INVALID' } });
+  });
 });

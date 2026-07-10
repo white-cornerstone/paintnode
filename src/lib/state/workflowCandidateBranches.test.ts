@@ -109,6 +109,7 @@ describe('WorkflowStore candidate branches', () => {
 
   it('verifies candidate bytes before atomically appending and reopening a promotion', async () => {
     const workflow = store();
+    const originalBrief = String(workflow.serialize().nodes.find((node) => node.id === 'brief')!.config.objective);
     const reviewId = workflow.addCreatorNode('review');
     workflow.disconnectNodes('transform-generate-square', 'output-square');
     expect(workflow.connectPorts('transform-generate-square', 'result', reviewId, 'candidates')).toBe(true);
@@ -140,16 +141,48 @@ describe('WorkflowStore candidate branches', () => {
 
     await workflow.promoteCandidate(reviewId, candidate.candidateId, runOptions);
     expect(workflow.serialize().reviewPromotions).toHaveLength(1);
+    await workflow.refreshReviewState(reviewId, runOptions);
+    expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('eligible');
+    expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
     const reopened = new WorkflowStore();
     reopened.openFromBytes(workflow.toBytes(), null, 'Reopened promotion');
     expect(reopened.reviewResolution(reviewId)).toMatchObject({
       state: 'ready', promotion: { candidateId: candidate.candidateId },
     });
 
-    runOptions.resolveAsset = async (asset) => ({
-      assetId: asset.id, relativePath: asset.relativePath,
-      bytes: new Uint8Array([1, 2, 3]), contentHash: workflowSha256Bytes(new Uint8Array([1, 2, 3])),
-    });
+    workflow.setBriefObjective('brief', 'Changed upstream after promotion.');
+    expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('stale');
+    expect(workflow.reviewResolution(reviewId, runOptions.assets, true))
+      .toMatchObject({ state: 'blocked', reason: { code: 'PROMOTION_STALE' } });
+    await workflow.refreshReviewState(reviewId, runOptions);
+    expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('stale');
+    expect(workflow.reviewResolution(reviewId, runOptions.assets, true))
+      .toMatchObject({ state: 'blocked', reason: { code: 'PROMOTION_STALE' } });
+    const stalePreflight = await workflow.preflightSelectiveExecution('run-node', 'output-square', runOptions);
+    expect(stalePreflight.stateByNodeId[reviewId]).toMatchObject({ state: 'blocked' });
+    expect(stalePreflight.plan.cachedResults.map((result) => result.nodeId)).not.toContain(reviewId);
+    expect(stalePreflight.plan.executionNodeIds).not.toContain('transform-generate-square');
+
+    workflow.setBriefObjective('brief', originalBrief);
+    runOptions.assets = [product];
+    const missingPreflight = await workflow.preflightSelectiveExecution('run-node', 'output-square', runOptions);
+    expect(missingPreflight.stateByNodeId[reviewId]).toMatchObject({ state: 'blocked' });
+    expect(missingPreflight.plan.cachedResults.map((result) => result.nodeId)).not.toContain(reviewId);
+
+    runOptions.assets = [product, generated];
+    runOptions.resolveAsset = async (asset) => asset.id === generated.id
+      ? {
+          assetId: generated.id, relativePath: generated.relativePath,
+          bytes: new Uint8Array([1, 2, 3]), contentHash: workflowSha256Bytes(new Uint8Array([1, 2, 3])),
+        }
+      : {
+          assetId: product.id, relativePath: product.relativePath,
+          bytes: productBytes, contentHash: workflowSha256Bytes(productBytes),
+        };
+    const tamperedPreflight = await workflow.preflightSelectiveExecution('run-node', 'output-square', runOptions);
+    expect(tamperedPreflight.stateByNodeId[reviewId]).toMatchObject({ state: 'blocked' });
+    expect(tamperedPreflight.plan.cachedResults.map((result) => result.nodeId)).not.toContain(reviewId);
+
     await expect(workflow.promoteCandidate(reviewId, candidate.candidateId, runOptions))
       .rejects.toThrow(/changed/i);
     expect(workflow.serialize().reviewPromotions).toHaveLength(1);

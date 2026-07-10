@@ -304,6 +304,40 @@ new current key, so only that node and downstream nodes whose own keys changed
 become stale. Successful or accepted results on unrelated branches remain
 available.
 
+### Review promotion boundary
+
+A Review node is a semantic cache boundary, not an executor and not a shortcut
+to the newest Transform run. It accepts candidate branches from exactly one
+Transform and may feed exactly one Output. Zero, ambiguous, or reconnected
+paths remain recoverably blocked until the graph is repaired.
+
+Promotion appends an immutable decision to the workflow-level
+`reviewPromotions` ledger. The decision snapshots the Review node revision,
+candidate lineage, exact run, asset reference, project-relative path, content
+hash, material key, and prior decision identity. Re-promotion appends another
+decision and preserves every earlier decision, candidate, and retry. Candidate
+run outputs are never mutated with `acceptedAt`.
+
+The latest decision is reusable only after the application boundary:
+
+1. prepares the currently connected Transform material and proves it still
+   matches the promoted candidate;
+2. re-reads the promoted project asset and proves its identity, path, bytes,
+   and SHA-256 hash match the decision;
+3. proves the decision's source Transform is still the Transform connected to
+   this Review; and
+4. confirms the workflow, project, and asset snapshot did not drift during
+   verification.
+
+Until all checks pass, the Review reports a recoverable stale, missing, or
+unavailable state. Selective planning must not install the Review cached result,
+consume the asset, or schedule the upstream Transform as an implicit bypass.
+When verification passes, the exact promoted asset-reference ID is injected as
+the Review result and traversal stops there. Its downstream material key hashes
+the Review revision and exact promoted run/output/content hash. Consequently,
+re-promotion stales only dependent downstream work; it does not stale or erase
+the candidate branch history.
+
 The scheduler receives the global concurrency limit, provider key mapping, and
 per-provider limits from its boundary. It starts independently ready nodes in
 stable graph order. A failed executor blocks only dependent pending nodes;
@@ -360,6 +394,13 @@ Every image-producing run records:
 
 Provenance supports debugging and reproducibility. Provider-internal traces
 remain governed by PaintNode's existing debug-artifact setting.
+
+Candidate comparison exposes the recorded Brief, Art Direction, provider/model,
+source assets, run identity, terminal state, and availability. Keyboard focus
+uses a roving tab stop: Left/Right cycle, Home/End jump, and focus follows the
+newly selected candidate. Stable `tab`/`tabpanel` relationships keep the active
+provenance context explicit to assistive technology. Promotion is always an
+explicit labelled action; selection alone never changes workflow history.
 
 ## Persistence and migration
 
