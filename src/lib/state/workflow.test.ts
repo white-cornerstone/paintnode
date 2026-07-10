@@ -140,6 +140,9 @@ describe('WorkflowStore graph adapter', () => {
         failure: { code: 'EXECUTOR_ERROR', message: 'The provider could not complete this attempt.' },
       }),
     ]);
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'failed', message: 'The provider could not complete this attempt. Retry Generate.', assetId: null,
+    });
     const reopened = new WorkflowStore({ idGenerator: ids() });
     reopened.openFromBytes(store.toBytes(), null, 'Campaign');
     expect(reopened.transformExecution('transform-generate-square')).toMatchObject({

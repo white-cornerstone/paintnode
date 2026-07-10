@@ -1298,11 +1298,12 @@ export class WorkflowStore {
       }
       if (this.activeTransformRuns.get(transformNodeId) === activeRun) {
         const cancelled = error instanceof WorkflowTransformExecutionError && error.code === 'CANCELLED';
+        const failureMessage = (error as Error)?.message ?? String(error);
         this.transformExecutions = {
           ...this.transformExecutions,
           [transformNodeId]: {
             state: cancelled ? 'cancelled' : 'failed',
-            message: (error as Error)?.message ?? String(error),
+            message: cancelled ? failureMessage : `${failureMessage} Retry Generate.`,
             assetId: null,
           },
         };
