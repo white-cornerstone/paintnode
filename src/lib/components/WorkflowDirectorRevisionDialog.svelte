@@ -72,7 +72,9 @@
     controller = currentController;
     requesting = true;
     error = '';
-    historyStatus = 'Preparing a provider-free revision preview…';
+    historyStatus = requester.providerFree
+      ? 'Preparing a provider-free revision preview…'
+      : 'Preparing a configured Director revision preview…';
     try {
       const result = await requestWorkflowDirectorRevisionPreview(
         requester,
@@ -181,7 +183,7 @@
         {:else}
           <button type="button" class="primary" onclick={() => void requestRevision()}>
             <Icon svg={ArrowSync} size={14} />
-            {preview ? 'Request again' : 'Preview QA Fake revision'}
+            {preview ? 'Request again' : requester.providerFree ? 'Preview QA Fake revision' : 'Preview Director revision'}
           </button>
         {/if}
       </div>

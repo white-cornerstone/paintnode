@@ -60,7 +60,7 @@ export interface WorkflowDirectorRevisionViewModel {
 
 export class WorkflowDirectorRevisionCancelledError extends Error {
   constructor() {
-    super('The provider-free Director revision request was cancelled.');
+    super('The Workflow Director revision request was cancelled.');
     this.name = 'WorkflowDirectorRevisionCancelledError';
   }
 }
