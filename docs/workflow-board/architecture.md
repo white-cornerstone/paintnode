@@ -290,6 +290,9 @@ is `transform`: the configured capability must match the registry's available
 capability. A boundary may inject a stricter disposition, but unsupported Edit,
 Relight, or Remove Background configurations remain blocked until their real
 executor is registered.
+Disposition overrides are monotonic restrictions: they may demote or disable a
+registry-available capability, but cannot promote `draft-only`, unsupported, or
+`not-required` definitions into executable work.
 
 Planning never mutates run history. A material change is represented by the
 new current key, so only that node and downstream nodes whose own keys changed
@@ -305,6 +308,9 @@ failure unless the boundary injects a validated sanitizer. Zero, missing, or
 invalid provider capacity is a configuration error raised before the first
 executor call, and exceptions from provider mapping are converted to the same
 stable safe boundary without exposing paths, credentials, or adapter details.
+Provider limits are read, validated, and checked for consistency for every
+planned executor during this preflight, then scheduling uses only the detached
+snapshot. A stateful getter or proxy cannot change capacity after validation.
 
 Executor results are accepted only as the exact `{ cacheKey, outputIds }`
 shape, with the planned key, unique nonblank identities, no cross-node identity

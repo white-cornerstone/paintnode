@@ -63,7 +63,7 @@ function graph(): WorkflowGraphV2 {
       node('input-b', 'input'),
       node('transform-a', 'transform', [{ id: 'image', required: true }]),
       node('transform-b', 'transform', [{ id: 'image', required: true }]),
-      node('review', 'review', [{ id: 'candidates', required: true, multiple: true }]),
+      node('review', 'transform', [{ id: 'candidates', required: true, multiple: true }]),
       node('output', 'output', [{ id: 'image', required: true }], []),
       node('unrelated', 'transform'),
     ],
@@ -183,7 +183,7 @@ describe('selective workflow planning', () => {
       mode: 'run-from-here',
       nodeId: 'input-a',
       materialKeys,
-      executionDisposition: (candidate) => candidate.type === 'review'
+      executionDisposition: (candidate) => candidate.id === 'review'
         ? { kind: 'not-required' }
         : candidate.type === 'transform'
           ? { kind: 'available' }
@@ -306,6 +306,7 @@ describe('selective workflow planning', () => {
       mode: 'run-node',
       nodeId: 'output-square',
       materialKeys: {},
+      executionDisposition: () => ({ kind: 'available' }),
     });
 
     expect(plan.executionNodeIds).toEqual([]);
@@ -348,6 +349,10 @@ describe('selective workflow planning', () => {
 describe('selective workflow scheduling', () => {
   it('uses injected provider limits and a deterministic graph-order ready queue', async () => {
     const input = graph();
+    input.nodes.filter((candidate) => candidate.id !== 'unrelated').forEach((candidate) => {
+      candidate.type = 'transform';
+      candidate.config.capability = 'generate';
+    });
     const plan = planSelectiveWorkflowExecution(input, {
       mode: 'run-node',
       nodeId: 'output',
@@ -432,6 +437,50 @@ describe('selective workflow scheduling', () => {
     expect(calls).toBe(0);
   });
 
+  it.each(['throws', 'changes'] as const)(
+    'snapshots provider limits during preflight when a second read %s',
+    async (behavior) => {
+      const input = graph();
+      const plan = planSelectiveWorkflowExecution(input, {
+        mode: 'run-node',
+        nodeId: 'output',
+        materialKeys: keys(input),
+      });
+      let reads = 0;
+      let calls = 0;
+      const providerConcurrency = {} as Record<string, number>;
+      Object.defineProperty(providerConcurrency, 'fake', {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+          if (reads === 1) return 1;
+          if (behavior === 'throws') throw new Error('/private/provider-config auth=secret');
+          return 2;
+        },
+      });
+
+      const run = executeSelectiveWorkflowPlan(plan, {
+        maxConcurrency: 2,
+        providerKeyForNode: () => 'fake',
+        providerConcurrency,
+        validateResultOwnership: () => true,
+        executeNode: async ({ nodeId, materialKey }) => {
+          calls += 1;
+          return { cacheKey: materialKey, outputIds: [`owned-${nodeId}`] };
+        },
+      });
+      const error = await run.then(
+        () => new Error('Expected provider preflight to reject.'),
+        (failure: unknown) => failure as Error,
+      );
+
+      expect(error.message).toMatch(/provider (mapping|concurrency)/i);
+      expect(error.message).not.toMatch(/private|auth|secret/);
+      expect(reads).toBe(2);
+      expect(calls).toBe(0);
+    },
+  );
+
   it('rejects extra result fields and foreign output ownership', async () => {
     const input = graph();
     const plan = planSelectiveWorkflowExecution(input, {
@@ -505,6 +554,10 @@ describe('selective workflow scheduling', () => {
 
   it('rejects cross-node output collisions and returns a detached immutable outcome', async () => {
     const input = graph();
+    input.nodes.filter((candidate) => candidate.id !== 'unrelated').forEach((candidate) => {
+      candidate.type = 'transform';
+      candidate.config.capability = 'generate';
+    });
     const plan = planSelectiveWorkflowExecution(input, {
       mode: 'run-node',
       nodeId: 'output',

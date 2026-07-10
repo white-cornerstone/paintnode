@@ -305,10 +305,15 @@ export function planSelectiveWorkflowExecution(
   const dispositions = new Map<string, WorkflowNodeExecutionDisposition>();
   for (const node of graph.nodes) {
     if (!required.has(node.id)) continue;
-    let disposition = registryExecutionDisposition(node);
+    const registryDisposition = registryExecutionDisposition(node);
+    let disposition = registryDisposition;
     if (request.executionDisposition) {
       try {
-        disposition = request.executionDisposition(detachedFrozen(node));
+        const restriction = request.executionDisposition(detachedFrozen(node));
+        if (registryDisposition.kind === 'available') disposition = restriction;
+        else if (registryDisposition.kind === 'not-required' && restriction.kind === 'unavailable') {
+          disposition = restriction;
+        }
       } catch {
         disposition = { kind: 'unavailable', reason: 'Execution availability could not be determined safely.' };
       }
@@ -502,12 +507,25 @@ export async function executeSelectiveWorkflowPlan(
   plan: WorkflowSelectiveExecutionPlan,
   options: WorkflowSelectiveSchedulerOptions,
 ): Promise<WorkflowSelectiveExecutionOutcome> {
-  if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency <= 0) {
-    throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Execution concurrency must be a positive safe integer.', {
+  let configuration: WorkflowSelectiveSchedulerOptions;
+  try {
+    configuration = {
       maxConcurrency: options.maxConcurrency,
+      providerKeyForNode: options.providerKeyForNode,
+      providerConcurrency: options.providerConcurrency,
+      executeNode: options.executeNode,
+      validateResultOwnership: options.validateResultOwnership,
+      ...(options.sanitizeFailure ? { sanitizeFailure: options.sanitizeFailure } : {}),
+    };
+  } catch {
+    throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Selective execution configuration could not be read safely.');
+  }
+  if (!Number.isSafeInteger(configuration.maxConcurrency) || configuration.maxConcurrency <= 0) {
+    throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Execution concurrency must be a positive safe integer.', {
+      maxConcurrency: configuration.maxConcurrency,
     });
   }
-  if (typeof options.validateResultOwnership !== 'function') {
+  if (typeof configuration.validateResultOwnership !== 'function') {
     throw new WorkflowExecutionError(
       'INVALID_ARGUMENT',
       'Selective execution requires an output ownership validator before any executor call.',
@@ -519,14 +537,15 @@ export async function executeSelectiveWorkflowPlan(
     { cacheKey: entry.cacheKey, outputIds: [...entry.outputIds] },
   ]));
   const providers = new Map<string, string>();
+  const providerLimits = new Map<string, number>();
   for (const nodeId of plan.executionNodeIds) {
     const node = nodes.get(nodeId);
     if (!node) throw new WorkflowExecutionError('INVALID_ARGUMENT', `Execution plan is missing node "${nodeId}".`);
     let provider: string;
     let limit: number;
     try {
-      provider = options.providerKeyForNode(detachedFrozen(node));
-      limit = options.providerConcurrency[provider];
+      provider = configuration.providerKeyForNode(detachedFrozen(node));
+      limit = configuration.providerConcurrency[provider];
     } catch {
       throw new WorkflowExecutionError(
         'INVALID_ARGUMENT',
@@ -542,7 +561,16 @@ export async function executeSelectiveWorkflowPlan(
         { nodeId },
       );
     }
+    const snapshottedLimit = providerLimits.get(provider);
+    if (snapshottedLimit !== undefined && snapshottedLimit !== limit) {
+      throw new WorkflowExecutionError(
+        'INVALID_ARGUMENT',
+        `Execution provider concurrency for node "${nodeId}" changed during preflight and cannot be trusted.`,
+        { nodeId },
+      );
+    }
     providers.set(nodeId, provider);
+    providerLimits.set(provider, limit);
   }
 
   type Settled = { nodeId: string; provider: string; result?: WorkflowExecutionResult; error?: unknown };
@@ -585,12 +613,12 @@ export async function executeSelectiveWorkflowPlan(
 
   const startReadyNodes = (): void => {
     for (const nodeId of plan.executionNodeIds) {
-      if (!pending.has(nodeId) || running.size >= options.maxConcurrency) continue;
+      if (!pending.has(nodeId) || running.size >= configuration.maxConcurrency) continue;
       const dependencyIds = plan.dependencies[nodeId] ?? [];
       if (!dependencyIds.every((dependencyId) => results.has(dependencyId))) continue;
       const provider = providers.get(nodeId)!;
       const active = providerActive.get(provider) ?? 0;
-      if (active >= options.providerConcurrency[provider]) continue;
+      if (active >= providerLimits.get(provider)!) continue;
       const node = nodes.get(nodeId)!;
       const dependencyResults = new Map(dependencyIds.map((dependencyId) => [
         dependencyId,
@@ -601,7 +629,7 @@ export async function executeSelectiveWorkflowPlan(
       executedNodeIds.push(nodeId);
       providerActive.set(provider, active + 1);
       const promise = Promise.resolve()
-        .then(() => options.executeNode({
+        .then(() => configuration.executeNode({
           nodeId,
           node: detachedFrozen(node),
           materialKey,
@@ -630,7 +658,7 @@ export async function executeSelectiveWorkflowPlan(
     running.delete(settled.nodeId);
     providerActive.set(settled.provider, providerActive.get(settled.provider)! - 1);
     if (settled.error) {
-      failures.set(settled.nodeId, safeFailure(settled.error, options.sanitizeFailure));
+      failures.set(settled.nodeId, safeFailure(settled.error, configuration.sanitizeFailure));
       continue;
     }
     let structurallyValid = false;
@@ -648,7 +676,7 @@ export async function executeSelectiveWorkflowPlan(
       });
       if (!hasCollision) {
         try {
-          ownershipValid = options.validateResultOwnership(detachedFrozen({
+          ownershipValid = configuration.validateResultOwnership(detachedFrozen({
             nodeId: settled.nodeId,
             result: {
               cacheKey: settled.result.cacheKey,
