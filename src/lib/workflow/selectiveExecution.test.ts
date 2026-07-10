@@ -140,6 +140,11 @@ describe('selective workflow planning', () => {
       mode: 'run-node',
       nodeId: 'review',
       materialKeys: keys(input),
+      executionDisposition: (candidate) => candidate.id === 'review'
+        ? { kind: 'available' }
+        : candidate.type === 'transform'
+          ? { kind: 'available' }
+          : { kind: 'not-required' },
       isRunRecordReusable: () => true,
     });
     const calls: string[] = [];
@@ -148,6 +153,8 @@ describe('selective workflow planning', () => {
     expect(plan.requiredNodeIds).toEqual(['input-a', 'input-b', 'transform-a', 'transform-b', 'review']);
     expect(plan.affectedNodeIds).toEqual(['review']);
     expect(plan.preflight.map(({ nodeId, state }) => [nodeId, state])).toEqual([
+      ['input-a', 'planned'],
+      ['input-b', 'planned'],
       ['transform-a', 'cached'],
       ['transform-b', 'cached'],
       ['review', 'planned'],
@@ -178,13 +185,13 @@ describe('selective workflow planning', () => {
 
     expect(plan.affectedNodeIds).toEqual(['input-a', 'transform-a', 'review', 'output']);
     expect(plan.preflight).toEqual(expect.arrayContaining([
-      expect.objectContaining({ nodeId: 'input-a', state: 'stale', reason: expect.objectContaining({ code: 'MATERIAL_CHANGED' }) }),
+      expect.objectContaining({ nodeId: 'input-a', state: 'planned', willExecute: false, reason: expect.objectContaining({ code: 'CONTEXT_SATISFIED' }) }),
       expect.objectContaining({ nodeId: 'transform-a', state: 'stale' }),
       expect.objectContaining({ nodeId: 'transform-b', state: 'cached' }),
-      expect.objectContaining({ nodeId: 'review', state: 'stale' }),
-      expect.objectContaining({ nodeId: 'output', state: 'stale' }),
+      expect.objectContaining({ nodeId: 'review', state: 'planned', willExecute: false }),
+      expect.objectContaining({ nodeId: 'output', state: 'planned', willExecute: false }),
     ]));
-    expect(calls).toEqual(['input-a', 'transform-a', 'review', 'output']);
+    expect(calls).toEqual(['transform-a']);
     expect(input).toEqual(before);
     expect((input.runRecords.find((run) => run.nodeId === 'transform-b') as WorkflowRunRecordV1)
       .outputs[0].acceptedAt).toBe(2);
@@ -215,9 +222,11 @@ describe('selective workflow planning', () => {
       mode: 'run-from-here',
       nodeId: 'transform-a',
       materialKeys: keys(input),
-      nodeAvailability: (candidate) => candidate.id === 'transform-a'
-        ? { executable: false, reason: 'Generate is disabled until an executor is configured.' }
-        : { executable: true },
+      executionDisposition: (candidate) => candidate.id === 'transform-a'
+        ? { kind: 'unavailable', reason: 'Generate is disabled until an executor is configured.' }
+        : candidate.type === 'transform'
+          ? { kind: 'available' }
+          : { kind: 'not-required' },
     });
     const calls: string[] = [];
     await execute(plan, calls);
@@ -227,7 +236,60 @@ describe('selective workflow planning', () => {
       expect.objectContaining({ nodeId: 'review', state: 'blocked', reason: { code: 'UPSTREAM_BLOCKED', message: expect.stringContaining('transform-a') } }),
       expect.objectContaining({ nodeId: 'output', state: 'blocked' }),
     ]));
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(['transform-b']);
+  });
+
+  it('exposes a missing-input root blocker without requiring a material key for blocked work', () => {
+    const input = graph();
+    input.edges = input.edges.filter((item) => item.id !== 'input-a-transform-a');
+
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'output',
+      materialKeys: { 'transform-b': 'key-transform-b' },
+    });
+
+    expect(plan.preflight).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'transform-a', state: 'blocked', reason: expect.objectContaining({ code: 'MISSING_REQUIRED_INPUT' }) }),
+      expect.objectContaining({ nodeId: 'review', state: 'blocked', reason: expect.objectContaining({ code: 'UPSTREAM_BLOCKED' }) }),
+      expect.objectContaining({ nodeId: 'output', state: 'blocked', reason: expect.objectContaining({ code: 'UPSTREAM_BLOCKED' }) }),
+    ]));
+    expect(plan.materialKeys).toEqual({ 'transform-b': 'key-transform-b' });
+  });
+
+  it('runs only Generate for the real Campaign structural topology', async () => {
+    const input = graph();
+    input.nodes = [
+      node('product', 'input'),
+      node('brief', 'brief', [{ id: 'image', required: true }]),
+      node('art-direction', 'art-direction', [{ id: 'image', required: true }]),
+      node('generate', 'transform', [{ id: 'image', required: true }]),
+      node('square-output', 'output', [{ id: 'image', required: true }], []),
+    ];
+    input.edges = [
+      edge('product-brief', 'product', 'brief'),
+      edge('brief-art', 'brief', 'art-direction'),
+      edge('art-generate', 'art-direction', 'generate'),
+      edge('generate-output', 'generate', 'square-output'),
+    ];
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'square-output',
+      materialKeys: { generate: 'key-generate' },
+    });
+    const calls: string[] = [];
+    await execute(plan, calls);
+
+    expect(plan.requiredNodeIds).toEqual(['product', 'brief', 'art-direction', 'generate', 'square-output']);
+    expect(plan.executionNodeIds).toEqual(['generate']);
+    expect(plan.preflight.map(({ nodeId, willExecute }) => [nodeId, willExecute])).toEqual([
+      ['product', false],
+      ['brief', false],
+      ['art-direction', false],
+      ['generate', true],
+      ['square-output', false],
+    ]);
+    expect(calls).toEqual(['generate']);
   });
 
   it('fails closed without explicit artifact proof and snapshots validated material keys', () => {
@@ -263,6 +325,7 @@ describe('selective workflow scheduling', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: keys(input),
+      executionDisposition: () => ({ kind: 'available' }),
     });
     const started: string[] = [];
     const active = new Map<string, number>();
@@ -317,6 +380,9 @@ describe('selective workflow scheduling', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: keys(input),
+      executionDisposition: (candidate) => candidate.type === 'transform' || candidate.type === 'review'
+        ? { kind: 'available' }
+        : { kind: 'not-required' },
     });
     const completed: string[] = [];
 
@@ -331,9 +397,13 @@ describe('selective workflow scheduling', () => {
       },
     });
 
-    expect(completed).toEqual(['input-a', 'input-b', 'transform-b']);
-    expect(result.failures.get('transform-a')).toEqual({ code: 'EXECUTOR_FAILED', message: 'transform-a failed' });
-    expect(result.blockedNodeIds).toEqual(['review', 'output']);
+    expect(completed).toEqual(['transform-b']);
+    expect(result.failures.get('transform-a')).toEqual({
+      code: 'EXECUTOR_FAILED',
+      message: 'Node execution failed. Retry the node or inspect safe run diagnostics.',
+    });
+    expect(result.failures.get('transform-a')?.message).not.toContain('transform-a failed');
+    expect(result.blockedNodeIds).toEqual(['review']);
     expect(result.results.has('transform-b')).toBe(true);
     expect(result.results.has('review')).toBe(false);
   });

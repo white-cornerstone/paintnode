@@ -22,6 +22,8 @@ export type WorkflowPreflightReasonCode =
   | 'MATERIAL_CHANGED'
   | 'CACHED_OUTPUT_UNAVAILABLE'
   | 'REUSABLE_RESULT'
+  | 'CONTEXT_SATISFIED'
+  | 'PRUNED_BY_REUSABLE_RESULT'
   | 'NO_REUSABLE_RESULT';
 
 export interface WorkflowPreflightReason {
@@ -32,11 +34,12 @@ export interface WorkflowPreflightReason {
 export interface WorkflowNodePreflight {
   nodeId: string;
   state: WorkflowPreflightState;
+  willExecute: boolean;
   reason: WorkflowPreflightReason;
 }
 
-export interface WorkflowNodeAvailability {
-  executable: boolean;
+export interface WorkflowNodeExecutionDisposition {
+  kind: 'not-required' | 'available' | 'unavailable';
   reason?: string;
 }
 
@@ -44,7 +47,7 @@ export interface WorkflowSelectiveExecutionRequest {
   mode: WorkflowSelectiveRunMode;
   nodeId: string;
   materialKeys: Readonly<Record<string, string>>;
-  nodeAvailability?: (node: Readonly<WorkflowNodeV2>) => WorkflowNodeAvailability;
+  executionDisposition?: (node: Readonly<WorkflowNodeV2>) => WorkflowNodeExecutionDisposition;
   isRunRecordReusable?: (record: Readonly<WorkflowRunRecordV1>) => boolean;
 }
 
@@ -73,6 +76,7 @@ export interface WorkflowSelectiveSchedulerOptions {
   providerKeyForNode: (node: Readonly<WorkflowNodeV2>) => string;
   providerConcurrency: Readonly<Record<string, number>>;
   executeNode: (context: WorkflowSelectiveNodeExecutionContext) => Promise<WorkflowExecutionResult>;
+  sanitizeFailure?: (error: unknown) => WorkflowSelectiveNodeFailure;
 }
 
 export interface WorkflowSelectiveExecutionOutcome {
@@ -151,6 +155,32 @@ function missingRequiredInput(
   return node.ports.inputs.find((port) => (
     port.required && !edges.some((edge) => edge.target.nodeId === node.id && edge.target.portId === port.id)
   ))?.id;
+}
+
+function defaultExecutionDisposition(node: WorkflowNodeV2): WorkflowNodeExecutionDisposition {
+  if (node.type === 'transform') return { kind: 'available' };
+  if (node.type === 'unsupported') {
+    return { kind: 'unavailable', reason: `Node "${node.title}" uses an unsupported workflow type.` };
+  }
+  return { kind: 'not-required' };
+}
+
+function safeFailure(
+  error: unknown,
+  sanitizer?: WorkflowSelectiveSchedulerOptions['sanitizeFailure'],
+): WorkflowSelectiveNodeFailure {
+  if (sanitizer) {
+    try {
+      const failure = sanitizer(error);
+      if (typeof failure?.code === 'string' && failure.code.trim()
+        && typeof failure.message === 'string' && failure.message.trim()) {
+        return { code: failure.code, message: failure.message };
+      }
+    } catch {
+      // A boundary sanitizer is fail-closed just like artifact verification.
+    }
+  }
+  return { code: 'EXECUTOR_FAILED', message: 'Node execution failed. Retry the node or inspect safe run diagnostics.' };
 }
 
 function linkedSuccessfulRuns(graph: WorkflowGraphV2, node: WorkflowNodeV2): WorkflowRunRecordV1[] {
@@ -236,18 +266,32 @@ export function planSelectiveWorkflowExecution(
   };
   affectedNodeIds.forEach(visitUpstream);
   const requiredNodeIds = graph.nodes.filter((node) => required.has(node.id)).map((node) => node.id);
-  const materialKeys = Object.fromEntries(requiredNodeIds.map((nodeId) => [
-    nodeId,
-    requireMaterialKey(request.materialKeys, nodeId),
-  ]));
-
+  const dispositions = new Map<string, WorkflowNodeExecutionDisposition>();
+  for (const node of graph.nodes) {
+    if (!required.has(node.id)) continue;
+    let disposition = defaultExecutionDisposition(node);
+    if (request.executionDisposition) {
+      try {
+        disposition = request.executionDisposition(detachedFrozen(node));
+      } catch {
+        disposition = { kind: 'unavailable', reason: 'Execution availability could not be determined safely.' };
+      }
+    }
+    if (!disposition || !['not-required', 'available', 'unavailable'].includes(disposition.kind)) {
+      throw new WorkflowExecutionError('INVALID_ARGUMENT', `Node "${node.id}" has an invalid execution disposition.`, {
+        nodeId: node.id,
+      });
+    }
+    dispositions.set(node.id, disposition);
+  }
   const blocked = new Map<string, WorkflowPreflightReason>();
   for (const node of graph.nodes) {
     if (!required.has(node.id)) continue;
-    if (node.type === 'unsupported') {
+    const disposition = dispositions.get(node.id)!;
+    if (disposition.kind === 'unavailable') {
       blocked.set(node.id, {
-        code: 'UNSUPPORTED_NODE',
-        message: `Node "${node.title}" uses an unsupported workflow type and cannot be executed.`,
+        code: node.type === 'unsupported' ? 'UNSUPPORTED_NODE' : 'NODE_DISABLED',
+        message: disposition.reason?.trim() || `Node "${node.title}" requires an executor that is unavailable.`,
       });
       continue;
     }
@@ -258,20 +302,6 @@ export function planSelectiveWorkflowExecution(
         message: `Node "${node.title}" requires an input on port "${missingPort}" before it can run.`,
       });
       continue;
-    }
-    if (request.nodeAvailability) {
-      let availability: WorkflowNodeAvailability;
-      try {
-        availability = request.nodeAvailability(detachedFrozen(node));
-      } catch (error) {
-        availability = { executable: false, reason: (error as Error).message };
-      }
-      if (!availability?.executable) {
-        blocked.set(node.id, {
-          code: 'NODE_DISABLED',
-          message: availability?.reason?.trim() || `Node "${node.title}" is disabled and cannot be executed.`,
-        });
-      }
     }
   }
   let changed = true;
@@ -288,12 +318,18 @@ export function planSelectiveWorkflowExecution(
       changed = true;
     }
   }
+  const materialKeys = Object.fromEntries(graph.nodes
+    .filter((node) => required.has(node.id)
+      && dispositions.get(node.id)?.kind === 'available'
+      && !blocked.has(node.id))
+    .map((node) => [node.id, requireMaterialKey(request.materialKeys, node.id)]));
 
   const cachedRuns = new Map<string, WorkflowRunRecordV1>();
   const latestSuccessful = new Map<string, WorkflowRunRecordV1>();
   const unavailableExact = new Set<string>();
   for (const node of graph.nodes) {
-    if (!required.has(node.id) || blocked.has(node.id)) continue;
+    if (!required.has(node.id) || blocked.has(node.id)
+      || dispositions.get(node.id)?.kind !== 'available') continue;
     const runs = linkedSuccessfulRuns(graph, node);
     if (runs.length > 0) latestSuccessful.set(node.id, runs.at(-1)!);
     const match = reusableRun(runs, materialKeys[node.id], request.isRunRecordReusable);
@@ -305,7 +341,7 @@ export function planSelectiveWorkflowExecution(
   const visitNeeded = (nodeId: string): void => {
     if (needed.has(nodeId)) return;
     needed.add(nodeId);
-    if (cachedRuns.has(nodeId) || blocked.has(nodeId)) return;
+    if (cachedRuns.has(nodeId)) return;
     incomingNodeIds(edges, nodeId).forEach(visitNeeded);
   };
   affectedNodeIds.forEach(visitNeeded);
@@ -318,18 +354,44 @@ export function planSelectiveWorkflowExecution(
       outputIds: cachedRuns.get(node.id)!.outputs.map((output) => output.assetReferenceId),
     }));
   const executionNodeIds = graph.nodes
-    .filter((node) => needed.has(node.id) && !cachedRuns.has(node.id) && !blocked.has(node.id))
+    .filter((node) => needed.has(node.id)
+      && dispositions.get(node.id)?.kind === 'available'
+      && !cachedRuns.has(node.id)
+      && !blocked.has(node.id))
     .map((node) => node.id);
   const preflight: WorkflowNodePreflight[] = graph.nodes
-    .filter((node) => needed.has(node.id))
+    .filter((node) => required.has(node.id))
     .map((node) => {
       const block = blocked.get(node.id);
-      if (block) return { nodeId: node.id, state: 'blocked' as const, reason: block };
+      if (block) return { nodeId: node.id, state: 'blocked' as const, willExecute: false, reason: block };
+      if (dispositions.get(node.id)?.kind === 'not-required') {
+        return {
+          nodeId: node.id,
+          state: 'planned' as const,
+          willExecute: false,
+          reason: {
+            code: 'CONTEXT_SATISFIED' as const,
+            message: `Node "${node.title}" supplies material context and requires no executor call.`,
+          },
+        };
+      }
       if (cachedRuns.has(node.id)) {
         return {
           nodeId: node.id,
           state: 'cached' as const,
+          willExecute: false,
           reason: { code: 'REUSABLE_RESULT' as const, message: 'An unchanged successful result will be reused.' },
+        };
+      }
+      if (!needed.has(node.id)) {
+        return {
+          nodeId: node.id,
+          state: 'planned' as const,
+          willExecute: false,
+          reason: {
+            code: 'PRUNED_BY_REUSABLE_RESULT' as const,
+            message: `Node "${node.title}" is behind a verified reusable result and is not scheduled.`,
+          },
         };
       }
       const latest = latestSuccessful.get(node.id);
@@ -337,6 +399,7 @@ export function planSelectiveWorkflowExecution(
         return {
           nodeId: node.id,
           state: 'stale' as const,
+          willExecute: true,
           reason: {
             code: 'MATERIAL_CHANGED' as const,
             message: `Node "${node.title}" changed since its latest successful run and will execute again.`,
@@ -347,6 +410,7 @@ export function planSelectiveWorkflowExecution(
         return {
           nodeId: node.id,
           state: 'planned' as const,
+          willExecute: true,
           reason: {
             code: 'CACHED_OUTPUT_UNAVAILABLE' as const,
             message: `Node "${node.title}" has matching run metadata, but its output is unavailable and will be rebuilt.`,
@@ -356,16 +420,32 @@ export function planSelectiveWorkflowExecution(
       return {
         nodeId: node.id,
         state: 'planned' as const,
+        willExecute: true,
         reason: {
           code: 'NO_REUSABLE_RESULT' as const,
           message: `Node "${node.title}" has no reusable successful result and will execute.`,
         },
       };
     });
-  const planNodes = graph.nodes.filter((node) => needed.has(node.id));
-  const dependencies = Object.fromEntries(planNodes.map((node) => [
-    node.id,
-    incomingNodeIds(edges, node.id).filter((nodeId) => needed.has(nodeId)),
+  const planNodes = graph.nodes.filter((node) => required.has(node.id));
+  const executionCandidates = new Set([...executionNodeIds, ...cachedResults.map((entry) => entry.nodeId)]);
+  const executionDependencies = (nodeId: string): string[] => {
+    const found = new Set<string>();
+    const visited = new Set<string>();
+    const visit = (candidateId: string): void => {
+      if (visited.has(candidateId)) return;
+      visited.add(candidateId);
+      for (const upstreamId of incomingNodeIds(edges, candidateId)) {
+        if (executionCandidates.has(upstreamId)) found.add(upstreamId);
+        else visit(upstreamId);
+      }
+    };
+    visit(nodeId);
+    return graph.nodes.filter((node) => found.has(node.id)).map((node) => node.id);
+  };
+  const dependencies = Object.fromEntries([...executionCandidates].map((nodeId) => [
+    nodeId,
+    executionDependencies(nodeId),
   ]));
 
   return detachedFrozen({
@@ -485,12 +565,7 @@ export async function executeSelectiveWorkflowPlan(
     running.delete(settled.nodeId);
     providerActive.set(settled.provider, providerActive.get(settled.provider)! - 1);
     if (settled.error) {
-      failures.set(settled.nodeId, {
-        code: settled.error instanceof WorkflowExecutionError
-          ? settled.error.code
-          : 'EXECUTOR_FAILED',
-        message: settled.error instanceof Error ? settled.error.message : 'The node executor failed.',
-      });
+      failures.set(settled.nodeId, safeFailure(settled.error, options.sanitizeFailure));
       continue;
     }
     if (!hasValidResult(settled.result) || settled.result.cacheKey !== plan.materialKeys[settled.nodeId]) {

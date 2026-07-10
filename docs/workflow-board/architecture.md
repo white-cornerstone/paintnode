@@ -259,7 +259,8 @@ Selective execution is a framework-independent two-stage contract:
   required by a reachable merge or configured Output.
 
 The planner receives a detached snapshot of the current material key for every
-required node. These are the same keys persisted by the provenance contract;
+unblocked `available` node. These are the same keys persisted by the provenance
+contract;
 the selective planner does not calculate a second cache identity. A persisted
 successful run is reusable only when its material key matches exactly and the
 caller explicitly verifies that every referenced output artifact is still
@@ -269,11 +270,20 @@ no process-global cache or separate trust metadata.
 
 Preflight reports the active execution frontier in stable graph order:
 
-- `planned` has no reusable result and will execute;
+- `planned` is satisfied structural context or has no reusable result;
 - `cached` has an exact verified result and will be reused;
 - `stale` has a successful result for different material and will execute;
 - `blocked` cannot execute, with a missing-input, disabled-node, unsupported,
   or upstream-blocked recovery reason.
+
+Every preflight entry also says whether it will produce an executor call.
+Registry disposition is explicit: `not-required` nodes such as Input, Brief,
+Art Direction, and Output remain visible as satisfied material context;
+`available` capability nodes may execute or reuse a result; and `unavailable`
+capability nodes block with their creator-facing recovery reason. A normal
+Campaign output run therefore executes Generate, not every structural node on
+the path. Planning continues through a propagated blocker so preflight exposes
+the disabled or missing-input root cause as well as affected downstream nodes.
 
 Planning never mutates run history. A material change is represented by the
 new current key, so only that node and downstream nodes whose own keys changed
@@ -284,8 +294,10 @@ The scheduler receives the global concurrency limit, provider key mapping, and
 per-provider limits from its boundary. It starts independently ready nodes in
 stable graph order. A failed executor blocks only dependent pending nodes;
 already-ready unrelated work continues and is returned with the failure and
-blocked-node outcome. Zero, missing, or invalid provider capacity is a
-configuration error raised before the first executor call.
+blocked-node outcome. Raw executor errors are replaced by a safe generic
+failure unless the boundary injects a validated sanitizer. Zero, missing, or
+invalid provider capacity is a configuration error raised before the first
+executor call.
 
 Progress and cancellation remain owned by the adjacent runtime work. That
 integration should wrap the injected node executor and consume the plan and
