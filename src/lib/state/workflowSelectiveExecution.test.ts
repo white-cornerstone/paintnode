@@ -10,6 +10,7 @@ import {
   type WorkflowTransformArtifact,
 } from '../workflow';
 import { WorkflowStore, type WorkflowStoreRunOptions } from './workflow.svelte';
+import { WorkflowSelectiveUiState } from './workflowSelectiveUiState.svelte';
 
 const productBytes = new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]);
 const productAsset = {
@@ -200,21 +201,26 @@ describe('WorkflowStore selective execution integration', () => {
     async (mode) => {
       const store = campaignStore();
       const run = harness();
+      const uiState = new WorkflowSelectiveUiState();
+      const options = { ...run.options(), selectiveExecutionIdentity: 'provider=fake;quality=standard' };
 
       const preflight = await store.preflightSelectiveExecution(
         mode,
         'transform-generate-square',
-        { ...run.options(), selectiveExecutionIdentity: 'provider=fake;quality=standard' },
+        options,
       );
+      uiState.capture(preflight, options);
 
       expect(preflight.stateByNodeId['transform-generate-square']).toMatchObject({
         state: 'planned', willExecute: true,
       });
+      expect(uiState.preflight).toBe(preflight);
+      expect(uiState.runOptions).toBe(options);
       expect(run.providerCalls()).toBe(0);
 
       const outcome = await store.runSelectiveExecution(
-        preflight,
-        { ...run.options(), selectiveExecutionIdentity: 'provider=fake;quality=standard' },
+        uiState.preflight!,
+        uiState.runOptions!,
       );
 
       expect(outcome.executedNodeIds).toEqual(['transform-generate-square']);

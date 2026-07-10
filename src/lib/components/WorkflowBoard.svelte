@@ -39,10 +39,10 @@
     type WorkflowConnection,
     type WorkflowCreatorNode,
     type WorkflowOutputNode,
-    type WorkflowSelectivePreflightProjection,
     type WorkflowStoreRunOptions,
     type WorkflowUnsupportedNode,
   } from '../state/workflow.svelte';
+  import { WorkflowSelectiveUiState } from '../state/workflowSelectiveUiState.svelte';
   import {
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
@@ -143,7 +143,7 @@
   let storyboardAnnotationDragStart: { x: number; y: number } | null = null;
   let activeTransformNodeId = $state<string | null>(null);
   let activeWorkflowTaskId = $state<string | null>(null);
-  let selectivePreflight = $state<WorkflowSelectivePreflightProjection | null>(null);
+  const selectiveUiState = new WorkflowSelectiveUiState();
   let selectiveTargetNodeId = $state<string | null>(null);
   let selectiveMode = $state<WorkflowSelectiveRunMode | null>(null);
   let selectiveOutcome = $state<WorkflowSelectiveExecutionOutcome | null>(null);
@@ -151,7 +151,6 @@
   let selectiveRunning = $state(false);
   let selectiveMessage = $state('');
   let selectiveError = $state('');
-  let selectiveRunOptions: WorkflowStoreRunOptions | null = null;
   let lastSelectiveContextIdentity = '';
   let selectiveRequestSequence = 0;
   let boardDestroyed = false;
@@ -1545,17 +1544,16 @@
   function invalidateSelectivePreview(): void {
     selectiveRequestSequence += 1;
     if (selectiveBusy && !selectiveRunning) void workflow.cancelSelectiveExecution();
-    selectivePreflight = null;
+    selectiveUiState.clear();
     selectiveOutcome = null;
     selectiveTargetNodeId = null;
     selectiveMode = null;
-    selectiveRunOptions = null;
     selectiveMessage = '';
     selectiveError = '';
   }
 
   function preflightForNode(nodeId: string) {
-    return selectivePreflight?.stateByNodeId[nodeId] ?? null;
+    return selectiveUiState.preflight?.stateByNodeId[nodeId] ?? null;
   }
 
   function workflowExecutionOptionsIdentity(): string {
@@ -1660,14 +1658,14 @@
     const runId = createRunId();
     try {
       const context = createWorkflowExecutionContext(runId);
-      selectiveRunOptions = context.options;
+      selectiveUiState.runOptions = context.options;
       const preflight = await workflow.preflightSelectiveExecution(mode, nodeId, context.options);
       if (requestSequence !== selectiveRequestSequence) return;
-      selectivePreflight = preflight;
+      selectiveUiState.capture(preflight, context.options);
       selectiveMessage = selectiveExecutionPreviewSummary(preflight.plan.preflight);
     } catch (cause) {
       if (requestSequence !== selectiveRequestSequence) return;
-      selectiveRunOptions = null;
+      selectiveUiState.runOptions = null;
       selectiveError = (cause as Error)?.message ?? String(cause);
       selectiveMessage = '';
     } finally {
@@ -1676,8 +1674,8 @@
   }
 
   async function confirmSelectiveExecution(): Promise<void> {
-    const preflight = selectivePreflight;
-    const options = selectiveRunOptions;
+    const preflight = selectiveUiState.preflight;
+    const options = selectiveUiState.runOptions;
     if (!preflight || !options || !selectiveTargetNodeId) return;
     const availability = selectiveExecutionRunAvailability(preflight.plan.preflight);
     if (!availability.enabled) {
@@ -1705,8 +1703,7 @@
     });
     try {
       const outcome = await workflow.runSelectiveExecution(preflight, options, { maxConcurrency: 1 });
-      selectivePreflight = null;
-      selectiveRunOptions = null;
+      selectiveUiState.clear();
       selectiveOutcome = outcome;
       selectiveMessage = selectiveExecutionOutcomeSummary(outcome);
       if (outcome.executedNodeIds.length > 0 && options.projectPath) await project.refresh(options.projectPath);
@@ -1715,8 +1712,7 @@
       else aiTasks.complete(task.id, selectiveMessage);
       editor.flash(selectiveMessage);
     } catch (cause) {
-      selectivePreflight = null;
-      selectiveRunOptions = null;
+      selectiveUiState.clear();
       selectiveError = (cause as Error)?.message ?? String(cause);
       if ((cause as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(task.id);
       else aiTasks.fail(task.id, selectiveError);
@@ -2248,8 +2244,8 @@
                     <strong>{selectiveMode === 'run-node' ? 'Run this node' : 'Run from here'} preview</strong>
                     {#if selectiveMessage}<p>{selectiveMessage}</p>{/if}
                     {#if selectiveError}<p class="selective-error">{selectiveError}</p>{/if}
-                    {#if selectivePreflight}
-                      {@const runAvailability = selectiveExecutionRunAvailability(selectivePreflight.plan.preflight)}
+                    {#if selectiveUiState.preflight}
+                      {@const runAvailability = selectiveExecutionRunAvailability(selectiveUiState.preflight.plan.preflight)}
                       <div class="selective-preview-actions">
                         <button
                           type="button"

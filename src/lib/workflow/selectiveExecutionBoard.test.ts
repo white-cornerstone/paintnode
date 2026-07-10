@@ -13,6 +13,7 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('Confirm selective run');
     expect(boardSource).toContain('maxConcurrency: 1');
     expect(boardSource).toContain('createWorkflowBoardRunIdGenerator');
+    expect(boardSource).toContain('WorkflowSelectiveUiState');
   });
 
   it('renders the exact transient state for each Transform during confirmed selective execution', () => {
