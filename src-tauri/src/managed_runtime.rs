@@ -32,6 +32,7 @@ pub(crate) struct RuntimePackageManifest {
     pub sdk_version: String,
     pub engine_version: String,
     pub protocol_version: u32,
+    #[serde(rename = "minimumPaintNodeVersion")]
     pub minimum_paintnode_version: String,
     pub runner: String,
     pub capabilities_runner: Option<String>,
@@ -58,6 +59,7 @@ struct RuntimeReleasePackage {
     sdk_version: String,
     engine_version: String,
     protocol_version: u32,
+    #[serde(rename = "minimumPaintNodeVersion")]
     minimum_paintnode_version: String,
     artifacts: Vec<RuntimeArtifact>,
 }
@@ -676,5 +678,42 @@ mod tests {
 
         assert_eq!(manifest.schema_version, 1);
         assert!(manifest.packages.is_empty());
+    }
+
+    #[test]
+    fn manifests_preserve_paintnode_product_name_casing() {
+        let package: RuntimePackageManifest = serde_json::from_str(
+            r#"{
+              "provider": "codex",
+              "packageVersion": "1.0.0",
+              "sdkVersion": "0.144.0",
+              "engineVersion": "codex-cli 0.144.0",
+              "protocolVersion": 1,
+              "minimumPaintNodeVersion": "0.2.0",
+              "runner": "bridge/codex-sdk-runner.mjs",
+              "capabilitiesRunner": "bridge/codex-capabilities.mjs",
+              "node": "bin/node",
+              "executable": "engine/codex"
+            }"#,
+        )
+        .expect("package manifest should accept the published PaintNode field casing");
+        assert_eq!(package.minimum_paintnode_version, "0.2.0");
+
+        let release = parse_release_manifest(
+            br#"{
+              "schemaVersion": 1,
+              "packages": [{
+                "provider": "codex",
+                "packageVersion": "1.0.0",
+                "sdkVersion": "0.144.0",
+                "engineVersion": "codex-cli 0.144.0",
+                "protocolVersion": 1,
+                "minimumPaintNodeVersion": "0.2.0",
+                "artifacts": []
+              }]
+            }"#,
+        )
+        .expect("release manifest should accept the published PaintNode field casing");
+        assert_eq!(release.packages[0].minimum_paintnode_version, "0.2.0");
     }
 }
