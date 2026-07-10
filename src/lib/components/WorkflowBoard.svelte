@@ -44,6 +44,8 @@
     creatorNodeFitsPlacementBounds,
     findOpenCreatorNodePlacement,
     runWithAsyncObserver,
+    workflowSha256Bytes,
+    workflowSha256Text,
     workflowProviderSelection,
     workflowReadiness,
     type CreatorNodeType,
@@ -1580,9 +1582,16 @@
           executors,
           assets: runAssets,
           currentProjectIdentity: () => project.identity,
-          readAsset: (asset) => {
+          resolveAsset: async (asset) => {
             if (!runProjectPath) throw new Error('No project is open.');
-            return readProjectFile(runProjectPath, asset.relativePath);
+            if (runSelection.qaFake) {
+              return {
+                bytes: null,
+                contentHash: workflowSha256Text(`provider-free-qa-asset-v1:${asset.id}:${asset.relativePath}`),
+              };
+            }
+            const bytes = await readProjectFile(runProjectPath, asset.relativePath);
+            return { bytes, contentHash: workflowSha256Bytes(bytes) };
           },
           readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
             if (storyboard.dataUrl) {

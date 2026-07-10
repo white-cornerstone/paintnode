@@ -1,4 +1,5 @@
 import { createWorkflowCacheKey, type WorkflowCacheHash } from './execution';
+import { hash as sha256 } from 'fast-sha256';
 import type {
   WorkflowGraphV2,
   WorkflowRunExecutor,
@@ -102,12 +103,36 @@ function digest(hash: WorkflowCacheHash, label: string, value: unknown): string 
   return result;
 }
 
+function persistedMaterialConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const runtimeKeys = new Set([
+    'resultAssetReferenceId', 'resultAssetId', 'resultRelativePath',
+    'assetReferenceId', 'outputAssetId', 'outputRelativePath',
+  ]);
+  return Object.fromEntries(Object.entries(config).filter(([key]) => !runtimeKeys.has(key)));
+}
+
 function graphRevisionMaterial(graph: WorkflowGraphV2): unknown {
   return {
     id: graph.id,
-    nodes: graph.nodes.map((node) => ({ ...node, runRecordIds: [] })),
+    nodes: graph.nodes.map((node) => ({ ...node, config: persistedMaterialConfig(node.config), runRecordIds: [] })),
     edges: graph.edges,
   };
+}
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function workflowSha256Bytes(bytes: Uint8Array): string {
+  return `sha256:${hex(sha256(bytes))}`;
+}
+
+export function workflowSha256Text(value: string): string {
+  return workflowSha256Bytes(new TextEncoder().encode(value));
+}
+
+export function createWorkflowRevision(graph: WorkflowGraphV2, hash: WorkflowCacheHash = workflowSha256Text): string {
+  return digest(hash, 'paintnode-workflow-revision-v1', graphRevisionMaterial(graph));
 }
 
 export function createWorkflowRunRecord(
@@ -164,7 +189,7 @@ export function createWorkflowRunRecord(
   if (draft.debugArtifactReference) {
     requireProjectRelativeWorkflowReference(draft.debugArtifactReference, 'Debug artifact reference');
   }
-  const workflowRevision = digest(hash, 'paintnode-workflow-revision-v1', graphRevisionMaterial(draft.graph));
+  const workflowRevision = createWorkflowRevision(draft.graph, hash);
   const nodeRevision = digest(hash, 'paintnode-workflow-node-revision-v1', {
     type: node.type,
     ports: node.ports,

@@ -1,7 +1,21 @@
 import { WorkflowGraphDomain } from './domain';
 import { planWorkflowExecution, type WorkflowExecutionPlan } from './execution';
 import { workflowReadiness } from './readiness';
-import type { WorkflowGraphV2, WorkflowNodeV2 } from './schema';
+import {
+  createWorkflowRunRecord,
+  isFullWorkflowRunRecord,
+  workflowSha256Bytes,
+  workflowSha256Text,
+  type WorkflowRunMaterialDraft,
+} from './provenance';
+import type {
+  WorkflowGraphV2,
+  WorkflowNodeV2,
+  WorkflowRunExecutor,
+  WorkflowRunProvider,
+  WorkflowRunRecordV1,
+} from './schema';
+import type { WorkflowCacheHash } from './execution';
 
 export interface WorkflowProjectAsset {
   id: string;
@@ -12,6 +26,11 @@ export interface WorkflowProjectAsset {
   mime?: string | null;
 }
 
+export interface WorkflowAssetMaterial {
+  bytes: Uint8Array | null;
+  contentHash: string;
+}
+
 export interface WorkflowTransformSource {
   nodeId: string;
   portId: string;
@@ -19,6 +38,7 @@ export interface WorkflowTransformSource {
   role: string;
   assetId: string;
   relativePath: string;
+  contentHash: string;
   bytes: Uint8Array;
 }
 
@@ -68,11 +88,14 @@ export interface WorkflowBytesArtifact {
   mime: string;
   width: number;
   height: number;
+  contentHash?: string;
 }
 
 export interface WorkflowStoredAssetArtifact {
   kind: 'project-asset';
   asset: WorkflowProjectAsset;
+  bytes: Uint8Array;
+  contentHash?: string;
 }
 
 export type WorkflowTransformArtifact = WorkflowBytesArtifact | WorkflowStoredAssetArtifact;
@@ -81,6 +104,8 @@ export interface WorkflowNodeExecutor {
   provider: string;
   capabilities: readonly string[];
   materialization?: 'visual-bytes' | 'metadata-only';
+  executor: WorkflowRunExecutor;
+  describeRun(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunProvider;
   execute(request: Readonly<WorkflowTransformExecutionRequest>): Promise<WorkflowTransformArtifact>;
 }
 
@@ -98,10 +123,13 @@ export interface ExecuteCampaignGenerateOptions {
   provider: string;
   executors: readonly WorkflowNodeExecutor[];
   assets: readonly WorkflowProjectAsset[];
-  readAsset: (asset: Readonly<WorkflowProjectAsset>) => Promise<Uint8Array>;
+  resolveAsset: (asset: Readonly<WorkflowProjectAsset>) => Promise<WorkflowAssetMaterial>;
   readStoryboard?: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => Promise<Uint8Array | null>;
   storeAsset: (request: Readonly<WorkflowAssetStoreRequest>) => Promise<WorkflowProjectAsset>;
   idGenerator?: () => string;
+  runIdGenerator?: (nodeId: string, attempt: number) => string;
+  clock?: () => number;
+  hash?: WorkflowCacheHash;
 }
 
 export interface WorkflowTransformExecutionOutcome {
@@ -119,6 +147,8 @@ export type WorkflowTransformExecutionErrorCode =
   | 'INVALID_TRANSFORM_PATH'
   | 'NOT_READY'
   | 'MISSING_ASSET'
+  | 'EXECUTOR_ERROR'
+  | 'ASSET_STORE_ERROR'
   | 'INVALID_EXECUTOR_RESULT';
 
 export class WorkflowTransformExecutionError extends Error {
@@ -126,6 +156,7 @@ export class WorkflowTransformExecutionError extends Error {
     readonly code: WorkflowTransformExecutionErrorCode,
     message: string,
     readonly nextAction: string,
+    readonly failureGraph?: WorkflowGraphV2,
   ) {
     super(message);
     this.name = 'WorkflowTransformExecutionError';
@@ -256,15 +287,58 @@ function boundAsset(node: WorkflowNodeV2, assets: readonly WorkflowProjectAsset[
   )) ?? null;
 }
 
+function canonicalContentHash(value: unknown): string | null {
+  const hash = typeof value === 'string' ? value.trim() : '';
+  return /^sha256:[0-9a-f]{64}$/.test(hash) ? hash : null;
+}
+
+function appendRunRecord(
+  graph: WorkflowGraphV2,
+  nodeId: string,
+  record: WorkflowRunRecordV1,
+): WorkflowGraphV2 {
+  return new WorkflowGraphDomain({
+    ...graph,
+    nodes: graph.nodes.map((node) => node.id === nodeId
+      ? { ...node, runRecordIds: [...node.runRecordIds, record.id] }
+      : node),
+    runRecords: [...graph.runRecords, record],
+  }).graph;
+}
+
+function nextRunAttempt(graph: WorkflowGraphV2, node: WorkflowNodeV2): number {
+  const prior = node.runRecordIds
+    .map((id) => graph.runRecords.find((record) => record.id === id))
+    .filter(isFullWorkflowRunRecord)
+    .reduce((maximum, record) => Math.max(maximum, record.attempt), 0);
+  return Math.max(prior, node.runRecordIds.length) + 1;
+}
+
 export function createWorkflowCompositionExecutor(
   provider: string,
   service: WorkflowCompositionService,
-  options: { materialization?: 'visual-bytes' | 'metadata-only' } = {},
+  options: {
+    materialization?: 'visual-bytes' | 'metadata-only';
+    executor?: WorkflowRunExecutor;
+    describeRun?: (request: Readonly<WorkflowTransformExecutionRequest>) => WorkflowRunProvider;
+  } = {},
 ): WorkflowNodeExecutor {
   return Object.freeze({
     provider,
     capabilities: Object.freeze(['generate']),
     materialization: options.materialization ?? 'visual-bytes',
+    executor: Object.freeze(options.executor ?? {
+      id: 'campaign-generate', version: '1', requestSchemaVersion: '1',
+    }),
+    describeRun: options.describeRun ?? ((request) => ({
+      id: provider,
+      model: typeof request.transform.advanced.model === 'string' ? request.transform.advanced.model : null,
+      effectiveOptions: typeof request.transform.advanced.options === 'object'
+        && request.transform.advanced.options !== null
+        && !Array.isArray(request.transform.advanced.options)
+        ? cloneValue(request.transform.advanced.options as Record<string, unknown>)
+        : {},
+    })),
     execute: async (request: Readonly<WorkflowTransformExecutionRequest>) => service(
       deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>,
     ),
@@ -342,6 +416,27 @@ export async function executeCampaignGenerateTransform(
         `Replace the asset in ${input.title}`,
       );
     }
+    const material = await options.resolveAsset(asset);
+    const claimedHash = canonicalContentHash(material.contentHash);
+    const visualBytes = material.bytes instanceof Uint8Array && material.bytes.length > 0
+      ? new Uint8Array(material.bytes)
+      : null;
+    const computedHash = visualBytes ? workflowSha256Bytes(visualBytes) : null;
+    if (!claimedHash || (computedHash && claimedHash !== computedHash)) {
+      throw new WorkflowTransformExecutionError(
+        'MISSING_ASSET',
+        `${input.title} could not be verified from the exact project material used for this run.`,
+        `Refresh or replace the asset in ${input.title}`,
+      );
+    }
+    if (executor.materialization !== 'metadata-only' && !visualBytes) {
+      throw new WorkflowTransformExecutionError(
+        'MISSING_ASSET',
+        `${input.title} could not be materialized for the image provider.`,
+        `Refresh or replace the asset in ${input.title}`,
+      );
+    }
+    const contentHash = computedHash ?? claimedHash;
     sources.push({
       nodeId: input.id,
       portId: edge.source.portId,
@@ -349,9 +444,8 @@ export async function executeCampaignGenerateTransform(
       role: textConfig(input, 'role'),
       assetId: asset.id,
       relativePath: asset.relativePath,
-      bytes: executor.materialization === 'metadata-only'
-        ? new Uint8Array()
-        : await options.readAsset(asset),
+      contentHash,
+      bytes: executor.materialization === 'metadata-only' ? new Uint8Array() : visualBytes!,
     });
   }
 
@@ -409,45 +503,164 @@ export async function executeCampaignGenerateTransform(
     },
   };
 
-  const artifact = await executor.execute(deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>);
-  let asset: WorkflowProjectAsset;
-  if (artifact.kind === 'project-asset') {
-    asset = cloneValue(artifact.asset);
-  } else if (
-    artifact.kind === 'bytes'
-    && artifact.bytes instanceof Uint8Array
-    && artifact.bytes.length > 0
-    && artifact.name.trim()
-    && artifact.mime.startsWith('image/')
-    && artifact.width === numberConfig(output, 'finalWidth')
-    && artifact.height === numberConfig(output, 'finalHeight')
-  ) {
-    asset = await options.storeAsset({
-      projectPath: options.projectPath,
-      prompt,
-      name: artifact.name,
-      bytes: new Uint8Array(artifact.bytes),
-      mime: artifact.mime,
-      width: artifact.width,
-      height: artifact.height,
-    });
-  } else {
+  const attempt = nextRunAttempt(graph, transform);
+  const startedAt = options.clock?.() ?? Date.now();
+  const runId = options.runIdGenerator?.(transform.id, attempt)
+    ?? globalThis.crypto?.randomUUID?.()
+    ?? `run-${transform.id}-${startedAt}-${attempt}`;
+  const hash = options.hash ?? workflowSha256Text;
+  const runMaterial: WorkflowRunMaterialDraft = {
+    sourceAssets: sources.map((source) => ({
+      nodeId: source.nodeId,
+      assetId: source.assetId,
+      relativePath: source.relativePath,
+      contentHash: source.contentHash,
+      name: source.name,
+      role: source.role,
+    })),
+    prompt: {
+      brief: briefText,
+      artDirection: artDirectionText,
+      instructions: transformInstructions,
+      constraints: placementConstraints,
+      effectivePrompt: prompt,
+    },
+    provider: executor.describeRun(deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>),
+    executor: executor.executor,
+    output: request.output,
+  };
+  createWorkflowRunRecord({
+    id: runId,
+    nodeId: transform.id,
+    attempt,
+    status: 'running',
+    graph,
+    material: runMaterial,
+    startedAt,
+    finishedAt: null,
+    outputs: [],
+  }, hash);
+
+  let phase: 'executor' | 'store' | 'validation' = 'executor';
+  let artifact: WorkflowTransformArtifact;
+  let artifactContentHash: string | null = null;
+  try {
+    artifact = await executor.execute(deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>);
+    phase = 'validation';
+  } catch (error) {
+    const finishedAt = options.clock?.() ?? Date.now();
+    const failed = createWorkflowRunRecord({
+      id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
+      startedAt, finishedAt, outputs: [],
+      failure: { code: 'EXECUTOR_ERROR', message: (error as Error)?.message ?? String(error) },
+    }, hash);
     throw new WorkflowTransformExecutionError(
-      'INVALID_EXECUTOR_RESULT',
-      'The Transform executor did not return a project asset or image bytes.',
+      'EXECUTOR_ERROR',
+      failed.failure!.message,
       'Retry Generate',
+      appendRunRecord(graph, transform.id, failed),
     );
   }
-  if (!validAsset(asset, output)) {
+  let asset: WorkflowProjectAsset;
+  try {
+    if (artifact.bytes instanceof Uint8Array && artifact.bytes.length > 0) {
+      artifactContentHash = workflowSha256Bytes(artifact.bytes);
+      const claimedHash = canonicalContentHash(artifact.contentHash);
+      if (artifact.contentHash !== undefined && claimedHash !== artifactContentHash) {
+        throw new WorkflowTransformExecutionError(
+          'INVALID_EXECUTOR_RESULT',
+          'The executor output fingerprint does not match the returned image bytes.',
+          'Retry Generate',
+        );
+      }
+    }
+    if (artifact.kind === 'project-asset') {
+      asset = cloneValue(artifact.asset);
+    } else if (
+      artifact.kind === 'bytes'
+      && artifact.bytes instanceof Uint8Array
+      && artifact.bytes.length > 0
+      && artifact.name.trim()
+      && artifact.mime.startsWith('image/')
+      && artifact.width === numberConfig(output, 'finalWidth')
+      && artifact.height === numberConfig(output, 'finalHeight')
+    ) {
+      phase = 'store';
+      asset = await options.storeAsset({
+        projectPath: options.projectPath,
+        prompt,
+        name: artifact.name,
+        bytes: new Uint8Array(artifact.bytes),
+        mime: artifact.mime,
+        width: artifact.width,
+        height: artifact.height,
+      });
+      phase = 'validation';
+    } else {
+      throw new WorkflowTransformExecutionError(
+        'INVALID_EXECUTOR_RESULT',
+        'The Transform executor did not return a project asset or image bytes.',
+        'Retry Generate',
+      );
+    }
+    if (!validAsset(asset, output)) {
+      throw new WorkflowTransformExecutionError(
+        'INVALID_EXECUTOR_RESULT',
+        `Generate must return an actual ${numberConfig(output, 'finalWidth')} x ${numberConfig(output, 'finalHeight')} image asset.`,
+        'Retry Generate',
+      );
+    }
+  } catch (error) {
+    const finishedAt = options.clock?.() ?? Date.now();
+    const original = error instanceof WorkflowTransformExecutionError ? error : null;
+    const failureCode = phase === 'store' ? 'ASSET_STORE_ERROR' : 'INVALID_EXECUTOR_RESULT';
+    const failed = createWorkflowRunRecord({
+      id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
+      startedAt, finishedAt, outputs: [],
+      failure: { code: failureCode, message: original?.message ?? (error as Error)?.message ?? String(error) },
+    }, hash);
     throw new WorkflowTransformExecutionError(
-      'INVALID_EXECUTOR_RESULT',
-      `Generate must return an actual ${numberConfig(output, 'finalWidth')} x ${numberConfig(output, 'finalHeight')} image asset.`,
-      'Retry Generate',
+      failureCode,
+      failed.failure!.message,
+      original?.nextAction ?? 'Retry Generate',
+      appendRunRecord(graph, transform.id, failed),
+    );
+  }
+
+  const outputContentHash = artifactContentHash;
+  if (!outputContentHash) {
+    const finishedAt = options.clock?.() ?? Date.now();
+    const failed = createWorkflowRunRecord({
+      id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
+      startedAt, finishedAt, outputs: [],
+      failure: { code: 'INVALID_EXECUTOR_RESULT', message: 'Generated asset fingerprint is unavailable.' },
+    }, hash);
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT', failed.failure!.message, 'Refresh the generated project asset',
+      appendRunRecord(graph, transform.id, failed),
     );
   }
 
   const referenceId = options.idGenerator?.() ?? `result-${transform.id}-${asset.id}`;
-  const resultGraph: WorkflowGraphV2 = {
+  const finishedAt = options.clock?.() ?? Date.now();
+  const succeeded = createWorkflowRunRecord({
+    id: runId,
+    nodeId: transform.id,
+    attempt,
+    status: 'succeeded',
+    graph,
+    material: runMaterial,
+    startedAt,
+    finishedAt,
+    outputs: [{
+      assetReferenceId: referenceId,
+      assetId: asset.id,
+      relativePath: asset.relativePath,
+      contentHash: outputContentHash,
+      acceptedAt: finishedAt,
+    }],
+  }, hash);
+  const resultGraph: WorkflowGraphV2 = appendRunRecord({
     ...graph,
     nodes: graph.nodes.map((node) => {
       if (node.id === transform.id) {
@@ -472,7 +685,7 @@ export async function executeCampaignGenerateTransform(
       ...graph.assetReferences.filter((reference) => reference.id !== referenceId),
       { id: referenceId, role: 'output', assetId: asset.id, relativePath: asset.relativePath },
     ],
-  };
+  }, transform.id, succeeded);
   return {
     graph: new WorkflowGraphDomain(resultGraph).graph,
     plan,

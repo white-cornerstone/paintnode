@@ -31,5 +31,9 @@ export function createProviderFreeQaWorkflowExecutor(
       width: 1024,
       height: 1024,
     };
-  }, { materialization: 'metadata-only' });
+  }, {
+    materialization: 'metadata-only',
+    executor: { id: 'paintnode-qa-fake-square', version: '1', requestSchemaVersion: '1' },
+    describeRun: () => ({ id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' } }),
+  });
 }

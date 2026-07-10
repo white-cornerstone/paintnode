@@ -8,6 +8,9 @@ import {
   type WorkflowProjectAsset,
   type WorkflowTransformExecutionRequest,
 } from './transformExecutor';
+import { workflowSha256Bytes } from './provenance';
+
+const material = (bytes: Uint8Array) => ({ bytes, contentHash: workflowSha256Bytes(bytes) });
 
 const productAsset: WorkflowProjectAsset = {
   id: 'asset-product',
@@ -36,7 +39,7 @@ describe('Campaign Composer Generate Transform execution', () => {
       options: { quality: 'high' },
     };
     const seen: WorkflowTransformExecutionRequest[] = [];
-    const readAsset = vi.fn(async () => new Uint8Array([137, 80, 78, 71]));
+    const resolveAsset = vi.fn(async () => material(new Uint8Array([137, 80, 78, 71])));
     const storeAsset = vi.fn(async () => ({
       id: 'asset-square-result',
       name: 'campaign-square.png',
@@ -62,9 +65,11 @@ describe('Campaign Composer Generate Transform execution', () => {
       provider: 'fake',
       executors: [executor],
       assets: [productAsset],
-      readAsset,
+      resolveAsset,
       storeAsset,
       idGenerator: () => 'asset-ref-square-result',
+      runIdGenerator: () => 'run-square-1',
+      clock: (() => { let now = 100; return () => now += 10; })(),
     });
 
     expect(result.plan.executionOrder).toEqual([
@@ -99,7 +104,7 @@ describe('Campaign Composer Generate Transform execution', () => {
     expect(Object.isFrozen(seen[0].sources)).toBe(true);
     expect(Object.isFrozen(seen[0].transform.advanced)).toBe(true);
     expect(Object.isFrozen(seen[0].transform.advanced.options)).toBe(true);
-    expect(readAsset).toHaveBeenCalledTimes(1);
+    expect(resolveAsset).toHaveBeenCalledTimes(1);
     expect(storeAsset).toHaveBeenCalledTimes(1);
     expect(result.asset).toEqual(expect.objectContaining({ id: 'asset-square-result' }));
     expect(result.graph.nodes.find((node) => node.id === 'transform-generate-square')?.config).toMatchObject({
@@ -116,9 +121,71 @@ describe('Campaign Composer Generate Transform execution', () => {
       assetId: 'asset-square-result',
       relativePath: 'generated/campaign-square.png',
     });
+    expect(result.graph.nodes.find((node) => node.id === 'transform-generate-square')?.runRecordIds)
+      .toEqual(['run-square-1']);
+    expect(result.graph.runRecords).toEqual([
+      expect.objectContaining({
+        recordVersion: 1,
+        id: 'run-square-1',
+        nodeId: 'transform-generate-square',
+        status: 'succeeded',
+        attempt: 1,
+        sourceAssets: [expect.objectContaining({
+          name: 'Product', role: 'The product that must remain recognisable in every campaign output.',
+          assetId: 'asset-product', contentHash: workflowSha256Bytes(new Uint8Array([137, 80, 78, 71])),
+        })],
+        target: { nodeId: 'output-square', title: 'Square 1:1', width: 1024, height: 1024 },
+        provider: { id: 'fake', model: 'persisted-model', effectiveOptions: { quality: 'high' } },
+        outputs: [expect.objectContaining({
+          assetReferenceId: 'asset-ref-square-result', assetId: 'asset-square-result',
+          contentHash: workflowSha256Bytes(new Uint8Array([1, 2, 3, 4])), acceptedAt: 120,
+        })],
+      }),
+    ]);
 
     const serialized = serializeWorkflowGraphV2(result.graph);
     expect(parseWorkflowGraphV2(JSON.parse(serialized))).toMatchObject({ ok: true, value: result.graph });
+  });
+
+  it('appends a failed attempt without deleting an earlier accepted result', async () => {
+    const first = await executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'project-asset',
+        asset: {
+          id: 'accepted-square', name: 'accepted.png', relativePath: 'generated/accepted.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([10, 20, 30]),
+      }))],
+      assets: [productAsset], resolveAsset: async () => material(new Uint8Array([1])), storeAsset: vi.fn(),
+      idGenerator: () => 'accepted-ref', runIdGenerator: () => 'run-success', clock: () => 100,
+    });
+
+    let failure: unknown;
+    try {
+      await executeCampaignGenerateTransform(first.graph, 'output-square', {
+        projectPath: '/virtual/project', provider: 'fake',
+        executors: [createWorkflowCompositionExecutor('fake', async () => { throw new Error('token=secret at /tmp/raw.jsonl'); })],
+        assets: [productAsset], resolveAsset: async () => material(new Uint8Array([1])), storeAsset: vi.fn(),
+        runIdGenerator: () => 'run-failed', clock: () => 200,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      failureGraph: {
+        runRecords: [
+          expect.objectContaining({ id: 'run-success', status: 'succeeded' }),
+          expect.objectContaining({
+            id: 'run-failed', status: 'failed', outputs: [],
+            failure: { code: 'EXECUTOR_ERROR', message: 'The provider could not complete this attempt.' },
+          }),
+        ],
+        assetReferences: [expect.objectContaining({ id: 'accepted-ref', assetId: 'accepted-square' })],
+      },
+    });
   });
 
   it('rejects legacy direct-output graphs without invoking an executor or injected IO', async () => {
@@ -131,19 +198,37 @@ describe('Campaign Composer Generate Transform execution', () => {
       target: { nodeId: 'output-square', portId: 'source' },
     });
     const service = vi.fn();
-    const readAsset = vi.fn();
+    const resolveAsset = vi.fn();
     const storeAsset = vi.fn();
     await expect(executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
       provider: 'fake',
       executors: [createWorkflowCompositionExecutor('fake', service)],
       assets: [productAsset],
-      readAsset,
+      resolveAsset,
       storeAsset,
     })).rejects.toMatchObject({ code: 'INVALID_TRANSFORM_PATH' });
     expect(service).not.toHaveBeenCalled();
-    expect(readAsset).not.toHaveBeenCalled();
+    expect(resolveAsset).not.toHaveBeenCalled();
     expect(storeAsset).not.toHaveBeenCalled();
+  });
+
+  it('rejects mismatched exact source material before invoking the provider', async () => {
+    const service = vi.fn();
+    await expect(executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', service)],
+      assets: [productAsset],
+      resolveAsset: async () => ({
+        bytes: new Uint8Array([137, 80, 78, 71]),
+        contentHash: `sha256:${'8'.repeat(64)}`,
+      }),
+      storeAsset: vi.fn(),
+    })).rejects.toMatchObject({
+      code: 'MISSING_ASSET',
+      message: expect.stringMatching(/exact project material/i),
+    });
+    expect(service).not.toHaveBeenCalled();
   });
 
   it('rejects malformed or wrong-sized results atomically and preserves an earlier output binding', async () => {
@@ -166,7 +251,7 @@ describe('Campaign Composer Generate Transform execution', () => {
         height: 768,
       }))],
       assets: [productAsset],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       storeAsset,
     })).rejects.toMatchObject({ code: 'INVALID_EXECUTOR_RESULT' });
 
@@ -176,6 +261,30 @@ describe('Campaign Composer Generate Transform execution', () => {
       outputAssetId: 'previous-square',
       outputRelativePath: 'generated/previous-square.png',
     });
+
+    const mismatchStore = vi.fn();
+    await expect(executeCampaignGenerateTransform(graph, 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'bytes', name: 'mismatch.png', bytes: new Uint8Array([1, 2, 3, 4]),
+        mime: 'image/png', width: 1024, height: 1024, contentHash: `sha256:${'9'.repeat(64)}`,
+      }))],
+      assets: [productAsset], resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: mismatchStore,
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXECUTOR_RESULT',
+      message: 'The generated result did not satisfy the output requirements.',
+      failureGraph: {
+        runRecords: [expect.objectContaining({
+          status: 'failed', failure: {
+            code: 'INVALID_EXECUTOR_RESULT',
+            message: 'The generated result did not satisfy the output requirements.',
+          },
+        })],
+      },
+    });
+    expect(mismatchStore).not.toHaveBeenCalled();
+    expect(graph).toEqual(before);
   });
 
   it('does not reach global network APIs on the pure fake executor path', async () => {
@@ -191,9 +300,10 @@ describe('Campaign Composer Generate Transform execution', () => {
             id: 'fake-square', name: 'square.png', relativePath: 'generated/square.png',
             width: 1024, height: 1024, mime: 'image/png',
           },
+          bytes: new Uint8Array([4, 5, 6]),
         }))],
         assets: [productAsset],
-        readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+        resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
         storeAsset: vi.fn(),
       });
       expect(fetch).not.toHaveBeenCalled();
@@ -228,10 +338,11 @@ describe('Campaign Composer Generate Transform execution', () => {
             id: 'storyboard-result', name: 'square.png', relativePath: 'generated/square.png',
             width: 1024, height: 1024, mime: 'image/png',
           },
+          bytes: new Uint8Array([7, 8, 9]),
         };
       })],
       assets: [productAsset],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       readStoryboard,
       storeAsset: vi.fn(),
     });
@@ -263,7 +374,7 @@ describe('Campaign Composer Generate Transform execution', () => {
 
   it('explains missing-project and unsupported-provider actions before any injected side effect', async () => {
     const graph = boundCampaign();
-    const readAsset = vi.fn();
+    const resolveAsset = vi.fn();
     const storeAsset = vi.fn();
     const executor = createWorkflowCompositionExecutor('fake', vi.fn());
 
@@ -272,7 +383,7 @@ describe('Campaign Composer Generate Transform execution', () => {
       provider: 'fake',
       executors: [executor],
       assets: [productAsset],
-      readAsset,
+      resolveAsset,
       storeAsset,
     })).rejects.toMatchObject({
       code: 'MISSING_PROJECT',
@@ -284,13 +395,13 @@ describe('Campaign Composer Generate Transform execution', () => {
       provider: 'unknown-provider',
       executors: [executor],
       assets: [productAsset],
-      readAsset,
+      resolveAsset,
       storeAsset,
     })).rejects.toMatchObject({
       code: 'UNSUPPORTED_PROVIDER',
       nextAction: 'Choose a supported image provider',
     } satisfies Partial<WorkflowTransformExecutionError>);
-    expect(readAsset).not.toHaveBeenCalled();
+    expect(resolveAsset).not.toHaveBeenCalled();
     expect(storeAsset).not.toHaveBeenCalled();
   });
 
@@ -300,20 +411,20 @@ describe('Campaign Composer Generate Transform execution', () => {
       provider: 'persisted-provider', model: 'persisted-model',
     };
     const service = vi.fn();
-    const readAsset = vi.fn();
+    const resolveAsset = vi.fn();
     await expect(executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
       provider: 'fake',
       executors: [createWorkflowCompositionExecutor('fake', service)],
       assets: [productAsset],
-      readAsset,
+      resolveAsset,
       storeAsset: vi.fn(),
     })).rejects.toMatchObject({
       code: 'UNSUPPORTED_PROVIDER',
       message: expect.stringMatching(/persisted-provider/),
     });
     expect(service).not.toHaveBeenCalled();
-    expect(readAsset).not.toHaveBeenCalled();
+    expect(resolveAsset).not.toHaveBeenCalled();
   });
 
   it('selects a saved Antigravity override exactly when the current UI default is Codex', async () => {
@@ -330,6 +441,7 @@ describe('Campaign Composer Generate Transform execution', () => {
         id: 'antigravity-square', name: 'square.png', relativePath: 'generated/square.png',
         width: 1024, height: 1024, mime: 'image/png',
       },
+      bytes: new Uint8Array([11, 12, 13]),
     }));
     const outcome = await executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
@@ -339,7 +451,7 @@ describe('Campaign Composer Generate Transform execution', () => {
         createWorkflowCompositionExecutor('antigravity', antigravity),
       ],
       assets: [productAsset],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       storeAsset: vi.fn(),
     });
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { WorkflowStore } from '../state/workflow.svelte';
 import { createWorkflowCompositionExecutor, type WorkflowProjectAsset } from './transformExecutor';
 import { runWithAsyncObserver } from './runObserver';
+import { workflowSha256Bytes } from './provenance';
 
 const product = {
   id: 'product',
@@ -54,6 +55,7 @@ describe('workflow async observer orchestration', () => {
             id: 'original-result', name: 'Square.png', relativePath: 'generated/original-square.png',
             width: 1024, height: 1024, mime: 'image/png',
           },
+          bytes: new Uint8Array([1, 2, 3]),
         };
       });
 
@@ -65,7 +67,10 @@ describe('workflow async observer orchestration', () => {
           provider: 'fake',
           executors: [createWorkflowCompositionExecutor('fake', provider)],
           assets: [product],
-          readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+          resolveAsset: async () => {
+            const bytes = new Uint8Array([137, 80, 78, 71]);
+            return { bytes, contentHash: workflowSha256Bytes(bytes) };
+          },
           storeAsset: async () => { throw new Error('unused'); },
         }),
       });

@@ -3,12 +3,14 @@ import { WorkflowStore } from './workflow.svelte';
 import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
 import annotations from '../workflow/fixtures/v1/annotations.json';
 import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
-import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
+import { WORKFLOW_GRAPH_VERSION, workflowSha256Bytes, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
 import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
 import { createWorkflowCompositionExecutor } from '../workflow/transformExecutor';
+
+const material = (bytes: Uint8Array) => ({ bytes, contentHash: workflowSha256Bytes(bytes) });
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -41,10 +43,11 @@ function deferredCampaignRun(store: WorkflowStore, currentProjectIdentity?: () =
           id: 'deferred-result', name: 'Square.png', relativePath: 'generated/Square.png',
           width: 1024, height: 1024, mime: 'image/png',
         },
+        bytes: new Uint8Array([1, 2, 3]),
       };
     })],
     assets: [campaignProduct],
-    readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+    resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
     storeAsset: async () => { throw new Error('unused'); },
     currentProjectIdentity,
   });
@@ -73,10 +76,11 @@ describe('WorkflowStore graph adapter', () => {
             id: 'result-square', name: 'Square.png', relativePath: 'generated/Square.png',
             width: 1024, height: 1024, mime: 'image/png',
           },
+          bytes: new Uint8Array([4, 5, 6]),
         };
       })],
       assets: [product],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       storeAsset: async () => { throw new Error('bytes store should not run'); },
     });
 
@@ -95,6 +99,60 @@ describe('WorkflowStore graph adapter', () => {
     expect(reopened.outputNode('output-square')).toMatchObject({
       outputAssetId: 'result-square', outputRelativePath: 'generated/Square.png',
     });
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'succeeded', assetId: 'result-square',
+    });
+    reopened.setBriefObjective('brief', 'A materially different campaign objective.');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'stale', assetId: 'result-square',
+    });
+  });
+
+  it('persists a safe failed attempt and restores it after reopen', async () => {
+    const store = campaignStore();
+    await expect(store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => {
+        throw new Error('token=secret at /tmp/provider.jsonl');
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: () => 'failed-run', clock: () => 100,
+    })).rejects.toMatchObject({ code: 'EXECUTOR_ERROR' });
+
+    expect(store.graphSnapshot().runRecords).toEqual([
+      expect.objectContaining({
+        id: 'failed-run', status: 'failed',
+        failure: { code: 'EXECUTOR_ERROR', message: 'The provider could not complete this attempt.' },
+      }),
+    ]);
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Campaign');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'failed', message: 'The provider could not complete this attempt.', assetId: null,
+    });
+  });
+
+  it('does not persist a failed attempt after the workflow changes while it is running', async () => {
+    const store = campaignStore();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => {
+        await gate;
+        throw new Error('provider failed');
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+    });
+    store.setBriefObjective('brief', 'Edited while failure was pending.');
+    finish();
+    await expect(run).rejects.toMatchObject({ code: 'EXECUTOR_ERROR' });
+    expect(store.graphSnapshot().runRecords).toEqual([]);
+    expect(store.briefNodes[0].objective).toBe('Edited while failure was pending.');
   });
 
   it('keeps the newest overlapping Transform result when an older run finishes late', async () => {
@@ -113,11 +171,12 @@ describe('WorkflowStore graph adapter', () => {
           id: assetId, name: `${assetId}.png`, relativePath: `generated/${assetId}.png`,
           width: 1024, height: 1024, mime: 'image/png',
         },
+        bytes: new Uint8Array([7, 8, 9]),
       }));
     }));
     const options = {
       projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [product],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       storeAsset: async () => { throw new Error('unused'); },
     };
     const older = store.runCampaignGenerate('output-square', options);

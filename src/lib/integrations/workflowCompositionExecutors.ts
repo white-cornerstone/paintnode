@@ -26,6 +26,10 @@ function numberOverride<T>(value: unknown, fallback: T): T {
   return typeof value === 'number' && Number.isFinite(value) ? value as T : fallback;
 }
 
+function definedOptions(entries: Array<readonly [string, unknown]>): Record<string, unknown> {
+  return Object.fromEntries(entries.filter(([, value]) => value !== undefined));
+}
+
 function codexConfigForRequest(
   config: CodexGeneratorConfig,
   request: Readonly<WorkflowTransformExecutionRequest>,
@@ -82,7 +86,7 @@ function providerSources(request: Readonly<WorkflowTransformExecutionRequest>) {
   ];
 }
 
-function resultAsset(result: GeneratedImageResult) {
+async function resultAsset(result: GeneratedImageResult) {
   const asset = result.asset;
   if (!asset) {
     throw new WorkflowTransformExecutionError(
@@ -91,7 +95,15 @@ function resultAsset(result: GeneratedImageResult) {
       'Retry Generate',
     );
   }
-  return { kind: 'project-asset' as const, asset };
+  const bytes = new Uint8Array(await (await fetch(result.dataUrl)).arrayBuffer());
+  if (bytes.length === 0) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT',
+      'The image provider returned an empty generated project asset.',
+      'Retry Generate',
+    );
+  }
+  return { kind: 'project-asset' as const, asset, bytes };
 }
 
 export function createCodexWorkflowTransformExecutor(config: CodexGeneratorConfig): WorkflowNodeExecutor {
@@ -102,7 +114,24 @@ export function createCodexWorkflowTransformExecutor(config: CodexGeneratorConfi
       providerSources(request),
       request.output,
     ),
-  ));
+  ), {
+    executor: { id: 'paintnode-codex-workflow', version: '1', requestSchemaVersion: '1' },
+    describeRun: (request) => {
+      const effective = codexConfigForRequest(config, request);
+      return {
+        id: 'codex',
+        model: effective.model ?? null,
+        effectiveOptions: definedOptions([
+          ['reasoningEffort', effective.reasoningEffort],
+          ['serviceTier', effective.serviceTier],
+          ['imageQuality', effective.imageQuality],
+          ['imageModeration', effective.imageModeration],
+          ['autonomyLevel', effective.autonomyLevel],
+          ['editChecksLevel', effective.editChecksLevel],
+        ]),
+      };
+    },
+  });
 }
 
 export function createAntigravityWorkflowTransformExecutor(config: AntigravityGeneratorConfig): WorkflowNodeExecutor {
@@ -113,5 +142,29 @@ export function createAntigravityWorkflowTransformExecutor(config: AntigravityGe
       providerSources(request),
       request.output,
     ),
-  ));
+  ), {
+    executor: { id: 'paintnode-antigravity-workflow', version: '1', requestSchemaVersion: '1' },
+    describeRun: (request) => {
+      const effective = antigravityConfigForRequest(config, request);
+      return {
+        id: 'antigravity',
+        model: effective.imageModel ?? null,
+        effectiveOptions: definedOptions([
+          ['approvalMode', effective.approvalMode],
+          ['agentModel', effective.model],
+          ['imageSize', effective.imageSize],
+          ['personGeneration', effective.personGeneration],
+          ['prominentPeople', effective.prominentPeople],
+          ['compressionQuality', effective.compressionQuality],
+          ['safetyFiltering', effective.safetyFiltering],
+          ['safetyHarassment', effective.safetyHarassment],
+          ['safetyHateSpeech', effective.safetyHateSpeech],
+          ['safetySexuallyExplicit', effective.safetySexuallyExplicit],
+          ['safetyDangerousContent', effective.safetyDangerousContent],
+          ['autonomyLevel', effective.autonomyLevel],
+          ['editChecksLevel', effective.editChecksLevel],
+        ]),
+      };
+    },
+  });
 }

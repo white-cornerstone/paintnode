@@ -72,7 +72,10 @@ describe('provider-free QA workflow executor', () => {
     const product = graph.nodes.find((node) => node.id === 'slot-product')!;
     product.config.assetId = 'product';
     product.config.relativePath = 'assets/Product.png';
-    const readAsset = vi.fn();
+    const resolveAsset = vi.fn(async () => ({
+      bytes: null,
+      contentHash: `sha256:${'5'.repeat(64)}`,
+    }));
     const readStoryboard = vi.fn();
     const storeAsset = vi.fn(async () => ({
       id: 'qa-square',
@@ -86,6 +89,12 @@ describe('provider-free QA workflow executor', () => {
       'provider-free',
       async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
     );
+    expect(executor.executor).toEqual({
+      id: 'paintnode-qa-fake-square', version: '1', requestSchemaVersion: '1',
+    });
+    expect(executor.describeRun(request())).toEqual({
+      id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' },
+    });
 
     const outcome = await executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
@@ -95,12 +104,12 @@ describe('provider-free QA workflow executor', () => {
         id: 'product', name: 'Product.png', relativePath: 'assets/Product.png',
         width: 1200, height: 1200, mime: 'image/png',
       }],
-      readAsset,
+      resolveAsset,
       readStoryboard,
       storeAsset,
     });
 
-    expect(readAsset).not.toHaveBeenCalled();
+    expect(resolveAsset).toHaveBeenCalledOnce();
     expect(readStoryboard).not.toHaveBeenCalled();
     expect(storeAsset).toHaveBeenCalledOnce();
     expect(outcome.asset).toMatchObject({

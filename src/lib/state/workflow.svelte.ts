@@ -22,10 +22,13 @@ import {
   executeCampaignGenerateTransform,
   type ExecuteCampaignGenerateOptions,
   type WorkflowTransformExecutionOutcome,
+  WorkflowTransformExecutionError,
+  createWorkflowRevision,
+  deriveWorkflowNodeRunState,
 } from '../workflow';
 
 export interface WorkflowTransformExecutionState {
-  state: 'idle' | 'running' | 'succeeded' | 'failed';
+  state: 'idle' | 'running' | 'succeeded' | 'failed' | 'stale';
   message: string;
   assetId: string | null;
 }
@@ -902,7 +905,28 @@ export class WorkflowStore {
   }
 
   transformExecution(nodeId: string): WorkflowTransformExecutionState {
-    return this.transformExecutions[nodeId] ?? { state: 'idle', message: '', assetId: null };
+    const transient = this.transformExecutions[nodeId];
+    if (transient) return transient;
+    const graph = this.requireGraphDomain().graph;
+    const derived = deriveWorkflowNodeRunState(graph, nodeId);
+    const latest = derived.latestRun;
+    if (!latest) return { state: 'idle', message: '', assetId: null };
+    const accepted = derived.acceptedOutputs.at(-1) ?? null;
+    if (latest.status === 'succeeded' && latest.workflowRevision !== createWorkflowRevision(graph)) {
+      return {
+        state: 'stale', message: 'Workflow inputs changed after this result was generated.',
+        assetId: accepted?.assetId ?? null,
+      };
+    }
+    if (latest.status === 'succeeded') {
+      return { state: 'succeeded', message: 'Generated', assetId: accepted?.assetId ?? null };
+    }
+    if (latest.status === 'running') {
+      return { state: 'running', message: 'Generation was still running when this workflow was saved.', assetId: null };
+    }
+    return {
+      state: 'failed', message: latest.failure?.message ?? 'The latest generation attempt did not complete.', assetId: null,
+    };
   }
 
   async runCampaignGenerate(
@@ -917,6 +941,21 @@ export class WorkflowStore {
     const outputEdge = graph.edges.find((edge) => edge.target.nodeId === outputNodeId && edge.target.portId === 'source');
     const transformNodeId = outputEdge?.source.nodeId ?? 'transform';
     const run = ++this.transformRunSequence;
+    const commitBlockReason = (): string => {
+      if (this.workflowSessionIdentity !== sessionIdentity) {
+        return 'The workflow session changed while Generate was running. The result was not applied.';
+      }
+      if (this.activeTransformRuns.get(transformNodeId) !== run) {
+        return 'A newer Generate run replaced this result before it could be applied.';
+      }
+      if (this.graphRevision !== graphRevision || this.rev !== storeRevision) {
+        return 'The workflow changed while Generate was running. The result was not applied.';
+      }
+      if ((options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
+        return 'The active project changed while Generate was running. The result was not applied.';
+      }
+      return '';
+    };
     this.activeTransformRuns.set(transformNodeId, run);
     this.transformExecutions = {
       ...this.transformExecutions,
@@ -924,16 +963,7 @@ export class WorkflowStore {
     };
     try {
       const outcome = await executeCampaignGenerateTransform(graph, outputNodeId, options);
-      let commitMessage = '';
-      if (this.workflowSessionIdentity !== sessionIdentity) {
-        commitMessage = 'The workflow session changed while Generate was running. The result was not applied.';
-      } else if (this.activeTransformRuns.get(transformNodeId) !== run) {
-        commitMessage = 'A newer Generate run replaced this result before it could be applied.';
-      } else if (this.graphRevision !== graphRevision || this.rev !== storeRevision) {
-        commitMessage = 'The workflow changed while Generate was running. The result was not applied.';
-      } else if ((options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
-        commitMessage = 'The active project changed while Generate was running. The result was not applied.';
-      }
+      let commitMessage = commitBlockReason();
       if (commitMessage) {
         commitMessage += ` The generated asset remains available at ${outcome.asset.relativePath}.`;
         if (
@@ -961,6 +991,13 @@ export class WorkflowStore {
       }
       return { ...outcome, committed: true, commitMessage: 'Generated result applied.' };
     } catch (error) {
+      const failureGraph = error instanceof WorkflowTransformExecutionError ? error.failureGraph : undefined;
+      if (failureGraph && !commitBlockReason()) {
+        this.graphDomain = new WorkflowGraphDomain(failureGraph, { idGenerator: this.graphIdGenerator });
+        this.projectedGraphRevision = this.graphDomain.revision;
+        this.syncReactiveGraph(this.graphDomain);
+        this.bump();
+      }
       if (this.activeTransformRuns.get(transformNodeId) === run) {
         this.transformExecutions = {
           ...this.transformExecutions,
