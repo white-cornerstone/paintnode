@@ -11,14 +11,14 @@ import {
 } from '../ai/managedRuntime';
 import { isDesktop } from '../integrations/desktop';
 import { settings } from './settings.svelte';
-import { shouldRunBackgroundUpdateCheck } from './updatePolicy';
+import { planUpdateCheck, type UpdateCheckPlan } from './updatePolicy';
 
 type UpdateStatus = 'idle' | 'checking' | 'available' | 'current' | 'downloading' | 'ready' | 'error' | 'unsupported';
 type RuntimeStatusMap = Partial<Record<ManagedRuntimeProvider, ManagedRuntimeStatus>>;
 type RuntimeErrorMap = Partial<Record<ManagedRuntimeProvider, string>>;
 
-export const UPDATE_CHECK_STORAGE_KEY = 'paintnode.updates.lastCheckedAt';
-export const UPDATE_AVAILABLE_STORAGE_KEY = 'paintnode.updates.previouslyAvailable';
+export const RUNTIME_UPDATE_CHECK_STORAGE_KEY = 'paintnode.runtimeUpdates.lastCheckedAt';
+export const RUNTIME_UPDATE_AVAILABLE_STORAGE_KEY = 'paintnode.runtimeUpdates.previouslyAvailable';
 export const MANAGED_RUNTIME_PROVIDERS: readonly ManagedRuntimeProvider[] = ['codex', 'claude'];
 
 export function managedRuntimeLabel(provider: ManagedRuntimeProvider): string {
@@ -86,19 +86,14 @@ class AppUpdaterStore {
       this.status = 'unsupported';
       return false;
     }
-    if (options.background && this.available) return true;
-    if (
-      options.background &&
-      !shouldRunBackgroundUpdateCheck(
-        localStorage.getItem(UPDATE_CHECK_STORAGE_KEY),
-        localStorage.getItem(UPDATE_AVAILABLE_STORAGE_KEY),
-      )
-    ) {
-      return this.available;
-    }
+    const plan = planUpdateCheck(
+      options.background === true,
+      localStorage.getItem(RUNTIME_UPDATE_CHECK_STORAGE_KEY),
+      localStorage.getItem(RUNTIME_UPDATE_AVAILABLE_STORAGE_KEY),
+    );
     if (this.checkInFlight) return this.checkInFlight;
 
-    this.checkInFlight = this.performUpdateCheck();
+    this.checkInFlight = this.performUpdateCheck(plan);
     try {
       return await this.checkInFlight;
     } finally {
@@ -106,21 +101,27 @@ class AppUpdaterStore {
     }
   }
 
-  private async performUpdateCheck(): Promise<boolean> {
+  private async performUpdateCheck(plan: UpdateCheckPlan): Promise<boolean> {
     this.status = 'checking';
-    this.runtimeChecking = true;
+    this.runtimeChecking = plan.checkManagedRuntimes;
     this.error = null;
-    this.runtimeErrors = {};
-    this.runtimeInstallError = null;
+    if (plan.checkManagedRuntimes) {
+      this.runtimeErrors = {};
+      this.runtimeInstallError = null;
+    }
     this.downloadedBytes = 0;
     this.contentLength = null;
 
-    const [appCheckSucceeded] = await Promise.all([this.checkAppUpdate(), this.checkManagedRuntimes()]);
-    this.runtimeChecking = false;
-    const checkSucceeded = appCheckSucceeded && Object.keys(this.runtimeErrors).length === 0;
-    if (checkSucceeded) {
-      localStorage.setItem(UPDATE_CHECK_STORAGE_KEY, String(Date.now()));
-      localStorage.setItem(UPDATE_AVAILABLE_STORAGE_KEY, String(this.available));
+    await Promise.all([
+      plan.checkApp ? this.checkAppUpdate() : Promise.resolve(),
+      plan.checkManagedRuntimes ? this.checkManagedRuntimes() : Promise.resolve(),
+    ]);
+    if (plan.checkManagedRuntimes) {
+      this.runtimeChecking = false;
+      if (Object.keys(this.runtimeErrors).length === 0) {
+        localStorage.setItem(RUNTIME_UPDATE_CHECK_STORAGE_KEY, String(Date.now()));
+        localStorage.setItem(RUNTIME_UPDATE_AVAILABLE_STORAGE_KEY, String(this.runtimeUpdates.length > 0));
+      }
     }
     return this.available;
   }
