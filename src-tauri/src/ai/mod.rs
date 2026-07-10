@@ -12,6 +12,8 @@ pub(crate) mod workflow_director;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+#[cfg(windows)]
+use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
@@ -230,15 +232,84 @@ pub(crate) fn ai_run_cancelled(run_id: &str) -> bool {
 }
 
 /// Prepare provider bridges for tree-scoped cancellation. Unix starts a new
-/// process group. Windows starts a PaintNode wrapper which cannot launch the
-/// real bridge until the parent assigns that wrapper to a kill-on-close Job
-/// Object and writes its gate. Windows then associates every later descendant
-/// with that job by default; breakaway is not enabled. This removes the
-/// spawn-to-AssignProcessToJobObject race of post-spawn bridge assignment.
+/// process group. Windows starts a PaintNode wrapper blocked on an inherited
+/// anonymous pipe. Only after the parent assigns that wrapper to a
+/// kill-on-close Job Object does it write the release token through its
+/// non-inherited pipe handle. Windows associates every later descendant with
+/// that job by default; breakaway is not enabled. This removes both the
+/// spawn-to-assignment race and spoofable named/file gates.
 #[cfg(windows)]
 const PROVIDER_WRAPPER_ARG: &str = "--paintnode-ai-provider-wrapper";
+#[cfg(any(windows, test))]
+const PROVIDER_WRAPPER_RELEASE_TOKEN: &[u8] = b"paintnode-provider-job-assigned-v1";
 
-pub(crate) fn configure_ai_process_group(command: &mut Command) -> Result<Option<PathBuf>, String> {
+pub(crate) struct ProviderLaunchGate {
+    #[cfg(windows)]
+    writer: File,
+}
+
+#[cfg(windows)]
+fn create_windows_provider_launch_pipe() -> Result<(ProviderLaunchGate, File), String> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    unsafe {
+        let mut reader: HANDLE = std::ptr::null_mut();
+        let mut writer: HANDLE = std::ptr::null_mut();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        if CreatePipe(&mut reader, &mut writer, std::ptr::addr_of!(attributes), 0) == 0 {
+            return Err(format!(
+                "Could not create the Windows provider launch pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if SetHandleInformation(writer, HANDLE_FLAG_INHERIT, 0) == 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = CloseHandle(reader);
+            let _ = CloseHandle(writer);
+            return Err(format!(
+                "Could not secure the Windows provider launch pipe: {error}"
+            ));
+        }
+        Ok((
+            ProviderLaunchGate {
+                writer: File::from_raw_handle(writer as RawHandle),
+            },
+            File::from_raw_handle(reader as RawHandle),
+        ))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn with_verified_provider_launch_signal<R, T>(
+    reader: &mut R,
+    launch: impl FnOnce() -> T,
+) -> Result<T, String>
+where
+    R: Read,
+{
+    let mut signal = Vec::new();
+    reader
+        .take(128)
+        .read_to_end(&mut signal)
+        .map_err(|error| format!("Could not read the provider launch signal: {error}"))?;
+    if signal != PROVIDER_WRAPPER_RELEASE_TOKEN {
+        return Err("Provider launch was not released by its assigned process tree.".into());
+    }
+    Ok(launch())
+}
+
+pub(crate) fn configure_ai_process_group(
+    command: &mut Command,
+) -> Result<Option<ProviderLaunchGate>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -259,21 +330,16 @@ pub(crate) fn configure_ai_process_group(command: &mut Command) -> Result<Option
             .map(|(name, value)| (name.to_os_string(), value.map(ToOwned::to_owned)))
             .collect::<Vec<_>>();
         let current_dir = command.get_current_dir().map(Path::to_path_buf);
-        let gate = std::env::temp_dir().join(format!(
-            "paintnode-provider-launch-{}-{}.gate",
-            std::process::id(),
-            now_id()
-        ));
-        let _ = fs::remove_file(&gate);
+        let (gate, reader) = create_windows_provider_launch_pipe()?;
         let mut wrapper =
             Command::new(std::env::current_exe().map_err(|error| {
                 format!("Could not locate PaintNode provider wrapper: {error}")
             })?);
         wrapper
             .arg(PROVIDER_WRAPPER_ARG)
-            .arg(&gate)
             .arg(program)
             .args(args)
+            .stdin(std::process::Stdio::from(reader))
             .creation_flags(CREATE_NEW_PROCESS_GROUP);
         if let Some(current_dir) = current_dir {
             wrapper.current_dir(current_dir);
@@ -297,22 +363,19 @@ pub(crate) fn run_provider_process_wrapper_if_requested() -> Option<i32> {
     if args.next()?.to_str() != Some(PROVIDER_WRAPPER_ARG) {
         return None;
     }
-    let gate = PathBuf::from(args.next()?);
     let program = args.next()?;
     let forwarded = args.collect::<Vec<_>>();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !gate.is_file() {
-        if Instant::now() >= deadline {
-            eprintln!("PaintNode provider wrapper timed out before Job Object assignment.");
-            return Some(70);
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    let status = match Command::new(program).args(forwarded).status() {
-        Ok(status) => status,
-        Err(error) => {
+    let status = match with_verified_provider_launch_signal(&mut std::io::stdin().lock(), || {
+        Command::new(program).args(forwarded).status()
+    }) {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
             eprintln!("PaintNode provider wrapper could not launch the provider bridge: {error}");
             return Some(71);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(70);
         }
     };
     Some(status.code().unwrap_or(1))
@@ -337,8 +400,6 @@ pub(crate) struct AiProcessTree {
     process_id: u32,
     #[cfg(windows)]
     job: windows_sys::Win32::Foundation::HANDLE,
-    #[cfg(windows)]
-    launch_gate: PathBuf,
 }
 
 impl AiProcessTree {
@@ -371,7 +432,6 @@ impl AiProcessTree {
             let terminate_error = (!terminated).then(std::io::Error::last_os_error);
             let closed = CloseHandle(self.job) != 0;
             self.job = std::ptr::null_mut();
-            let _ = fs::remove_file(&self.launch_gate);
             process_tree_action_result(terminated, "Windows Job Object termination").map_err(
                 |message| {
                     format!(
@@ -402,14 +462,13 @@ impl Drop for AiProcessTree {
                 let _ = windows_sys::Win32::Foundation::CloseHandle(self.job);
             }
             self.job = std::ptr::null_mut();
-            let _ = fs::remove_file(&self.launch_gate);
         }
     }
 }
 
 pub(crate) fn track_ai_process_tree(
     child: &mut Child,
-    launch_gate: Option<PathBuf>,
+    launch_gate: Option<ProviderLaunchGate>,
 ) -> Result<AiProcessTree, String> {
     #[cfg(unix)]
     {
@@ -458,22 +517,23 @@ pub(crate) fn track_ai_process_tree(
                 "Could not isolate the Windows provider process tree: {error}"
             ));
         }
-        let launch_gate = launch_gate.ok_or_else(|| {
+        let mut launch_gate = launch_gate.ok_or_else(|| {
             let _ = CloseHandle(job);
             let _ = child.kill();
             let _ = child.wait();
             "Windows provider wrapper launch gate is missing.".to_string()
         })?;
-        if let Err(error) = fs::write(&launch_gate, b"assigned") {
+        if let Err(error) = launch_gate.writer.write_all(PROVIDER_WRAPPER_RELEASE_TOKEN) {
             let _ = TerminateJobObject(job, 1);
             let _ = CloseHandle(job);
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "Could not release the isolated Windows provider wrapper: {error}"
+                "Could not release the isolated Windows provider wrapper pipe: {error}"
             ));
         }
-        Ok(AiProcessTree { job, launch_gate })
+        drop(launch_gate);
+        Ok(AiProcessTree { job })
     }
 }
 
@@ -2064,25 +2124,43 @@ mod tests {
         assert!(error.contains("cleanup timed out"));
     }
 
+    #[test]
+    fn invalid_or_preexisting_launch_signal_never_reaches_provider_launch() {
+        let launched = std::cell::Cell::new(false);
+        for signal in [
+            b"".as_slice(),
+            b"assigned",
+            b"paintnode-provider-job-assigned-v1-extra",
+        ] {
+            let mut reader = std::io::Cursor::new(signal);
+            let result = with_verified_provider_launch_signal(&mut reader, || launched.set(true));
+            assert!(result.is_err());
+            assert!(!launched.get());
+        }
+        let mut reader = std::io::Cursor::new(PROVIDER_WRAPPER_RELEASE_TOKEN);
+        with_verified_provider_launch_signal(&mut reader, || launched.set(true))
+            .expect("exact parent signal");
+        assert!(launched.get());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_provider_bridge_is_gated_before_job_assignment() {
         let mut command = Command::new("cmd.exe");
         command.args(["/D", "/S", "/C", "exit 0"]);
-        let gate = configure_ai_process_group(&mut command)
+        let _gate = configure_ai_process_group(&mut command)
             .expect("configure wrapper")
             .expect("Windows gate");
         let args = command.get_args().collect::<Vec<_>>();
         assert_eq!(args[0], std::ffi::OsStr::new(PROVIDER_WRAPPER_ARG));
-        assert_eq!(args[1], gate.as_os_str());
-        assert!(!gate.exists());
+        assert_eq!(args[1], std::ffi::OsStr::new("cmd.exe"));
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_job_object_kills_descendant_after_bridge_exit() {
-        let job = TempJobDir::new("paintnode-windows-job-test").expect("temp dir");
-        let gate = job.path().join("assigned.gate");
+        let (gate, _gate_reader) =
+            create_windows_provider_launch_pipe().expect("anonymous launch pipe");
         let mut command = Command::new("cmd.exe");
         command
             .args([
