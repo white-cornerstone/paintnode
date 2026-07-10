@@ -4,6 +4,8 @@ import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
 import annotations from '../workflow/fixtures/v1/annotations.json';
 import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
+import { WORKFLOW_TEMPLATES } from '../workflow/templates';
+import { workflowReadiness } from '../workflow/readiness';
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -11,6 +13,89 @@ function ids(): WorkflowIdGenerator {
 }
 
 describe('WorkflowStore graph adapter', () => {
+  it.each(WORKFLOW_TEMPLATES)('installs and round-trips the $name template through the graph adapter', (template) => {
+    const store = new WorkflowStore({
+      idGenerator: ids(),
+      workflowGraphIdGenerator: () => `workflow-${template.id}-test`,
+    });
+    store.newFromTemplate(template.id, `My ${template.name}`);
+
+    expect(store.active).toBe(true);
+    expect(store.name).toBe(`My ${template.name}`);
+    expect(store.graphSnapshot().id).toBe(`workflow-${template.id}-test`);
+    expect(store.savedPath).toBeNull();
+    expect(store.rev).toBe(0);
+    expect(store.savedRev).toBe(0);
+    expect(store.dirty).toBe(false);
+    expect(store.briefNodes).toHaveLength(1);
+    expect(store.nodes.map((node) => node.name)).toEqual(template.slots.map((slot) => slot.name));
+    expect(store.outputNodes.map((node) => [node.name, node.finalWidth, node.finalHeight])).toEqual(
+      template.outputs.map((output) => [output.name, output.width, output.height]),
+    );
+
+    const graph = store.serialize();
+    expect(graph.metadata).toEqual({ name: `My ${template.name}`, sourceVersion: null, migrations: [] });
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Fallback');
+    expect(reopened.serialize()).toEqual(graph);
+    expect(reopened.briefNodes).toEqual(store.briefNodes);
+    expect(reopened.rev).toBe(0);
+  });
+
+  it('persists guided slot assignments and brief edits as graph configuration', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer');
+    store.assignAsset('slot-product', {
+      id: 'product-asset',
+      kind: 'imported',
+      name: 'Product.png',
+      relativePath: 'assets/product.png',
+      createdAt: 1,
+      exists: true,
+    });
+    store.setBriefObjective('brief', 'Launch the winter range for design-conscious travellers.');
+
+    expect(store.nodes.find((node) => node.id === 'slot-product')).toMatchObject({
+      assetId: 'product-asset',
+      relativePath: 'assets/product.png',
+      required: true,
+    });
+    expect(store.briefNodes[0].objective).toBe('Launch the winter range for design-conscious travellers.');
+    expect(store.rev).toBe(2);
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Campaign');
+    expect(reopened.nodes.find((node) => node.id === 'slot-product')).toMatchObject({
+      assetId: 'product-asset',
+      relativePath: 'assets/product.png',
+    });
+    expect(reopened.briefNodes[0].objective).toBe('Launch the winter range for design-conscious travellers.');
+  });
+
+  it('reconnects Brief through the compatible named prompt port and restores readiness', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer');
+    store.assignAsset('slot-product', {
+      id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png', createdAt: 1, exists: true,
+    });
+    store.disconnectConnection('edge-brief-composition');
+    const options = {
+      desktop: true,
+      projectPath: '/tmp/project',
+      assets: [{ id: 'product-asset', relativePath: 'assets/product.png', exists: true }],
+    };
+    expect(workflowReadiness(store.graphSnapshot(), options).ready).toBe(false);
+    expect(store.planExecution('output-square', { maxConcurrency: 2 }).blocked).not.toEqual([]);
+
+    expect(store.connect('brief', 'composition')).toBe(true);
+    expect(store.graphSnapshot().edges.find((edge) => edge.source.nodeId === 'brief')).toMatchObject({
+      source: { portId: 'prompt' },
+      target: { portId: 'brief' },
+    });
+    expect(workflowReadiness(store.graphSnapshot(), options).ready).toBe(true);
+    expect(store.planExecution('output-square', { maxConcurrency: 2 }).blocked).toEqual([]);
+  });
+
   it('routes asset node mutations and connections through one domain owner', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard('Adapter test');

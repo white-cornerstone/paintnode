@@ -5,26 +5,38 @@
     title,
     onStart,
     onFinish,
+    showInput = true,
+    showOutput = true,
+    inputLabel = 'Input',
+    outputLabel = 'Output',
   }: {
     title: string;
     onStart: (event: PointerEvent) => void;
     onFinish: (event: PointerEvent) => void;
+    showInput?: boolean;
+    showOutput?: boolean;
+    inputLabel?: string;
+    outputLabel?: string;
   } = $props();
 </script>
 
-<button
-  class="node-port input"
-  aria-label={`Input for ${title}`}
-  use:tooltip={{ text: 'Input', placement: 'left' }}
-  onpointerdown={(event) => event.stopPropagation()}
-  onpointerup={onFinish}
-></button>
-<button
-  class="node-port output"
-  aria-label={`Output from ${title}`}
-  use:tooltip={{ text: 'Output', placement: 'right' }}
-  onpointerdown={onStart}
-></button>
+{#if showInput}
+  <button
+    class="node-port input"
+    aria-label={`${inputLabel} for ${title}`}
+    use:tooltip={{ text: inputLabel, placement: 'left' }}
+    onpointerdown={(event) => event.stopPropagation()}
+    onpointerup={onFinish}
+  ></button>
+{/if}
+{#if showOutput}
+  <button
+    class="node-port output"
+    aria-label={`${outputLabel} from ${title}`}
+    use:tooltip={{ text: outputLabel, placement: 'right' }}
+    onpointerdown={onStart}
+  ></button>
+{/if}
 
 <style>
   .node-port {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
@@ -30,8 +30,10 @@
   import { aiRunOptionsFromSettings } from '../state/settings';
   import { aiRunningLabel, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
-  import { workflow, type WorkflowAssetNode, type WorkflowConnection, type WorkflowOutputNode } from '../state/workflow.svelte';
-  import { Add, ArrowSync, CommentNote, Delete, Dismiss, DocumentSave, Edit, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import { workflow, type WorkflowAssetNode, type WorkflowBriefNode, type WorkflowConnection, type WorkflowOutputNode } from '../state/workflow.svelte';
+  import { workflowReadiness } from '../workflow';
+  import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
+  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
@@ -44,7 +46,7 @@
     provider?: string;
     detail?: string;
   };
-  type WorkflowMapKind = 'asset' | 'composition' | 'output' | 'viewport';
+  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'output' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {
     id: string;
@@ -103,6 +105,7 @@
   let stopProgress: UnlistenFn | null = null;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
+  let handledFocusRequest = 0;
 
   const ASSET_NODE_W = 205;
   const MAP_EDGE_PADDING = 260;
@@ -118,6 +121,22 @@
   );
   const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
+  const readiness = $derived.by(() => {
+    workflow.rev;
+    project.current;
+    return workflowReadiness(workflow.graphSnapshot(), {
+      desktop,
+      projectPath: project.path,
+      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+    });
+  });
+  $effect(() => {
+    const request = ui.workflowFocusRequest;
+    if (request === 0 || request === handledFocusRequest) return;
+    handledFocusRequest = request;
+    const selector = workflowInitialFocusSelector(readiness.nextAction?.code ?? null);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(selector)?.focus());
+  });
   const storyboardOverlayBox = $derived.by(() => {
     storyboardViewTick;
     const session = editor.textEdit;
@@ -256,6 +275,12 @@
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
+  }
+
+  async function chooseProjectFolder(trigger: HTMLElement): Promise<void> {
+    await project.openFolder();
+    await tick();
+    restoreExternalDialogTrigger(trigger);
   }
 
   function createRunId(): string {
@@ -407,6 +432,15 @@
         height: node.height,
         color: node.color,
         included: node.included,
+      })),
+      ...workflow.briefNodes.map((node) => ({
+        id: node.id,
+        kind: 'brief' as const,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        color: node.color,
       })),
       {
         id: 'composition',
@@ -688,6 +722,8 @@
     }
     const outputNode = workflow.outputNode(nodeId);
     if (outputNode) return { x: outputNode.x, y: outputNode.y, width: outputNode.width, height: outputNode.height };
+    const briefNode = workflow.briefNodes.find((item) => item.id === nodeId);
+    if (briefNode) return { x: briefNode.x, y: briefNode.y, width: briefNode.width, height: briefNode.height };
     const node = workflow.nodes.find((item) => item.id === nodeId);
     return node ? { x: node.x, y: node.y, width: node.width, height: node.height } : null;
   }
@@ -1347,23 +1383,18 @@
   async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
     const targetOutput = targetOutputForGenerate(node);
     error = '';
-    if (!desktop) {
-      error = 'Workflow generation is available only in the desktop app.';
-      return;
-    }
-    if (!project.path) {
-      error = 'Open a project folder before generating.';
+    const preflight = workflowReadiness(workflow.graphSnapshot(), {
+      desktop,
+      projectPath: project.path,
+      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+    });
+    if (!preflight.ready) {
+      error = preflight.nextAction
+        ? `${preflight.nextAction.message} Next: ${preflight.nextAction.action}.`
+        : 'Complete the workflow checklist before generating.';
       return;
     }
     const sourceNodes = workflow.connectedAssetNodesTo('composition');
-    if (!sourceNodes.length) {
-      error = 'Connect at least one asset to the composition prompt.';
-      return;
-    }
-    if (!workflow.prompt.trim()) {
-      error = 'Enter a composition prompt.';
-      return;
-    }
     busy = true;
     progress = 'Preparing workflow assets...';
     const runId = createRunId();
@@ -1401,9 +1432,10 @@
       const storyboardAnnotations = workflow.storyboardAnnotations
         .map((annotation, index) => `${index + 1}. ${annotation}`)
         .join('\n');
-      for (const [index, node] of sourceNodes.entries()) {
-        const asset = assetFor(node);
-        if (!asset) continue;
+      const boundSources = sourceNodes
+        .map((node) => ({ node, asset: assetFor(node) }))
+        .filter((item): item is { node: WorkflowAssetNode; asset: ProjectAsset } => item.asset !== null);
+      for (const [index, { node, asset }] of boundSources.entries()) {
         sources.push({
           name: node.note
             ? `Mandatory asset ${index + 1}: ${node.name}. Role: ${node.note}`
@@ -1412,8 +1444,10 @@
         });
       }
       if (!sources.length) throw new Error('Workflow asset files are missing.');
-      const requiredAssets = sourceNodes.map((node, index) => `${index + 1}. ${node.name}${node.note ? ` - ${node.note}` : ''}`).join('\n');
-      const prompt = `${workflow.prompt.trim()}
+      const requiredAssets = boundSources.map(({ node }, index) => `${index + 1}. ${node.name}${node.note ? ` - ${node.note}` : ''}`).join('\n');
+      const creativeBrief = workflow.briefNodes[0]?.objective.trim() ?? '';
+      const prompt = `${creativeBrief ? `Creative brief:\n${creativeBrief}\n\n` : ''}Art direction:
+${workflow.prompt.trim()}
 
 Final output aspect ratio: ${ratioLabel(targetOutput.finalWidth, targetOutput.finalHeight)}.
 
@@ -1535,6 +1569,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             <span
               class="map-node"
               class:asset={item.kind === 'asset'}
+              class:brief={item.kind === 'brief'}
               class:composition={item.kind === 'composition'}
               class:output={item.kind === 'output'}
               class:included={item.included}
@@ -1544,7 +1579,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
         </button>
         <div class="map-meta">
-        <span>{workflow.nodes.length + 1 + workflow.outputNodes.length} nodes</span>
+        <span>{workflow.nodes.length + workflow.briefNodes.length + 1 + workflow.outputNodes.length} nodes</span>
           <span>{Math.round(workflow.zoom * 100)}%</span>
         </div>
       </div>
@@ -1560,6 +1595,8 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
       class:overscrolling={overscrollReturning}
       role="application"
       aria-label="Workflow composition board"
+      tabindex="-1"
+      data-workflow-board
       bind:this={boardEl}
       style={`background-position:${workflow.panX + overscrollX}px ${workflow.panY + overscrollY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
       onpointerdown={onBoardPointerDown}
@@ -1613,15 +1650,24 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             class="asset-node"
             class:included={node.included}
             class:selected={workflow.selection?.kind === 'asset' && workflow.selection.id === node.id}
-            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
+            style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; min-height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onpointerdown={(event) => {
               workflow.select({ kind: 'asset', id: node.id });
               event.stopPropagation();
             }}
           >
-            <WorkflowNodePorts title={node.name} onStart={(event) => startConnection(event, node.id)} onFinish={(event) => finishConnection(event, node.id)} />
+            <WorkflowNodePorts
+              title={node.name}
+              showInput={false}
+              outputLabel={node.slotId ? `${node.name} visual input` : 'Asset reference'}
+              onStart={(event) => startConnection(event, node.id)}
+              onFinish={(event) => finishConnection(event, node.id)}
+            />
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>{assetTitle(node)}</span>
+              <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
+                {assetTitle(node)}
+                {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
+              </span>
               <div class="node-tools">
                 <button
                   type="button"
@@ -1650,15 +1696,58 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 </button>
               </div>
             </div>
-            <div class="node-preview" style={`height:${Math.max(64, node.height - 84)}px`}>
+            <div class="node-preview" style={`height:${Math.max(64, node.height - (node.slotId ? 150 : 84))}px`}>
               {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
             </div>
+            {#if node.slotId}
+              <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
+                <span>{node.required ? 'Required asset' : 'Optional asset'}</span>
+                <select
+                  aria-label={`Asset for ${node.name}`}
+                  data-workflow-required-slot={node.required ? '' : undefined}
+                  value={asset?.id ?? ''}
+                  onchange={(event) => workflow.assignAsset(
+                    node.id,
+                    assets.find((item) => item.id === event.currentTarget.value) ?? null,
+                  )}
+                >
+                  <option value="">Choose from project…</option>
+                  {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+                </select>
+              </label>
+            {/if}
             <textarea
               aria-label={`Role for ${node.name}`}
-              placeholder="role in composition"
+              placeholder={node.guidance || 'role in composition'}
               value={node.note}
               onpointerdown={(event) => event.stopPropagation()}
               oninput={(event) => workflow.setNodeNote(node.id, event.currentTarget.value)}
+            ></textarea>
+          </article>
+        {/each}
+
+        {#each workflow.briefNodes as brief (brief.id)}
+          <article
+            class="brief-node"
+            style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; min-height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
+          >
+            <WorkflowNodePorts
+              title={brief.name}
+              showInput={false}
+              outputLabel="Creative brief"
+              onStart={(event) => startConnection(event, brief.id)}
+              onFinish={(event) => finishConnection(event, brief.id)}
+            />
+            <div class="node-head">
+              <span>{brief.name}</span>
+              <small>Brief</small>
+            </div>
+            <p>{brief.guidance}</p>
+            <textarea
+              aria-label={`${brief.name} objective`}
+              placeholder="Outcome, audience, and non-negotiables…"
+              value={brief.objective}
+              oninput={(event) => workflow.setBriefObjective(brief.id, event.currentTarget.value)}
             ></textarea>
           </article>
         {/each}
@@ -1672,7 +1761,13 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
             event.stopPropagation();
           }}
         >
-          <WorkflowNodePorts title={compositionTitle()} onStart={(event) => startConnection(event, 'composition')} onFinish={(event) => finishConnection(event, 'composition')} />
+          <WorkflowNodePorts
+            title={compositionTitle()}
+            inputLabel="Visual inputs and creative brief"
+            outputLabel="Directed composition"
+            onStart={(event) => startConnection(event, 'composition')}
+            onFinish={(event) => finishConnection(event, 'composition')}
+          />
           <div class="node-head">
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
             <div class="node-tools">
@@ -1807,6 +1902,21 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
           <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
             <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
           </div>
+          <div class="readiness-checklist" role="group" aria-label="Generate checklist" tabindex="-1" data-workflow-checklist onpointerdown={(event) => event.stopPropagation()}>
+            <div class="checklist-head">
+              <strong>Before Generate</strong>
+              <span>{readiness.ready ? 'Ready' : `${readiness.items.filter((item) => item.status === 'blocked').length} actions left`}</span>
+            </div>
+            {#each readiness.items as item (item.code)}
+              <div class:blocked={item.status === 'blocked'} class="checklist-item">
+                <Icon svg={item.status === 'complete' ? CheckmarkCircle : ErrorCircle} size={13} />
+                <span><b>{item.label}</b><small>{item.message}</small></span>
+                {#if item.code === 'project-folder' && item.status === 'blocked' && desktop}
+                  <button type="button" onclick={(event) => void chooseProjectFolder(event.currentTarget)}>Choose folder…</button>
+                {/if}
+              </div>
+            {/each}
+          </div>
           {#if busy}<p class="progress">{progress}</p>{/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
@@ -1822,7 +1932,13 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               event.stopPropagation();
             }}
           >
-            <WorkflowNodePorts title={outputTitle(outputNode)} onStart={(event) => startConnection(event, outputNode.id)} onFinish={(event) => finishConnection(event, outputNode.id)} />
+            <WorkflowNodePorts
+              title={outputTitle(outputNode)}
+              showOutput={false}
+              inputLabel="Directed composition"
+              onStart={(event) => startConnection(event, outputNode.id)}
+              onFinish={(event) => finishConnection(event, outputNode.id)}
+            />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
               <div class="node-tools">
@@ -1858,7 +1974,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
               </div>
             </div>
             <div class="output-actions">
-              <button onclick={() => void generate(outputNode)} disabled={busy}>
+              <button onclick={() => void generate(outputNode)} disabled={busy || !readiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                 <Icon svg={PaintBrush} size={14} />
                 Generate
               </button>
@@ -1867,6 +1983,11 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
                 Place
               </button>
             </div>
+            {#if !readiness.ready && readiness.nextAction}
+              <p class="generate-block" id={`generate-block-${outputNode.id}`}>
+                {readiness.nextAction.action}
+              </p>
+            {/if}
           </article>
         {/each}
       </div>
@@ -1997,6 +2118,10 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     background: color-mix(in srgb, var(--accent) 28%, #4b4d52);
     border-color: color-mix(in srgb, var(--accent) 65%, #65686f);
   }
+  .map-node.brief {
+    background: color-mix(in srgb, #a77ad1 30%, #4b4d52);
+    border-color: color-mix(in srgb, #a77ad1 68%, #65686f);
+  }
   .map-node.output {
     background: color-mix(in srgb, #6b7cff 28%, #4b4d52);
   }
@@ -2102,6 +2227,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     stroke-width: 4;
   }
   .asset-node,
+  .brief-node,
   .prompt-node,
   .output-node {
     position: absolute;
@@ -2115,6 +2241,9 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
   .asset-node {
     opacity: 0.72;
   }
+  .brief-node {
+    width: 245px;
+  }
   .asset-node.included {
     border-color: color-mix(in srgb, var(--accent) 65%, #4b4d52);
     opacity: 1;
@@ -2126,6 +2255,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     width: 210px;
   }
   .asset-node.selected,
+  .brief-node:focus-within,
   .prompt-node.selected,
   .output-node.selected {
     border-color: var(--accent);
@@ -2149,6 +2279,17 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     min-width: 0;
     flex: 1 1 auto;
     cursor: grab;
+  }
+  .node-drag-region small,
+  .brief-node .node-head small {
+    margin-left: 7px;
+    color: var(--text-dim);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .node-drag-region small.required {
+    color: #ffd38a;
   }
   .node-drag-region:active {
     cursor: grabbing;
@@ -2219,6 +2360,7 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     object-position: center;
   }
   .asset-node textarea,
+  .brief-node textarea,
   .prompt-node textarea {
     width: 100%;
     min-height: 52px;
@@ -2227,6 +2369,31 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     border-radius: 0;
     resize: vertical;
     background: #242528;
+  }
+  .slot-picker {
+    display: grid;
+    gap: 4px;
+    padding: 7px 8px;
+    border-top: 1px solid #4b4d52;
+    background: #292a2e;
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .slot-picker select {
+    width: 100%;
+    min-width: 0;
+    height: 25px;
+    font-size: 11px;
+  }
+  .brief-node p {
+    margin: 0;
+    padding: 9px 9px 5px;
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+  .brief-node textarea {
+    min-height: 105px;
   }
   .prompt-node textarea {
     min-height: 96px;
@@ -2326,6 +2493,53 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     justify-content: flex-start;
     padding: 0 8px 8px;
   }
+  .readiness-checklist {
+    display: grid;
+    gap: 4px;
+    margin: 0 8px 8px;
+    padding: 7px;
+    border: 1px solid #4b4d52;
+    border-radius: 4px;
+    background: #252629;
+    font-size: 10px;
+  }
+  .checklist-head,
+  .checklist-item {
+    display: flex;
+    align-items: center;
+  }
+  .checklist-head {
+    justify-content: space-between;
+    color: var(--text-bright);
+  }
+  .checklist-head span {
+    color: var(--text-dim);
+  }
+  .checklist-item {
+    gap: 6px;
+    color: #8fd4a6;
+  }
+  .checklist-item.blocked {
+    color: #ffd38a;
+  }
+  .checklist-item > span {
+    display: grid;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .checklist-item b {
+    color: var(--text);
+    font-size: 10px;
+  }
+  .checklist-item small {
+    color: var(--text-dim);
+    line-height: 1.25;
+  }
+  .checklist-item button {
+    flex: 0 0 auto;
+    padding: 3px 6px;
+    font-size: 10px;
+  }
   .output-actions {
     justify-content: flex-end;
     padding: 8px;
@@ -2335,6 +2549,12 @@ Unless the user explicitly asks for an impossible or surreal composition, preser
     display: inline-flex;
     align-items: center;
     gap: 5px;
+  }
+  .generate-block {
+    margin: -3px 8px 8px;
+    color: #ffd38a;
+    font-size: 10px;
+    line-height: 1.3;
   }
   .output-props {
     display: grid;
