@@ -89,6 +89,82 @@ describe('Workflow Director patch schema', () => {
     expect(result.value).toBeNull();
     expect(result.issues.length).toBeGreaterThan(0);
   });
+
+  it.each([
+    ['inherited summary', (() => {
+      const input = Object.create({ summary: 'Inherited summary' }) as Record<string, unknown>;
+      Object.assign(input, { version: 1, sourceGraphRevision: SOURCE_REVISION, operations: [] });
+      return input;
+    })()],
+    ['inherited operation', (() => {
+      const operation = Object.create({ op: 'remove-edge' }) as Record<string, unknown>;
+      operation.edgeId = 'edge-composition-output-landscape';
+      return { ...patch([]), operations: [operation] };
+    })()],
+    ['non-enumerable summary', (() => {
+      const input = patch([]) as unknown as Record<string, unknown>;
+      Object.defineProperty(input, 'summary', { value: input.summary, enumerable: false });
+      return input;
+    })()],
+    ['non-enumerable operation kind', (() => {
+      const operation: Record<string, unknown> = { edgeId: 'edge-composition-output-landscape' };
+      Object.defineProperty(operation, 'op', { value: 'remove-edge', enumerable: false });
+      return { ...patch([]), operations: [operation] };
+    })()],
+    ['symbol key', (() => {
+      const input = patch([]) as WorkflowDirectorPatchV1 & { [key: symbol]: boolean };
+      input[Symbol('hidden')] = true;
+      return input;
+    })()],
+  ])('rejects patches containing %s', (_name, input) => {
+    const result = parseWorkflowDirectorPatch(input);
+    expect(result.value).toBeNull();
+    expect(result.issues.length).toBeGreaterThan(0);
+  });
+
+  it('rejects accessors without invoking them', () => {
+    const input = patch([]) as unknown as Record<string, unknown>;
+    let reads = 0;
+    Object.defineProperty(input, 'summary', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return 'Accessor summary';
+      },
+    });
+    const result = parseWorkflowDirectorPatch(input);
+    expect(result.value).toBeNull();
+    expect(reads).toBe(0);
+  });
+
+  it('rejects oversized operation arrays before inspecting any operation', () => {
+    const operations = new Array(129).fill(null);
+    let reads = 0;
+    Object.defineProperty(operations, 0, {
+      enumerable: true,
+      get() {
+        reads += 1;
+        throw new Error('must not inspect oversized patch');
+      },
+    });
+    const result = parseWorkflowDirectorPatch({ ...patch([]), operations });
+    expect(result.value).toBeNull();
+    expect(result.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'TOO_MANY_OPERATIONS' }),
+    ]));
+    expect(reads).toBe(0);
+  });
+
+  it('rejects a source revision that cannot be incremented safely', () => {
+    const result = parseWorkflowDirectorPatch({
+      ...patch([]),
+      sourceGraphRevision: { graphId: SOURCE_REVISION.graphId, revision: Number.MAX_SAFE_INTEGER },
+    });
+    expect(result.value).toBeNull();
+    expect(result.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'INVALID_REVISION' }),
+    ]));
+  });
 });
 
 describe('Workflow Director patch proposal', () => {
@@ -338,6 +414,108 @@ describe('Workflow Director patch proposal', () => {
     );
     expect(result.proposal).toBeNull();
     expect(result.issues.map((issue) => issue.message).join(' ')).toMatch(/immutable project asset/i);
+  });
+
+  it.each([
+    ['nested accepted asset identity', (graph: WorkflowGraphV2) => {
+      graph.nodes.find((node) => node.id === 'output-portrait')!.config.futureAcceptedCandidate = {
+        assetId: 'accepted-square-asset',
+        path: 'assets/generated/accepted-square.png',
+      };
+      return 'output-portrait';
+    }],
+    ['direct input asset binding', (graph: WorkflowGraphV2) => {
+      const product = graph.nodes.find((node) => node.id === 'slot-product')!;
+      product.config.assetId = 'accepted-square-asset';
+      product.config.relativePath = 'assets/generated/accepted-square.png';
+      return product.id;
+    }],
+    ['run-output identity outside asset references', (graph: WorkflowGraphV2) => {
+      const transform = graph.nodes.find((node) => node.id === 'transform-generate-square')!;
+      graph.runRecords = [{
+        recordVersion: 1,
+        id: 'run-generate-square',
+        nodeId: transform.id,
+        status: 'succeeded',
+        attempt: 1,
+        workflowRevision: 'workflow-revision',
+        nodeRevision: 'node-revision',
+        materialKey: 'material-key',
+        sourceAssets: [],
+        prompt: {
+          brief: 'Brief', artDirection: 'Direction', instructions: 'Generate',
+          constraints: [], effectivePromptHash: 'prompt-hash',
+        },
+        provider: { id: 'fake', model: null, effectiveOptions: {} },
+        executor: { id: 'fake', version: '1', requestSchemaVersion: '1' },
+        target: { nodeId: transform.id, title: transform.title, width: 1024, height: 1024 },
+        startedAt: 1,
+        finishedAt: 2,
+        outputs: [{
+          assetReferenceId: 'run-only-reference',
+          assetId: 'run-only-asset',
+          relativePath: 'assets/generated/run-only.png',
+          contentHash: 'sha256:run-only',
+        }],
+      }] as unknown as WorkflowGraphV2['runRecords'];
+      graph.assetReferences = [];
+      graph.nodes.find((node) => node.id === 'output-portrait')!.config.futureAcceptedCandidate = {
+        assetId: 'run-only-asset',
+        relativePath: 'assets/generated/run-only.png',
+      };
+      return 'output-portrait';
+    }],
+  ])('rejects removal through %s', (_name, prepare) => {
+    const graph = campaignWithAcceptedHistory();
+    const nodeId = prepare(graph);
+    const result = createWorkflowDirectorPatchProposal(
+      patch([{ op: 'remove-node', nodeId }]),
+      graph,
+      SOURCE_REVISION,
+    );
+    expect(result.proposal).toBeNull();
+    expect(result.issues.map((issue) => issue.message).join(' ')).toMatch(/immutable project asset|accepted/i);
+  });
+
+  it('derives configured changes and staleness only from the final shadow graph', () => {
+    const graph = campaignWithAcceptedHistory();
+    const original = graph.nodes.find((node) => node.id === 'transform-generate-square')!.config.instructions as string;
+    const result = createWorkflowDirectorPatchProposal(patch([
+      { op: 'configure-node', nodeId: 'transform-generate-square', changes: { instructions: 'Temporary change.' } },
+      { op: 'configure-node', nodeId: 'transform-generate-square', changes: { instructions: original } },
+      { op: 'move-node', nodeId: 'output-portrait', position: { x: 1777, y: 333 } },
+    ]), graph, SOURCE_REVISION).proposal!;
+
+    expect(result.nodeChanges).toEqual([
+      expect.objectContaining({ kind: 'moved', nodeId: 'output-portrait' }),
+    ]);
+    expect(result.downstreamStaleness).toEqual([]);
+  });
+
+  it('derives edge, requirement, and staleness changes only from net topology', () => {
+    const graph = campaignWithAcceptedHistory();
+    const edge = graph.edges.find((item) => item.id === 'edge-composition-output-landscape')!;
+    const result = createWorkflowDirectorPatchProposal(patch([
+      { op: 'remove-edge', edgeId: edge.id },
+      { op: 'add-edge', edge },
+      { op: 'move-node', nodeId: 'output-portrait', position: { x: 1888, y: 444 } },
+    ]), graph, SOURCE_REVISION).proposal!;
+
+    expect(result.edgeChanges).toEqual([]);
+    expect(result.requirementChanges).toEqual([]);
+    expect(result.downstreamStaleness).toEqual([]);
+  });
+
+  it('rejects an edge remove-and-restore sequence as a semantic no-op', () => {
+    const graph = campaignWithAcceptedHistory();
+    const edge = graph.edges.find((item) => item.id === 'edge-composition-output-landscape')!;
+    const result = createWorkflowDirectorPatchProposal(patch([
+      { op: 'remove-edge', edgeId: edge.id },
+      { op: 'add-edge', edge },
+    ]), graph, SOURCE_REVISION);
+
+    expect(result.proposal).toBeNull();
+    expect(result.issues).toEqual([expect.objectContaining({ code: 'NO_EFFECT' })]);
   });
 
   it('produces the same accepted graph and derived preview for reordered independent operations', () => {

@@ -143,8 +143,12 @@ const candidateConfigKeys = new Set([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
 }
 
 function cloneValue<T>(value: T): T {
@@ -187,12 +191,108 @@ function exactKeys(
   required: readonly string[],
   issues: WorkflowDirectorPatchIssue[],
 ): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) addIssue(issues, `${path}.${key}`, 'EXTRA_KEY', `${path}.${key} is not supported.`);
+  let keys: readonly PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    addIssue(issues, path, 'INVALID_OBJECT', `${path} could not be inspected safely.`);
+    return;
+  }
+  for (const key of keys) {
+    if (typeof key === 'symbol') {
+      addIssue(issues, path, 'SYMBOL_KEY', `${path} cannot contain symbol keys.`);
+      continue;
+    }
+    const name = String(key);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !('value' in descriptor)) {
+      addIssue(issues, `${path}.${name}`, 'INVALID_PROPERTY', `${path}.${name} must be an enumerable data property.`);
+      continue;
+    }
+    if (!allowed.includes(name)) addIssue(issues, `${path}.${name}`, 'EXTRA_KEY', `${path}.${name} is not supported.`);
   }
   for (const key of required) {
-    if (!(key in value)) addIssue(issues, `${path}.${key}`, 'MISSING_KEY', `${path}.${key} is required.`);
+    if (!Object.hasOwn(value, key)) addIssue(issues, `${path}.${key}`, 'MISSING_KEY', `${path}.${key} is required.`);
   }
+}
+
+function ownData(value: Record<string, unknown>, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && 'value' in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function ownDataEntries(
+  value: Record<string, unknown>,
+  path: string,
+  issues: WorkflowDirectorPatchIssue[],
+): [string, unknown][] {
+  let keys: readonly PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    addIssue(issues, path, 'INVALID_OBJECT', `${path} could not be inspected safely.`);
+    return [];
+  }
+  const entries: [string, unknown][] = [];
+  for (const key of keys) {
+    if (typeof key === 'symbol') {
+      addIssue(issues, path, 'SYMBOL_KEY', `${path} cannot contain symbol keys.`);
+      continue;
+    }
+    const name = String(key);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !('value' in descriptor)) {
+      addIssue(issues, `${path}.${name}`, 'INVALID_PROPERTY', `${path}.${name} must be an enumerable data property.`);
+      continue;
+    }
+    entries.push([name, descriptor.value]);
+  }
+  return entries;
+}
+
+function operationItems(
+  value: unknown,
+  issues: WorkflowDirectorPatchIssue[],
+): { index: number; value: unknown }[] {
+  if (!Array.isArray(value)) {
+    addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations must be an array.');
+    return [];
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  const length = lengthDescriptor && 'value' in lengthDescriptor && Number.isSafeInteger(lengthDescriptor.value)
+    ? lengthDescriptor.value as number
+    : 0;
+  if (length > 128) {
+    addIssue(issues, 'operations', 'TOO_MANY_OPERATIONS', 'Director patches support at most 128 operations.');
+    return [];
+  }
+  const items: { index: number; value: unknown }[] = [];
+  let keys: readonly PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations could not be inspected safely.');
+    return [];
+  }
+  for (const key of keys) {
+    if (key === 'length') continue;
+    if (typeof key === 'symbol' || !/^(0|[1-9]\d*)$/.test(String(key))) {
+      addIssue(issues, 'operations', 'INVALID_ARRAY_PROPERTY', 'operations cannot contain symbol or named properties.');
+    }
+  }
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor?.enumerable || !('value' in descriptor)) {
+      addIssue(issues, `operations[${index}]`, 'INVALID_ARRAY_ENTRY', `operations[${index}] must be an enumerable data property.`);
+      continue;
+    }
+    items.push({ index, value: descriptor.value });
+  }
+  return items;
 }
 
 function requiredString(
@@ -215,7 +315,7 @@ function point(value: unknown, path: string, issues: WorkflowDirectorPatchIssue[
   }
   exactKeys(value, path, ['x', 'y'], ['x', 'y'], issues);
   const read = (key: 'x' | 'y') => {
-    const coordinate = value[key];
+    const coordinate = ownData(value, key);
     if (typeof coordinate !== 'number' || !Number.isFinite(coordinate)) {
       addIssue(issues, `${path}.${key}`, 'INVALID_POSITION', `${path}.${key} must be a finite number.`);
       return 0;
@@ -236,8 +336,8 @@ function endpoint(
   }
   exactKeys(value, path, ['nodeId', 'portId'], ['nodeId', 'portId'], issues);
   return {
-    nodeId: requiredString(value.nodeId, `${path}.nodeId`, issues),
-    portId: requiredString(value.portId, `${path}.portId`, issues),
+    nodeId: requiredString(ownData(value, 'nodeId'), `${path}.nodeId`, issues),
+    portId: requiredString(ownData(value, 'portId'), `${path}.portId`, issues),
   };
 }
 
@@ -252,12 +352,12 @@ function config(
     return {};
   }
   const permitted = allowed ?? allConfigKeys;
-  for (const key of Object.keys(value)) {
+  const parsed: Record<string, unknown> = {};
+  for (const [key, setting] of ownDataEntries(value, path, issues)) {
     if (!permitted.has(key)) {
       addIssue(issues, `${path}.${key}`, 'UNKNOWN_CONFIG', `${path}.${key} is not an authoring setting supported by Director patches.`);
       continue;
     }
-    const setting = value[key];
     const valid = key === 'assetId'
       ? setting === null || (typeof setting === 'string' && setting.trim().length > 0 && setting.length <= 256)
       : key === 'required'
@@ -271,9 +371,11 @@ function config(
               && (key !== 'capability' || setting.trim().length > 0);
     if (!valid) {
       addIssue(issues, `${path}.${key}`, 'INVALID_CONFIG_VALUE', `${path}.${key} has an invalid value for that authoring setting.`);
+      continue;
     }
+    parsed[key] = setting;
   }
-  return cloneValue(value);
+  return parsed;
 }
 
 function parseOperation(
@@ -286,77 +388,83 @@ function parseOperation(
     addIssue(issues, path, 'INVALID_OPERATION', `${path} must be an object.`);
     return null;
   }
-  const op = input.op;
+  const op = ownData(input, 'op');
   if (op === 'add-node') {
     exactKeys(input, path, ['op', 'node'], ['op', 'node'], issues);
-    if (!isRecord(input.node)) {
+    const node = ownData(input, 'node');
+    if (!isRecord(node)) {
       addIssue(issues, `${path}.node`, 'INVALID_NODE', `${path}.node must be an object.`);
       return null;
     }
-    exactKeys(input.node, `${path}.node`, ['id', 'type', 'title', 'position', 'config'], ['id', 'type'], issues);
-    const type = creatorTypes.has(input.node.type as CreatorNodeType)
-      ? input.node.type as CreatorNodeType
+    exactKeys(node, `${path}.node`, ['id', 'type', 'title', 'position', 'config'], ['id', 'type'], issues);
+    const rawType = ownData(node, 'type');
+    const type = creatorTypes.has(rawType as CreatorNodeType)
+      ? rawType as CreatorNodeType
       : null;
-    if (!type) addIssue(issues, `${path}.node.type`, 'UNKNOWN_NODE_TYPE', `Unsupported creator node type: ${String(input.node.type)}.`);
-    const parsedConfig = input.node.config === undefined
+    if (!type) addIssue(issues, `${path}.node.type`, 'UNKNOWN_NODE_TYPE', 'Unsupported creator node type.');
+    const rawConfig = ownData(node, 'config');
+    const parsedConfig = rawConfig === undefined
       ? undefined
-      : config(input.node.config, `${path}.node.config`, issues, type ? configKeys[type] : new Set());
+      : config(rawConfig, `${path}.node.config`, issues, type ? configKeys[type] : new Set());
+    const title = ownData(node, 'title');
+    const position = ownData(node, 'position');
     return {
       op,
       node: {
-        id: requiredString(input.node.id, `${path}.node.id`, issues),
+        id: requiredString(ownData(node, 'id'), `${path}.node.id`, issues),
         type: type ?? 'output',
-        ...(input.node.title === undefined
+        ...(title === undefined
           ? {}
-          : { title: requiredString(input.node.title, `${path}.node.title`, issues) }),
-        ...(input.node.position === undefined
+          : { title: requiredString(title, `${path}.node.title`, issues) }),
+        ...(position === undefined
           ? {}
-          : { position: point(input.node.position, `${path}.node.position`, issues) }),
+          : { position: point(position, `${path}.node.position`, issues) }),
         ...(parsedConfig === undefined ? {} : { config: parsedConfig }),
       },
     };
   }
   if (op === 'remove-node') {
     exactKeys(input, path, ['op', 'nodeId'], ['op', 'nodeId'], issues);
-    return { op, nodeId: requiredString(input.nodeId, `${path}.nodeId`, issues) };
+    return { op, nodeId: requiredString(ownData(input, 'nodeId'), `${path}.nodeId`, issues) };
   }
   if (op === 'configure-node') {
     exactKeys(input, path, ['op', 'nodeId', 'changes'], ['op', 'nodeId', 'changes'], issues);
-    const changes = config(input.changes, `${path}.changes`, issues);
+    const changes = config(ownData(input, 'changes'), `${path}.changes`, issues);
     if (Object.keys(changes).length === 0) {
       addIssue(issues, `${path}.changes`, 'EMPTY_CONFIG', 'Configure operations require at least one authoring setting.');
     }
-    return { op, nodeId: requiredString(input.nodeId, `${path}.nodeId`, issues), changes };
+    return { op, nodeId: requiredString(ownData(input, 'nodeId'), `${path}.nodeId`, issues), changes };
   }
   if (op === 'move-node') {
     exactKeys(input, path, ['op', 'nodeId', 'position'], ['op', 'nodeId', 'position'], issues);
     return {
       op,
-      nodeId: requiredString(input.nodeId, `${path}.nodeId`, issues),
-      position: point(input.position, `${path}.position`, issues),
+      nodeId: requiredString(ownData(input, 'nodeId'), `${path}.nodeId`, issues),
+      position: point(ownData(input, 'position'), `${path}.position`, issues),
     };
   }
   if (op === 'add-edge') {
     exactKeys(input, path, ['op', 'edge'], ['op', 'edge'], issues);
-    if (!isRecord(input.edge)) {
+    const edge = ownData(input, 'edge');
+    if (!isRecord(edge)) {
       addIssue(issues, `${path}.edge`, 'INVALID_EDGE', `${path}.edge must be an object.`);
       return null;
     }
-    exactKeys(input.edge, `${path}.edge`, ['id', 'source', 'target'], ['id', 'source', 'target'], issues);
+    exactKeys(edge, `${path}.edge`, ['id', 'source', 'target'], ['id', 'source', 'target'], issues);
     return {
       op,
       edge: {
-        id: requiredString(input.edge.id, `${path}.edge.id`, issues),
-        source: endpoint(input.edge.source, `${path}.edge.source`, issues),
-        target: endpoint(input.edge.target, `${path}.edge.target`, issues),
+        id: requiredString(ownData(edge, 'id'), `${path}.edge.id`, issues),
+        source: endpoint(ownData(edge, 'source'), `${path}.edge.source`, issues),
+        target: endpoint(ownData(edge, 'target'), `${path}.edge.target`, issues),
       },
     };
   }
   if (op === 'remove-edge') {
     exactKeys(input, path, ['op', 'edgeId'], ['op', 'edgeId'], issues);
-    return { op, edgeId: requiredString(input.edgeId, `${path}.edgeId`, issues) };
+    return { op, edgeId: requiredString(ownData(input, 'edgeId'), `${path}.edgeId`, issues) };
   }
-  addIssue(issues, `${path}.op`, 'UNSUPPORTED_OPERATION', `Unsupported Director patch operation: ${String(op)}.`);
+  addIssue(issues, `${path}.op`, 'UNSUPPORTED_OPERATION', 'Unsupported Director patch operation.');
   return null;
 }
 
@@ -370,34 +478,32 @@ export function parseWorkflowDirectorPatch(input: unknown): {
     return detachedFrozen({ value: null, issues });
   }
   exactKeys(input, '<root>', ['version', 'sourceGraphRevision', 'summary', 'operations'], ['version', 'sourceGraphRevision', 'summary', 'operations'], issues);
-  if (input.version !== WORKFLOW_DIRECTOR_PATCH_VERSION) {
+  if (ownData(input, 'version') !== WORKFLOW_DIRECTOR_PATCH_VERSION) {
     addIssue(issues, 'version', 'UNSUPPORTED_VERSION', `Director patch version must be ${WORKFLOW_DIRECTOR_PATCH_VERSION}.`);
   }
   let sourceGraphRevision: WorkflowGraphRevision = { graphId: '', revision: 0 };
-  if (!isRecord(input.sourceGraphRevision)) {
+  const rawSourceGraphRevision = ownData(input, 'sourceGraphRevision');
+  if (!isRecord(rawSourceGraphRevision)) {
     addIssue(issues, 'sourceGraphRevision', 'INVALID_REVISION', 'sourceGraphRevision must identify a graph and its content revision.');
   } else {
-    exactKeys(input.sourceGraphRevision, 'sourceGraphRevision', ['graphId', 'revision'], ['graphId', 'revision'], issues);
-    const graphId = requiredString(input.sourceGraphRevision.graphId, 'sourceGraphRevision.graphId', issues);
-    const revision = input.sourceGraphRevision.revision;
-    if (!Number.isSafeInteger(revision) || (revision as number) < 0) {
-      addIssue(issues, 'sourceGraphRevision.revision', 'INVALID_REVISION', 'sourceGraphRevision.revision must be a non-negative safe integer.');
+    exactKeys(rawSourceGraphRevision, 'sourceGraphRevision', ['graphId', 'revision'], ['graphId', 'revision'], issues);
+    const graphId = requiredString(ownData(rawSourceGraphRevision, 'graphId'), 'sourceGraphRevision.graphId', issues);
+    const revision = ownData(rawSourceGraphRevision, 'revision');
+    if (!Number.isSafeInteger(revision) || (revision as number) < 0 || revision === Number.MAX_SAFE_INTEGER) {
+      addIssue(issues, 'sourceGraphRevision.revision', 'INVALID_REVISION', 'sourceGraphRevision.revision must be a non-negative safe integer that can advance by one.');
     }
-    sourceGraphRevision = { graphId, revision: Number.isSafeInteger(revision) ? revision as number : 0 };
+    sourceGraphRevision = {
+      graphId,
+      revision: Number.isSafeInteger(revision) && revision !== Number.MAX_SAFE_INTEGER ? revision as number : 0,
+    };
   }
-  const operations = Array.isArray(input.operations)
-    ? input.operations.map((operation, index) => parseOperation(operation, index, issues))
-      .filter((operation): operation is WorkflowDirectorPatchOperation => operation !== null)
-    : [];
-  if (!Array.isArray(input.operations)) {
-    addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations must be an array.');
-  } else if (input.operations.length > 128) {
-    addIssue(issues, 'operations', 'TOO_MANY_OPERATIONS', 'Director patches support at most 128 operations.');
-  }
+  const operations = operationItems(ownData(input, 'operations'), issues)
+    .map((operation) => parseOperation(operation.value, operation.index, issues))
+    .filter((operation): operation is WorkflowDirectorPatchOperation => operation !== null);
   const value: WorkflowDirectorPatchV1 = {
     version: WORKFLOW_DIRECTOR_PATCH_VERSION,
     sourceGraphRevision,
-    summary: requiredString(input.summary, 'summary', issues, 2_000),
+    summary: requiredString(ownData(input, 'summary'), 'summary', issues, 2_000),
     operations,
   };
   return detachedFrozen({ value: issues.length === 0 ? value : null, issues });
@@ -410,11 +516,143 @@ function candidateProtected(node: WorkflowGraphV2['nodes'][number]): boolean {
   });
 }
 
+function addIdentity(identities: Set<string>, value: unknown): void {
+  if (typeof value === 'string' && value.length > 0) identities.add(value);
+}
+
+function immutableCandidateIdentities(graph: WorkflowGraphV2): Set<string> {
+  const identities = new Set<string>();
+  for (const reference of graph.assetReferences) {
+    addIdentity(identities, reference.id);
+    addIdentity(identities, reference.assetId);
+    addIdentity(identities, reference.relativePath);
+  }
+  for (const run of graph.runRecords as readonly unknown[]) {
+    if (!isRecord(run)) continue;
+    const outputs = ownData(run, 'outputs');
+    if (!Array.isArray(outputs)) continue;
+    for (const output of outputs) {
+      if (!isRecord(output)) continue;
+      addIdentity(identities, ownData(output, 'assetReferenceId'));
+      addIdentity(identities, ownData(output, 'assetId'));
+      addIdentity(identities, ownData(output, 'relativePath'));
+    }
+  }
+  return identities;
+}
+
 function containsString(value: unknown, candidates: ReadonlySet<string>): boolean {
   if (typeof value === 'string') return candidates.has(value);
   if (Array.isArray(value)) return value.some((item) => containsString(item, candidates));
   if (isRecord(value)) return Object.values(value).some((item) => containsString(item, candidates));
   return false;
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => valuesEqual(item, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && valuesEqual(left[key], right[key]));
+}
+
+function nodeStructure(node: WorkflowNodeV2): Omit<WorkflowNodeV2, 'config' | 'position'> {
+  const { config: _config, position: _position, ...structure } = node;
+  return structure;
+}
+
+function deriveNodeChanges(
+  before: WorkflowGraphV2,
+  after: WorkflowGraphV2,
+): WorkflowDirectorPatchNodeChange[] {
+  const beforeNodes = new Map(before.nodes.map((node) => [node.id, node]));
+  const afterNodes = new Map(after.nodes.map((node) => [node.id, node]));
+  const changes: WorkflowDirectorPatchNodeChange[] = [];
+
+  for (const node of before.nodes) {
+    const next = afterNodes.get(node.id);
+    if (!next || !valuesEqual(nodeStructure(node), nodeStructure(next))) {
+      changes.push({
+        kind: 'removed', nodeId: node.id, title: node.title,
+        detail: `Remove ${node.type} creator node and its edges.`,
+      });
+    }
+  }
+  for (const node of after.nodes) {
+    const previous = beforeNodes.get(node.id);
+    if (!previous || !valuesEqual(nodeStructure(previous), nodeStructure(node))) {
+      changes.push({
+        kind: 'added', nodeId: node.id, title: node.title,
+        detail: `Add ${node.type} creator node.`,
+      });
+      continue;
+    }
+    if (!valuesEqual(previous.config, node.config)) {
+      const keys = new Set([...Object.keys(previous.config), ...Object.keys(node.config)]);
+      const configured = [...keys]
+        .filter((key) => !valuesEqual(previous.config[key], node.config[key]))
+        .sort((left, right) => left.localeCompare(right));
+      changes.push({
+        kind: 'configured', nodeId: node.id, title: node.title,
+        detail: `Configure ${configured.join(', ')}.`,
+      });
+    }
+    if (!valuesEqual(previous.position, node.position)) {
+      changes.push({ kind: 'moved', nodeId: node.id, title: node.title, detail: 'Move node on the workflow board.' });
+    }
+  }
+  return changes.sort((left, right) => left.nodeId.localeCompare(right.nodeId) || left.kind.localeCompare(right.kind));
+}
+
+function deriveEdgeChanges(
+  before: WorkflowGraphV2,
+  after: WorkflowGraphV2,
+): WorkflowDirectorPatchEdgeChange[] {
+  const beforeEdges = new Map(before.edges.map((edge) => [edge.id, edge]));
+  const afterEdges = new Map(after.edges.map((edge) => [edge.id, edge]));
+  const changes: WorkflowDirectorPatchEdgeChange[] = [];
+  for (const edge of before.edges) {
+    const next = afterEdges.get(edge.id);
+    if (!next || !valuesEqual(edge, next)) {
+      changes.push({ kind: 'removed', edgeId: edge.id, source: edge.source, target: edge.target });
+    }
+  }
+  for (const edge of after.edges) {
+    const previous = beforeEdges.get(edge.id);
+    if (!previous || !valuesEqual(previous, edge)) {
+      changes.push({ kind: 'added', edgeId: edge.id, source: edge.source, target: edge.target });
+    }
+  }
+  return changes.sort((left, right) => left.edgeId.localeCompare(right.edgeId) || left.kind.localeCompare(right.kind));
+}
+
+function deriveMaterialRoots(
+  before: WorkflowGraphV2,
+  after: WorkflowGraphV2,
+  nodeChanges: readonly WorkflowDirectorPatchNodeChange[],
+  edgeChanges: readonly WorkflowDirectorPatchEdgeChange[],
+): Set<string> {
+  const roots = new Set<string>();
+  const beforeNodeIds = new Set(before.nodes.map((node) => node.id));
+  const afterNodeIds = new Set(after.nodes.map((node) => node.id));
+  for (const change of nodeChanges) {
+    if (change.kind === 'configured') roots.add(change.nodeId);
+    if ((change.kind === 'added' || change.kind === 'removed')
+      && beforeNodeIds.has(change.nodeId) && afterNodeIds.has(change.nodeId)) {
+      roots.add(change.nodeId);
+    }
+  }
+  for (const change of edgeChanges) {
+    if (afterNodeIds.has(change.target.nodeId)) roots.add(change.target.nodeId);
+  }
+  return roots;
 }
 
 function ensureCreatorNode(
@@ -560,11 +798,9 @@ export function createWorkflowDirectorPatchProposal(
   } catch (error) {
     return detachedFrozen({ proposal: null, issues: [issueFromError(error, 'graph')] });
   }
+  const immutableIdentities = immutableCandidateIdentities(inputGraph);
   const historyBefore = immutableHistorySnapshot(before);
   const working = new WorkflowGraphDomain(before);
-  const nodeChanges: WorkflowDirectorPatchNodeChange[] = [];
-  const edgeChanges: WorkflowDirectorPatchEdgeChange[] = [];
-  const materialRoots = new Set<string>();
 
   try {
     patch.operations.forEach((operation, index) => {
@@ -577,7 +813,6 @@ export function createWorkflowDirectorPatchProposal(
           ...(operation.node.config === undefined ? {} : { config: operation.node.config }),
         });
         working.addNode(node);
-        nodeChanges.push({ kind: 'added', nodeId: node.id, title: node.title, detail: `Add ${node.type} creator node.` });
       } else if (operation.op === 'remove-node') {
         const node = ensureCreatorNode(working.graph, operation.nodeId);
         if (node.runRecordIds.length > 0) {
@@ -586,13 +821,10 @@ export function createWorkflowDirectorPatchProposal(
         if (candidateProtected(node)) {
           throw new WorkflowDomainError('INVALID_GRAPH', `Node "${node.title}" cannot be removed because it owns an accepted candidate.`, { nodeId: node.id });
         }
-        const referenceIds = new Set(working.graph.assetReferences.map((reference) => reference.id));
-        if (containsString(node.config, referenceIds)) {
-          throw new WorkflowDomainError('INVALID_GRAPH', `Node "${node.title}" cannot be removed because it references an immutable project asset.`, { nodeId: node.id });
+        if (containsString(node.config, immutableIdentities)) {
+          throw new WorkflowDomainError('INVALID_GRAPH', `Node "${node.title}" cannot be removed because it references an immutable project asset or accepted candidate.`, { nodeId: node.id });
         }
-        working.outgoing(node.id).forEach((edge) => materialRoots.add(edge.target.nodeId));
         working.removeNode(node.id);
-        nodeChanges.push({ kind: 'removed', nodeId: node.id, title: node.title, detail: `Remove ${node.type} creator node and its edges.` });
       } else if (operation.op === 'configure-node') {
         const node = ensureCreatorNode(working.graph, operation.nodeId);
         const allowed = configKeys[node.type];
@@ -610,35 +842,16 @@ export function createWorkflowDirectorPatchProposal(
             { nodeId: node.id },
           );
         }
-        const revision = working.revision;
         working.configureNode(node.id, nextConfig);
-        if (working.revision !== revision) {
-          materialRoots.add(node.id);
-          nodeChanges.push({
-            kind: 'configured', nodeId: node.id, title: node.title,
-            detail: `Configure ${Object.keys(operation.changes).join(', ')}.`,
-          });
-        }
       } else if (operation.op === 'move-node') {
         const node = ensureCreatorNode(working.graph, operation.nodeId);
-        const revision = working.revision;
         working.moveNode(node.id, operation.position);
-        if (working.revision !== revision) {
-          nodeChanges.push({ kind: 'moved', nodeId: node.id, title: node.title, detail: 'Move node on the workflow board.' });
-        }
       } else if (operation.op === 'add-edge') {
         working.addEdge(operation.edge);
-        materialRoots.add(operation.edge.target.nodeId);
-        edgeChanges.push({
-          kind: 'added', edgeId: operation.edge.id,
-          source: operation.edge.source, target: operation.edge.target,
-        });
       } else if (operation.op === 'remove-edge') {
         const edge = working.edge(operation.edgeId);
         if (!edge) throw new WorkflowDomainError('EDGE_NOT_FOUND', `Edge "${operation.edgeId}" does not exist.`, { edgeId: operation.edgeId });
-        materialRoots.add(edge.target.nodeId);
         working.removeEdge(edge.id);
-        edgeChanges.push({ kind: 'removed', edgeId: edge.id, source: edge.source, target: edge.target });
       }
     });
   } catch (error) {
@@ -661,12 +874,15 @@ export function createWorkflowDirectorPatchProposal(
       }],
     });
   }
-  if (JSON.stringify(after) === JSON.stringify(before)) {
+  const nodeChanges = deriveNodeChanges(before, after);
+  const edgeChanges = deriveEdgeChanges(before, after);
+  if (nodeChanges.length === 0 && edgeChanges.length === 0) {
     return detachedFrozen({
       proposal: null,
       issues: [{ path: 'operations', code: 'NO_EFFECT', message: 'Director patch makes no changes to the workflow.' }],
     });
   }
+  const materialRoots = deriveMaterialRoots(before, after, nodeChanges, edgeChanges);
 
   return detachedFrozen({
     proposal: {
@@ -674,8 +890,8 @@ export function createWorkflowDirectorPatchProposal(
       graph: after,
       sourceGraphRevision: currentGraphRevision,
       targetGraphRevision: { graphId: currentGraphRevision.graphId, revision: currentGraphRevision.revision + 1 },
-      nodeChanges: nodeChanges.sort((left, right) => left.nodeId.localeCompare(right.nodeId) || left.kind.localeCompare(right.kind)),
-      edgeChanges: edgeChanges.sort((left, right) => left.edgeId.localeCompare(right.edgeId) || left.kind.localeCompare(right.kind)),
+      nodeChanges,
+      edgeChanges,
       requirementChanges: requirementChanges(before, after),
       downstreamStaleness: downstreamStaleness(before, after, materialRoots),
       canAccept: true,
