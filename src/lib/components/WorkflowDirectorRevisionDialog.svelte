@@ -11,6 +11,7 @@
     createWorkflowDirectorRevisionViewModel,
     rejectWorkflowDirectorRevisionPreview,
     requestWorkflowDirectorRevisionPreview,
+    workflowDirectorRevisionPreviewIsCurrent,
     type WorkflowDirectorRevisionPreview,
     type WorkflowDirectorRevisionRequester,
   } from '../workflow';
@@ -32,6 +33,9 @@
   let requestEpoch = 0;
 
   const view = $derived(preview ? createWorkflowDirectorRevisionViewModel(preview.result) : null);
+  const previewCurrent = $derived(preview
+    ? workflowDirectorRevisionPreviewIsCurrent(preview, workflow, instruction)
+    : false);
   const canUndo = $derived(workflow.canUndoDirectorPatch);
   const canRedo = $derived(workflow.canRedoDirectorPatch);
 
@@ -181,8 +185,8 @@
         <div class="empty-preview"><Icon svg={ArrowSync} size={24} /><strong>Preparing revision preview…</strong><span>The current workflow remains unchanged.</span></div>
       {:else if view}
         <div class="proposal-heading">
-          <span><strong>{view.summary}</strong><small>{view.canAccept ? 'Validated against the current graph revision.' : 'Rejected before acceptance.'}</small></span>
-          <span class:valid={view.canAccept} class="status-chip">{view.canAccept ? 'Ready to review' : 'Invalid'}</span>
+          <span><strong>{view.summary}</strong><small>{view.canAccept && previewCurrent ? 'Validated against the current graph revision.' : view.canAccept ? 'The workflow changed after this preview. Request it again.' : 'Rejected before acceptance.'}</small></span>
+          <span class:valid={view.canAccept && previewCurrent} class="status-chip">{view.canAccept ? previewCurrent ? 'Ready to review' : 'Stale preview' : 'Invalid'}</span>
         </div>
 
         <section class="change-section" aria-labelledby="revision-operations-heading">
@@ -222,7 +226,7 @@
 
         <div class="preview-actions">
           <button type="button" onclick={rejectRevision}>Reject revision</button>
-          <button type="button" class="primary" disabled={!view.canAccept} onclick={acceptRevision}>Accept revision as one transaction</button>
+          <button type="button" class="primary" disabled={!view.canAccept || !previewCurrent} onclick={acceptRevision}>Accept revision as one transaction</button>
         </div>
       {:else}
         <div class="empty-preview"><Icon svg={ArrowSync} size={24} /><strong>No revision preview yet</strong><span>Enter an instruction to inspect the exact patch and its downstream impact.</span></div>

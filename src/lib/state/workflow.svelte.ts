@@ -267,8 +267,8 @@ export class WorkflowStore {
   private readonly workflowGraphIdGenerator: (() => string) | undefined;
   private projectedGraphRevision = 0;
   private transformRunSequence = 0;
-  private workflowSessionIdentity = 0;
-  private workflowMutationIdentity = 0;
+  private workflowSessionIdentity = $state(0);
+  private workflowMutationIdentity = $state(0);
   private readonly activeTransformRuns = new Map<string, number>();
   private pendingDirectorPatchReview: WorkflowDirectorPatchReview | null = null;
   private directorPatchUndoStack: WorkflowDirectorPatchTransaction[] = [];

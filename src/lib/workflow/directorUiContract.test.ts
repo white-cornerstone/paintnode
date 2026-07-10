@@ -74,6 +74,13 @@ describe('Workflow Director UI contract', () => {
     expect(revisionDialogSource).toContain('workflow.redoDirectorPatch()');
   });
 
+  it('marks stale previews visibly and disables acceptance before the store guard is reached', () => {
+    expect(revisionDialogSource).toContain('workflowDirectorRevisionPreviewIsCurrent');
+    expect(revisionDialogSource).toContain('previewCurrent');
+    expect(revisionDialogSource).toContain("'Stale preview'");
+    expect(revisionDialogSource).toContain('disabled={!view.canAccept || !previewCurrent}');
+  });
+
   it('keeps the revision fixture provider-free with no discovery, auth, provider, or image execution calls', () => {
     expect(revisionDialogSource).toContain('createProviderFreeWorkflowRevisionRequester');
     expect(revisionDialogSource).not.toContain('createConfiguredWorkflowDirector');

@@ -117,11 +117,15 @@ function operationView(
     return { index: index + 1, kind: operation.op, label: 'Remove node', detail: operation.nodeId };
   }
   if (operation.op === 'configure-node') {
+    const settings = Object.entries(operation.changes)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+      .join('; ');
     return {
       index: index + 1,
       kind: operation.op,
       label: 'Configure node',
-      detail: `${operation.nodeId}: ${Object.keys(operation.changes).sort().join(', ')}`,
+      detail: `${operation.nodeId}: ${settings}`,
     };
   }
   if (operation.op === 'move-node') {
@@ -186,6 +190,17 @@ export function rejectWorkflowDirectorRevisionPreview(
   if (!preview.result.proposal || target.pendingDirectorPatchProposal !== preview.result.proposal) return false;
   target.rejectDirectorPatchProposal();
   return true;
+}
+
+export function workflowDirectorRevisionPreviewIsCurrent(
+  preview: WorkflowDirectorRevisionPreview,
+  target: WorkflowDirectorRevisionTarget,
+  currentInstruction: string = preview.instruction,
+): boolean {
+  return currentInstruction.trim() === preview.instruction
+    && preview.result.proposal !== null
+    && target.pendingDirectorPatchProposal === preview.result.proposal
+    && sameSession(preview.session, target.captureDirectorSession());
 }
 
 export function acceptWorkflowDirectorRevisionPreview(

@@ -9,6 +9,7 @@ import {
   createWorkflowDirectorRevisionViewModel,
   rejectWorkflowDirectorRevisionPreview,
   requestWorkflowDirectorRevisionPreview,
+  workflowDirectorRevisionPreviewIsCurrent,
   type WorkflowDirectorRevisionRequest,
   type WorkflowDirectorRevisionRequester,
 } from './directorRevisionSession';
@@ -82,7 +83,24 @@ describe('Workflow Director revision session', () => {
       nodeChanges: [expect.objectContaining({ kind: 'configured', nodeId: 'brief' })],
       validationIssues: [],
     });
+    expect(view.operations[0].detail).toContain('premium evening launch');
     expect(view.downstreamStaleness.length).toBeGreaterThan(0);
+  });
+
+  it('reports preview currency across instruction, store, and workflow session changes', async () => {
+    const store = campaign();
+    const preview = await requestWorkflowDirectorRevisionPreview(
+      createProviderFreeWorkflowRevisionRequester(),
+      store,
+      'Keep this exact live instruction.',
+    );
+
+    expect(workflowDirectorRevisionPreviewIsCurrent(preview, store, preview.instruction)).toBe(true);
+    expect(workflowDirectorRevisionPreviewIsCurrent(preview, store, 'Changed instruction.')).toBe(false);
+    store.setBriefObjective('brief', 'Newer store state.');
+    expect(workflowDirectorRevisionPreviewIsCurrent(preview, store, preview.instruction)).toBe(false);
+    store.newFromTemplate('campaign-composer', 'Replacement session');
+    expect(workflowDirectorRevisionPreviewIsCurrent(preview, store, preview.instruction)).toBe(false);
   });
 
   it('rejects a pending preview with zero graph, revision, dirty, or history mutation', async () => {
