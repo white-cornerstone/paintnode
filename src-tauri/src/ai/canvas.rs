@@ -146,13 +146,15 @@ pub(crate) fn validate_optional_target_dimensions(
     }
 }
 
+pub(crate) type NormalizedPngResult = (Vec<u8>, (u32, u32), bool);
+
 /// Normalize a provider result to the submitted crop size: exact-size results
 /// pass through; same-ratio results at another resolution get resized.
 fn crop_png_bytes_to_ai_content(
     bytes: &[u8],
     working: &AiWorkingCanvas,
     label: &str,
-) -> Result<(Vec<u8>, (u32, u32), bool), String> {
+) -> Result<NormalizedPngResult, String> {
     let result_dimensions = png_dimensions_from_bytes(bytes)
         .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
     if result_dimensions == working.original_dimensions {
@@ -174,7 +176,7 @@ pub(crate) fn read_png_bytes_cropped_to_ai_working_canvas(
     path: &Path,
     working: &AiWorkingCanvas,
     label: &str,
-) -> Result<(Vec<u8>, (u32, u32), bool), String> {
+) -> Result<NormalizedPngResult, String> {
     let bytes = fs::read(path).map_err(|e| format!("Failed to read {label}: {e}"))?;
     let (normalized_bytes, result_dimensions, normalized) =
         crop_png_bytes_to_ai_content(&bytes, working, label)?;

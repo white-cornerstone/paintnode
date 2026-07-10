@@ -56,19 +56,20 @@ use crate::ai::placement::{
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
     ai_director_restore_contract, ai_director_workflow_contract, ai_job_project_dir,
-    ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
-    cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
+    ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
+    clean_option, cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
     codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
     emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
-    remove_legacy_generative_fill_agent_inputs, safe_job_child_path, safe_png_source_file_name,
-    should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
-    unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
-    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
-    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
-    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, POLL_INTERVAL,
+    remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
+    safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
+    synthesize_decouple_asset_manifest, unique_child_path, validate_reference_pngs,
+    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
+    AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
+    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult, DecoupleImageResult,
+    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
+    TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
+    CODEX_RUNS_DIR, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -88,7 +89,7 @@ const PAINTNODE_IMAGE_REQUEST_FILE: &str = "paintnode-image-request.json";
 const PAINTNODE_CODEX_IMAGE_REQUEST_FILE: &str = "paintnode-codex-image-request.json";
 const PAINTNODE_CODEX_IMAGE_RESPONSE_FILE: &str = "paintnode-codex-image-response.json";
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct CodexCommandOptions {
     model: Option<String>,
     reasoning_effort: Option<String>,
@@ -96,19 +97,6 @@ struct CodexCommandOptions {
     image_quality: Option<String>,
     image_moderation: Option<String>,
     keep_debug_artifacts: bool,
-}
-
-impl Default for CodexCommandOptions {
-    fn default() -> Self {
-        Self {
-            model: None,
-            reasoning_effort: None,
-            service_tier: None,
-            image_quality: None,
-            image_moderation: None,
-            keep_debug_artifacts: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -538,12 +526,20 @@ pub(crate) fn run_codex_director_request(
     job_path: &Path,
     prompt_text: &str,
     image_paths: &[PathBuf],
+    session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
     let codex_bin = configured_codex_bin_or_sdk_default(bin);
     let mut options = codex_command_options(model, reasoning_effort, service_tier, None, None);
     options.keep_debug_artifacts = keep_debug_artifacts;
-    let mut command =
-        build_codex_sdk_command(&codex_bin, job_path, prompt_text, image_paths, &options);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        image_paths,
+        &options,
+        session_id,
+        Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+    );
     let run =
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
             format!(
@@ -708,6 +704,7 @@ fn fallback_codex_capabilities(warning: Option<String>) -> AiProviderCapabilitie
         .collect(),
         source: "fallback".into(),
         warning,
+        features: ai_provider_features(AiDirectorProvider::Codex),
     }
 }
 
@@ -796,6 +793,7 @@ fn parse_codex_capabilities_payload(bytes: &[u8]) -> Result<AiProviderCapabiliti
         models,
         source: "appServer".into(),
         warning: None,
+        features: ai_provider_features(AiDirectorProvider::Codex),
     })
 }
 
@@ -818,6 +816,26 @@ fn build_codex_sdk_command(
     image_paths: &[PathBuf],
     options: &CodexCommandOptions,
 ) -> Command {
+    build_codex_sdk_command_with_session(
+        codex_bin,
+        job_path,
+        prompt_text,
+        image_paths,
+        options,
+        None,
+        None,
+    )
+}
+
+fn build_codex_sdk_command_with_session(
+    codex_bin: &str,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+    options: &CodexCommandOptions,
+    session_id: Option<&str>,
+    output_file: Option<&str>,
+) -> Command {
     let codex_bin = managed_codex_bin_or(codex_bin);
     let mut command = Command::new(codex_sdk_node());
     apply_ai_cli_environment(&mut command)
@@ -830,6 +848,12 @@ fn build_codex_sdk_command(
         .arg("--approval")
         .arg("never")
         .arg("--skip-git-repo-check");
+    if let Some(session_id) = session_id {
+        command.arg("--session-id").arg(session_id);
+    }
+    if let Some(output_file) = output_file {
+        command.arg("--output-file").arg(job_path.join(output_file));
+    }
     if !codex_bin.trim().is_empty() {
         command.arg("--codex-path").arg(codex_bin.as_ref());
     }
@@ -861,7 +885,7 @@ fn gpt_image2_size_for_dimensions(dimensions: (u32, u32)) -> Option<String> {
     let long = width.max(height);
     let short = width.min(height);
     let pixels = u64::from(width) * u64::from(height);
-    if long > 3840 || long > short * 3 || pixels < 655_360 || pixels > 8_294_400 {
+    if long > 3840 || long > short * 3 || !(655_360..=8_294_400).contains(&pixels) {
         return None;
     }
     Some(format!("{width}x{height}"))
@@ -908,9 +932,10 @@ fn director_action_file_contract(base_image: &str, prompt_label: &str) -> String
         r#"PaintNode Director tool loop:
 - Do not create image pixels yourself and do not create `result.png`.
 - Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
-- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.
+- Choose exactly one Director action: `generateCandidate`, `acceptResult`, `requestUserInput`, or `fail`.
 - For the first turn, normally write a `generateCandidate` action that asks PaintNode's owned image tool to create the candidate.
 - Allowed PaintNode tool action: `generateCandidate`. PaintNode will run the image model, write an observation naming the full candidate file, and attach a downscaled review preview of that candidate when your participation level requires review.
+- Use `requestUserInput` only when a missing user decision would materially change the intended image. Ask one concise question with up to four options.
 
 JSON schema:
 {{
@@ -1352,6 +1377,9 @@ fn build_decouple_codex_command(
     )
 }
 
+// These provider orchestration signatures mirror the stable Tauri command and
+// prompt contracts. Regrouping them requires a coordinated IPC API migration.
+#[allow(clippy::too_many_arguments)]
 fn build_decouple_codex_director_command(
     codex_bin: &str,
     job_path: &Path,
@@ -1403,6 +1431,7 @@ Requirements:
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn generative_fill_prompt(
     prompt: &str,
     autonomy: AiAutonomyLevel,
@@ -1430,6 +1459,7 @@ fn generative_fill_prompt(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generative_fill_director_prompt(
     prompt: &str,
     autonomy: AiAutonomyLevel,
@@ -1452,11 +1482,16 @@ fn generative_fill_director_prompt(
         "generative fill",
     );
     let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
+    let user_input_requirement = if agentic_tool_loop {
+        "- If a missing user decision would materially change the image, write a `requestUserInput` action with one concise question, up to four short `options`, and `allowCustom` when useful."
+    } else {
+        "- Do not ask follow-up questions."
+    };
     let task_intro =
         "Plan one PaintNode-controlled generative fill image request from the attached frame.";
     let request_file_requirement = if agentic_tool_loop {
         format!(
-            "- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.\n- Choose exactly one Director action: `generateCandidate`, `acceptResult`, or `fail`.\n"
+            "- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.\n- Choose exactly one Director action: `generateCandidate`, `acceptResult`, `requestUserInput`, or `fail`.\n"
         )
     } else {
         format!(
@@ -1578,7 +1613,7 @@ Requirements:
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 {managed_method_requirements}
 {review_requirement}
-- Do not ask follow-up questions.
+{user_input_requirement}
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing while preserving the existing visible draft content and composition.
 
 JSON schema:
@@ -1636,7 +1671,7 @@ Requirements:
 - Do not include PaintNode UI, checkerboard transparency pattern, selection outlines, red guide marks, borders, labels, or mask visualization in the output.
 {managed_method_requirements}
 {review_requirement}
-- Do not ask follow-up questions.
+{user_input_requirement}
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
 JSON schema:
@@ -1681,7 +1716,7 @@ Requirements:
 - If extending a real photo, avoid inventing crisp readable text in newly generated distant signs or advertisements; partial or indistinct text is preferable.
 {managed_method_requirements}
 {review_requirement}
-- Do not ask follow-up questions.
+{user_input_requirement}
 - If a safety or quality adjustment is needed, make a reasonable compliant rephrasing and continue.
 
 JSON schema:
@@ -1696,6 +1731,7 @@ Final response should be one short sentence confirming `{final_response_file}` w
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_generative_fill_codex_command(
     codex_bin: &str,
     job_path: &Path,
@@ -1784,6 +1820,7 @@ fn codex_direct_retouch_prompt(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn codex_direct_retouch_director_prompt(
     prompt: &str,
     has_annotated_source: bool,
@@ -1978,6 +2015,7 @@ pub(crate) async fn discover_codex_capabilities(
 /// Codex auth files and strips API-key environment variables so this provider prefers the user's
 /// existing ChatGPT/Codex sign-in rather than accidental API billing.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_codex_image(
     app: AppHandle,
     bin: Option<String>,
@@ -2090,7 +2128,7 @@ pub(crate) async fn generate_codex_image(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!(
+                    format!(
                         "Cover-cropped Codex result from {}x{} to {}x{}",
                         source_dimensions.0, source_dimensions.1, target.0, target.1
                     ),
@@ -2100,7 +2138,7 @@ pub(crate) async fn generate_codex_image(
                 emit_codex_progress(
                     &app,
                     &run_id,
-                    &format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
+                    format!("Result enlarged {upscale_factor:.2}x; restoring image detail"),
                 );
                 let (restored, _) = codex_restore_image_details(
                     &app,
@@ -2246,7 +2284,7 @@ fn run_codex_fill_storyboard(
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
-                codex_command_label(&codex_bin)
+                codex_command_label(codex_bin)
             )
         })?;
 
@@ -2269,7 +2307,7 @@ fn run_codex_fill_storyboard(
             |e| {
                 format!(
                     "Failed to run Codex at '{}': {e}",
-                    codex_command_label(&codex_bin)
+                    codex_command_label(codex_bin)
                 )
             },
         )?;
@@ -2560,15 +2598,18 @@ fn run_director_provider_action_turn(
     part_path: &Path,
     prompt_text: &str,
     image_paths: &[PathBuf],
+    session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
     match director_provider {
         PaintNodeDirectorProvider::Codex => {
-            let mut command = build_codex_sdk_command(
+            let mut command = build_codex_sdk_command_with_session(
                 codex_bin,
                 part_path,
                 prompt_text,
                 image_paths,
                 codex_options,
+                session_id,
+                Some(PAINTNODE_DIRECTOR_ACTION_FILE),
             );
             let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
                 .map_err(|e| {
@@ -2586,8 +2627,13 @@ fn run_director_provider_action_turn(
             }
         }
         PaintNodeDirectorProvider::Claude => {
-            let mut command =
-                build_director_claude_command(claude_options, part_path, prompt_text, image_paths);
+            let mut command = build_director_claude_command(
+                claude_options,
+                part_path,
+                prompt_text,
+                image_paths,
+                session_id,
+            );
             let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string())
                 .map_err(|e| {
                     format!(
@@ -2615,6 +2661,7 @@ fn run_director_provider_action_turn(
             prompt_text,
             true,
             PAINTNODE_DIRECTOR_ACTION_FILE,
+            session_id,
         ),
     }
 }
@@ -2648,7 +2695,7 @@ fn run_agentic_fill_director_part(
             ensure_completion_acceptance_note:
                 "Candidate completed; ensure-completion mode does not run a separate quality review.",
         },
-        |_, prompt_text, candidate_path| {
+        |_, prompt_text, candidate_path, session_id| {
             let image_paths = fill_director_turn_image_paths(
                 part_path,
                 has_overview,
@@ -2666,9 +2713,21 @@ fn run_agentic_fill_director_part(
                 part_path,
                 prompt_text,
                 &image_paths,
+                session_id,
             )
         },
         |run| director_final_agent_message(director_provider, &run.output),
+        |turn, question, options, allow_custom| {
+            request_ai_director_input(
+                app,
+                run_id,
+                director_provider.label(),
+                turn,
+                question,
+                options,
+                allow_custom,
+            )
+        },
         |turn, request, prompt| {
             let candidate_file = director_candidate_file(turn);
             let result = run_paintnode_owned_fill_image_request(
@@ -2719,7 +2778,7 @@ fn run_codex_fill_part(
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
-                codex_command_label(&codex_bin)
+                codex_command_label(codex_bin)
             )
         })?;
 
@@ -2743,7 +2802,7 @@ fn run_codex_fill_part(
             |e| {
                 format!(
                     "Failed to run Codex at '{}': {e}",
-                    codex_command_label(&codex_bin)
+                    codex_command_label(codex_bin)
                 )
             },
         )?;
@@ -2883,6 +2942,7 @@ fn run_antigravity_fill_part(
         prompt_text,
         true,
         PAINTNODE_IMAGE_REQUEST_FILE,
+        None,
     )?;
 
     let owned_request_path = part_path.join(PAINTNODE_IMAGE_REQUEST_FILE);
@@ -2918,6 +2978,7 @@ fn run_antigravity_fill_part(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_codex_direct_edit_part(
     app: &AppHandle,
     run_id: &str,
@@ -3034,6 +3095,7 @@ Output requirements:
 
 /// Run a tiled detail-restoration pass over an enlarged image: every part is
 /// regenerated at model-native density and pasted back at its position.
+#[allow(clippy::too_many_arguments)]
 fn codex_restore_image_details(
     app: &AppHandle,
     run_id: &str,
@@ -3154,7 +3216,7 @@ fn codex_restore_image_details(
                     ensure_completion_acceptance_note:
                         "Candidate completed; ensure-completion mode does not run a separate quality review.",
                 },
-                |_, turn_prompt_text, candidate_path| {
+                |_, turn_prompt_text, candidate_path, session_id| {
                     let mut turn_image_paths = image_paths.clone();
                     if let Some(candidate_path) = candidate_path {
                         turn_image_paths.push(candidate_path.to_path_buf());
@@ -3170,9 +3232,21 @@ fn codex_restore_image_details(
                         &part_path,
                         turn_prompt_text,
                         &turn_image_paths,
+                        session_id,
                     )
                 },
                 |run| director_final_agent_message(&director_runner, &run.output),
+                |turn, question, options, allow_custom| {
+                    request_ai_director_input(
+                        app,
+                        run_id,
+                        director_runner.label(),
+                        turn,
+                        question,
+                        options,
+                        allow_custom,
+                    )
+                },
                 |turn, _request, candidate_prompt| {
                     let part_run = run_codex_direct_edit_part(
                         app,
@@ -3255,6 +3329,7 @@ fn codex_restore_image_details(
 
 /// Run local Codex headlessly for a mask-guided generative fill.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_codex_fill_image(
     app: AppHandle,
     bin: Option<String>,
@@ -3544,7 +3619,7 @@ pub(crate) async fn generate_codex_fill_image(
                         emit_codex_progress(
                             &app,
                             &run_id,
-                            &format!("Skipping storyboard draft guide: {error}"),
+                            format!("Skipping storyboard draft guide: {error}"),
                         );
                         None
                     }
@@ -3857,6 +3932,7 @@ pub(crate) async fn generate_codex_fill_image(
 
 /// Run local Codex headlessly for an AI retouch request.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_codex_retouch_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4154,7 +4230,7 @@ pub(crate) async fn generate_codex_retouch_image(
                         ensure_completion_acceptance_note:
                             "Candidate completed; ensure-completion mode does not run a separate quality review.",
                     },
-                    |_, turn_prompt_text, candidate_path| {
+                    |_, turn_prompt_text, candidate_path, session_id| {
                         let mut turn_image_paths = image_paths.clone();
                         if let Some(candidate_path) = candidate_path {
                             turn_image_paths.push(candidate_path.to_path_buf());
@@ -4170,9 +4246,21 @@ pub(crate) async fn generate_codex_retouch_image(
                             &part_path,
                             turn_prompt_text,
                             &turn_image_paths,
+                            session_id,
                         )
                     },
                     |run| director_final_agent_message(&director_runner, &run.output),
+                    |turn, question, options, allow_custom| {
+                        request_ai_director_input(
+                            &app,
+                            &run_id,
+                            director_runner.label(),
+                            turn,
+                            question,
+                            options,
+                            allow_custom,
+                        )
+                    },
                     |turn, _request, candidate_prompt| {
                         let part_run = run_retouch_candidate(turn, candidate_prompt)
                             .map_err(|(error, _)| error)?;
@@ -4299,6 +4387,7 @@ pub(crate) async fn generate_codex_retouch_image(
 /// Enlarge a flattened document and restore its detail with tiled AI
 /// regeneration (AI -> Upscale). 100% skips the enlarge and only restores.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upscale_codex_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4367,7 +4456,7 @@ pub(crate) async fn upscale_codex_image(
             emit_codex_progress(
                 &app,
                 &run_id,
-                &format!(
+                format!(
                     "Enlarging image from {}x{} to {}x{}",
                     source_dimensions.0,
                     source_dimensions.1,
@@ -4438,6 +4527,7 @@ pub(crate) async fn upscale_codex_image(
 ///
 /// The app owns the deterministic import step; Codex only needs to satisfy the file contract.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decouple_codex_image(
     app: AppHandle,
     bin: Option<String>,
@@ -4712,6 +4802,7 @@ pub(crate) async fn decouple_codex_image(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn compose_codex_workflow(
     app: AppHandle,
     bin: Option<String>,
@@ -4900,6 +4991,32 @@ mod tests {
                 .expect("service tier flag should be present");
             assert_eq!(args[service_tier_idx + 1], "fast");
         }
+    }
+
+    #[test]
+    fn codex_director_command_resumes_sdk_thread() {
+        let job = TempJobDir::new("paintnode-codex-resume-test").expect("temp dir");
+        let session_id = "019ef9e6-cc0a-79b3-9464-c2d16354e957";
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "review the latest candidate",
+            &[],
+            &CodexCommandOptions::default(),
+            Some(session_id),
+            Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", session_id]));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
+        }));
     }
 
     #[test]

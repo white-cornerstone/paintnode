@@ -48,24 +48,13 @@ impl Default for FillStoryboard {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 pub(crate) struct FillStoryboardPart {
     pub(crate) index: usize,
     pub(crate) role: String,
     pub(crate) continuity_edges: Vec<String>,
     pub(crate) expected_content: Vec<String>,
     pub(crate) prompt_guidance: String,
-}
-
-impl Default for FillStoryboardPart {
-    fn default() -> Self {
-        Self {
-            index: 0,
-            role: String::new(),
-            continuity_edges: Vec::new(),
-            expected_content: Vec::new(),
-            prompt_guidance: String::new(),
-        }
-    }
 }
 
 struct PlannedPart {

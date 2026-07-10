@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::thread;
@@ -39,9 +40,40 @@ use crate::project::{
 pub(crate) const AI_RUN_STOPPED_MESSAGE: &str = "The task was stopped.";
 
 static CANCELLED_AI_RUNS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static PENDING_DIRECTOR_INPUTS: OnceLock<(Mutex<HashMap<String, PendingDirectorInput>>, Condvar)> =
+    OnceLock::new();
+
+const DIRECTOR_INPUT_EVENT: &str = "ai-director-input-required";
+
+#[derive(Clone, Debug)]
+struct DirectorInputResponse {
+    answer: String,
+    cancelled: bool,
+}
+
+#[derive(Debug)]
+struct PendingDirectorInput {
+    run_id: String,
+    response: Option<DirectorInputResponse>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectorInputPayload {
+    run_id: String,
+    request_id: String,
+    provider: String,
+    question: String,
+    options: Vec<String>,
+    allow_custom: bool,
+}
 
 fn cancelled_ai_runs() -> &'static Mutex<HashSet<String>> {
     CANCELLED_AI_RUNS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn pending_director_inputs() -> &'static (Mutex<HashMap<String, PendingDirectorInput>>, Condvar) {
+    PENDING_DIRECTOR_INPUTS.get_or_init(|| (Mutex::new(HashMap::new()), Condvar::new()))
 }
 
 /// Flag a running AI job for cancellation; its CLI process is killed at the
@@ -56,7 +88,122 @@ pub(crate) async fn cancel_ai_run(run_id: String) -> Result<(), String> {
         .lock()
         .map_err(|_| "Cancellation registry is unavailable.".to_string())?
         .insert(run_id);
+    pending_director_inputs().1.notify_all();
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn submit_ai_director_input(
+    run_id: String,
+    request_id: String,
+    answer: String,
+    cancelled: bool,
+) -> Result<(), String> {
+    let (inputs, ready) = pending_director_inputs();
+    let mut inputs = inputs
+        .lock()
+        .map_err(|_| "AI Director input registry is unavailable.".to_string())?;
+    let pending = inputs.get_mut(request_id.trim()).ok_or_else(|| {
+        "This AI Director question is no longer waiting for an answer.".to_string()
+    })?;
+    if pending.run_id != run_id.trim() {
+        return Err("AI Director question does not belong to this task.".into());
+    }
+    pending.response = Some(DirectorInputResponse { answer, cancelled });
+    ready.notify_all();
+    Ok(())
+}
+
+pub(crate) fn request_ai_director_input(
+    app: &AppHandle,
+    run_id: &str,
+    provider_label: &str,
+    turn: usize,
+    question: &str,
+    options: &[String],
+    allow_custom: bool,
+) -> Result<String, String> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("AI Director requested user input without a question.".into());
+    }
+    let options = options
+        .iter()
+        .map(|option| option.trim())
+        .filter(|option| !option.is_empty())
+        .take(4)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if options.is_empty() && !allow_custom {
+        return Err(
+            "AI Director question must provide an answer option or allow a custom answer.".into(),
+        );
+    }
+    let request_id = format!("{run_id}-director-{turn}-{}", now_id());
+    let payload = DirectorInputPayload {
+        run_id: run_id.to_string(),
+        request_id: request_id.clone(),
+        provider: provider_label.to_string(),
+        question: question.to_string(),
+        options,
+        allow_custom,
+    };
+    let (inputs, ready) = pending_director_inputs();
+    inputs
+        .lock()
+        .map_err(|_| "AI Director input registry is unavailable.".to_string())?
+        .insert(
+            request_id.clone(),
+            PendingDirectorInput {
+                run_id: run_id.to_string(),
+                response: None,
+            },
+        );
+    if let Err(error) = app.emit(DIRECTOR_INPUT_EVENT, payload) {
+        if let Ok(mut inputs) = inputs.lock() {
+            inputs.remove(&request_id);
+        }
+        return Err(format!("Failed to request AI Director input: {error}"));
+    }
+    emit_provider_progress(
+        app,
+        run_id,
+        "userInputRequired",
+        provider_label,
+        "AI Director is waiting for your answer",
+        Some("requestUserInput"),
+    );
+
+    loop {
+        if ai_run_cancelled(run_id) {
+            if let Ok(mut inputs) = inputs.lock() {
+                inputs.remove(&request_id);
+            }
+            clear_ai_run_cancelled(run_id);
+            return Err(AI_RUN_STOPPED_MESSAGE.into());
+        }
+        let mut guard = inputs
+            .lock()
+            .map_err(|_| "AI Director input registry is unavailable.".to_string())?;
+        if let Some(response) = guard
+            .get(&request_id)
+            .and_then(|pending| pending.response.clone())
+        {
+            guard.remove(&request_id);
+            drop(guard);
+            if response.cancelled {
+                return Err(AI_RUN_STOPPED_MESSAGE.into());
+            }
+            let answer = response.answer.trim();
+            if answer.is_empty() {
+                return Err("The AI Director answer was empty.".into());
+            }
+            return Ok(answer.to_string());
+        }
+        let _ = ready
+            .wait_timeout(guard, POLL_INTERVAL)
+            .map_err(|_| "AI Director input registry is unavailable.".to_string())?;
+    }
 }
 
 /// Commands clear any stale flag when they start so a retry with the same run
@@ -171,10 +318,23 @@ pub(crate) struct AiModelCapability {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AiProviderFeatureCapabilities {
+    transport: String,
+    session_reuse: bool,
+    structured_output: bool,
+    app_mediated_user_input: bool,
+    autonomous_subagents: bool,
+    managed_subagents: bool,
+    structured_progress: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AiProviderCapabilitiesResult {
     models: Vec<AiModelCapability>,
     source: String,
     warning: Option<String>,
+    features: AiProviderFeatureCapabilities,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -297,6 +457,11 @@ pub(crate) fn reference_prompt_note(reference_names: &[String], prefix: &str) ->
 struct CodexProgressPayload {
     run_id: String,
     message: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
     /// 1-based position of the placement part this message belongs to.
     #[serde(skip_serializing_if = "Option::is_none")]
     part_index: Option<usize>,
@@ -354,6 +519,38 @@ impl AiDirectorProvider {
             Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
         }
+    }
+}
+
+pub(crate) fn ai_provider_features(provider: AiDirectorProvider) -> AiProviderFeatureCapabilities {
+    match provider {
+        AiDirectorProvider::Codex => AiProviderFeatureCapabilities {
+            transport: "sdk".into(),
+            session_reuse: true,
+            structured_output: true,
+            app_mediated_user_input: true,
+            autonomous_subagents: true,
+            managed_subagents: false,
+            structured_progress: true,
+        },
+        AiDirectorProvider::Claude => AiProviderFeatureCapabilities {
+            transport: "sdk".into(),
+            session_reuse: true,
+            structured_output: true,
+            app_mediated_user_input: true,
+            autonomous_subagents: true,
+            managed_subagents: true,
+            structured_progress: true,
+        },
+        AiDirectorProvider::Antigravity => AiProviderFeatureCapabilities {
+            transport: "cli".into(),
+            session_reuse: true,
+            structured_output: false,
+            app_mediated_user_input: true,
+            autonomous_subagents: true,
+            managed_subagents: false,
+            structured_progress: false,
+        },
     }
 }
 
@@ -546,7 +743,7 @@ pub(crate) fn emit_kept_job_dir(
         emit_codex_progress(
             app,
             run_id,
-            &format!("Saved AI run inputs: {}", job_path.display()),
+            format!("Saved AI run inputs: {}", job_path.display()),
         );
     }
 }
@@ -745,7 +942,18 @@ pub(crate) fn codex_thread_id_from_line(line: &str) -> Option<String> {
     }
 }
 
-fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) -> Option<String> {
+#[derive(Debug, PartialEq, Eq)]
+struct ProviderProgressUpdate {
+    kind: String,
+    message: String,
+    detail: Option<String>,
+}
+
+fn provider_progress_update(
+    line: &str,
+    is_stderr: bool,
+    provider_label: &str,
+) -> Option<ProviderProgressUpdate> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
@@ -756,38 +964,90 @@ fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) 
         let item_type = json_string_at(&value, &["item", "type"]).unwrap_or("");
         let combined = format!("{event_type} {item_type} {}", value).to_ascii_lowercase();
 
+        if event_type == "provider.progress" {
+            let kind = json_string_at(&value, &["kind"])
+                .filter(|kind| !kind.trim().is_empty())
+                .unwrap_or("agentProgress");
+            let message = json_string_at(&value, &["message"])
+                .and_then(sanitize_provider_progress_line)
+                .unwrap_or_else(|| format!("{provider_label} is working"));
+            let detail =
+                json_string_at(&value, &["detail"]).and_then(sanitize_provider_progress_line);
+            return Some(ProviderProgressUpdate {
+                kind: kind.to_string(),
+                message,
+                detail,
+            });
+        }
+
         if event_type.contains("thread.started") {
-            return Some(format!("{provider_label} session started"));
+            return Some(ProviderProgressUpdate {
+                kind: "sessionStarted".into(),
+                message: format!("{provider_label} session started"),
+                detail: None,
+            });
         }
         if event_type.contains("turn.started") {
-            return Some(format!("{provider_label} is working on the image"));
+            return Some(ProviderProgressUpdate {
+                kind: "turnStarted".into(),
+                message: format!("{provider_label} is working on the image"),
+                detail: None,
+            });
         }
         if event_type.contains("turn.completed") {
-            return Some(format!(
-                "{provider_label} finished; checking generated output"
-            ));
+            return Some(ProviderProgressUpdate {
+                kind: "turnCompleted".into(),
+                message: format!("{provider_label} finished; checking generated output"),
+                detail: None,
+            });
         }
         if event_type.contains("error") {
             let message = json_string_at(&value, &["message"])
                 .or_else(|| json_string_at(&value, &["error", "message"]))
                 .and_then(sanitize_provider_progress_line)
                 .unwrap_or_else(|| format!("{provider_label} reported an error"));
-            return Some(message);
+            return Some(ProviderProgressUpdate {
+                kind: "error".into(),
+                message,
+                detail: None,
+            });
         }
         if event_type.contains("item.started") {
             if combined.contains("imagegen") || combined.contains("image_generation") {
-                return Some(format!("Generating image with {provider_label}"));
+                return Some(ProviderProgressUpdate {
+                    kind: "toolStarted".into(),
+                    message: format!("Generating image with {provider_label}"),
+                    detail: Some("imageGeneration".into()),
+                });
             }
-            if combined.contains("tool") || combined.contains("function") {
-                return Some(format!("{provider_label} is using a local tool"));
+            if combined.contains("tool")
+                || combined.contains("function")
+                || matches!(
+                    item_type,
+                    "command_execution" | "file_change" | "mcp_tool_call" | "web_search"
+                )
+            {
+                return Some(ProviderProgressUpdate {
+                    kind: "toolStarted".into(),
+                    message: format!("{provider_label} is using a local tool"),
+                    detail: (!item_type.is_empty()).then(|| item_type.to_string()),
+                });
             }
-            return Some(format!("{provider_label} is processing the prompt"));
+            return Some(ProviderProgressUpdate {
+                kind: "agentProgress".into(),
+                message: format!("{provider_label} is processing the prompt"),
+                detail: (!item_type.is_empty()).then(|| item_type.to_string()),
+            });
         }
         if event_type.contains("item.completed") {
             if combined.contains("imagegen") || combined.contains("image_generation") {
-                return Some(format!(
-                    "Image generation step completed; waiting for {provider_label}"
-                ));
+                return Some(ProviderProgressUpdate {
+                    kind: "toolCompleted".into(),
+                    message: format!(
+                        "Image generation step completed; waiting for {provider_label}"
+                    ),
+                    detail: Some("imageGeneration".into()),
+                });
             }
             if combined.contains("agent_message") {
                 if let Some(message) = codex_agent_message_text(trimmed)
@@ -798,11 +1058,30 @@ fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) 
                         || lower.contains("using the `imagegen` skill")
                         || lower.contains("using the image generation skill")
                     {
-                        return Some(format!("{provider_label} is preparing image generation"));
+                        return Some(ProviderProgressUpdate {
+                            kind: "agentProgress".into(),
+                            message: format!("{provider_label} is preparing image generation"),
+                            detail: Some("agentMessage".into()),
+                        });
                     }
-                    return Some(format!("{provider_label}: {message}"));
+                    return Some(ProviderProgressUpdate {
+                        kind: "agentMessage".into(),
+                        message: format!("{provider_label}: {message}"),
+                        detail: None,
+                    });
                 }
-                return Some(format!("{provider_label} is continuing image generation"));
+                return Some(ProviderProgressUpdate {
+                    kind: "agentProgress".into(),
+                    message: format!("{provider_label} is continuing image generation"),
+                    detail: Some("agentMessage".into()),
+                });
+            }
+            if !item_type.is_empty() {
+                return Some(ProviderProgressUpdate {
+                    kind: "toolCompleted".into(),
+                    message: format!("{provider_label} completed a {item_type} step"),
+                    detail: Some(item_type.to_string()),
+                });
             }
         }
         return None;
@@ -827,10 +1106,19 @@ fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) 
         || lower.contains("timeout")
         || lower.contains("error")
     {
-        Some(text)
+        Some(ProviderProgressUpdate {
+            kind: if is_stderr { "diagnostic" } else { "message" }.into(),
+            message: text,
+            detail: None,
+        })
     } else {
         None
     }
+}
+
+#[cfg(test)]
+fn provider_progress_message(line: &str, is_stderr: bool, provider_label: &str) -> Option<String> {
+    provider_progress_update(line, is_stderr, provider_label).map(|update| update.message)
 }
 
 pub(crate) fn watched_job_files(job_path: &Path) -> HashMap<String, Option<SystemTime>> {
@@ -897,10 +1185,13 @@ pub(crate) fn emit_job_file_progress(
         .collect::<Vec<_>>();
     changes.sort();
     for file_name in changes {
-        emit_codex_progress(
+        emit_provider_progress(
             app,
             run_id,
+            "artifactUpdated",
+            provider_label,
             job_file_progress_message(provider_label, &file_name, required_output),
+            Some(&file_name),
         );
     }
     *snapshot = current;
@@ -1084,6 +1375,31 @@ pub(crate) fn emit_codex_progress(app: &AppHandle, run_id: &str, message: impl I
         CodexProgressPayload {
             run_id: run_id.to_string(),
             message: message.into(),
+            kind: "message".into(),
+            provider: None,
+            detail: None,
+            part_index: None,
+            part_count: None,
+        },
+    );
+}
+
+pub(crate) fn emit_provider_progress(
+    app: &AppHandle,
+    run_id: &str,
+    kind: &str,
+    provider_label: &str,
+    message: impl Into<String>,
+    detail: Option<&str>,
+) {
+    let _ = app.emit(
+        CODEX_PROGRESS_EVENT,
+        CodexProgressPayload {
+            run_id: run_id.to_string(),
+            message: message.into(),
+            kind: kind.to_string(),
+            provider: Some(provider_label.to_string()),
+            detail: detail.map(str::to_string),
             part_index: None,
             part_count: None,
         },
@@ -1104,6 +1420,9 @@ pub(crate) fn emit_codex_part_progress(
         CodexProgressPayload {
             run_id: run_id.to_string(),
             message: message.into(),
+            kind: "partProgress".into(),
+            provider: None,
+            detail: None,
             part_index: Some(part_index + 1),
             part_count: Some(part_count),
         },
@@ -1143,10 +1462,17 @@ pub(crate) fn spawn_output_reader<R: Read + Send + 'static>(
                             *current_thread_id = Some(next_thread_id);
                         }
                     }
-                    if let Some(message) =
-                        provider_progress_message(&text, is_stderr, &provider_label)
+                    if let Some(update) =
+                        provider_progress_update(&text, is_stderr, &provider_label)
                     {
-                        emit_codex_progress(&app, &run_id, message);
+                        emit_provider_progress(
+                            &app,
+                            &run_id,
+                            &update.kind,
+                            &provider_label,
+                            update.message,
+                            update.detail.as_deref(),
+                        );
                     }
                 }
                 Err(_) => break,
@@ -1283,22 +1609,21 @@ pub(crate) fn image_agent_autonomy_contract(
     }
 }
 
+type ProjectJobPath = (
+    Option<PathBuf>,
+    Option<PathBuf>,
+    PathBuf,
+    bool,
+    Option<TempJobDir>,
+);
+
 pub(crate) fn project_or_temp_job_path(
     app: &AppHandle,
     project_path: &Option<String>,
     prefix: &str,
     run_id: &str,
     keep_job_dir: bool,
-) -> Result<
-    (
-        Option<PathBuf>,
-        Option<PathBuf>,
-        PathBuf,
-        bool,
-        Option<TempJobDir>,
-    ),
-    String,
-> {
+) -> Result<ProjectJobPath, String> {
     let project_dir = optional_project_dir(project_path);
     let job_project_dir = ai_job_project_dir(app, &project_dir, keep_job_dir)?;
     if let Some(job_project_dir) = &job_project_dir {
@@ -1437,6 +1762,39 @@ mod tests {
         .expect("thread id");
         assert_eq!(thread_id, "019ef9e6-cc0a-79b3-9464-c2d16354e957");
         assert!(codex_thread_id_from_line(r#"{"type":"turn.started"}"#).is_none());
+    }
+
+    #[test]
+    fn provider_feature_negotiation_reports_transport_specific_gaps() {
+        let codex = ai_provider_features(AiDirectorProvider::Codex);
+        let claude = ai_provider_features(AiDirectorProvider::Claude);
+        let antigravity = ai_provider_features(AiDirectorProvider::Antigravity);
+
+        assert_eq!(codex.transport, "sdk");
+        assert!(codex.structured_output);
+        assert!(!codex.managed_subagents);
+        assert!(claude.managed_subagents);
+        assert!(claude.structured_progress);
+        assert_eq!(antigravity.transport, "cli");
+        assert!(antigravity.session_reuse);
+        assert!(antigravity.app_mediated_user_input);
+        assert!(antigravity.autonomous_subagents);
+        assert!(!antigravity.structured_output);
+        assert!(!antigravity.structured_progress);
+    }
+
+    #[test]
+    fn provider_progress_update_preserves_structured_subagent_event() {
+        let update = provider_progress_update(
+            r#"{"type":"provider.progress","kind":"subagentStarted","message":"Reviewing candidate","detail":"image-reviewer"}"#,
+            false,
+            "Claude",
+        )
+        .expect("progress update");
+
+        assert_eq!(update.kind, "subagentStarted");
+        assert_eq!(update.message, "Reviewing candidate");
+        assert_eq!(update.detail.as_deref(), Some("image-reviewer"));
     }
 
     #[test]

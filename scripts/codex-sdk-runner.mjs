@@ -1,8 +1,20 @@
 #!/usr/bin/env node
 import { Codex } from '@openai/codex-sdk';
+import { writeFileSync } from 'node:fs';
+import { directorActionSchema } from './director-action-schema.mjs';
+
+function writeDirectorAction(path, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('The SDK did not return a Director action object');
+  }
+  if (!directorActionSchema.properties.action.enum.includes(value.action)) {
+    throw new Error(`The SDK returned an unknown Director action: ${String(value.action)}`);
+  }
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
 
 function usage() {
-  return `Usage: codex-sdk-runner.mjs --cwd DIR [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
+  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -16,6 +28,8 @@ function requireValue(args, index, flag) {
 function parseArgs(argv) {
   const options = {
     cwd: process.cwd(),
+    sessionId: undefined,
+    outputFile: undefined,
     codexPath: undefined,
     model: undefined,
     reasoning: undefined,
@@ -47,6 +61,12 @@ function parseArgs(argv) {
     }
     if (arg === '--cwd') {
       options.cwd = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--session-id') {
+      options.sessionId = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--output-file') {
+      options.outputFile = requireValue(argv, index, arg);
       index += 2;
     } else if (arg === '--codex-path') {
       options.codexPath = requireValue(argv, index, arg);
@@ -116,23 +136,42 @@ async function main() {
     env: sanitizedEnv(),
     config: sdkConfig(options),
   });
-  const thread = codex.startThread({
-    workingDirectory: options.cwd,
-    skipGitRepoCheck: options.skipGitRepoCheck,
-    model: options.model,
-    modelReasoningEffort: options.reasoning,
-    sandboxMode: options.sandbox,
-    approvalPolicy: options.approval,
-  });
+  const thread = options.sessionId
+    ? codex.resumeThread(options.sessionId)
+    : codex.startThread({
+        workingDirectory: options.cwd,
+        skipGitRepoCheck: options.skipGitRepoCheck,
+        model: options.model,
+        modelReasoningEffort: options.reasoning,
+        sandboxMode: options.sandbox,
+        approvalPolicy: options.approval,
+      });
+  if (options.sessionId) {
+    process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: options.sessionId, resumed: true })}\n`);
+  }
   const input = [
     ...options.images.map((path) => ({ type: 'local_image', path })),
     { type: 'text', text: prompt },
   ];
-  const { events } = await thread.runStreamed(input);
+  const { events } = await thread.runStreamed(
+    input,
+    options.outputFile ? { outputSchema: directorActionSchema } : undefined,
+  );
   let failed = false;
+  let finalResponse = null;
   for await (const event of events) {
     process.stdout.write(`${JSON.stringify(event)}\n`);
     if (event.type === 'turn.failed' || event.type === 'error') failed = true;
+    if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
+      finalResponse = event.item.text;
+    }
+  }
+  if (!failed && options.outputFile) {
+    if (!finalResponse) throw new Error('Codex did not return a structured Director action');
+    writeDirectorAction(options.outputFile, JSON.parse(finalResponse));
+    process.stdout.write(
+      `${JSON.stringify({ type: 'provider.progress', kind: 'actionReady', message: 'Codex returned a structured Director action' })}\n`,
+    );
   }
   if (failed) process.exitCode = 1;
 }

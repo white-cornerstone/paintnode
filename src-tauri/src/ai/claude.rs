@@ -8,10 +8,11 @@ use std::thread;
 use serde::Deserialize;
 use tauri::AppHandle;
 
+use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 use crate::ai::{
-    ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled, codex_agent_message_text,
-    output_tail, spawn_output_reader, AgentRunResult, AiModelCapability,
-    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    ai_provider_features, ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled,
+    codex_agent_message_text, output_tail, spawn_output_reader, AgentRunResult, AiDirectorProvider,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
 };
 
@@ -88,6 +89,16 @@ fn build_claude_agent_command(
     prompt_text: &str,
     image_paths: &[PathBuf],
 ) -> Command {
+    build_claude_agent_command_with_session(options, job_path, prompt_text, image_paths, None)
+}
+
+fn build_claude_agent_command_with_session(
+    options: &ClaudeCommandOptions,
+    job_path: &Path,
+    prompt_text: &str,
+    image_paths: &[PathBuf],
+    session_id: Option<&str>,
+) -> Command {
     let managed_bin = managed_claude_bin_or(&options.bin);
     let mut command = Command::new(claude_sdk_node());
     apply_ai_cli_environment(&mut command)
@@ -95,6 +106,9 @@ fn build_claude_agent_command(
         .arg(claude_agent_runner_script())
         .arg("--cwd")
         .arg(job_path);
+    if let Some(session_id) = session_id {
+        command.arg("--session-id").arg(session_id);
+    }
     if !managed_bin.is_empty() {
         command.arg("--claude-path").arg(managed_bin);
     }
@@ -131,8 +145,19 @@ pub(crate) fn build_director_claude_command(
     job_path: &Path,
     prompt_text: &str,
     image_paths: &[PathBuf],
+    session_id: Option<&str>,
 ) -> Command {
-    build_claude_agent_command(options, job_path, prompt_text, image_paths)
+    let mut command = build_claude_agent_command_with_session(
+        options,
+        job_path,
+        prompt_text,
+        image_paths,
+        session_id,
+    );
+    command
+        .arg("--output-file")
+        .arg(job_path.join(PAINTNODE_DIRECTOR_ACTION_FILE));
+    command
 }
 
 pub(crate) fn run_claude_with_progress(
@@ -389,6 +414,7 @@ fn fallback_claude_capabilities(warning: Option<String>) -> AiProviderCapabiliti
         .collect(),
         source: "fallback".into(),
         warning,
+        features: ai_provider_features(AiDirectorProvider::Claude),
     }
 }
 
@@ -443,6 +469,7 @@ fn parse_claude_capabilities(bytes: &[u8]) -> Result<AiProviderCapabilitiesResul
         models,
         source: "agentSdk".into(),
         warning: None,
+        features: ai_provider_features(AiDirectorProvider::Claude),
     })
 }
 
@@ -510,6 +537,31 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["--model", "sonnet"]));
         assert!(args.windows(2).any(|pair| pair == ["--effort", "max"]));
+    }
+
+    #[test]
+    fn director_command_resumes_agent_sdk_session() {
+        let job = TempJobDir::new("paintnode-claude-resume-test").expect("temp dir");
+        let options = claude_command_options(None, None, None);
+        let session_id = "af9de5e1-8b05-4790-9ea0-c70b427963f1";
+        let command = build_director_claude_command(
+            &options,
+            job.path(),
+            "review the latest candidate",
+            &[],
+            Some(session_id),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", session_id]));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
+        }));
     }
 
     #[test]

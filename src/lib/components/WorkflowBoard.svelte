@@ -36,7 +36,13 @@
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
 
-  type CodexProgressPayload = { runId: string; message: string };
+  type CodexProgressPayload = {
+    runId: string;
+    message: string;
+    kind?: string;
+    provider?: string;
+    detail?: string;
+  };
   type WorkflowMapKind = 'asset' | 'composition' | 'output' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {

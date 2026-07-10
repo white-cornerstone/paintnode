@@ -1088,11 +1088,13 @@ pub(crate) fn resize_png_to_dimensions(
 /// Center-crop the PNG to the target aspect ratio and resize it to the target
 /// dimensions (no distortion). Returns the normalized PNG, the source
 /// dimensions, and the enlargement factor that was applied (1.0 = none/shrink).
+type CoverCropResult = (Vec<u8>, (u32, u32), f64);
+
 pub(crate) fn cover_crop_png_to_dimensions(
     bytes: &[u8],
     target: (u32, u32),
     label: &str,
-) -> Result<(Vec<u8>, (u32, u32), f64), String> {
+) -> Result<CoverCropResult, String> {
     let image = decode_png_rgba(bytes, label)?;
     let source_dimensions = image.dimensions();
     if source_dimensions == target {
@@ -1783,10 +1785,10 @@ fn city_block_distances(seeds: &[bool], width: usize, height: usize) -> Vec<u32>
 fn mix_rgba(old: image::Rgba<u8>, new: image::Rgba<u8>, weight: u8) -> image::Rgba<u8> {
     let w = u16::from(weight);
     let mut out = [0_u8; 4];
-    for channel in 0..4 {
+    for (channel, output) in out.iter_mut().enumerate() {
         let old_value = u16::from(old.0[channel]);
         let new_value = u16::from(new.0[channel]);
-        out[channel] = ((old_value * (255 - w) + new_value * w + 127) / 255) as u8;
+        *output = ((old_value * (255 - w) + new_value * w + 127) / 255) as u8;
     }
     image::Rgba(out)
 }
@@ -2472,11 +2474,13 @@ pub(crate) fn storyboard_draft_mask_png(
     encode_rgba_png(mask, label)
 }
 
+type NormalizedStoryboardResult = (Vec<u8>, (u32, u32), bool);
+
 pub(crate) fn normalize_storyboard_draft_png(
     draft_png: &[u8],
     document_dimensions: (u32, u32),
     label: &str,
-) -> Result<(Vec<u8>, (u32, u32), bool), String> {
+) -> Result<NormalizedStoryboardResult, String> {
     let draft = decode_png_rgba(draft_png, label)?;
     let source_dimensions = draft.dimensions();
     let crop = centered_aspect_crop(source_dimensions, document_dimensions);

@@ -7,6 +7,9 @@ import type { AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiProvi
 export type CodexProgressPayload = {
   runId: string;
   message: string;
+  kind?: string;
+  provider?: string;
+  detail?: string;
   /** 1-based position of the placement part this message belongs to. */
   partIndex?: number;
   partCount?: number;
