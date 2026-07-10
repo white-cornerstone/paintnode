@@ -146,6 +146,7 @@ export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
   startedAt: number;
   finishedAt: number | null;
   outputs: WorkflowRunOutput[];
+  retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
   debugArtifactReference?: string;
@@ -187,6 +188,28 @@ export interface WorkflowParseResult {
   ok: boolean;
   value?: WorkflowGraphV2;
   issues: WorkflowValidationIssue[];
+}
+
+export function normalizeInterruptedWorkflowRuns(graph: WorkflowGraphV2): WorkflowGraphV2 {
+  if (!graph.runRecords.some((record) => (
+    'recordVersion' in record && record.recordVersion === 1 && record.status === 'running'
+  ))) return graph;
+  return {
+    ...graph,
+    runRecords: graph.runRecords.map((record) => {
+      if (!('recordVersion' in record) || record.recordVersion !== 1 || record.status !== 'running') return record;
+      return {
+        ...record,
+        status: 'failed' as const,
+        finishedAt: record.startedAt,
+        outputs: [],
+        failure: {
+          code: 'INTERRUPTED',
+          message: 'The attempt was interrupted before it completed.',
+        },
+      };
+    }),
+  };
 }
 
 const nodeTypes = new Set<WorkflowNodeType>([
@@ -602,6 +625,9 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
   if (typeof value.debugArtifactReference === 'string' && !isProjectRelativeWorkflowReference(value.debugArtifactReference)) {
     issues.push({ path: `${path}.debugArtifactReference`, message: `${path}.debugArtifactReference must be project-relative`, severity: 'error' });
   }
+  if (value.retryOfRunId !== undefined && typeof value.retryOfRunId !== 'string') {
+    issues.push({ path: `${path}.retryOfRunId`, message: `${path}.retryOfRunId must be a string`, severity: 'error' });
+  }
   const parsed: WorkflowRunRecordV1 = {
     recordVersion: 1,
     id: minimal.id,
@@ -633,6 +659,7 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     startedAt,
     finishedAt,
     outputs: parsedOutputs,
+    ...(typeof value.retryOfRunId === 'string' ? { retryOfRunId: value.retryOfRunId } : {}),
     ...(parsedFailure ? { failure: parsedFailure } : {}),
     ...(typeof value.projectTaskId === 'string' ? { projectTaskId: value.projectTaskId } : {}),
     ...(typeof value.debugArtifactReference === 'string' ? { debugArtifactReference: value.debugArtifactReference } : {}),
@@ -643,6 +670,46 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     issues.push({ path, message: (error as Error).message, severity: 'error' });
   }
   return parsed;
+}
+
+function validateRunRetryLinks(graph: WorkflowGraphV2, issues: WorkflowValidationIssue[]): void {
+  for (const [index, reference] of graph.runRecords.entries()) {
+    if (!('recordVersion' in reference) || reference.recordVersion !== 1 || !reference.retryOfRunId) continue;
+    const path = `runRecords[${index}].retryOfRunId`;
+    const prior = graph.runRecords.find((candidate) => candidate.id === reference.retryOfRunId);
+    if (!prior || !('recordVersion' in prior) || prior.recordVersion !== 1) {
+      issues.push({ path, message: `${path} must reference a run in the current workflow`, severity: 'error' });
+      continue;
+    }
+    if (prior.nodeId !== reference.nodeId) {
+      issues.push({ path, message: `${path} must reference an attempt on the same node`, severity: 'error' });
+      continue;
+    }
+    if (prior.status !== 'failed' && prior.status !== 'cancelled') {
+      issues.push({ path, message: `${path} must reference a failed or cancelled attempt`, severity: 'error' });
+      continue;
+    }
+    const node = graph.nodes.find((candidate) => candidate.id === reference.nodeId);
+    const currentIndex = node?.runRecordIds.indexOf(reference.id) ?? -1;
+    const priorIndex = node?.runRecordIds.indexOf(prior.id) ?? -1;
+    if (currentIndex < 0 || priorIndex < 0 || priorIndex >= currentIndex) {
+      issues.push({ path, message: `${path} must reference an earlier linked attempt on the same node`, severity: 'error' });
+      continue;
+    }
+    const latestTerminal = node?.runRecordIds
+      .slice(0, currentIndex)
+      .map((id) => graph.runRecords.find((candidate) => candidate.id === id))
+      .filter((candidate): candidate is WorkflowRunRecordV1 => Boolean(
+        candidate && 'recordVersion' in candidate && candidate.recordVersion === 1 && candidate.status !== 'running',
+      ))
+      .at(-1);
+    if (latestTerminal?.id !== prior.id) {
+      issues.push({ path, message: `${path} must reference the latest terminal attempt`, severity: 'error' });
+    }
+    if (reference.attempt !== prior.attempt + 1) {
+      issues.push({ path, message: `${path} retry attempt must immediately follow the linked attempt`, severity: 'error' });
+    }
+  }
 }
 
 function parseMigrations(value: unknown, issues: WorkflowValidationIssue[]): WorkflowMigrationRecord[] {
@@ -739,6 +806,8 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
     runRecords: rawRuns.map((run, index) => parseRunReference(run, index, issues)),
   };
 
+  validateRunRetryLinks(value, issues);
+
   if (issues.some((issue) => issue.severity === 'error')) return { ok: false, issues };
   return { ok: true, value, issues };
 }
@@ -756,7 +825,7 @@ function stableValue(value: unknown): unknown {
 }
 
 export function serializeWorkflowGraphV2(graph: WorkflowGraphV2): string {
-  const parsed = parseWorkflowGraphV2(graph);
+  const parsed = parseWorkflowGraphV2(normalizeInterruptedWorkflowRuns(graph));
   if (!parsed.ok || !parsed.value) {
     const detail = parsed.issues.map((issue) => `${issue.path || '<root>'}: ${issue.message}`).join('; ');
     throw new Error(`Cannot serialize invalid WorkflowGraph v2: ${detail}`);

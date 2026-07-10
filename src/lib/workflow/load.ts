@@ -2,6 +2,7 @@ import { migrateWorkflowFileV1, WorkflowMigrationError } from './migration';
 import { WorkflowDomainError, WorkflowGraphDomain } from './domain';
 import {
   WORKFLOW_GRAPH_VERSION,
+  normalizeInterruptedWorkflowRuns,
   parseWorkflowGraphV2,
   type WorkflowGraphV2,
   type WorkflowValidationIssue,
@@ -55,7 +56,7 @@ function validateLoadedGraph(
   issues: WorkflowValidationIssue[] = [],
 ): WorkflowReadResult {
   try {
-    const domain = new WorkflowGraphDomain(graph);
+    const domain = new WorkflowGraphDomain(normalizeInterruptedWorkflowRuns(graph));
     return {
       ok: true,
       graph: domain.graph,

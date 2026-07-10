@@ -42,6 +42,7 @@ export interface WorkflowRunRecordDraft {
   startedAt: number;
   finishedAt: number | null;
   outputs: WorkflowRunOutput[];
+  retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
   debugArtifactReference?: string;
@@ -186,6 +187,31 @@ export function createWorkflowRunRecord(
     )) throw new Error('Accepted output time must fall within a successful run.');
   }
   if (draft.projectTaskId) safeWorkflowIdentifier(draft.projectTaskId, 'Project task ID');
+  if (draft.retryOfRunId) {
+    safeWorkflowIdentifier(draft.retryOfRunId, 'Retry run ID');
+    const prior = draft.graph.runRecords.find((record) => record.id === draft.retryOfRunId);
+    if (!prior || !isFullWorkflowRunRecord(prior)) {
+      throw new Error('Retry run ID must reference an attempt in the current workflow.');
+    }
+    if (prior.nodeId !== draft.nodeId) {
+      throw new Error('Retry run ID must reference an attempt on the same node.');
+    }
+    if (prior.status !== 'failed' && prior.status !== 'cancelled') {
+      throw new Error('Retry run ID must reference a failed or cancelled attempt.');
+    }
+    const latestTerminal = draft.graph.nodes.find((candidate) => candidate.id === draft.nodeId)?.runRecordIds
+      .map((id) => draft.graph.runRecords.find((record) => record.id === id))
+      .filter((record): record is WorkflowRunRecordV1 => Boolean(
+        record && isFullWorkflowRunRecord(record) && record.status !== 'running',
+      ))
+      .at(-1);
+    if (latestTerminal?.id !== prior.id) {
+      throw new Error('Retry run ID must reference the latest terminal attempt.');
+    }
+    if (draft.attempt !== prior.attempt + 1) {
+      throw new Error('Retry attempt must immediately follow the linked attempt.');
+    }
+  }
   if (draft.debugArtifactReference) {
     requireProjectRelativeWorkflowReference(draft.debugArtifactReference, 'Debug artifact reference');
   }
@@ -245,6 +271,7 @@ export function createWorkflowRunRecord(
     startedAt: draft.startedAt,
     finishedAt: draft.finishedAt,
     outputs: structuredClone(draft.outputs),
+    ...(draft.retryOfRunId ? { retryOfRunId: draft.retryOfRunId } : {}),
     ...(draft.failure ? { failure: sanitizeWorkflowFailure(draft.failure) } : {}),
     ...(draft.projectTaskId ? { projectTaskId: draft.projectTaskId } : {}),
     ...(draft.debugArtifactReference ? { debugArtifactReference: draft.debugArtifactReference } : {}),

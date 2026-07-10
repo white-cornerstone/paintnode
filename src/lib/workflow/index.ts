@@ -9,6 +9,7 @@ export * from './registry';
 export * from './palette';
 export * from './transformExecutor';
 export * from './runObserver';
+export * from './runControl';
 export * from './providerQaSelection';
 export * from './provenance';
 export * from './storyboardRead';

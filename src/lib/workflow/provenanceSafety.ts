@@ -121,6 +121,7 @@ interface WorkflowRunRecordSafetyShape {
   startedAt: number;
   finishedAt: number | null;
   outputs: Array<{ assetReferenceId: string; assetId: string; relativePath: string; contentHash: string; acceptedAt?: number }>;
+  retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
   debugArtifactReference?: string;
@@ -171,6 +172,7 @@ export function validateWorkflowRunRecordSafety(record: WorkflowRunRecordSafetyS
     throw new Error('Run outputs must have unique asset references.');
   }
   if (record.projectTaskId !== undefined) safeWorkflowIdentifier(record.projectTaskId, 'Project task ID');
+  if (record.retryOfRunId !== undefined) safeWorkflowIdentifier(record.retryOfRunId, 'Retry run ID');
   if (record.debugArtifactReference !== undefined) {
     requireProjectRelativeWorkflowReference(record.debugArtifactReference, 'Debug artifact reference');
   }

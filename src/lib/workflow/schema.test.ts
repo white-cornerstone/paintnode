@@ -178,6 +178,50 @@ describe('WorkflowGraph v2 schema', () => {
     expect(serializeWorkflowGraphV2(reordered)).toBe(first);
   });
 
+  it('parses retry linkage only when it targets the immediately previous failed attempt', () => {
+    const input = graph();
+    const nodeId = input.nodes[0].id;
+    const failedRun = (id: string, attempt: number, retryOfRunId?: string) => ({
+      recordVersion: 1 as const,
+      id,
+      nodeId,
+      status: 'failed' as const,
+      attempt,
+      workflowRevision: 'sha256:workflow',
+      nodeRevision: 'sha256:node',
+      materialKey: `workflow-cache-v1:${id}`,
+      sourceAssets: [{
+        nodeId: 'input', assetId: 'asset', relativePath: 'assets/input.png', contentHash: 'sha256:input',
+        name: 'Input', role: 'Product',
+      }],
+      prompt: {
+        brief: 'Brief', artDirection: 'Direction', instructions: 'Generate', constraints: [],
+        effectivePromptHash: 'sha256:prompt',
+      },
+      provider: { id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' } },
+      executor: { id: 'campaign-generate', version: '1', requestSchemaVersion: '1' },
+      target: { nodeId: 'output-square', title: 'Square 1:1', width: 1024, height: 1024 },
+      startedAt: attempt * 100,
+      finishedAt: attempt * 100 + 10,
+      outputs: [],
+      failure: { code: 'EXECUTOR_ERROR', message: 'The provider could not complete this attempt.' },
+      ...(retryOfRunId ? { retryOfRunId } : {}),
+    });
+    input.nodes[0].runRecordIds = ['run-1', 'run-2'];
+    input.runRecords = [failedRun('run-1', 1), failedRun('run-2', 2, 'run-1')];
+    expect(parseWorkflowGraphV2(input).ok).toBe(true);
+
+    const wrongAttempt = structuredClone(input);
+    (wrongAttempt.runRecords[1] as { attempt: number }).attempt = 3;
+    expect(parseWorkflowGraphV2(wrongAttempt).ok).toBe(false);
+    const missing = structuredClone(input);
+    (missing.runRecords[1] as { retryOfRunId: string }).retryOfRunId = 'other-workflow-run';
+    expect(parseWorkflowGraphV2(missing).ok).toBe(false);
+    const reordered = structuredClone(input);
+    reordered.nodes[0].runRecordIds = ['run-2', 'run-1'];
+    expect(parseWorkflowGraphV2(reordered).ok).toBe(false);
+  });
+
   it.each([
     ['fractional attempt', (run: Record<string, unknown>) => { run.attempt = 1.5; }],
     ['negative timestamp', (run: Record<string, unknown>) => { run.startedAt = -1; }],
@@ -197,6 +241,7 @@ describe('WorkflowGraph v2 schema', () => {
     ['invalid debug reference', (run: Record<string, unknown>) => { run.debugArtifactReference = '../raw.jsonl'; }],
     ['zero attempt', (run: Record<string, unknown>) => { run.attempt = 0; }],
     ['unsafe project task id', (run: Record<string, unknown>) => { run.projectTaskId = '../task'; }],
+    ['non-string retry run id', (run: Record<string, unknown>) => { run.retryOfRunId = 1; }],
     ['unsafe source path', (run: Record<string, unknown>) => {
       (run.sourceAssets as Array<Record<string, unknown>>)[0].relativePath = '/opt/private/input.png';
     }],
