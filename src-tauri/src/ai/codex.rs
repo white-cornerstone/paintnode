@@ -57,20 +57,21 @@ use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
     ai_director_restore_contract, ai_director_workflow_contract, ai_job_project_dir,
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_ai_process_group_after_bridge_exit, cleanup_project_agent_job,
+    clean_option, cleanup_ai_process_tree_after_bridge_exit, cleanup_project_agent_job,
     cleanup_project_job_enabled, clear_ai_run_cancelled, codex_agent_message_text, command_failure,
     configure_ai_process_group, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
     emit_kept_job_dir, join_output_readers_bounded, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
     safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, terminate_ai_process_tree, unique_child_path,
-    validate_reference_pngs, write_ai_job_prompt, write_reference_pngs, AgentRunResult,
-    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
-    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult, DecoupleImageResult,
-    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
-    TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
-    CODEX_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
+    unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
+    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT,
+    POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -442,13 +443,13 @@ fn run_codex_with_progress(
     run_id: String,
 ) -> Result<AgentRunResult, String> {
     ensure_provider_launch_allowed(Provider::Codex)?;
-    configure_ai_process_group(command);
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
-    let process_id = child.id();
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -486,13 +487,16 @@ fn run_codex_with_progress(
         {
             break (
                 Ok(status),
-                cleanup_ai_process_group_after_bridge_exit(process_id),
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
             );
         }
 
         if ai_run_cancelled(&run_id) {
             stopped = true;
-            break (terminate_ai_process_tree(&mut child), Ok(()));
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                Ok(()),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);

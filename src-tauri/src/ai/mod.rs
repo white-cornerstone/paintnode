@@ -229,27 +229,102 @@ pub(crate) fn ai_run_cancelled(run_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Start provider bridges in their own OS process group so cancellation can
-/// terminate the bridge and every provider process it launches. Killing only
-/// the immediate Node bridge can leave Codex/Claude descendants holding pipes
-/// and temporary workspaces open indefinitely.
-pub(crate) fn configure_ai_process_group(command: &mut Command) {
+/// Prepare provider bridges for tree-scoped cancellation. Unix starts a new
+/// process group. Windows starts a PaintNode wrapper which cannot launch the
+/// real bridge until the parent assigns that wrapper to a kill-on-close Job
+/// Object and writes its gate. Windows then associates every later descendant
+/// with that job by default; breakaway is not enabled. This removes the
+/// spawn-to-AssignProcessToJobObject race of post-spawn bridge assignment.
+#[cfg(windows)]
+const PROVIDER_WRAPPER_ARG: &str = "--paintnode-ai-provider-wrapper";
+
+pub(crate) fn configure_ai_process_group(command: &mut Command) -> Result<Option<PathBuf>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        Ok(None)
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        let program = command.get_program().to_os_string();
+        let args = command
+            .get_args()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| (name.to_os_string(), value.map(ToOwned::to_owned)))
+            .collect::<Vec<_>>();
+        let current_dir = command.get_current_dir().map(Path::to_path_buf);
+        let gate = std::env::temp_dir().join(format!(
+            "paintnode-provider-launch-{}-{}.gate",
+            std::process::id(),
+            now_id()
+        ));
+        let _ = fs::remove_file(&gate);
+        let mut wrapper =
+            Command::new(std::env::current_exe().map_err(|error| {
+                format!("Could not locate PaintNode provider wrapper: {error}")
+            })?);
+        wrapper
+            .arg(PROVIDER_WRAPPER_ARG)
+            .arg(&gate)
+            .arg(program)
+            .args(args)
+            .creation_flags(CREATE_NEW_PROCESS_GROUP);
+        if let Some(current_dir) = current_dir {
+            wrapper.current_dir(current_dir);
+        }
+        for (name, value) in environment {
+            if let Some(value) = value {
+                wrapper.env(name, value);
+            } else {
+                wrapper.env_remove(name);
+            }
+        }
+        *command = wrapper;
+        Ok(Some(gate))
     }
 }
 
-/// Force-stop an isolated provider process group and reap its direct child.
+#[cfg(windows)]
+pub(crate) fn run_provider_process_wrapper_if_requested() -> Option<i32> {
+    let mut args = std::env::args_os();
+    let _executable = args.next()?;
+    if args.next()?.to_str() != Some(PROVIDER_WRAPPER_ARG) {
+        return None;
+    }
+    let gate = PathBuf::from(args.next()?);
+    let program = args.next()?;
+    let forwarded = args.collect::<Vec<_>>();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !gate.is_file() {
+        if Instant::now() >= deadline {
+            eprintln!("PaintNode provider wrapper timed out before Job Object assignment.");
+            return Some(70);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let status = match Command::new(program).args(forwarded).status() {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("PaintNode provider wrapper could not launch the provider bridge: {error}");
+            return Some(71);
+        }
+    };
+    Some(status.code().unwrap_or(1))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn run_provider_process_wrapper_if_requested() -> Option<i32> {
+    None
+}
+
 #[cfg(any(windows, test))]
-fn process_tree_command_result(success: bool, action: &str) -> Result<(), String> {
+fn process_tree_action_result(success: bool, action: &str) -> Result<(), String> {
     if success {
         Ok(())
     } else {
@@ -257,54 +332,163 @@ fn process_tree_command_result(success: bool, action: &str) -> Result<(), String
     }
 }
 
-pub(crate) fn terminate_ai_process_group(process_id: u32) -> Result<(), String> {
+pub(crate) struct AiProcessTree {
     #[cfg(unix)]
+    process_id: u32,
+    #[cfg(windows)]
+    job: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(windows)]
+    launch_gate: PathBuf,
+}
+
+impl AiProcessTree {
+    fn terminate(&mut self) -> Result<(), String> {
+        #[cfg(unix)]
+        unsafe {
+            // configure_ai_process_group makes the direct child the group
+            // leader, so this id remains valid after that child exits.
+            if libc::kill(-(self.process_id as i32), libc::SIGKILL) == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(format!(
+                "Could not stop provider process group {}: {error}",
+                self.process_id
+            ));
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+            if self.job.is_null() {
+                return Ok(());
+            }
+            let terminated = TerminateJobObject(self.job, 1) != 0;
+            let terminate_error = (!terminated).then(std::io::Error::last_os_error);
+            let closed = CloseHandle(self.job) != 0;
+            self.job = std::ptr::null_mut();
+            let _ = fs::remove_file(&self.launch_gate);
+            process_tree_action_result(terminated, "Windows Job Object termination").map_err(
+                |message| {
+                    format!(
+                        "{message} {} Kill-on-close fallback {}.",
+                        terminate_error
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "Unknown Windows error.".into()),
+                        if closed {
+                            "was requested"
+                        } else {
+                            "also failed"
+                        }
+                    )
+                },
+            )?;
+            process_tree_action_result(closed, "Windows Job Object close")
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AiProcessTree {
+    fn drop(&mut self) {
+        if !self.job.is_null() {
+            unsafe {
+                // KILL_ON_JOB_CLOSE is a final safety net if a caller exits
+                // before explicit termination.
+                let _ = windows_sys::Win32::Foundation::CloseHandle(self.job);
+            }
+            self.job = std::ptr::null_mut();
+            let _ = fs::remove_file(&self.launch_gate);
+        }
+    }
+}
+
+pub(crate) fn track_ai_process_tree(
+    child: &mut Child,
+    launch_gate: Option<PathBuf>,
+) -> Result<AiProcessTree, String> {
+    #[cfg(unix)]
+    {
+        let _ = launch_gate;
+        Ok(AiProcessTree {
+            process_id: child.id(),
+        })
+    }
+    #[cfg(windows)]
     unsafe {
-        // configure_ai_process_group makes the direct child the group leader,
-        // therefore its pid remains the process-group id after that child exits.
-        if libc::kill(-(process_id as i32), libc::SIGKILL) == 0 {
-            return Ok(());
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Could not create Windows provider Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) != 0;
+        let assigned =
+            configured && AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) != 0;
+        if !assigned {
+            // This also handles an invalid nested-job environment. Never fall
+            // back to an untracked provider process tree.
+            let error = std::io::Error::last_os_error();
+            let _ = CloseHandle(job);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Could not isolate the Windows provider process tree: {error}"
+            ));
         }
-        return Err(format!(
-            "Could not stop provider process group {process_id}: {error}"
-        ));
-    }
-    #[cfg(windows)]
-    {
-        let status = Command::new("taskkill")
-            .args(["/PID", &process_id.to_string(), "/T", "/F"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|error| format!("Could not run taskkill for provider tree: {error}"))?;
-        process_tree_command_result(status.success(), "Windows taskkill")
+        let launch_gate = launch_gate.ok_or_else(|| {
+            let _ = CloseHandle(job);
+            let _ = child.kill();
+            let _ = child.wait();
+            "Windows provider wrapper launch gate is missing.".to_string()
+        })?;
+        if let Err(error) = fs::write(&launch_gate, b"assigned") {
+            let _ = TerminateJobObject(job, 1);
+            let _ = CloseHandle(job);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Could not release the isolated Windows provider wrapper: {error}"
+            ));
+        }
+        Ok(AiProcessTree { job, launch_gate })
     }
 }
 
-pub(crate) fn cleanup_ai_process_group_after_bridge_exit(process_id: u32) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        terminate_ai_process_group(process_id)
-    }
-    #[cfg(windows)]
-    {
-        // taskkill cannot address a tree by a parent pid after that parent has
-        // exited. The bounded reader join below detects inherited handles and
-        // fails without hanging; active cancellation still uses checked /T /F.
-        let _ = process_id;
-        Ok(())
-    }
+pub(crate) fn cleanup_ai_process_tree_after_bridge_exit(
+    tree: &mut AiProcessTree,
+) -> Result<(), String> {
+    tree.terminate()
 }
 
-/// Force-stop an isolated provider process group and reap its direct child.
-pub(crate) fn terminate_ai_process_tree(child: &mut Child) -> Result<ExitStatus, String> {
-    let process_id = child.id();
-    let tree_result = terminate_ai_process_group(process_id);
+/// Force-stop an isolated provider process tree and reap its direct child.
+pub(crate) fn terminate_ai_process_tree(
+    tree: &mut AiProcessTree,
+    child: &mut Child,
+) -> Result<ExitStatus, String> {
+    let tree_result = tree.terminate();
     let _ = child.kill();
     let status = child
         .wait()
@@ -1785,8 +1969,10 @@ mod tests {
             .arg(&descendant_path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        configure_ai_process_group(&mut command);
+        let launch_gate = configure_ai_process_group(&mut command).expect("configure process tree");
         let mut child = command.spawn().expect("spawn bridge with descendant");
+        let mut process_tree =
+            track_ai_process_tree(&mut child, launch_gate).expect("track process tree");
         let deadline = Instant::now() + Duration::from_secs(2);
         while !descendant_path.is_file() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
@@ -1797,7 +1983,7 @@ mod tests {
             .parse::<i32>()
             .expect("numeric descendant pid");
 
-        let status = terminate_ai_process_tree(&mut child).expect("reap bridge");
+        let status = terminate_ai_process_tree(&mut process_tree, &mut child).expect("reap bridge");
         assert!(!status.success());
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1827,9 +2013,10 @@ mod tests {
             .arg(&descendant_path)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        configure_ai_process_group(&mut command);
+        let launch_gate = configure_ai_process_group(&mut command).expect("configure process tree");
         let mut child = command.spawn().expect("spawn short-lived bridge");
-        let process_id = child.id();
+        let mut process_tree =
+            track_ai_process_tree(&mut child, launch_gate).expect("track process tree");
         let mut stream = child.stdout.take().expect("bridge stdout");
         let reader = thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -1842,7 +2029,7 @@ mod tests {
                 break status;
             }
             if Instant::now() >= deadline {
-                let _ = terminate_ai_process_tree(&mut child);
+                let _ = terminate_ai_process_tree(&mut process_tree, &mut child);
                 panic!("test bridge did not exit before its descendant");
             }
             thread::sleep(Duration::from_millis(10));
@@ -1854,16 +2041,18 @@ mod tests {
             .parse::<i32>()
             .expect("numeric descendant pid");
 
-        cleanup_ai_process_group_after_bridge_exit(process_id).expect("kill lingering group");
+        cleanup_ai_process_tree_after_bridge_exit(&mut process_tree)
+            .expect("kill lingering process tree");
         join_output_readers_bounded(vec![reader], Duration::from_secs(1))
             .expect("inherited output pipe closed");
         assert_ne!(unsafe { libc::kill(descendant_id, 0) }, 0);
     }
 
     #[test]
-    fn process_tree_command_failure_is_never_reported_as_success() {
-        assert!(process_tree_command_result(true, "Windows taskkill").is_ok());
-        let error = process_tree_command_result(false, "Windows taskkill").unwrap_err();
+    fn process_tree_action_failure_is_never_reported_as_success() {
+        assert!(process_tree_action_result(true, "Windows Job Object termination").is_ok());
+        let error =
+            process_tree_action_result(false, "Windows Job Object termination").unwrap_err();
         assert!(error.contains("did not stop the provider process tree"));
     }
 
@@ -1873,6 +2062,55 @@ mod tests {
         let error = join_output_readers_bounded(vec![reader], Duration::from_millis(5))
             .expect_err("reader cleanup should time out");
         assert!(error.contains("cleanup timed out"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_bridge_is_gated_before_job_assignment() {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C", "exit 0"]);
+        let gate = configure_ai_process_group(&mut command)
+            .expect("configure wrapper")
+            .expect("Windows gate");
+        let args = command.get_args().collect::<Vec<_>>();
+        assert_eq!(args[0], std::ffi::OsStr::new(PROVIDER_WRAPPER_ARG));
+        assert_eq!(args[1], gate.as_os_str());
+        assert!(!gate.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_object_kills_descendant_after_bridge_exit() {
+        let job = TempJobDir::new("paintnode-windows-job-test").expect("temp dir");
+        let gate = job.path().join("assigned.gate");
+        let mut command = Command::new("cmd.exe");
+        command
+            .args([
+                "/D",
+                "/S",
+                "/C",
+                "ping -n 2 127.0.0.1 >nul & start \"\" /B cmd.exe /D /S /C \"ping -n 30 127.0.0.1\"",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().expect("spawn delayed bridge");
+        let mut tree = track_ai_process_tree(&mut child, Some(gate)).expect("assign job");
+        let mut stream = child.stdout.take().expect("bridge stdout");
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().expect("poll bridge").is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Windows bridge did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        cleanup_ai_process_tree_after_bridge_exit(&mut tree).expect("terminate retained job");
+        join_output_readers_bounded(vec![reader], Duration::from_secs(2))
+            .expect("descendant inherited pipe closed");
     }
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::codex::codex_direct_generate_prompt;

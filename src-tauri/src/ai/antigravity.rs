@@ -59,19 +59,20 @@ use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
     ai_director_restore_contract, ai_director_workflow_contract, ai_provider_features,
     ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
-    cleanup_ai_process_group_after_bridge_exit, cleanup_project_agent_job, clear_ai_run_cancelled,
+    cleanup_ai_process_tree_after_bridge_exit, cleanup_project_agent_job, clear_ai_run_cancelled,
     command_failure_with_required_output, configure_ai_process_group, emit_codex_part_progress,
     emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, emit_provider_progress,
     image_agent_autonomy_contract, join_output_readers_bounded, now_id, output_tail,
     project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
     request_ai_director_input, required_png_output_is_ready, safe_job_child_path,
     sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, terminate_ai_process_tree, validate_reference_pngs,
-    watched_job_files, write_ai_job_prompt, write_ai_job_settings, write_reference_pngs,
-    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
-    AiModelCapability, AiProviderCapabilitiesResult, CodexDetectionResult, DecoupleImageResult,
-    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
-    WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
+    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_ai_job_settings,
+    write_reference_pngs, AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode,
+    AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT,
+    POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -1404,13 +1405,13 @@ fn run_antigravity_with_progress(
     required_output: Option<&str>,
     keep_debug_artifacts: bool,
 ) -> Result<AgentRunResult, String> {
-    configure_ai_process_group(command);
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
-    let process_id = child.id();
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -1473,7 +1474,7 @@ fn run_antigravity_with_progress(
             break (
                 Ok(status),
                 false,
-                cleanup_ai_process_group_after_bridge_exit(process_id),
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
             );
         }
 
@@ -1519,13 +1520,21 @@ fn run_antigravity_with_progress(
                         "Antigravity wrote {required_output}; applying PaintNode post-processing"
                     ),
                 );
-                break (terminate_ai_process_tree(&mut child), true, Ok(()));
+                break (
+                    terminate_ai_process_tree(&mut process_tree, &mut child),
+                    true,
+                    Ok(()),
+                );
             }
         }
 
         if ai_run_cancelled(&run_id) {
             stopped = true;
-            break (terminate_ai_process_tree(&mut child), false, Ok(()));
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                false,
+                Ok(()),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);

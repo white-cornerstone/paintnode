@@ -115,3 +115,7 @@ pub fn run() {
             }
         });
 }
+
+pub fn run_ai_provider_wrapper_if_requested() -> Option<i32> {
+    ai::run_provider_process_wrapper_if_requested()
+}

@@ -11,10 +11,10 @@ use tauri::AppHandle;
 use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 use crate::ai::{
     ai_provider_features, ai_run_cancelled, apply_ai_cli_environment,
-    cleanup_ai_process_group_after_bridge_exit, clear_ai_run_cancelled, codex_agent_message_text,
+    cleanup_ai_process_tree_after_bridge_exit, clear_ai_run_cancelled, codex_agent_message_text,
     configure_ai_process_group, join_output_readers_bounded, output_tail, spawn_output_reader,
-    terminate_ai_process_tree, AgentRunResult, AiDirectorProvider, AiModelCapability,
-    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    terminate_ai_process_tree, track_ai_process_tree, AgentRunResult, AiDirectorProvider,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
@@ -224,13 +224,13 @@ pub(crate) fn run_claude_with_progress(
     app: AppHandle,
     run_id: String,
 ) -> Result<AgentRunResult, String> {
-    configure_ai_process_group(command);
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
-    let process_id = child.id();
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -268,13 +268,16 @@ pub(crate) fn run_claude_with_progress(
         {
             break (
                 Ok(status),
-                cleanup_ai_process_group_after_bridge_exit(process_id),
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
             );
         }
 
         if ai_run_cancelled(&run_id) {
             stopped = true;
-            break (terminate_ai_process_tree(&mut child), Ok(()));
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                Ok(()),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);
