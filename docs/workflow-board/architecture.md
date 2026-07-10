@@ -293,6 +293,10 @@ executor is registered.
 Disposition overrides are monotonic restrictions: they may demote or disable a
 registry-available capability, but cannot promote `draft-only`, unsupported, or
 `not-required` definitions into executable work.
+The boundary accepts only an exact plain own-data `{ kind, reason? }` snapshot.
+Accessors, symbols, extra fields, non-plain objects, and exceptions become a
+generic unavailable blocker; the planner never retains or rereads the caller's
+object.
 
 Planning never mutates run history. A material change is represented by the
 new current key, so only that node and downstream nodes whose own keys changed

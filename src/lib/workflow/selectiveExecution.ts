@@ -184,6 +184,33 @@ export function registryExecutionDisposition(node: Readonly<WorkflowNodeV2>): Wo
   return { kind: 'available' };
 }
 
+function snapshotExecutionDisposition(value: unknown): WorkflowNodeExecutionDisposition {
+  if (typeof value !== 'object' || value === null) throw new Error('Execution disposition must be plain data.');
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error('Execution disposition must be plain data.');
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string' || (key !== 'kind' && key !== 'reason'))
+    || !keys.includes('kind')) {
+    throw new Error('Execution disposition must contain only kind and optional reason.');
+  }
+  const kindDescriptor = Object.getOwnPropertyDescriptor(value, 'kind');
+  if (!kindDescriptor?.enumerable || !('value' in kindDescriptor)
+    || typeof kindDescriptor.value !== 'string'
+    || !['not-required', 'available', 'unavailable'].includes(kindDescriptor.value)) {
+    throw new Error('Execution disposition kind must be plain supported data.');
+  }
+  const kind = kindDescriptor.value as WorkflowNodeExecutionDisposition['kind'];
+  if (!keys.includes('reason')) return { kind };
+  const reasonDescriptor = Object.getOwnPropertyDescriptor(value, 'reason');
+  if (!reasonDescriptor?.enumerable || !('value' in reasonDescriptor)
+    || typeof reasonDescriptor.value !== 'string') {
+    throw new Error('Execution disposition reason must be plain string data.');
+  }
+  return { kind, reason: reasonDescriptor.value };
+}
+
 function safeFailure(
   error: unknown,
   sanitizer?: WorkflowSelectiveSchedulerOptions['sanitizeFailure'],
@@ -309,7 +336,7 @@ export function planSelectiveWorkflowExecution(
     let disposition = registryDisposition;
     if (request.executionDisposition) {
       try {
-        const restriction = request.executionDisposition(detachedFrozen(node));
+        const restriction = snapshotExecutionDisposition(request.executionDisposition(detachedFrozen(node)));
         if (registryDisposition.kind === 'available') disposition = restriction;
         else if (registryDisposition.kind === 'not-required' && restriction.kind === 'unavailable') {
           disposition = restriction;
@@ -317,11 +344,6 @@ export function planSelectiveWorkflowExecution(
       } catch {
         disposition = { kind: 'unavailable', reason: 'Execution availability could not be determined safely.' };
       }
-    }
-    if (!disposition || !['not-required', 'available', 'unavailable'].includes(disposition.kind)) {
-      throw new WorkflowExecutionError('INVALID_ARGUMENT', `Node "${node.id}" has an invalid execution disposition.`, {
-        nodeId: node.id,
-      });
     }
     dispositions.set(node.id, disposition);
   }

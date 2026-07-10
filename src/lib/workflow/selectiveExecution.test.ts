@@ -320,6 +320,44 @@ describe('selective workflow planning', () => {
     ]));
   });
 
+  it.each(['stateful', 'throwing'] as const)(
+    'rejects a %s disposition accessor without promotion, leakage, or executor calls',
+    async (behavior) => {
+      const input = instantiateWorkflowTemplate('campaign-composer');
+      let getterReads = 0;
+      const malicious = Object.defineProperty({}, 'kind', {
+        enumerable: true,
+        get: () => {
+          getterReads += 1;
+          if (behavior === 'throwing') throw new Error('/private/project auth=secret');
+          return getterReads === 1 ? 'unavailable' : 'available';
+        },
+      });
+      const plan = planSelectiveWorkflowExecution(input, {
+        mode: 'run-node',
+        nodeId: 'output-square',
+        materialKeys: { 'transform-generate-square': 'key-generate' },
+        executionDisposition: (candidate) => candidate.id === 'slot-product'
+          ? malicious as never
+          : candidate.type === 'transform'
+            ? { kind: 'available' }
+            : { kind: 'not-required' },
+      });
+      const calls: string[] = [];
+      await execute(plan, calls);
+
+      const product = plan.preflight.find((entry) => entry.nodeId === 'slot-product');
+      expect(product).toMatchObject({
+        state: 'blocked',
+        reason: { code: 'NODE_DISABLED', message: 'Execution availability could not be determined safely.' },
+      });
+      expect(product?.reason.message).not.toMatch(/private|auth|secret/);
+      expect(plan.executionNodeIds).toEqual([]);
+      expect(getterReads).toBe(0);
+      expect(calls).toEqual([]);
+    },
+  );
+
   it('fails closed without explicit artifact proof and snapshots validated material keys', () => {
     const input = graph();
     addRun(input, successfulRun('unrelated', 'key-unrelated'));
