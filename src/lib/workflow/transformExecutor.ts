@@ -16,6 +16,10 @@ import type {
   WorkflowRunRecordV1,
 } from './schema';
 import type { WorkflowCacheHash } from './execution';
+import {
+  requireProjectRelativeWorkflowReference,
+  safeWorkflowIdentifier,
+} from './provenanceSafety';
 
 export interface WorkflowProjectAsset {
   id: string;
@@ -508,16 +512,44 @@ export async function executeCampaignGenerateTransform(
   const runId = options.runIdGenerator?.(transform.id, attempt)
     ?? globalThis.crypto?.randomUUID?.()
     ?? `run-${transform.id}-${startedAt}-${attempt}`;
+  safeWorkflowIdentifier(runId, 'Run ID');
+  if (graph.runRecords.some((record) => record.id === runId)) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT', 'The generated run ID collides with existing workflow history.', 'Retry Generate',
+    );
+  }
+  const referenceId = options.idGenerator?.() ?? `result-${runId}`;
+  safeWorkflowIdentifier(referenceId, 'Output asset reference ID');
+  if (graph.assetReferences.some((reference) => reference.id === referenceId)
+    || graph.runRecords.some((record) => isFullWorkflowRunRecord(record)
+      && record.outputs.some((item) => item.assetReferenceId === referenceId))) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT',
+      'The generated output reference collides with existing workflow history.',
+      'Retry Generate',
+    );
+  }
   const hash = options.hash ?? workflowSha256Text;
+  const provenanceSources = sources.map((source) => ({
+    nodeId: source.nodeId,
+    assetId: source.assetId,
+    relativePath: source.relativePath,
+    contentHash: source.contentHash,
+    name: source.name,
+    role: source.role,
+  }));
+  if (storyboardBytes && storyboardBytes.length > 0 && storyboard) {
+    provenanceSources.push({
+      nodeId: artDirection.id,
+      assetId: `storyboard-${artDirection.id}`,
+      relativePath: storyboard.oraPath ?? `storyboards/embedded-${artDirection.id}.png`,
+      contentHash: workflowSha256Bytes(storyboardBytes),
+      name: 'Storyboard sketch',
+      role: 'Mandatory layout guide used by the provider',
+    });
+  }
   const runMaterial: WorkflowRunMaterialDraft = {
-    sourceAssets: sources.map((source) => ({
-      nodeId: source.nodeId,
-      assetId: source.assetId,
-      relativePath: source.relativePath,
-      contentHash: source.contentHash,
-      name: source.name,
-      role: source.role,
-    })),
+    sourceAssets: provenanceSources,
     prompt: {
       brief: briefText,
       artDirection: artDirectionText,
@@ -610,6 +642,15 @@ export async function executeCampaignGenerateTransform(
         'Retry Generate',
       );
     }
+    safeWorkflowIdentifier(asset.id, 'Generated asset ID');
+    requireProjectRelativeWorkflowReference(asset.relativePath, 'Generated asset path');
+    if (graph.assetReferences.some((reference) => reference.assetId === asset.id)) {
+      throw new WorkflowTransformExecutionError(
+        'INVALID_EXECUTOR_RESULT',
+        'The generated asset ID collides with an existing workflow asset.',
+        'Retry Generate',
+      );
+    }
   } catch (error) {
     const finishedAt = options.clock?.() ?? Date.now();
     const original = error instanceof WorkflowTransformExecutionError ? error : null;
@@ -641,51 +682,63 @@ export async function executeCampaignGenerateTransform(
     );
   }
 
-  const referenceId = options.idGenerator?.() ?? `result-${transform.id}-${asset.id}`;
   const finishedAt = options.clock?.() ?? Date.now();
-  const succeeded = createWorkflowRunRecord({
-    id: runId,
-    nodeId: transform.id,
-    attempt,
-    status: 'succeeded',
-    graph,
-    material: runMaterial,
-    startedAt,
-    finishedAt,
-    outputs: [{
-      assetReferenceId: referenceId,
-      assetId: asset.id,
-      relativePath: asset.relativePath,
-      contentHash: outputContentHash,
-      acceptedAt: finishedAt,
-    }],
-  }, hash);
-  const resultGraph: WorkflowGraphV2 = appendRunRecord({
-    ...graph,
-    nodes: graph.nodes.map((node) => {
-      if (node.id === transform.id) {
-        return { ...node, config: {
-          ...node.config,
-          resultAssetReferenceId: referenceId,
-          resultAssetId: asset.id,
-          resultRelativePath: asset.relativePath,
-        } };
-      }
-      if (node.id === output.id) {
-        return { ...node, config: {
-          ...node.config,
-          assetReferenceId: referenceId,
-          outputAssetId: asset.id,
-          outputRelativePath: asset.relativePath,
-        } };
-      }
-      return node;
-    }),
-    assetReferences: [
-      ...graph.assetReferences.filter((reference) => reference.id !== referenceId),
-      { id: referenceId, role: 'output', assetId: asset.id, relativePath: asset.relativePath },
-    ],
-  }, transform.id, succeeded);
+  let resultGraph: WorkflowGraphV2;
+  try {
+    const succeeded = createWorkflowRunRecord({
+      id: runId,
+      nodeId: transform.id,
+      attempt,
+      status: 'succeeded',
+      graph,
+      material: runMaterial,
+      startedAt,
+      finishedAt,
+      outputs: [{
+        assetReferenceId: referenceId,
+        assetId: asset.id,
+        relativePath: asset.relativePath,
+        contentHash: outputContentHash,
+        acceptedAt: finishedAt,
+      }],
+    }, hash);
+    resultGraph = appendRunRecord({
+      ...graph,
+      nodes: graph.nodes.map((node) => {
+        if (node.id === transform.id) {
+          return { ...node, config: {
+            ...node.config,
+            resultAssetReferenceId: referenceId,
+            resultAssetId: asset.id,
+            resultRelativePath: asset.relativePath,
+          } };
+        }
+        if (node.id === output.id) {
+          return { ...node, config: {
+            ...node.config,
+            assetReferenceId: referenceId,
+            outputAssetId: asset.id,
+            outputRelativePath: asset.relativePath,
+          } };
+        }
+        return node;
+      }),
+      assetReferences: [
+        ...graph.assetReferences,
+        { id: referenceId, role: 'output', assetId: asset.id, relativePath: asset.relativePath },
+      ],
+    }, transform.id, succeeded);
+  } catch (error) {
+    const failed = createWorkflowRunRecord({
+      id: runId, nodeId: transform.id, attempt, status: 'failed', graph, material: runMaterial,
+      startedAt, finishedAt, outputs: [],
+      failure: { code: 'INVALID_EXECUTOR_RESULT', message: (error as Error)?.message ?? String(error) },
+    }, hash);
+    throw new WorkflowTransformExecutionError(
+      'INVALID_EXECUTOR_RESULT', failed.failure!.message, 'Retry Generate',
+      appendRunRecord(graph, transform.id, failed),
+    );
+  }
   return {
     graph: new WorkflowGraphDomain(resultGraph).graph,
     plan,

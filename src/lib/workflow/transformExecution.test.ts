@@ -8,7 +8,7 @@ import {
   type WorkflowProjectAsset,
   type WorkflowTransformExecutionRequest,
 } from './transformExecutor';
-import { workflowSha256Bytes } from './provenance';
+import { isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
 
 const material = (bytes: Uint8Array) => ({ bytes, contentHash: workflowSha256Bytes(bytes) });
 
@@ -312,6 +312,120 @@ describe('Campaign Composer Generate Transform execution', () => {
     }
   });
 
+  it('converts unsafe returned asset metadata into a durable sanitized failure', async () => {
+    for (const [kind, executor, storeAsset] of [
+      [
+        'project-asset',
+        createWorkflowCompositionExecutor('fake', async () => ({
+          kind: 'project-asset',
+          asset: {
+            id: '../unsafe-result', name: 'unsafe.png', relativePath: 'generated/unsafe.png',
+            width: 1024, height: 1024, mime: 'image/png',
+          },
+          bytes: new Uint8Array([1, 2, 3]),
+        })),
+        vi.fn(),
+      ],
+      [
+        'stored-bytes',
+        createWorkflowCompositionExecutor('fake', async () => ({
+          kind: 'bytes', name: 'stored.png', bytes: new Uint8Array([4, 5, 6]),
+          mime: 'image/png', width: 1024, height: 1024,
+        })),
+        vi.fn(async () => ({
+          id: 'unsafe-stored', name: 'stored.png', relativePath: '../outside-stored.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        })),
+      ],
+    ] as const) {
+      let failure: unknown;
+      try {
+        await executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+          projectPath: '/virtual/project', provider: 'fake', executors: [executor],
+          assets: [productAsset],
+          resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+          storeAsset,
+          runIdGenerator: () => `run-unsafe-${kind}`,
+          idGenerator: () => `ref-unsafe-${kind}`,
+          clock: () => 100,
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        code: 'INVALID_EXECUTOR_RESULT',
+        message: 'The generated result did not satisfy the output requirements.',
+        failureGraph: {
+          runRecords: [expect.objectContaining({
+            id: `run-unsafe-${kind}`, status: 'failed', outputs: [],
+            failure: {
+              code: 'INVALID_EXECUTOR_RESULT',
+              message: 'The generated result did not satisfy the output requirements.',
+            },
+          })],
+        },
+      });
+    }
+  });
+
+  it('rejects run and output-reference collisions before invoking the provider', async () => {
+    const first = await executeCampaignGenerateTransform(boundCampaign(), 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'project-asset',
+        asset: {
+          id: 'collision-output', name: 'collision.png', relativePath: 'generated/collision.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([1, 2, 3]),
+      }))],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: vi.fn(), runIdGenerator: () => 'run-collision', idGenerator: () => 'ref-collision',
+    });
+    const provider = vi.fn();
+    await expect(executeCampaignGenerateTransform(first.graph, 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', provider)],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: vi.fn(), runIdGenerator: () => 'run-collision', idGenerator: () => 'ref-next',
+    })).rejects.toMatchObject({ message: expect.stringMatching(/run ID collides/i) });
+    await expect(executeCampaignGenerateTransform(first.graph, 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', provider)],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: vi.fn(), runIdGenerator: () => 'run-next', idGenerator: () => 'ref-collision',
+    })).rejects.toMatchObject({ message: expect.stringMatching(/output reference collides/i) });
+    expect(provider).not.toHaveBeenCalled();
+
+    const duplicateAssetProvider = vi.fn(async () => ({
+      kind: 'project-asset' as const,
+      asset: {
+        id: 'collision-output', name: 'duplicate.png', relativePath: 'generated/duplicate.png',
+        width: 1024, height: 1024, mime: 'image/png',
+      },
+      bytes: new Uint8Array([8, 8, 8]),
+    }));
+    await expect(executeCampaignGenerateTransform(first.graph, 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', duplicateAssetProvider)],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: vi.fn(), runIdGenerator: () => 'run-duplicate-asset', idGenerator: () => 'ref-duplicate-asset',
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXECUTOR_RESULT',
+      failureGraph: {
+        runRecords: [
+          expect.objectContaining({ id: 'run-collision', status: 'succeeded' }),
+          expect.objectContaining({ id: 'run-duplicate-asset', status: 'failed' }),
+        ],
+      },
+    });
+    expect(duplicateAssetProvider).toHaveBeenCalledOnce();
+  });
+
   it('materializes persisted storyboard intent and placement constraints through an injected boundary', async () => {
     const graph = boundCampaign();
     const composition = graph.nodes.find((node) => node.id === 'composition')!;
@@ -327,7 +441,7 @@ describe('Campaign Composer Generate Transform execution', () => {
     };
     const readStoryboard = vi.fn(async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
     let seen!: WorkflowTransformExecutionRequest;
-    await executeCampaignGenerateTransform(graph, 'output-square', {
+    const outcome = await executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
       provider: 'fake',
       executors: [createWorkflowCompositionExecutor('fake', async (request) => {
@@ -370,6 +484,39 @@ describe('Campaign Composer Generate Transform execution', () => {
     expect(seen.prompt).toMatch(/primary spatial plan/i);
     expect(seen.prompt).toContain('keep the product left');
     expect(seen.prompt).not.toMatch(/1440|900/);
+    expect(outcome.graph.runRecords[0]).toMatchObject({
+      sourceAssets: expect.arrayContaining([expect.objectContaining({
+        nodeId: 'composition', assetId: 'storyboard-composition',
+        relativePath: 'storyboards/campaign.ora',
+        contentHash: workflowSha256Bytes(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])),
+      })]),
+    });
+
+    const changedStoryboard = await executeCampaignGenerateTransform(graph, 'output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'project-asset',
+        asset: {
+          id: 'storyboard-result-2', name: 'square-2.png', relativePath: 'generated/square-2.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([12, 13, 14]),
+      }))],
+      assets: [productAsset],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      readStoryboard: async () => new Uint8Array([137, 80, 78, 71, 99, 98, 97, 96]),
+      storeAsset: vi.fn(),
+      runIdGenerator: () => 'run-storyboard-changed',
+    });
+    const originalRun = outcome.graph.runRecords.find(isFullWorkflowRunRecord)!;
+    const changedRun = changedStoryboard.graph.runRecords.find(isFullWorkflowRunRecord)!;
+    expect(changedRun.sourceAssets).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        relativePath: 'storyboards/campaign.ora',
+        contentHash: workflowSha256Bytes(new Uint8Array([137, 80, 78, 71, 99, 98, 97, 96])),
+      }),
+    ]));
+    expect(changedRun.materialKey).not.toBe(originalRun.materialKey);
   });
 
   it('explains missing-project and unsupported-provider actions before any injected side effect', async () => {
