@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkflowStore } from './workflow.svelte';
+import { project } from './project.svelte';
 import {
   createWorkflowCompositionExecutor,
   deriveWorkflowNodeRunState,
@@ -7,7 +8,43 @@ import {
   type WorkflowGraphV2,
   type WorkflowRunRecordV1,
 } from '../workflow';
-import type { ProjectAsset } from '../integrations/desktop';
+import type { ProjectAsset, ProjectState } from '../integrations/desktop';
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((accept, fail) => {
+    resolve = accept;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+const virtualProject: ProjectState = {
+  path: '/virtual/project',
+  name: 'Virtual project',
+  documentPath: '/virtual/project/Documents',
+  assets: [],
+  files: [],
+};
+
+let previousProject: ProjectState | null;
+
+beforeEach(() => {
+  previousProject = project.current;
+  project.current = virtualProject;
+});
+
+afterEach(() => {
+  project.current = previousProject;
+  vi.restoreAllMocks();
+});
 
 const productAsset = {
   id: 'product-asset',
@@ -262,6 +299,190 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     expect(store.dirty).toBe(true);
     expect(JSON.stringify(store.graphSnapshot().runRecords)).toBe(after.provenance);
     expect(store.redoDirectorPatch()).toBe(false);
+  });
+
+  it('keeps a later accepted patch dirty when a pre-accept save completes', async () => {
+    const store = storeWithAcceptedHistory();
+    store.createDirectorPatchProposal(configureTransformPatch(store));
+    const beforeBytes = bytes(store);
+    const write = deferred<string>();
+    let submittedBytes = '';
+    vi.spyOn(project, 'saveDocumentToPath').mockImplementation(async (_path, value) => {
+      submittedBytes = new TextDecoder().decode(value);
+      return write.promise;
+    });
+
+    const saving = store.save();
+    store.acceptDirectorPatchProposal();
+    const acceptedBytes = bytes(store);
+    expect(store.dirty).toBe(true);
+
+    write.resolve('workflows/campaign-with-history.cxflow.json');
+    await expect(saving).resolves.toBe('workflows/campaign-with-history.cxflow.json');
+
+    expect(submittedBytes).toBe(beforeBytes);
+    expect(bytes(store)).toBe(acceptedBytes);
+    expect(store.dirty).toBe(true);
+    expect(store.undoDirectorPatch()).toBe(true);
+    expect(bytes(store)).toBe(beforeBytes);
+    expect(store.dirty).toBe(false);
+    expect(store.redoDirectorPatch()).toBe(true);
+    expect(bytes(store)).toBe(acceptedBytes);
+    expect(store.dirty).toBe(true);
+  });
+
+  it('marks only the submitted accepted snapshot clean when save resolves after undo', async () => {
+    const store = storeWithAcceptedHistory();
+    store.createDirectorPatchProposal(configureTransformPatch(store));
+    store.acceptDirectorPatchProposal();
+    const acceptedBytes = bytes(store);
+    const acceptedRevision = store.rev;
+    const write = deferred<string>();
+    let submittedBytes = '';
+    vi.spyOn(project, 'saveDocumentToPath').mockImplementation(async (_path, value) => {
+      submittedBytes = new TextDecoder().decode(value);
+      return write.promise;
+    });
+
+    const saving = store.save();
+    expect(store.undoDirectorPatch()).toBe(true);
+    const undoneBytes = bytes(store);
+    expect(store.dirty).toBe(false);
+
+    write.resolve('workflows/campaign-with-history.cxflow.json');
+    await saving;
+
+    expect(submittedBytes).toBe(acceptedBytes);
+    expect(bytes(store)).toBe(undoneBytes);
+    expect(store.savedRev).toBe(acceptedRevision);
+    expect(store.dirty).toBe(true);
+    expect(store.redoDirectorPatch()).toBe(true);
+    expect(bytes(store)).toBe(acceptedBytes);
+    expect(store.dirty).toBe(false);
+  });
+
+  it('reconciles overlapping saves in completion order using each submitted snapshot', async () => {
+    const store = storeWithAcceptedHistory();
+    store.createDirectorPatchProposal(configureTransformPatch(store));
+    const beforeBytes = bytes(store);
+    const writes: Array<Deferred<string> & { bytes: string }> = [];
+    vi.spyOn(project, 'saveDocumentToPath').mockImplementation(async (_path, value) => {
+      const write = { ...deferred<string>(), bytes: new TextDecoder().decode(value) };
+      writes.push(write);
+      return write.promise;
+    });
+
+    const beforeSave = store.save();
+    store.acceptDirectorPatchProposal();
+    const acceptedBytes = bytes(store);
+    const acceptedSave = store.save();
+    expect(writes.map((write) => write.bytes)).toEqual([beforeBytes, acceptedBytes]);
+
+    writes[1].resolve('workflows/campaign-with-history.cxflow.json');
+    await acceptedSave;
+    expect(store.dirty).toBe(false);
+
+    writes[0].resolve('workflows/campaign-with-history.cxflow.json');
+    await beforeSave;
+    expect(store.dirty).toBe(true);
+    expect(store.undoDirectorPatch()).toBe(true);
+    expect(store.dirty).toBe(false);
+    expect(store.redoDirectorPatch()).toBe(true);
+    expect(store.dirty).toBe(true);
+  });
+
+  it('ignores save completion after another workflow is opened in the same store', async () => {
+    const store = storeWithAcceptedHistory();
+    const write = deferred<string>();
+    vi.spyOn(project, 'saveDocumentToPath').mockReturnValue(write.promise);
+    const saving = store.save();
+    const other = new WorkflowStore();
+    other.newFromTemplate('campaign-composer', 'Other campaign');
+
+    store.openFromBytes(
+      other.toBytes(),
+      'workflows/other-campaign.cxflow.json',
+      'Other campaign',
+    );
+    const opened = {
+      bytes: bytes(store),
+      savedPath: store.savedPath,
+      savedRev: store.savedRev,
+      dirty: store.dirty,
+    };
+    write.resolve('workflows/campaign-with-history.cxflow.json');
+    await saving;
+
+    expect({
+      bytes: bytes(store),
+      savedPath: store.savedPath,
+      savedRev: store.savedRev,
+      dirty: store.dirty,
+    }).toEqual(opened);
+  });
+
+  it('captures Save As rename bytes without marking a later edit clean', async () => {
+    const store = storeWithAcceptedHistory();
+    const write = deferred<string | null>();
+    let submittedName = '';
+    let submittedBytes = '';
+    vi.spyOn(project, 'saveDocument').mockImplementation(async (name, value) => {
+      submittedName = name;
+      submittedBytes = new TextDecoder().decode(value);
+      return write.promise;
+    });
+
+    const saving = store.saveAs('Renamed Campaign');
+    const submittedRevision = store.rev;
+    store.setBriefObjective('brief', 'Edited after Save As submission.');
+    const editedBytes = bytes(store);
+    write.resolve('workflows/renamed-campaign.cxflow.json');
+    await saving;
+
+    expect(submittedName).toBe('Renamed Campaign.cxflow.json');
+    expect(JSON.parse(submittedBytes).metadata.name).toBe('Renamed Campaign');
+    expect(store.name).toBe('Renamed Campaign');
+    expect(store.savedPath).toBe('workflows/renamed-campaign.cxflow.json');
+    expect(store.savedRev).toBe(submittedRevision);
+    expect(bytes(store)).toBe(editedBytes);
+    expect(store.dirty).toBe(true);
+  });
+
+  it('leaves the saved marker and valid Director history unchanged on save failure', async () => {
+    const store = storeWithAcceptedHistory();
+    store.createDirectorPatchProposal(configureTransformPatch(store));
+    store.acceptDirectorPatchProposal();
+    const savedPath = store.savedPath;
+    const savedRevision = store.savedRev;
+    const write = deferred<string>();
+    vi.spyOn(project, 'saveDocumentToPath').mockReturnValue(write.promise);
+
+    const saving = store.save();
+    write.reject(new Error('disk unavailable'));
+    await expect(saving).rejects.toThrow('disk unavailable');
+
+    expect(store.savedPath).toBe(savedPath);
+    expect(store.savedRev).toBe(savedRevision);
+    expect(store.dirty).toBe(true);
+    expect(store.undoDirectorPatch()).toBe(true);
+  });
+
+  it('stays dirty when an edit after undo collides with the saved store revision', async () => {
+    const store = storeWithAcceptedHistory();
+    store.createDirectorPatchProposal(configureTransformPatch(store));
+    store.acceptDirectorPatchProposal();
+    vi.spyOn(project, 'saveDocumentToPath')
+      .mockResolvedValue('workflows/campaign-with-history.cxflow.json');
+
+    await store.save();
+    expect(store.dirty).toBe(false);
+    expect(store.undoDirectorPatch()).toBe(true);
+    expect(store.dirty).toBe(true);
+
+    store.setBriefObjective('brief', 'Different bytes at the same numeric revision.');
+
+    expect(store.rev).toBe(store.savedRev);
+    expect(store.dirty).toBe(true);
   });
 
   it('rejects stale pending acceptance after a graph race without rolling back the newer change', () => {

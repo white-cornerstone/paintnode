@@ -185,13 +185,20 @@ interface WorkflowDirectorPatchSnapshot {
   graph: WorkflowGraphV2;
   graphRevision: number;
   storeRevision: number;
-  savedRevision: number;
 }
 
 interface WorkflowDirectorPatchTransaction {
   before: WorkflowDirectorPatchSnapshot;
   after: WorkflowDirectorPatchSnapshot;
   sessionIdentity: number;
+}
+
+interface WorkflowSaveSubmission {
+  bytes: Uint8Array;
+  serializedBytes: string;
+  storeRevision: number;
+  sessionIdentity: number;
+  projectIdentity: string;
 }
 
 function workflowGraphBytes(graph: WorkflowGraphV2): string {
@@ -265,6 +272,7 @@ export class WorkflowStore {
   private pendingDirectorPatchReview: WorkflowDirectorPatchReview | null = null;
   private directorPatchUndoStack: WorkflowDirectorPatchTransaction[] = [];
   private directorPatchRedoStack: WorkflowDirectorPatchTransaction[] = [];
+  private savedWorkflowBytes = $state<string | null>(null);
 
   constructor(options: WorkflowStoreOptions = {}) {
     this.graphIdGenerator = options.idGenerator;
@@ -273,7 +281,9 @@ export class WorkflowStore {
 
   get dirty(): boolean {
     this.rev;
-    return this.rev !== this.savedRev;
+    return this.savedWorkflowBytes === null
+      ? this.rev !== this.savedRev
+      : workflowGraphBytes(this.serialize()) !== this.savedWorkflowBytes;
   }
 
   get graphRevision(): number {
@@ -350,7 +360,6 @@ export class WorkflowStore {
       graph: nextDomain.graph,
       graphRevision: nextDomain.revision,
       storeRevision: before.storeRevision + 1,
-      savedRevision: before.savedRevision,
     };
 
     try {
@@ -456,6 +465,7 @@ export class WorkflowStore {
     this.rev = 0;
     this.savedRev = 0;
     this.resetGraphDomain();
+    this.captureCurrentSavedBaseline();
   }
 
   newFromTemplate(templateId: WorkflowTemplateId, name?: string): void {
@@ -484,6 +494,7 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain);
     this.rev = 0;
     this.savedRev = 0;
+    this.captureCurrentSavedBaseline();
   }
 
   applyDirectorProposal(
@@ -1222,20 +1233,18 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain, legacyProjection);
     this.rev = 0;
     this.savedRev = 0;
+    this.captureCurrentSavedBaseline();
   }
 
   async save(): Promise<string | null> {
     if (!project.path) return null;
     const name = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
-    const relativePath = this.savedPath
-      ? await project.saveDocumentToPath(this.savedPath, this.toBytes())
-      : await project.saveDocument(name, this.toBytes());
-    if (relativePath) {
-      this.savedPath = relativePath;
-      this.savedRev = this.rev;
-      this.requiresExplicitSave = false;
-      this.migrationSourcePath = null;
-    }
+    const savedPath = this.savedPath;
+    const submission = this.captureSaveSubmission();
+    const relativePath = savedPath
+      ? await project.saveDocumentToPath(savedPath, submission.bytes)
+      : await project.saveDocument(name, submission.bytes);
+    this.reconcileSaveCompletion(submission, relativePath);
     return relativePath;
   }
 
@@ -1243,13 +1252,9 @@ export class WorkflowStore {
     if (!project.path) return null;
     this.name = cleanWorkflowName(name);
     this.bump();
-    const relativePath = await project.saveDocument(`${this.name}.cxflow.json`, this.toBytes());
-    if (relativePath) {
-      this.savedPath = relativePath;
-      this.savedRev = this.rev;
-      this.requiresExplicitSave = false;
-      this.migrationSourcePath = null;
-    }
+    const submission = this.captureSaveSubmission();
+    const relativePath = await project.saveDocument(`${this.name}.cxflow.json`, submission.bytes);
+    this.reconcileSaveCompletion(submission, relativePath);
     return relativePath;
   }
 
@@ -1302,6 +1307,7 @@ export class WorkflowStore {
   private beginWorkflowSession(): void {
     this.workflowSessionIdentity += 1;
     this.workflowMutationIdentity += 1;
+    this.savedWorkflowBytes = null;
     this.transformExecutions = {};
     this.activeTransformRuns.clear();
     this.pendingDirectorPatchReview = null;
@@ -1327,7 +1333,6 @@ export class WorkflowStore {
       graph: this.serialize(),
       graphRevision: this.graphRevision,
       storeRevision: this.rev,
-      savedRevision: this.savedRev,
     };
   }
 
@@ -1350,14 +1355,41 @@ export class WorkflowStore {
     this.graphDomain = domain;
     this.projectedGraphRevision = domain.revision;
     this.rev = snapshot.storeRevision;
-    this.savedRev = snapshot.savedRevision;
   }
 
   private matchesDirectorPatchSnapshot(snapshot: WorkflowDirectorPatchSnapshot): boolean {
     return this.graphRevision === snapshot.graphRevision
       && this.rev === snapshot.storeRevision
-      && this.savedRev === snapshot.savedRevision
       && workflowGraphBytes(this.serialize()) === workflowGraphBytes(snapshot.graph);
+  }
+
+  private captureCurrentSavedBaseline(): void {
+    this.savedWorkflowBytes = workflowGraphBytes(this.serialize());
+  }
+
+  private captureSaveSubmission(): WorkflowSaveSubmission {
+    const bytes = this.toBytes();
+    return {
+      bytes,
+      serializedBytes: new TextDecoder().decode(bytes),
+      storeRevision: this.rev,
+      sessionIdentity: this.workflowSessionIdentity,
+      projectIdentity: project.identity,
+    };
+  }
+
+  private reconcileSaveCompletion(
+    submission: WorkflowSaveSubmission,
+    relativePath: string | null,
+  ): void {
+    if (!relativePath
+      || submission.sessionIdentity !== this.workflowSessionIdentity
+      || submission.projectIdentity !== project.identity) return;
+    this.savedPath = relativePath;
+    this.savedRev = submission.storeRevision;
+    this.savedWorkflowBytes = submission.serializedBytes;
+    this.requiresExplicitSave = false;
+    this.migrationSourcePath = null;
   }
 
   private clearDirectorPatchHistory(): void {
