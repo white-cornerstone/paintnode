@@ -9,6 +9,7 @@
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
     isDesktop,
+    providerQaMode,
     readProjectFile,
     storeProjectAssetBytes,
     type ProjectAsset,
@@ -43,6 +44,7 @@
     creatorNodeFitsPlacementBounds,
     findOpenCreatorNodePlacement,
     runWithAsyncObserver,
+    workflowProviderSelection,
     workflowReadiness,
     type CreatorNodeType,
     type WorkflowNodePort,
@@ -59,6 +61,7 @@
     createAntigravityWorkflowTransformExecutor,
     createCodexWorkflowTransformExecutor,
   } from '../integrations/workflowCompositionExecutors';
+  import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
 
   type CodexProgressPayload = {
     runId: string;
@@ -93,6 +96,9 @@
   let progress = $state('');
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
+  let qaModeResolved = $state(!desktop);
+  const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
@@ -153,8 +159,8 @@
       desktop,
       projectPath: project.path,
       assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
-      provider: imageProvider,
-      supportedProviders: ['codex', 'antigravity'],
+      provider: providerSelection.provider,
+      supportedProviders: providerSelection.supportedProviders,
     });
   });
 
@@ -163,8 +169,8 @@
       desktop,
       projectPath: project.path,
       assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
-      provider: imageProvider,
-      supportedProviders: ['codex', 'antigravity'],
+      provider: providerSelection.provider,
+      supportedProviders: providerSelection.supportedProviders,
       targetNodeId: outputNodeId,
     });
   }
@@ -195,6 +201,18 @@
   });
 
   onMount(() => {
+    if (desktop) {
+      void providerQaMode()
+        .then((mode) => {
+          if (!boardDestroyed) qaMode = mode;
+        })
+        .catch(() => {
+          if (!boardDestroyed) qaMode = null;
+        })
+        .finally(() => {
+          if (!boardDestroyed) qaModeResolved = true;
+        });
+    }
     const flushBeforeSave = () => {
       if (editor.textEdit) editor.commitActiveText();
       if (workflow.storyboardEditing && storyboardDoc) persistStoryboardFromDoc();
@@ -1506,20 +1524,29 @@
         : 'Complete the workflow checklist before generating.';
       return;
     }
+    if (!providerSelection.ready || !providerSelection.provider) {
+      error = 'Wait for native QA mode detection before generating.';
+      return;
+    }
     busy = true;
-    progress = 'Preparing workflow assets...';
+    progress = providerSelection.qaFake
+      ? 'Running deterministic QA Fake output…'
+      : 'Preparing workflow assets...';
     const runId = createRunId();
     const runProjectPath = project.path;
-    const runProvider = imageProvider;
+    const runSelection = providerSelection;
+    const runProvider = runSelection.provider!;
     const runAssets = assets.map((asset) => ({ ...asset }));
-    const executors = [
-      createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
-        runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-      )),
-      createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
-        runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-      )),
-    ];
+    const executors = runSelection.qaFake
+      ? [createProviderFreeQaWorkflowExecutor('provider-free')]
+      : [
+          createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+          createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+        ];
     stopProgress?.();
     stopProgress = null;
 
@@ -1543,7 +1570,9 @@
           return dispose;
         },
         onRegistrationError: () => {
-          progress = aiRunningLabel(runProvider);
+          progress = runSelection.qaFake
+            ? 'Running deterministic QA Fake output…'
+            : aiRunningLabel(runProvider as 'codex' | 'antigravity');
         },
         run: () => workflow.runCampaignGenerate(targetOutput.id, {
           projectPath: runProjectPath,
@@ -1997,11 +2026,12 @@
                   onclick={() => void generate(outputForTransform(node.id))}
                 >
                   <Icon svg={PaintBrush} size={14} />
-                  Run Generate
+                  {providerSelection.qaFake ? 'Run QA Fake' : 'Run Generate'}
                 </button>
                 <p class="transform-run-state" aria-live="polite">
                   {workflow.transformExecution(node.id).state === 'idle'
-                    ? transformOutputReadiness(node.id)?.nextAction?.action ?? 'Ready to run'
+                    ? transformOutputReadiness(node.id)?.nextAction?.action
+                      ?? (providerSelection.qaFake ? providerSelection.label : 'Ready to run')
                     : workflow.transformExecution(node.id).message}
                 </p>
               {:else if node.type === 'transform' && definition.executor.status === 'available'}
@@ -2198,14 +2228,21 @@
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if imageProvider === 'antigravity'}
+          {#if !providerSelection.qaFake && imageProvider === 'antigravity'}
             <label>
               <span>Antigravity auth helper</span>
               <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
             </label>
           {/if}
           <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
-            <AiRunOptionsControl bind:options={runOptions} disabled={busy} />
+            {#if providerSelection.qaFake}
+              <div class="qa-fake-banner" role="status">
+                <strong>QA Fake</strong>
+                <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
+              </div>
+            {:else}
+              <AiRunOptionsControl bind:options={runOptions} disabled={busy || !providerSelection.ready} />
+            {/if}
           </div>
           <div class="readiness-checklist" role="group" aria-label="Generate checklist" tabindex="-1" data-workflow-checklist onpointerdown={(event) => event.stopPropagation()}>
             <div class="checklist-head">
@@ -2289,7 +2326,7 @@
               <div class="output-actions">
                 <button onclick={() => void generate(outputNode)} disabled={busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
-                  Generate
+                  {providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
                 </button>
                 <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
                   <Icon svg={Open} size={14} />
@@ -2917,6 +2954,20 @@
     display: flex;
     justify-content: flex-start;
     padding: 0 8px 8px;
+  }
+  .qa-fake-banner {
+    display: grid;
+    gap: 2px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 1px solid #48795e;
+    border-radius: 4px;
+    background: #20382a;
+    color: #d8f3e3;
+    font-size: 10px;
+  }
+  .qa-fake-banner span {
+    color: #acd5bd;
   }
   .readiness-checklist {
     display: grid;

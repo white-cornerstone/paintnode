@@ -80,6 +80,7 @@ export type WorkflowTransformArtifact = WorkflowBytesArtifact | WorkflowStoredAs
 export interface WorkflowNodeExecutor {
   provider: string;
   capabilities: readonly string[];
+  materialization?: 'visual-bytes' | 'metadata-only';
   execute(request: Readonly<WorkflowTransformExecutionRequest>): Promise<WorkflowTransformArtifact>;
 }
 
@@ -258,10 +259,12 @@ function boundAsset(node: WorkflowNodeV2, assets: readonly WorkflowProjectAsset[
 export function createWorkflowCompositionExecutor(
   provider: string,
   service: WorkflowCompositionService,
+  options: { materialization?: 'visual-bytes' | 'metadata-only' } = {},
 ): WorkflowNodeExecutor {
   return Object.freeze({
     provider,
     capabilities: Object.freeze(['generate']),
+    materialization: options.materialization ?? 'visual-bytes',
     execute: async (request: Readonly<WorkflowTransformExecutionRequest>) => service(
       deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>,
     ),
@@ -346,7 +349,9 @@ export async function executeCampaignGenerateTransform(
       role: textConfig(input, 'role'),
       assetId: asset.id,
       relativePath: asset.relativePath,
-      bytes: await options.readAsset(asset),
+      bytes: executor.materialization === 'metadata-only'
+        ? new Uint8Array()
+        : await options.readAsset(asset),
     });
   }
 
@@ -360,7 +365,8 @@ export async function executeCampaignGenerateTransform(
     ...storyboard.annotations,
     ...annotationItemConstraints(storyboard.annotationItems, storyboard.width, storyboard.height),
   ] : [];
-  const storyboardBytes = storyboard && (storyboard.dataUrl || storyboard.oraPath)
+  const storyboardBytes = executor.materialization !== 'metadata-only'
+    && storyboard && (storyboard.dataUrl || storyboard.oraPath)
     ? await options.readStoryboard?.(deepFreeze(cloneValue(storyboard)) as Readonly<WorkflowStoryboardDescriptor>) ?? null
     : null;
   const materializedStoryboard: WorkflowStoryboardMaterialization | null = storyboard ? {

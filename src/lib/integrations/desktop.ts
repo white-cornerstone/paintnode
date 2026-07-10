@@ -509,9 +509,16 @@ export async function detectCodex(bin?: string): Promise<CodexDetectionResult> {
   });
 }
 
-export async function providerQaMode(): Promise<'provider-free' | 'provider-e2e' | null> {
+export type ProviderQaMode = 'provider-free' | 'provider-e2e' | null;
+
+export async function providerQaMode(): Promise<ProviderQaMode> {
   if (!isDesktop()) return null;
-  return invoke<'provider-free' | 'provider-e2e' | null>('provider_qa_mode');
+  return invoke<ProviderQaMode>('provider_qa_mode');
+}
+
+export async function providerFreeQaSquarePng(): Promise<Uint8Array> {
+  if (!isDesktop()) throw new Error('Provider-free QA output is available only in the desktop QA app.');
+  return new Uint8Array(await invoke<number[]>('provider_free_qa_square_png'));
 }
 
 export async function discoverCodexCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {
