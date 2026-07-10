@@ -137,6 +137,30 @@ describe('Workflow Director patch schema', () => {
     expect(reads).toBe(0);
   });
 
+  it.each([
+    ['root descriptor trap', (secret: string) => new Proxy(patch([]), {
+      getOwnPropertyDescriptor() { throw new Error(secret); },
+    })],
+    ['operation own-key trap', (secret: string) => ({
+      ...patch([]),
+      operations: [new Proxy({ op: 'remove-edge', edgeId: 'edge-composition-output-landscape' }, {
+        ownKeys() { throw new Error(secret); },
+      })],
+    })],
+    ['operations descriptor trap', (secret: string) => ({
+      ...patch([]),
+      operations: new Proxy([], {
+        getOwnPropertyDescriptor() { throw new Error(secret); },
+      }),
+    })],
+  ])('sanitizes %s without leaking trap text', (_name, hostile) => {
+    const secret = 'do-not-leak-proxy-secret';
+    let result: ReturnType<typeof parseWorkflowDirectorPatch> | undefined;
+    expect(() => { result = parseWorkflowDirectorPatch(hostile(secret)); }).not.toThrow();
+    expect(result?.value).toBeNull();
+    expect(JSON.stringify(result?.issues)).not.toContain(secret);
+  });
+
   it('rejects oversized operation arrays before inspecting any operation', () => {
     const operations = new Array(129).fill(null);
     let reads = 0;
@@ -475,6 +499,59 @@ describe('Workflow Director patch proposal', () => {
     );
     expect(result.proposal).toBeNull();
     expect(result.issues.map((issue) => issue.message).join(' ')).toMatch(/immutable project asset|accepted/i);
+  });
+
+  it('preserves a complete run record byte-for-byte on an unrelated patch', () => {
+    const graph = campaignWithAcceptedHistory();
+    const transform = graph.nodes.find((node) => node.id === 'transform-generate-square')!;
+    graph.runRecords = [{
+      recordVersion: 1,
+      id: 'run-generate-square',
+      nodeId: transform.id,
+      status: 'succeeded',
+      attempt: 1,
+      workflowRevision: 'workflow-revision',
+      nodeRevision: 'node-revision',
+      materialKey: 'material-key',
+      sourceAssets: [],
+      prompt: {
+        brief: 'Brief', artDirection: 'Direction', instructions: 'Generate',
+        constraints: [], effectivePromptHash: 'prompt-hash',
+      },
+      provider: { id: 'fake', model: null, effectiveOptions: {} },
+      executor: { id: 'fake', version: '1', requestSchemaVersion: '1' },
+      target: { nodeId: transform.id, title: transform.title, width: 1024, height: 1024 },
+      startedAt: 1,
+      finishedAt: 2,
+      outputs: [{
+        assetReferenceId: 'run-only-reference',
+        assetId: 'run-only-asset',
+        relativePath: 'assets/generated/run-only.png',
+        contentHash: 'sha256:run-only',
+      }],
+    }] as unknown as WorkflowGraphV2['runRecords'];
+    const before = JSON.stringify(graph.runRecords);
+
+    const proposal = createWorkflowDirectorPatchProposal(patch([
+      { op: 'move-node', nodeId: 'output-portrait', position: { x: 1666, y: 222 } },
+    ]), graph, SOURCE_REVISION).proposal!;
+
+    expect(JSON.stringify(proposal.graph.runRecords)).toBe(before);
+  });
+
+  it('does not treat ordinary authoring text as an immutable asset binding', () => {
+    const graph = campaignWithAcceptedHistory();
+    const brief = graph.nodes.find((node) => node.id === 'brief')!;
+    brief.config.objective = 'accepted-square-asset';
+
+    const result = createWorkflowDirectorPatchProposal(
+      patch([{ op: 'remove-node', nodeId: brief.id }]),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.issues).toEqual([]);
+    expect(result.proposal?.graph.nodes.some((node) => node.id === brief.id)).toBe(false);
   });
 
   it('derives configured changes and staleness only from the final shadow graph', () => {
