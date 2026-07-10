@@ -242,6 +242,33 @@ describe('WorkflowStore selective execution integration', () => {
     expect(store.graphSnapshot().runRecords).toEqual([]);
   });
 
+  it.each(['maxConcurrency', 'providerConcurrency', 'executors'] as const)(
+    'cleans up a registered selective operation when %s access throws',
+    async (field) => {
+      const store = campaignStore();
+      const run = harness();
+      const preflight = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+      const hostileOptions = { ...run.options() };
+      const hostileScheduler = {};
+      Object.defineProperty(field === 'executors' ? hostileOptions : hostileScheduler, field, {
+        enumerable: true,
+        get() { throw new Error(`hostile ${field} getter`); },
+      });
+
+      await expect(store.runSelectiveExecution(
+        preflight,
+        hostileOptions,
+        hostileScheduler,
+      )).rejects.toThrow(`hostile ${field} getter`);
+
+      const replacement = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+      const outcome = await store.runSelectiveExecution(replacement, run.options());
+      expect(outcome.failures).toEqual({});
+      expect(run.providerCalls()).toBe(1);
+    },
+    1_000,
+  );
+
   it('runs from Product through only the real reachable Campaign Generate capability', async () => {
     const store = campaignStore();
     const run = harness();

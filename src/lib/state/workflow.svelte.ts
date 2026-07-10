@@ -979,7 +979,7 @@ export class WorkflowStore {
     try {
       return await this.buildSelectivePreflight(mode, nodeId, options, operation);
     } finally {
-      this.finishSelectiveOperation(operation, options.signal);
+      this.finishSelectiveOperation(operation);
     }
   }
 
@@ -995,11 +995,11 @@ export class WorkflowStore {
       );
     }
     const operation = await this.beginSelectiveOperation(options);
-    const maxConcurrency = scheduler.maxConcurrency ?? 1;
-    const providerConcurrency = scheduler.providerConcurrency ?? Object.fromEntries(
-      options.executors.map((executor) => [executor.provider, maxConcurrency]),
-    );
     try {
+      const maxConcurrency = scheduler.maxConcurrency ?? 1;
+      const providerConcurrency = scheduler.providerConcurrency ?? Object.fromEntries(
+        options.executors.map((executor) => [executor.provider, maxConcurrency]),
+      );
       let currentPreflight = preflight;
       if (operation.supersededPrior) {
         currentPreflight = await this.buildSelectivePreflight(
@@ -1072,7 +1072,7 @@ export class WorkflowStore {
           : { code: 'EXECUTOR_FAILED', message: 'Campaign Generate did not complete.' },
       });
     } finally {
-      this.finishSelectiveOperation(operation, options.signal);
+      this.finishSelectiveOperation(operation);
     }
   }
 
@@ -1600,16 +1600,17 @@ export class WorkflowStore {
         );
         await prior.completion;
       }
+      const externalSignal = options.signal;
       const controller = new AbortController();
       const abortFromExternal = () => controller.abort();
-      if (options.signal?.aborted) controller.abort();
-      else options.signal?.addEventListener('abort', abortFromExternal, { once: true });
+      if (externalSignal?.aborted) controller.abort();
+      else externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
       let resolveCompletion!: () => void;
       const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
       const operation: ActiveWorkflowSelectiveOperation = {
         controller,
         transformNodeIds: new Set(),
-        stopExternalAbort: () => options.signal?.removeEventListener('abort', abortFromExternal),
+        stopExternalAbort: () => externalSignal?.removeEventListener('abort', abortFromExternal),
         completion,
         resolveCompletion,
         supersededPrior: prior !== null,
@@ -1621,13 +1622,13 @@ export class WorkflowStore {
     }
   }
 
-  private finishSelectiveOperation(
-    operation: ActiveWorkflowSelectiveOperation,
-    _externalSignal?: AbortSignal,
-  ): void {
-    operation.stopExternalAbort();
-    if (this.activeSelectiveOperation === operation) this.activeSelectiveOperation = null;
-    operation.resolveCompletion();
+  private finishSelectiveOperation(operation: ActiveWorkflowSelectiveOperation): void {
+    try {
+      operation.stopExternalAbort();
+    } finally {
+      if (this.activeSelectiveOperation === operation) this.activeSelectiveOperation = null;
+      operation.resolveCompletion();
+    }
   }
 
   private campaignOutputForTransform(graph: WorkflowGraphV2, transformNodeId: string): string | null {
