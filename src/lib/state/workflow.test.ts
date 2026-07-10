@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { WorkflowStore } from './workflow.svelte';
-import type { WorkflowIdGenerator } from '../workflow';
+import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
+import annotations from '../workflow/fixtures/v1/annotations.json';
+import multipleOutputs from '../workflow/fixtures/v1/multiple-outputs.json';
+import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowIdGenerator } from '../workflow';
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -137,24 +140,19 @@ describe('WorkflowStore graph adapter', () => {
   it('preserves legacy primary and default secondary output geometry after unrelated mutations', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard();
-    const initial = store.serialize();
-
-    expect(initial.outputHeight).toBe(190);
-    expect(initial.outputNodes?.[0].height).toBe(232);
+    const initial = { outputWidth: store.outputWidth, outputHeight: store.outputHeight, outputX: store.outputX, outputY: store.outputY };
     store.setPrompt('Geometry must not change');
 
-    const afterPrompt = store.serialize();
-    expect(afterPrompt.outputWidth).toBe(initial.outputWidth);
-    expect(afterPrompt.outputHeight).toBe(initial.outputHeight);
-    expect(afterPrompt.outputX).toBe(initial.outputX);
-    expect(afterPrompt.outputY).toBe(initial.outputY);
-    expect(afterPrompt.outputNodes?.[0]).toEqual(initial.outputNodes?.[0]);
+    expect(store.outputWidth).toBe(initial.outputWidth);
+    expect(store.outputHeight).toBe(initial.outputHeight);
+    expect(store.outputX).toBe(initial.outputX);
+    expect(store.outputY).toBe(initial.outputY);
 
     const secondary = store.addOutputNode();
     expect(secondary).toMatchObject({ width: 210, height: 190 });
   });
 
-  it('normalizes near-origin UI coordinates and opened viewport values to positive zero', () => {
+  it('normalizes near-origin UI mutations while preserving exact v2 viewport values on reopen', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard();
     store.addBlankAsset(-0.1, -0.1, 200, 180);
@@ -172,10 +170,10 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.outputY).toBe(0);
     expect(Object.is(store.nodes[0].x, -0)).toBe(false);
 
-    const persisted = store.serialize();
-    persisted.panX = -0.1;
-    persisted.panY = -0.1;
-    persisted.nodes[0].x = -0.1;
+    const persisted = structuredClone(store.serialize());
+    persisted.viewport.panX = -0.1;
+    persisted.viewport.panY = -0.1;
+    persisted.nodes.find((node) => node.id === assetId)!.position.x = -0.1;
     const reopened = new WorkflowStore({ idGenerator: ids() });
     reopened.openFromBytes(
       new TextEncoder().encode(JSON.stringify(persisted)),
@@ -183,14 +181,12 @@ describe('WorkflowStore graph adapter', () => {
       'Near origin',
     );
 
-    expect(reopened.panX).toBe(0);
-    expect(reopened.panY).toBe(0);
-    expect(reopened.nodes[0].x).toBe(0);
-    expect(Object.is(reopened.panX, -0)).toBe(false);
-    expect(Object.is(reopened.nodes[0].x, -0)).toBe(false);
+    expect(reopened.panX).toBe(-0.1);
+    expect(reopened.panY).toBe(-0.1);
+    expect(reopened.nodes[0].x).toBe(-0.1);
   });
 
-  it('rebuilds the domain adapter after opening the unchanged v1 serialization format', () => {
+  it('reopens a WorkflowGraph v2 save through the same domain adapter', () => {
     const source = new WorkflowStore({ idGenerator: ids() });
     source.newBoard('Legacy round trip');
     source.addBlankAsset(20, 30, 200, 180);
@@ -206,5 +202,192 @@ describe('WorkflowStore graph adapter', () => {
     expect(reopened.nodes[0]).toMatchObject({ x: 45, y: 55 });
     expect(reopened.rev).toBe(1);
     expect(reopened.graphRevision).toBe(1);
+  });
+
+  it.each([
+    ['assets and storyboard', assetsStoryboard],
+    ['annotations', annotations],
+    ['multiple outputs', multipleOutputs],
+  ])('migrates the %s v1 fixture into reactive behavior and explicitly saves/reopens v2', (_name, fixture) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    const originalBytes = new TextEncoder().encode(JSON.stringify(fixture));
+    store.openFromBytes(originalBytes, `workflows/${fixture.name}.cxflow.json`, fixture.name);
+
+    expect(store.requiresExplicitSave).toBe(true);
+    expect(store.savedPath).toBeNull();
+    expect(store.migrationSourcePath).toContain('.cxflow.json');
+    expect(store.serialize().version).toBe(WORKFLOW_GRAPH_VERSION);
+    expect(JSON.parse(new TextDecoder().decode(originalBytes))).toEqual(fixture);
+
+    const v2 = store.serialize();
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), 'workflows/converted.cxflow.json', 'Converted');
+    expect(reopened.serialize()).toEqual(v2);
+    expect(reopened.requiresExplicitSave).toBe(false);
+    expect(reopened.rev).toBe(0);
+  });
+
+  it('preserves storyboard, annotations, multiple outputs, generated placement, references, and graph metadata', () => {
+    const assets = new WorkflowStore({ idGenerator: ids() });
+    assets.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(assetsStoryboard)),
+      'workflows/assets.cxflow.json',
+      'Assets',
+    );
+    expect(assets.nodes).toHaveLength(2);
+    expect(assets.nodes[0]).toMatchObject({
+      assetId: 'project-product',
+      relativePath: 'assets/product.png',
+      included: true,
+      note: 'Hero product; preserve label and proportions',
+    });
+    expect(assets.storyboardDataUrl).toBe(assetsStoryboard.storyboardDataUrl);
+
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(multipleOutputs)),
+      'workflows/outputs.cxflow.json',
+      'Outputs',
+    );
+    expect(store.outputNodes).toHaveLength(2);
+    expect(store.outputNodes[1]).toMatchObject({ finalWidth: 768, finalHeight: 1376, outputAssetId: 'story-asset' });
+    store.setOutput({
+      id: 'replacement-story',
+      kind: 'generated',
+      name: 'replacement.png',
+      relativePath: 'generated/replacement-story.png',
+      createdAt: 2,
+      exists: true,
+    }, 'output-story');
+    const placementReopen = new WorkflowStore({ idGenerator: ids() });
+    placementReopen.openFromBytes(store.toBytes(), 'workflows/placement.cxflow.json', 'Placement');
+    expect(placementReopen.outputNode('output-story')).toMatchObject({
+      outputAssetId: 'replacement-story',
+      outputRelativePath: 'generated/replacement-story.png',
+    });
+    placementReopen.setOutput(null, 'output-story');
+    expect(placementReopen.outputNode('output-story')).toMatchObject({
+      outputAssetId: null,
+      outputRelativePath: null,
+    });
+    const clearedReopen = new WorkflowStore({ idGenerator: ids() });
+    clearedReopen.openFromBytes(placementReopen.toBytes(), 'workflows/cleared.cxflow.json', 'Cleared');
+    expect(clearedReopen.outputNode('output-story')).toMatchObject({
+      outputAssetId: null,
+      outputRelativePath: null,
+    });
+
+    const storyboard = new WorkflowStore({ idGenerator: ids() });
+    storyboard.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(annotations)),
+      'workflows/annotations.cxflow.json',
+      'Annotations',
+    );
+    expect(storyboard.storyboardAnnotationItems).toEqual(annotations.storyboardAnnotationItems);
+    expect(storyboard.storyboardAnnotationsVisible).toBe(false);
+    const before = storyboard.serialize();
+    storyboard.setPrompt('Updated prompt');
+    const after = storyboard.serialize();
+    expect(after.id).toBe(before.id);
+    expect(after.metadata.sourceVersion).toBe(1);
+    expect(after.metadata.migrations).toEqual([{ from: 1, to: 2 }]);
+    expect(after.assetReferences).toEqual(before.assetReferences);
+  });
+
+  it('keeps presentation state outside graph revisions while persisting viewport dirty state', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard();
+    const graphRevision = store.graphRevision;
+    store.select({ kind: 'output', id: 'output' });
+    store.setTool('zoom');
+    expect(store.rev).toBe(0);
+    expect(store.graphRevision).toBe(graphRevision);
+    store.zoomBy(1, 300, 200);
+    expect(store.rev).toBe(0);
+
+    store.panBy(20, 10);
+    store.setZoom(1.25);
+    expect(store.rev).toBe(2);
+    expect(store.graphRevision).toBe(graphRevision);
+    expect(store.serialize().viewport).toEqual({ panX: 20, panY: 10, zoom: 1.25 });
+  });
+
+  it('round-trips unusual valid v2 metadata names exactly until the user renames', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
+    const graph = structuredClone(source.serialize());
+    graph.metadata.name = '  Campaign.CXFLOW.JSON  ';
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.openFromBytes(new TextEncoder().encode(JSON.stringify(graph)), 'workflows/unusual.cxflow.json', 'Fallback');
+
+    expect(store.name).toBe('  Campaign.CXFLOW.JSON  ');
+    expect(store.serialize().metadata.name).toBe('  Campaign.CXFLOW.JSON  ');
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), 'workflows/unusual.cxflow.json', 'Fallback');
+    expect(reopened.serialize()).toEqual(store.serialize());
+
+    store.setName('  Renamed.cxflow.json  ');
+    expect(store.serialize().metadata.name).toBe('Renamed');
+  });
+
+  it('preserves fractional v2 pan for identity and saturated zoom no-ops', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
+    const graph = structuredClone(source.serialize());
+    graph.viewport = { panX: 0.5, panY: -0.5, zoom: 1 };
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.openFromBytes(new TextEncoder().encode(JSON.stringify(graph)), 'workflows/fractional.cxflow.json', 'Fractional');
+
+    store.zoomBy(1, 200, 100);
+    expect(store.rev).toBe(0);
+    expect(store.serialize().viewport).toEqual({ panX: 0.5, panY: -0.5, zoom: 1 });
+
+    const saturatedGraph = structuredClone(graph);
+    saturatedGraph.viewport = { panX: 0.5, panY: -0.5, zoom: 4 };
+    const saturated = new WorkflowStore({ idGenerator: ids() });
+    saturated.openFromBytes(new TextEncoder().encode(JSON.stringify(saturatedGraph)), 'workflows/saturated.cxflow.json', 'Saturated');
+    saturated.zoomAt(200, 100, 'in');
+    expect(saturated.rev).toBe(0);
+    expect(saturated.serialize().viewport).toEqual(saturatedGraph.viewport);
+  });
+
+  it('surfaces strict connection explanations without dirtying or partially mutating the graph', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard();
+    const before = store.graphSnapshot();
+
+    expect(store.connect('composition', 'composition')).toBe(false);
+    expect(store.connectionError).toMatch(/cannot connect to itself/i);
+    expect(store.graphSnapshot()).toBe(before);
+    expect(store.rev).toBe(0);
+  });
+
+  it('delegates output execution planning and preserves unsupported dormant nodes across UI mutations', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
+    const graph = structuredClone(source.serialize()) as WorkflowGraphV2;
+    graph.nodes.push({
+      id: 'future',
+      type: 'unsupported',
+      title: 'Future node',
+      position: { x: 100, y: 500 },
+      size: { width: 200, height: 160 },
+      color: '#333333',
+      ports: { inputs: [], outputs: [] },
+      config: { unsupportedType: 'future', rawConfig: { strength: 1 }, rawPorts: {}, rawNode: {} },
+      runRecordIds: [],
+    });
+    graph.nodes.find((node) => node.id === 'composition')!.runRecordIds = ['run-composition'];
+    graph.runRecords = [{ id: 'run-composition', nodeId: 'composition', status: 'succeeded' }];
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.openFromBytes(new TextEncoder().encode(JSON.stringify(graph)), 'workflows/future.cxflow.json', 'Future');
+    store.setPrompt('Still preserved');
+
+    expect(store.serialize().nodes.find((node) => node.id === 'future')).toEqual(graph.nodes.at(-1));
+    expect(store.serialize().runRecords).toEqual(graph.runRecords);
+    expect(store.planExecution('output', { maxConcurrency: 2 })).toMatchObject({
+      targetNodeId: 'output',
+      executionOrder: ['composition', 'output'],
+    });
   });
 });
