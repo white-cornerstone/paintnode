@@ -4,6 +4,7 @@ import {
   type WorkflowGraphRevision,
 } from './domain';
 import { affectedWorkflowNodes } from './execution';
+import { isFullWorkflowRunRecord } from './provenance';
 import {
   createCreatorNode,
   validateCreatorNodeConfig,
@@ -141,6 +142,20 @@ const candidateConfigKeys = new Set([
   'outputRelativePath',
 ]);
 
+const immutableIdentityConfigKeys = new Set([
+  'assetReferenceId',
+  'resultAssetReferenceId',
+  'reference',
+  'referenceId',
+  'assetId',
+  'resultAssetId',
+  'outputAssetId',
+  'relativePath',
+  'resultRelativePath',
+  'outputRelativePath',
+  'path',
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   try {
@@ -184,74 +199,50 @@ function addIssue(
   issues.push({ path, code, message });
 }
 
-function exactKeys(
+interface OwnDataSnapshot {
+  readonly values: ReadonlyMap<string, unknown>;
+}
+
+function snapshotOwnData(
   value: Record<string, unknown>,
+  path: string,
+  issues: WorkflowDirectorPatchIssue[],
+): OwnDataSnapshot {
+  const values = new Map<string, unknown>();
+  try {
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === 'symbol') {
+        addIssue(issues, path, 'SYMBOL_KEY', `${path} cannot contain symbol keys.`);
+        continue;
+      }
+      const name = String(key);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !('value' in descriptor)) {
+        addIssue(issues, `${path}.${name}`, 'INVALID_PROPERTY', `${path}.${name} must be an enumerable data property.`);
+        continue;
+      }
+      values.set(name, descriptor.value);
+    }
+  } catch {
+    addIssue(issues, path, 'INVALID_OBJECT', `${path} could not be inspected safely.`);
+    values.clear();
+  }
+  return { values };
+}
+
+function exactKeys(
+  snapshot: OwnDataSnapshot,
   path: string,
   allowed: readonly string[],
   required: readonly string[],
   issues: WorkflowDirectorPatchIssue[],
 ): void {
-  let keys: readonly PropertyKey[];
-  try {
-    keys = Reflect.ownKeys(value);
-  } catch {
-    addIssue(issues, path, 'INVALID_OBJECT', `${path} could not be inspected safely.`);
-    return;
-  }
-  for (const key of keys) {
-    if (typeof key === 'symbol') {
-      addIssue(issues, path, 'SYMBOL_KEY', `${path} cannot contain symbol keys.`);
-      continue;
-    }
-    const name = String(key);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !('value' in descriptor)) {
-      addIssue(issues, `${path}.${name}`, 'INVALID_PROPERTY', `${path}.${name} must be an enumerable data property.`);
-      continue;
-    }
+  for (const name of snapshot.values.keys()) {
     if (!allowed.includes(name)) addIssue(issues, `${path}.${name}`, 'EXTRA_KEY', `${path}.${name} is not supported.`);
   }
   for (const key of required) {
-    if (!Object.hasOwn(value, key)) addIssue(issues, `${path}.${key}`, 'MISSING_KEY', `${path}.${key} is required.`);
+    if (!snapshot.values.has(key)) addIssue(issues, `${path}.${key}`, 'MISSING_KEY', `${path}.${key} is required.`);
   }
-}
-
-function ownData(value: Record<string, unknown>, key: string): unknown {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor?.enumerable && 'value' in descriptor ? descriptor.value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function ownDataEntries(
-  value: Record<string, unknown>,
-  path: string,
-  issues: WorkflowDirectorPatchIssue[],
-): [string, unknown][] {
-  let keys: readonly PropertyKey[];
-  try {
-    keys = Reflect.ownKeys(value);
-  } catch {
-    addIssue(issues, path, 'INVALID_OBJECT', `${path} could not be inspected safely.`);
-    return [];
-  }
-  const entries: [string, unknown][] = [];
-  for (const key of keys) {
-    if (typeof key === 'symbol') {
-      addIssue(issues, path, 'SYMBOL_KEY', `${path} cannot contain symbol keys.`);
-      continue;
-    }
-    const name = String(key);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !('value' in descriptor)) {
-      addIssue(issues, `${path}.${name}`, 'INVALID_PROPERTY', `${path}.${name} must be an enumerable data property.`);
-      continue;
-    }
-    entries.push([name, descriptor.value]);
-  }
-  return entries;
 }
 
 function operationItems(
@@ -262,35 +253,46 @@ function operationItems(
     addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations must be an array.');
     return [];
   }
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
-  const length = lengthDescriptor && 'value' in lengthDescriptor && Number.isSafeInteger(lengthDescriptor.value)
-    ? lengthDescriptor.value as number
-    : 0;
+  let length = 0;
+  try {
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!lengthDescriptor || !('value' in lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value)) {
+      addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations must have a safe array length.');
+      return [];
+    }
+    length = lengthDescriptor.value as number;
+  } catch {
+    addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations could not be inspected safely.');
+    return [];
+  }
   if (length > 128) {
     addIssue(issues, 'operations', 'TOO_MANY_OPERATIONS', 'Director patches support at most 128 operations.');
     return [];
   }
   const items: { index: number; value: unknown }[] = [];
-  let keys: readonly PropertyKey[];
   try {
-    keys = Reflect.ownKeys(value);
+    const descriptors = new Map<string, PropertyDescriptor>();
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === 'length') continue;
+      if (typeof key === 'symbol' || !/^(0|[1-9]\d*)$/.test(String(key))) {
+        addIssue(issues, 'operations', 'INVALID_ARRAY_PROPERTY', 'operations cannot contain symbol or named properties.');
+        continue;
+      }
+      const name = String(key);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor) descriptors.set(name, descriptor);
+    }
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors.get(String(index));
+      if (!descriptor?.enumerable || !('value' in descriptor)) {
+        addIssue(issues, `operations[${index}]`, 'INVALID_ARRAY_ENTRY', `operations[${index}] must be an enumerable data property.`);
+        continue;
+      }
+      items.push({ index, value: descriptor.value });
+    }
   } catch {
     addIssue(issues, 'operations', 'INVALID_OPERATIONS', 'operations could not be inspected safely.');
     return [];
-  }
-  for (const key of keys) {
-    if (key === 'length') continue;
-    if (typeof key === 'symbol' || !/^(0|[1-9]\d*)$/.test(String(key))) {
-      addIssue(issues, 'operations', 'INVALID_ARRAY_PROPERTY', 'operations cannot contain symbol or named properties.');
-    }
-  }
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (!descriptor?.enumerable || !('value' in descriptor)) {
-      addIssue(issues, `operations[${index}]`, 'INVALID_ARRAY_ENTRY', `operations[${index}] must be an enumerable data property.`);
-      continue;
-    }
-    items.push({ index, value: descriptor.value });
   }
   return items;
 }
@@ -313,9 +315,10 @@ function point(value: unknown, path: string, issues: WorkflowDirectorPatchIssue[
     addIssue(issues, path, 'INVALID_POSITION', `${path} must be an object.`);
     return { x: 0, y: 0 };
   }
-  exactKeys(value, path, ['x', 'y'], ['x', 'y'], issues);
+  const snapshot = snapshotOwnData(value, path, issues);
+  exactKeys(snapshot, path, ['x', 'y'], ['x', 'y'], issues);
   const read = (key: 'x' | 'y') => {
-    const coordinate = ownData(value, key);
+    const coordinate = snapshot.values.get(key);
     if (typeof coordinate !== 'number' || !Number.isFinite(coordinate)) {
       addIssue(issues, `${path}.${key}`, 'INVALID_POSITION', `${path}.${key} must be a finite number.`);
       return 0;
@@ -334,10 +337,11 @@ function endpoint(
     addIssue(issues, path, 'INVALID_ENDPOINT', `${path} must be an object.`);
     return { nodeId: '', portId: '' };
   }
-  exactKeys(value, path, ['nodeId', 'portId'], ['nodeId', 'portId'], issues);
+  const snapshot = snapshotOwnData(value, path, issues);
+  exactKeys(snapshot, path, ['nodeId', 'portId'], ['nodeId', 'portId'], issues);
   return {
-    nodeId: requiredString(ownData(value, 'nodeId'), `${path}.nodeId`, issues),
-    portId: requiredString(ownData(value, 'portId'), `${path}.portId`, issues),
+    nodeId: requiredString(snapshot.values.get('nodeId'), `${path}.nodeId`, issues),
+    portId: requiredString(snapshot.values.get('portId'), `${path}.portId`, issues),
   };
 }
 
@@ -353,7 +357,8 @@ function config(
   }
   const permitted = allowed ?? allConfigKeys;
   const parsed: Record<string, unknown> = {};
-  for (const [key, setting] of ownDataEntries(value, path, issues)) {
+  const snapshot = snapshotOwnData(value, path, issues);
+  for (const [key, setting] of snapshot.values) {
     if (!permitted.has(key)) {
       addIssue(issues, `${path}.${key}`, 'UNKNOWN_CONFIG', `${path}.${key} is not an authoring setting supported by Director patches.`);
       continue;
@@ -388,30 +393,32 @@ function parseOperation(
     addIssue(issues, path, 'INVALID_OPERATION', `${path} must be an object.`);
     return null;
   }
-  const op = ownData(input, 'op');
+  const snapshot = snapshotOwnData(input, path, issues);
+  const op = snapshot.values.get('op');
   if (op === 'add-node') {
-    exactKeys(input, path, ['op', 'node'], ['op', 'node'], issues);
-    const node = ownData(input, 'node');
+    exactKeys(snapshot, path, ['op', 'node'], ['op', 'node'], issues);
+    const node = snapshot.values.get('node');
     if (!isRecord(node)) {
       addIssue(issues, `${path}.node`, 'INVALID_NODE', `${path}.node must be an object.`);
       return null;
     }
-    exactKeys(node, `${path}.node`, ['id', 'type', 'title', 'position', 'config'], ['id', 'type'], issues);
-    const rawType = ownData(node, 'type');
+    const nodeSnapshot = snapshotOwnData(node, `${path}.node`, issues);
+    exactKeys(nodeSnapshot, `${path}.node`, ['id', 'type', 'title', 'position', 'config'], ['id', 'type'], issues);
+    const rawType = nodeSnapshot.values.get('type');
     const type = creatorTypes.has(rawType as CreatorNodeType)
       ? rawType as CreatorNodeType
       : null;
     if (!type) addIssue(issues, `${path}.node.type`, 'UNKNOWN_NODE_TYPE', 'Unsupported creator node type.');
-    const rawConfig = ownData(node, 'config');
+    const rawConfig = nodeSnapshot.values.get('config');
     const parsedConfig = rawConfig === undefined
       ? undefined
       : config(rawConfig, `${path}.node.config`, issues, type ? configKeys[type] : new Set());
-    const title = ownData(node, 'title');
-    const position = ownData(node, 'position');
+    const title = nodeSnapshot.values.get('title');
+    const position = nodeSnapshot.values.get('position');
     return {
       op,
       node: {
-        id: requiredString(ownData(node, 'id'), `${path}.node.id`, issues),
+        id: requiredString(nodeSnapshot.values.get('id'), `${path}.node.id`, issues),
         type: type ?? 'output',
         ...(title === undefined
           ? {}
@@ -424,45 +431,46 @@ function parseOperation(
     };
   }
   if (op === 'remove-node') {
-    exactKeys(input, path, ['op', 'nodeId'], ['op', 'nodeId'], issues);
-    return { op, nodeId: requiredString(ownData(input, 'nodeId'), `${path}.nodeId`, issues) };
+    exactKeys(snapshot, path, ['op', 'nodeId'], ['op', 'nodeId'], issues);
+    return { op, nodeId: requiredString(snapshot.values.get('nodeId'), `${path}.nodeId`, issues) };
   }
   if (op === 'configure-node') {
-    exactKeys(input, path, ['op', 'nodeId', 'changes'], ['op', 'nodeId', 'changes'], issues);
-    const changes = config(ownData(input, 'changes'), `${path}.changes`, issues);
+    exactKeys(snapshot, path, ['op', 'nodeId', 'changes'], ['op', 'nodeId', 'changes'], issues);
+    const changes = config(snapshot.values.get('changes'), `${path}.changes`, issues);
     if (Object.keys(changes).length === 0) {
       addIssue(issues, `${path}.changes`, 'EMPTY_CONFIG', 'Configure operations require at least one authoring setting.');
     }
-    return { op, nodeId: requiredString(ownData(input, 'nodeId'), `${path}.nodeId`, issues), changes };
+    return { op, nodeId: requiredString(snapshot.values.get('nodeId'), `${path}.nodeId`, issues), changes };
   }
   if (op === 'move-node') {
-    exactKeys(input, path, ['op', 'nodeId', 'position'], ['op', 'nodeId', 'position'], issues);
+    exactKeys(snapshot, path, ['op', 'nodeId', 'position'], ['op', 'nodeId', 'position'], issues);
     return {
       op,
-      nodeId: requiredString(ownData(input, 'nodeId'), `${path}.nodeId`, issues),
-      position: point(ownData(input, 'position'), `${path}.position`, issues),
+      nodeId: requiredString(snapshot.values.get('nodeId'), `${path}.nodeId`, issues),
+      position: point(snapshot.values.get('position'), `${path}.position`, issues),
     };
   }
   if (op === 'add-edge') {
-    exactKeys(input, path, ['op', 'edge'], ['op', 'edge'], issues);
-    const edge = ownData(input, 'edge');
+    exactKeys(snapshot, path, ['op', 'edge'], ['op', 'edge'], issues);
+    const edge = snapshot.values.get('edge');
     if (!isRecord(edge)) {
       addIssue(issues, `${path}.edge`, 'INVALID_EDGE', `${path}.edge must be an object.`);
       return null;
     }
-    exactKeys(edge, `${path}.edge`, ['id', 'source', 'target'], ['id', 'source', 'target'], issues);
+    const edgeSnapshot = snapshotOwnData(edge, `${path}.edge`, issues);
+    exactKeys(edgeSnapshot, `${path}.edge`, ['id', 'source', 'target'], ['id', 'source', 'target'], issues);
     return {
       op,
       edge: {
-        id: requiredString(ownData(edge, 'id'), `${path}.edge.id`, issues),
-        source: endpoint(ownData(edge, 'source'), `${path}.edge.source`, issues),
-        target: endpoint(ownData(edge, 'target'), `${path}.edge.target`, issues),
+        id: requiredString(edgeSnapshot.values.get('id'), `${path}.edge.id`, issues),
+        source: endpoint(edgeSnapshot.values.get('source'), `${path}.edge.source`, issues),
+        target: endpoint(edgeSnapshot.values.get('target'), `${path}.edge.target`, issues),
       },
     };
   }
   if (op === 'remove-edge') {
-    exactKeys(input, path, ['op', 'edgeId'], ['op', 'edgeId'], issues);
-    return { op, edgeId: requiredString(ownData(input, 'edgeId'), `${path}.edgeId`, issues) };
+    exactKeys(snapshot, path, ['op', 'edgeId'], ['op', 'edgeId'], issues);
+    return { op, edgeId: requiredString(snapshot.values.get('edgeId'), `${path}.edgeId`, issues) };
   }
   addIssue(issues, `${path}.op`, 'UNSUPPORTED_OPERATION', 'Unsupported Director patch operation.');
   return null;
@@ -477,18 +485,20 @@ export function parseWorkflowDirectorPatch(input: unknown): {
     addIssue(issues, '<root>', 'INVALID_PATCH', 'Director patch must be an object.');
     return detachedFrozen({ value: null, issues });
   }
-  exactKeys(input, '<root>', ['version', 'sourceGraphRevision', 'summary', 'operations'], ['version', 'sourceGraphRevision', 'summary', 'operations'], issues);
-  if (ownData(input, 'version') !== WORKFLOW_DIRECTOR_PATCH_VERSION) {
+  const snapshot = snapshotOwnData(input, '<root>', issues);
+  exactKeys(snapshot, '<root>', ['version', 'sourceGraphRevision', 'summary', 'operations'], ['version', 'sourceGraphRevision', 'summary', 'operations'], issues);
+  if (snapshot.values.get('version') !== WORKFLOW_DIRECTOR_PATCH_VERSION) {
     addIssue(issues, 'version', 'UNSUPPORTED_VERSION', `Director patch version must be ${WORKFLOW_DIRECTOR_PATCH_VERSION}.`);
   }
   let sourceGraphRevision: WorkflowGraphRevision = { graphId: '', revision: 0 };
-  const rawSourceGraphRevision = ownData(input, 'sourceGraphRevision');
+  const rawSourceGraphRevision = snapshot.values.get('sourceGraphRevision');
   if (!isRecord(rawSourceGraphRevision)) {
     addIssue(issues, 'sourceGraphRevision', 'INVALID_REVISION', 'sourceGraphRevision must identify a graph and its content revision.');
   } else {
-    exactKeys(rawSourceGraphRevision, 'sourceGraphRevision', ['graphId', 'revision'], ['graphId', 'revision'], issues);
-    const graphId = requiredString(ownData(rawSourceGraphRevision, 'graphId'), 'sourceGraphRevision.graphId', issues);
-    const revision = ownData(rawSourceGraphRevision, 'revision');
+    const revisionSnapshot = snapshotOwnData(rawSourceGraphRevision, 'sourceGraphRevision', issues);
+    exactKeys(revisionSnapshot, 'sourceGraphRevision', ['graphId', 'revision'], ['graphId', 'revision'], issues);
+    const graphId = requiredString(revisionSnapshot.values.get('graphId'), 'sourceGraphRevision.graphId', issues);
+    const revision = revisionSnapshot.values.get('revision');
     if (!Number.isSafeInteger(revision) || (revision as number) < 0 || revision === Number.MAX_SAFE_INTEGER) {
       addIssue(issues, 'sourceGraphRevision.revision', 'INVALID_REVISION', 'sourceGraphRevision.revision must be a non-negative safe integer that can advance by one.');
     }
@@ -497,13 +507,13 @@ export function parseWorkflowDirectorPatch(input: unknown): {
       revision: Number.isSafeInteger(revision) && revision !== Number.MAX_SAFE_INTEGER ? revision as number : 0,
     };
   }
-  const operations = operationItems(ownData(input, 'operations'), issues)
+  const operations = operationItems(snapshot.values.get('operations'), issues)
     .map((operation) => parseOperation(operation.value, operation.index, issues))
     .filter((operation): operation is WorkflowDirectorPatchOperation => operation !== null);
   const value: WorkflowDirectorPatchV1 = {
     version: WORKFLOW_DIRECTOR_PATCH_VERSION,
     sourceGraphRevision,
-    summary: requiredString(ownData(input, 'summary'), 'summary', issues, 2_000),
+    summary: requiredString(snapshot.values.get('summary'), 'summary', issues, 2_000),
     operations,
   };
   return detachedFrozen({ value: issues.length === 0 ? value : null, issues });
@@ -527,24 +537,28 @@ function immutableCandidateIdentities(graph: WorkflowGraphV2): Set<string> {
     addIdentity(identities, reference.assetId);
     addIdentity(identities, reference.relativePath);
   }
-  for (const run of graph.runRecords as readonly unknown[]) {
-    if (!isRecord(run)) continue;
-    const outputs = ownData(run, 'outputs');
-    if (!Array.isArray(outputs)) continue;
-    for (const output of outputs) {
-      if (!isRecord(output)) continue;
-      addIdentity(identities, ownData(output, 'assetReferenceId'));
-      addIdentity(identities, ownData(output, 'assetId'));
-      addIdentity(identities, ownData(output, 'relativePath'));
+  for (const run of graph.runRecords) {
+    if (!isFullWorkflowRunRecord(run)) continue;
+    for (const output of run.outputs) {
+      addIdentity(identities, output.assetReferenceId);
+      addIdentity(identities, output.assetId);
+      addIdentity(identities, output.relativePath);
     }
   }
   return identities;
 }
 
-function containsString(value: unknown, candidates: ReadonlySet<string>): boolean {
-  if (typeof value === 'string') return candidates.has(value);
-  if (Array.isArray(value)) return value.some((item) => containsString(item, candidates));
-  if (isRecord(value)) return Object.values(value).some((item) => containsString(item, candidates));
+function containsImmutableIdentity(value: unknown, candidates: ReadonlySet<string>): boolean {
+  if (Array.isArray(value)) return value.some((item) => containsImmutableIdentity(item, candidates));
+  if (!isRecord(value)) return false;
+  for (const [key, item] of Object.entries(value)) {
+    if (immutableIdentityConfigKeys.has(key) && typeof item === 'string' && candidates.has(item)) {
+      return true;
+    }
+    if ((Array.isArray(item) || isRecord(item)) && containsImmutableIdentity(item, candidates)) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -798,7 +812,7 @@ export function createWorkflowDirectorPatchProposal(
   } catch (error) {
     return detachedFrozen({ proposal: null, issues: [issueFromError(error, 'graph')] });
   }
-  const immutableIdentities = immutableCandidateIdentities(inputGraph);
+  const immutableIdentities = immutableCandidateIdentities(before);
   const historyBefore = immutableHistorySnapshot(before);
   const working = new WorkflowGraphDomain(before);
 
@@ -821,7 +835,7 @@ export function createWorkflowDirectorPatchProposal(
         if (candidateProtected(node)) {
           throw new WorkflowDomainError('INVALID_GRAPH', `Node "${node.title}" cannot be removed because it owns an accepted candidate.`, { nodeId: node.id });
         }
-        if (containsString(node.config, immutableIdentities)) {
+        if (containsImmutableIdentity(node.config, immutableIdentities)) {
           throw new WorkflowDomainError('INVALID_GRAPH', `Node "${node.title}" cannot be removed because it references an immutable project asset or accepted candidate.`, { nodeId: node.id });
         }
         working.removeNode(node.id);
