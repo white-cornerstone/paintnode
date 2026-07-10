@@ -21,8 +21,14 @@ function node(id: string, x = 0): WorkflowNodeV2 {
     size: { width: 260, height: 180 },
     color: '#3a3c42',
     ports: {
-      inputs: [{ id: 'input', label: 'Input', dataType: 'prompt' }],
-      outputs: [{ id: 'output', label: 'Output', dataType: 'prompt' }],
+      inputs: [
+        { id: 'input', label: 'Input', dataType: 'prompt', multiple: true },
+        { id: 'alternate-input', label: 'Alternate input', dataType: 'prompt', multiple: true },
+      ],
+      outputs: [
+        { id: 'output', label: 'Output', dataType: 'prompt' },
+        { id: 'alternate-output', label: 'Alternate output', dataType: 'prompt' },
+      ],
     },
     config: { objective: id },
     runRecordIds: [],

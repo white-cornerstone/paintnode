@@ -82,6 +82,39 @@ describe('WorkflowGraph v2 schema', () => {
       config: {
         unsupportedType: 'future-relight-node',
         rawConfig: { strength: 0.75, nested: { mode: 'cinematic' } },
+        rawPorts: input.nodes[0].ports,
+      },
+    });
+  });
+
+  it('keeps the raw type, configuration, ports, and future fields recoverable for unsupported nodes', () => {
+    const input = graph();
+    const futureNode = {
+      ...input.nodes[0],
+      type: 'future-compositor',
+      ports: {
+        inputs: [{ id: 'scene', label: 'Scene', dataType: 'future-scene' }],
+        outputs: [{ id: 'result', label: 'Result', dataType: 'future-render' }],
+      },
+      config: { quality: 'ultra', nested: { passes: 4 } },
+      futureExecutionPolicy: { locality: 'device' },
+    };
+    input.nodes[0] = futureNode as never;
+
+    const result = parseWorkflowGraphV2(input);
+
+    expect(result.ok).toBe(true);
+    expect(result.value?.nodes[0]).toMatchObject({
+      type: 'unsupported',
+      ports: {
+        inputs: [{ id: 'scene', dataType: 'unknown' }],
+        outputs: [{ id: 'result', dataType: 'unknown' }],
+      },
+      config: {
+        unsupportedType: 'future-compositor',
+        rawConfig: futureNode.config,
+        rawPorts: futureNode.ports,
+        rawNode: futureNode,
       },
     });
   });

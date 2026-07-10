@@ -21,6 +21,15 @@ export type WorkflowDomainErrorCode =
   | 'NODE_NOT_FOUND'
   | 'EDGE_NOT_FOUND'
   | 'ENDPOINT_NODE_NOT_FOUND'
+  | 'DUPLICATE_PORT_ID'
+  | 'SOURCE_PORT_NOT_FOUND'
+  | 'TARGET_PORT_NOT_FOUND'
+  | 'UNSUPPORTED_CONNECTION'
+  | 'INCOMPATIBLE_PORT_TYPES'
+  | 'DUPLICATE_CONNECTION'
+  | 'TARGET_PORT_OCCUPIED'
+  | 'SELF_LINK'
+  | 'CYCLE_DETECTED'
   | 'RUN_RECORD_NODE_NOT_FOUND'
   | 'RUN_RECORD_NOT_FOUND'
   | 'RUN_RECORD_LINK_MISSING'
@@ -70,6 +79,31 @@ export interface WorkflowNodeWithEdgeResult {
   node: WorkflowNodeV2;
   edge: WorkflowEdgeV2;
 }
+
+export type WorkflowConnectionRejectionCode =
+  | 'ENDPOINT_NODE_NOT_FOUND'
+  | 'SOURCE_PORT_NOT_FOUND'
+  | 'TARGET_PORT_NOT_FOUND'
+  | 'UNSUPPORTED_CONNECTION'
+  | 'INCOMPATIBLE_PORT_TYPES'
+  | 'DUPLICATE_CONNECTION'
+  | 'TARGET_PORT_OCCUPIED'
+  | 'SELF_LINK'
+  | 'CYCLE_DETECTED';
+
+export interface WorkflowConnectionAccepted {
+  ok: true;
+}
+
+export interface WorkflowConnectionRejected {
+  ok: false;
+  code: WorkflowConnectionRejectionCode;
+  message: string;
+  details: Readonly<Record<string, unknown>>;
+}
+
+export type WorkflowConnectionValidation = WorkflowConnectionAccepted | WorkflowConnectionRejected;
+export type WorkflowConnectionEndpoints = Pick<WorkflowEdgeV2, 'source' | 'target'>;
 
 let fallbackIdSequence = 0;
 
@@ -218,23 +252,46 @@ function assertValidSize(size: WorkflowSize, nodeId: string): void {
 
 function assertUniqueIds(graph: WorkflowGraphV2): void {
   const nodeIds = new Set<string>();
-  for (const node of graph.nodes) {
+  for (const [nodeIndex, node] of graph.nodes.entries()) {
     if (nodeIds.has(node.id)) {
       throw new WorkflowDomainError('DUPLICATE_NODE_ID', `A node with ID "${node.id}" already exists.`, {
         nodeId: node.id,
+        nodeIndex,
       });
     }
     nodeIds.add(node.id);
   }
 
   const edgeIds = new Set<string>();
-  for (const edge of graph.edges) {
+  for (const [edgeIndex, edge] of graph.edges.entries()) {
     if (edgeIds.has(edge.id)) {
       throw new WorkflowDomainError('DUPLICATE_EDGE_ID', `An edge with ID "${edge.id}" already exists.`, {
         edgeId: edge.id,
+        edgeIndex,
       });
     }
     edgeIds.add(edge.id);
+  }
+}
+
+function assertUniquePortIds(graph: WorkflowGraphV2): void {
+  for (const node of graph.nodes) {
+    for (const [direction, ports] of [
+      ['input', node.ports.inputs],
+      ['output', node.ports.outputs],
+    ] as const) {
+      const ids = new Set<string>();
+      for (const port of ports) {
+        if (ids.has(port.id)) {
+          throw new WorkflowDomainError(
+            'DUPLICATE_PORT_ID',
+            `Node "${node.title}" ${direction} port IDs must be unique; "${port.id}" is repeated.`,
+            { nodeId: node.id, direction, portId: port.id },
+          );
+        }
+        ids.add(port.id);
+      }
+    }
   }
 }
 
@@ -311,22 +368,176 @@ function assertReferenceInvariants(graph: WorkflowGraphV2): void {
   }
 }
 
-function assertEndpointNodes(graph: WorkflowGraphV2): void {
-  const nodeIds = new Set(graph.nodes.map((node) => node.id));
-  for (const edge of graph.edges) {
-    for (const [endpointName, endpoint] of [
-      ['source', edge.source],
-      ['target', edge.target],
-    ] as const) {
-      if (!nodeIds.has(endpoint.nodeId)) {
-        throw new WorkflowDomainError(
-          'ENDPOINT_NODE_NOT_FOUND',
-          `The ${endpointName} node "${endpoint.nodeId}" for edge "${edge.id}" does not exist.`,
-          { edgeId: edge.id, endpoint: endpointName, nodeId: endpoint.nodeId },
-        );
+function rejected(
+  code: WorkflowConnectionRejectionCode,
+  message: string,
+  details: Readonly<Record<string, unknown>>,
+): WorkflowConnectionRejected {
+  return { ok: false, code, message, details };
+}
+
+function connectionTouchesUnsupported(
+  graph: WorkflowGraphV2,
+  endpoints: WorkflowConnectionEndpoints,
+): boolean {
+  return graph.nodes.some((node) => (
+    node.type === 'unsupported'
+    && (node.id === endpoints.source.nodeId || node.id === endpoints.target.nodeId)
+  ));
+}
+
+function hasDependencyPath(
+  graph: WorkflowGraphV2,
+  fromNodeId: string,
+  toNodeId: string,
+  excludedEdgeId?: string,
+): boolean {
+  const visited = new Set<string>();
+  const pending = [fromNodeId];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current === toNodeId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const edge of graph.edges) {
+      if (
+        edge.id !== excludedEdgeId
+        && !connectionTouchesUnsupported(graph, edge)
+        && edge.source.nodeId === current
+      ) {
+        pending.push(edge.target.nodeId);
       }
     }
   }
+  return false;
+}
+
+function validateConnectionInGraph(
+  graph: WorkflowGraphV2,
+  endpoints: WorkflowConnectionEndpoints,
+  options: {
+    excludedEdgeId?: string;
+    allowDormantUnsupported?: boolean;
+  } = {},
+): WorkflowConnectionValidation {
+  const sourceNode = graph.nodes.find((node) => node.id === endpoints.source.nodeId);
+  if (!sourceNode) {
+    return rejected(
+      'ENDPOINT_NODE_NOT_FOUND',
+      `The source node "${endpoints.source.nodeId}" does not exist.`,
+      { endpoint: 'source', nodeId: endpoints.source.nodeId },
+    );
+  }
+  const targetNode = graph.nodes.find((node) => node.id === endpoints.target.nodeId);
+  if (!targetNode) {
+    return rejected(
+      'ENDPOINT_NODE_NOT_FOUND',
+      `The target node "${endpoints.target.nodeId}" does not exist.`,
+      { endpoint: 'target', nodeId: endpoints.target.nodeId },
+    );
+  }
+  if (sourceNode.type === 'unsupported' || targetNode.type === 'unsupported') {
+    if (options.allowDormantUnsupported) return { ok: true };
+    return rejected(
+      'UNSUPPORTED_CONNECTION',
+      `Unsupported workflow nodes cannot be connected until PaintNode understands their port contract.`,
+      { sourceNodeType: sourceNode.type, targetNodeType: targetNode.type },
+    );
+  }
+  if (sourceNode.id === targetNode.id) {
+    return rejected(
+      'SELF_LINK',
+      `Node "${sourceNode.title}" cannot connect to itself.`,
+      { nodeId: sourceNode.id },
+    );
+  }
+
+  const sourcePort = sourceNode.ports.outputs.find((port) => port.id === endpoints.source.portId);
+  if (!sourcePort) {
+    const wrongDirection = sourceNode.ports.inputs.some((port) => port.id === endpoints.source.portId);
+    return rejected(
+      'SOURCE_PORT_NOT_FOUND',
+      wrongDirection
+        ? `Source node "${sourceNode.title}" port "${endpoints.source.portId}" is not an output port.`
+        : `Source node "${sourceNode.title}" has no "${endpoints.source.portId}" output port.`,
+      { nodeId: sourceNode.id, portId: endpoints.source.portId, direction: 'output' },
+    );
+  }
+  const targetPort = targetNode.ports.inputs.find((port) => port.id === endpoints.target.portId);
+  if (!targetPort) {
+    const wrongDirection = targetNode.ports.outputs.some((port) => port.id === endpoints.target.portId);
+    return rejected(
+      'TARGET_PORT_NOT_FOUND',
+      wrongDirection
+        ? `Target node "${targetNode.title}" port "${endpoints.target.portId}" is not an input port.`
+        : `Target node "${targetNode.title}" has no "${endpoints.target.portId}" input port.`,
+      { nodeId: targetNode.id, portId: endpoints.target.portId, direction: 'input' },
+    );
+  }
+
+  if (sourcePort.dataType === 'unknown' || targetPort.dataType === 'unknown') {
+    return rejected(
+      'UNSUPPORTED_CONNECTION',
+      `Unknown workflow port types cannot be connected safely.`,
+      { sourceType: sourcePort.dataType, targetType: targetPort.dataType },
+    );
+  }
+  if (sourcePort.dataType !== targetPort.dataType) {
+    return rejected(
+      'INCOMPATIBLE_PORT_TYPES',
+      `The ${sourcePort.dataType} output cannot connect to the ${targetPort.dataType} input.`,
+      { sourceType: sourcePort.dataType, targetType: targetPort.dataType },
+    );
+  }
+
+  const existingEdges = graph.edges.filter((edge) => (
+    edge.id !== options.excludedEdgeId && !connectionTouchesUnsupported(graph, edge)
+  ));
+  if (existingEdges.some((edge) => (
+    endpointEquals(edge.source, endpoints.source) && endpointEquals(edge.target, endpoints.target)
+  ))) {
+    return rejected(
+      'DUPLICATE_CONNECTION',
+      `"${sourceNode.title}" and "${targetNode.title}" are already connected through these ports.`,
+      { source: endpoints.source, target: endpoints.target },
+    );
+  }
+  if (!targetPort.multiple && existingEdges.some((edge) => endpointEquals(edge.target, endpoints.target))) {
+    return rejected(
+      'TARGET_PORT_OCCUPIED',
+      `The "${targetPort.label}" input on "${targetNode.title}" accepts only one connection.`,
+      { target: endpoints.target },
+    );
+  }
+  if (hasDependencyPath(graph, targetNode.id, sourceNode.id, options.excludedEdgeId)) {
+    return rejected(
+      'CYCLE_DETECTED',
+      `Connecting "${sourceNode.title}" to "${targetNode.title}" would create a cycle.`,
+      { sourceNodeId: sourceNode.id, targetNodeId: targetNode.id },
+    );
+  }
+  return { ok: true };
+}
+
+function throwConnectionRejection(
+  validation: WorkflowConnectionValidation,
+  context: Readonly<Record<string, unknown>> = {},
+): void {
+  if (!validation.ok) {
+    throw new WorkflowDomainError(validation.code, validation.message, { ...validation.details, ...context });
+  }
+}
+
+function assertConnections(graph: WorkflowGraphV2): void {
+  graph.edges.forEach((edge, edgeIndex) => {
+    throwConnectionRejection(
+      validateConnectionInGraph(graph, edge, {
+        excludedEdgeId: edge.id,
+        allowDormantUnsupported: true,
+      }),
+      { edgeId: edge.id, edgeIndex },
+    );
+  });
 }
 
 function normalizeGraph(graph: WorkflowGraphV2): WorkflowGraphV2 {
@@ -344,6 +555,7 @@ function normalizeGraph(graph: WorkflowGraphV2): WorkflowGraphV2 {
 
   const normalized = normalizeNegativeZero(parsed.value);
   assertUniqueIds(normalized);
+  assertUniquePortIds(normalized);
   // Parsing intentionally normalizes optional undefined fields. The parsed
   // graph must then round-trip through JSON without changing numeric identity
   // (including the otherwise lossy negative-zero case).
@@ -353,7 +565,7 @@ function normalizeGraph(graph: WorkflowGraphV2): WorkflowGraphV2 {
     assertFinitePoint(node.position, node.id);
     assertValidSize(node.size, node.id);
   }
-  assertEndpointNodes(normalized);
+  assertConnections(normalized);
   return deepFreeze(normalized);
 }
 
@@ -414,6 +626,10 @@ export class WorkflowGraphDomain {
     return this.#graph.edges.some(
       (edge) => edge.source.nodeId === sourceNodeId && edge.target.nodeId === targetNodeId,
     );
+  }
+
+  validateConnection(endpoints: WorkflowConnectionEndpoints): WorkflowConnectionValidation {
+    return validateConnectionInGraph(this.#graph, endpoints);
   }
 
   addNode(draft: WorkflowNodeDraft): WorkflowNodeV2 {
@@ -526,8 +742,7 @@ export class WorkflowGraphDomain {
       throw new WorkflowDomainError('DUPLICATE_EDGE_ID', `An edge with ID "${id}" already exists.`, { edgeId: id });
     }
     const candidate = normalizeNegativeZero<WorkflowEdgeV2>({ ...draft, id });
-    this.assertEndpoint(candidate.source, id, 'source');
-    this.assertEndpoint(candidate.target, id, 'target');
+    throwConnectionRejection(this.validateConnection(candidate));
     this.commit({ ...this.#graph, edges: [...this.#graph.edges, candidate] });
     return this.#graph.edges[this.#graph.edges.length - 1];
   }
@@ -535,9 +750,8 @@ export class WorkflowGraphDomain {
   updateEdge(edgeId: string, endpoints: Pick<WorkflowEdgeV2, 'source' | 'target'>): void {
     const edge = this.requireEdge(edgeId);
     const normalizedEndpoints = normalizeNegativeZero(endpoints);
-    this.assertEndpoint(normalizedEndpoints.source, edgeId, 'source');
-    this.assertEndpoint(normalizedEndpoints.target, edgeId, 'target');
     if (endpointEquals(edge.source, normalizedEndpoints.source) && endpointEquals(edge.target, normalizedEndpoints.target)) return;
+    throwConnectionRejection(validateConnectionInGraph(this.#graph, normalizedEndpoints, { excludedEdgeId: edgeId }));
     this.commit({
       ...this.#graph,
       edges: this.#graph.edges.map((item) => item.id === edgeId ? { ...item, ...normalizedEndpoints } : item),
@@ -581,20 +795,6 @@ export class WorkflowGraphDomain {
       throw new WorkflowDomainError('EDGE_NOT_FOUND', `Edge "${edgeId}" does not exist.`, { edgeId });
     }
     return edge;
-  }
-
-  private assertEndpoint(
-    endpoint: WorkflowEdgeEndpoint,
-    edgeId: string,
-    endpointName: 'source' | 'target',
-  ): void {
-    if (!this.#graph.nodes.some((node) => node.id === endpoint.nodeId)) {
-      throw new WorkflowDomainError(
-        'ENDPOINT_NODE_NOT_FOUND',
-        `The ${endpointName} node "${endpoint.nodeId}" for edge "${edgeId}" does not exist.`,
-        { edgeId, endpoint: endpointName, nodeId: endpoint.nodeId },
-      );
-    }
   }
 
   private commit(candidate: WorkflowGraphV2): void {

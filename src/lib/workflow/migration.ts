@@ -6,6 +6,7 @@ import {
   type WorkflowNodePort,
   type WorkflowNodeV2,
 } from './schema';
+import { WorkflowDomainError, WorkflowGraphDomain } from './domain';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -277,6 +278,21 @@ function migrateEdges(source: UnknownRecord, nodes: WorkflowNodeV2[]): WorkflowE
   ];
 }
 
+function retainValidLegacyEdges(graph: WorkflowGraphV2, candidates: WorkflowEdgeV2[]): WorkflowEdgeV2[] {
+  const domain = new WorkflowGraphDomain({ ...graph, edges: [] });
+  for (const candidate of candidates) {
+    try {
+      domain.addEdge(candidate);
+    } catch (error) {
+      // WorkflowFile v1 did not enforce direction, port compatibility,
+      // cardinality, or acyclicity. Keep valid dependencies in source order
+      // and deterministically discard legacy links that cannot exist in v2.
+      if (!(error instanceof WorkflowDomainError)) throw error;
+    }
+  }
+  return domain.graph.edges.map((edge) => structuredClone(edge));
+}
+
 export function migrateWorkflowFileV1(input: unknown): WorkflowGraphV2 {
   const source = record(input, 'workflow');
   if (source.version !== 1) {
@@ -301,7 +317,7 @@ export function migrateWorkflowFileV1(input: unknown): WorkflowGraphV2 {
   const outputs = rawOutputs.map((output, index) => migrateOutputNode(output, index, assetReferences));
   const nodes = [...inputs, direction, ...outputs];
 
-  return {
+  const graph: WorkflowGraphV2 = {
     version: WORKFLOW_GRAPH_VERSION,
     id: `workflow-${slug(name)}`,
     metadata: {
@@ -315,8 +331,12 @@ export function migrateWorkflowFileV1(input: unknown): WorkflowGraphV2 {
       zoom: numberValue(source.zoom, 1),
     },
     nodes,
-    edges: migrateEdges(source, nodes),
+    edges: [],
     assetReferences,
     runRecords: [],
   };
+  graph.edges = retainValidLegacyEdges(graph, migrateEdges(source, nodes));
+  // Verify the final migrated result through the same strict constructor used
+  // by v2 loading before exposing it to callers.
+  return structuredClone(new WorkflowGraphDomain(graph).graph);
 }

@@ -225,6 +225,7 @@ function parseNode(value: unknown, index: number, issues: WorkflowValidationIssu
   const knownType = typeof rawType === 'string' && nodeTypes.has(rawType as WorkflowNodeType);
   const type: WorkflowNodeType = knownType ? rawType as WorkflowNodeType : 'unsupported';
   const rawConfig = isRecord(value.config) ? clonePersistedValue(value.config) : {};
+  const rawPorts = isRecord(value.ports) ? clonePersistedValue(value.ports) : {};
   if (!knownType) {
     issues.push({
       path: `${path}.type`,
@@ -275,7 +276,12 @@ function parseNode(value: unknown, index: number, issues: WorkflowValidationIssu
     },
     config: knownType
       ? rawConfig
-      : { unsupportedType: String(rawType ?? 'unknown'), rawConfig },
+      : {
+          unsupportedType: String(rawType ?? 'unknown'),
+          rawConfig,
+          rawPorts,
+          rawNode: clonePersistedValue(value),
+        },
     runRecordIds,
   };
 }
