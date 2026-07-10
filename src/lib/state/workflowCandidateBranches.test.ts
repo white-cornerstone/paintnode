@@ -145,6 +145,31 @@ describe('WorkflowStore candidate branches', () => {
     expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('eligible');
     expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
 
+    let releaseConcurrentVerification!: () => void;
+    let concurrentVerificationStarted!: () => void;
+    const concurrentStarted = new Promise<void>((resolve) => { concurrentVerificationStarted = resolve; });
+    const concurrentGate = new Promise<void>((resolve) => { releaseConcurrentVerification = resolve; });
+    const concurrentOptions: WorkflowStoreRunOptions = {
+      ...runOptions,
+      resolveAsset: async (asset) => {
+        if (asset.id === generated.id) {
+          concurrentVerificationStarted();
+          await concurrentGate;
+        }
+        return runOptions.resolveAsset(asset);
+      },
+    };
+    const concurrentVerification = workflow.refreshReviewState(reviewId, concurrentOptions);
+    await concurrentStarted;
+    const concurrentBranches = await workflow.runCandidateBranches('output-square', runOptions, {
+      branchGroupId: 'concurrent-verification-group', count: 2, maxConcurrency: 1,
+    });
+    expect(concurrentBranches.committed).toBe(true);
+    expect(workflow.candidateBranchGroups('transform-generate-square'))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: 'concurrent-verification-group' })]));
+    releaseConcurrentVerification();
+    await expect(concurrentVerification).rejects.toThrow(/changed/i);
+
     let releaseProviderA!: () => void;
     let providerAStarted!: () => void;
     const providerAStartedPromise = new Promise<void>((resolve) => { providerAStarted = resolve; });

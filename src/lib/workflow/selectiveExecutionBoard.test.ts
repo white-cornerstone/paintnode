@@ -58,5 +58,6 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('.focus()');
     expect(boardSource).toContain('requireVerifiedReview: true');
     expect(boardSource).toContain('reviewResolutions');
+    expect(boardSource).toContain('untrack(() => workflow.refreshReviewState');
   });
 });

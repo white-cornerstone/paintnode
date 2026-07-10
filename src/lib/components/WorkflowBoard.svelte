@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
@@ -1657,11 +1657,11 @@
     const epoch = ++reviewVerificationEpoch;
     if (!ready || reviewNodeIds.length === 0) return;
     void (async () => {
-      const context = createWorkflowExecutionContext(createRunId());
+      const context = untrack(() => createWorkflowExecutionContext(createRunId()));
       void assetIdentity;
       for (const reviewNodeId of reviewNodeIds) {
         try {
-          await workflow.refreshReviewState(reviewNodeId, context.options);
+          await untrack(() => workflow.refreshReviewState(reviewNodeId, context.options));
         } catch {
           // The node remains recoverably stale/unavailable until a current snapshot verifies.
         }
