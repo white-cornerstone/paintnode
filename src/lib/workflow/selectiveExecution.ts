@@ -44,11 +44,24 @@ export interface WorkflowNodeExecutionDisposition {
   reason?: string;
 }
 
+export interface WorkflowExecutionRestriction {
+  nodeId: string;
+  kind: 'not-required' | 'unavailable';
+  reason?: string;
+}
+
+declare const workflowExecutionRestrictionsBrand: unique symbol;
+export interface WorkflowExecutionRestrictions {
+  readonly [workflowExecutionRestrictionsBrand]: true;
+}
+
+const trustedExecutionRestrictions = new WeakMap<object, ReadonlyMap<string, WorkflowExecutionRestriction>>();
+
 export interface WorkflowSelectiveExecutionRequest {
   mode: WorkflowSelectiveRunMode;
   nodeId: string;
   materialKeys: Readonly<Record<string, string>>;
-  executionDisposition?: (node: Readonly<WorkflowNodeV2>) => WorkflowNodeExecutionDisposition;
+  executionRestrictions?: WorkflowExecutionRestrictions;
   isRunRecordReusable?: (record: Readonly<WorkflowRunRecordV1>) => boolean;
 }
 
@@ -184,31 +197,64 @@ export function registryExecutionDisposition(node: Readonly<WorkflowNodeV2>): Wo
   return { kind: 'available' };
 }
 
-function snapshotExecutionDisposition(value: unknown): WorkflowNodeExecutionDisposition {
-  if (typeof value !== 'object' || value === null) throw new Error('Execution disposition must be plain data.');
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new Error('Execution disposition must be plain data.');
+export function createWorkflowExecutionRestrictions(
+  input: readonly WorkflowExecutionRestriction[],
+): WorkflowExecutionRestrictions {
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone(input);
+  } catch {
+    throw new WorkflowExecutionError(
+      'INVALID_ARGUMENT',
+      'Execution restrictions must be detached plain data.',
+    );
   }
-  const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key !== 'string' || (key !== 'kind' && key !== 'reason'))
-    || !keys.includes('kind')) {
-    throw new Error('Execution disposition must contain only kind and optional reason.');
+  if (!Array.isArray(snapshot)) {
+    throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Execution restrictions must be an array.');
   }
-  const kindDescriptor = Object.getOwnPropertyDescriptor(value, 'kind');
-  if (!kindDescriptor?.enumerable || !('value' in kindDescriptor)
-    || typeof kindDescriptor.value !== 'string'
-    || !['not-required', 'available', 'unavailable'].includes(kindDescriptor.value)) {
-    throw new Error('Execution disposition kind must be plain supported data.');
+  const restrictions = new Map<string, WorkflowExecutionRestriction>();
+  for (const value of snapshot) {
+    if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
+      throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Each execution restriction must be a plain object.');
+    }
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== 'string' || !['nodeId', 'kind', 'reason'].includes(key))
+      || !keys.includes('nodeId') || !keys.includes('kind')) {
+      throw new WorkflowExecutionError(
+        'INVALID_ARGUMENT',
+        'Execution restrictions contain unsupported fields.',
+      );
+    }
+    const descriptors = Object.fromEntries((keys as string[]).map((key) => [
+      key,
+      Object.getOwnPropertyDescriptor(value, key),
+    ]));
+    if (Object.values(descriptors).some((descriptor) => !descriptor?.enumerable || !('value' in descriptor))) {
+      throw new WorkflowExecutionError('INVALID_ARGUMENT', 'Execution restrictions must contain own data fields.');
+    }
+    const nodeId = descriptors.nodeId?.value;
+    const kind = descriptors.kind?.value;
+    const reason = descriptors.reason?.value;
+    if (typeof nodeId !== 'string' || nodeId.trim().length === 0
+      || (kind !== 'not-required' && kind !== 'unavailable')
+      || (keys.includes('reason') && typeof reason !== 'string')) {
+      throw new WorkflowExecutionError(
+        'INVALID_ARGUMENT',
+        'Execution restrictions may only demote or disable a named node.',
+      );
+    }
+    if (restrictions.has(nodeId)) {
+      throw new WorkflowExecutionError('INVALID_ARGUMENT', `Execution restriction for node "${nodeId}" is duplicated.`);
+    }
+    restrictions.set(nodeId, deepFreeze({
+      nodeId,
+      kind,
+      ...(typeof reason === 'string' ? { reason } : {}),
+    }));
   }
-  const kind = kindDescriptor.value as WorkflowNodeExecutionDisposition['kind'];
-  if (!keys.includes('reason')) return { kind };
-  const reasonDescriptor = Object.getOwnPropertyDescriptor(value, 'reason');
-  if (!reasonDescriptor?.enumerable || !('value' in reasonDescriptor)
-    || typeof reasonDescriptor.value !== 'string') {
-    throw new Error('Execution disposition reason must be plain string data.');
-  }
-  return { kind, reason: reasonDescriptor.value };
+  const handle = Object.freeze(Object.create(null)) as WorkflowExecutionRestrictions;
+  trustedExecutionRestrictions.set(handle, restrictions);
+  return handle;
 }
 
 function safeFailure(
@@ -294,6 +340,15 @@ function hasValidResult(result: unknown): result is WorkflowExecutionResult {
   return true;
 }
 
+function snapshotExecutorResult(result: unknown): Readonly<WorkflowExecutionResult> | null {
+  try {
+    const snapshot = detachedFrozen(result);
+    return hasValidResult(snapshot) ? snapshot : null;
+  } catch {
+    return null;
+  }
+}
+
 export function planSelectiveWorkflowExecution(
   inputGraph: WorkflowGraphV2,
   request: WorkflowSelectiveExecutionRequest,
@@ -305,6 +360,36 @@ export function planSelectiveWorkflowExecution(
   }
   const graph = new WorkflowGraphDomain(inputGraph).graph;
   requireNode(graph, request.nodeId);
+  let restrictions: ReadonlyMap<string, WorkflowExecutionRestriction> = new Map();
+  try {
+    const restrictionHandle = request.executionRestrictions;
+    if (restrictionHandle !== undefined) {
+      const trusted = trustedExecutionRestrictions.get(restrictionHandle);
+      if (!trusted) {
+        throw new WorkflowExecutionError(
+          'INVALID_ARGUMENT',
+          'Execution restrictions were not created by the trusted workflow boundary.',
+        );
+      }
+      restrictions = trusted;
+    }
+  } catch (error) {
+    if (error instanceof WorkflowExecutionError) throw error;
+    throw new WorkflowExecutionError(
+      'INVALID_ARGUMENT',
+      'Execution restrictions could not be read safely.',
+    );
+  }
+  const graphNodeIds = new Set(graph.nodes.map((node) => node.id));
+  for (const nodeId of restrictions.keys()) {
+    if (!graphNodeIds.has(nodeId)) {
+      throw new WorkflowExecutionError(
+        'INVALID_ARGUMENT',
+        `Execution restriction references missing node "${nodeId}".`,
+        { nodeId },
+      );
+    }
+  }
   const edges = activeEdges(graph);
 
   const affected = new Set<string>([request.nodeId]);
@@ -334,16 +419,11 @@ export function planSelectiveWorkflowExecution(
     if (!required.has(node.id)) continue;
     const registryDisposition = registryExecutionDisposition(node);
     let disposition = registryDisposition;
-    if (request.executionDisposition) {
-      try {
-        const restriction = snapshotExecutionDisposition(request.executionDisposition(detachedFrozen(node)));
-        if (registryDisposition.kind === 'available') disposition = restriction;
-        else if (registryDisposition.kind === 'not-required' && restriction.kind === 'unavailable') {
-          disposition = restriction;
-        }
-      } catch {
-        disposition = { kind: 'unavailable', reason: 'Execution availability could not be determined safely.' };
-      }
+    const restriction = restrictions.get(node.id);
+    if (restriction && registryDisposition.kind === 'available') {
+      disposition = { kind: restriction.kind, ...(restriction.reason ? { reason: restriction.reason } : {}) };
+    } else if (restriction && registryDisposition.kind === 'not-required' && restriction.kind === 'unavailable') {
+      disposition = { kind: restriction.kind, ...(restriction.reason ? { reason: restriction.reason } : {}) };
     }
     dispositions.set(node.id, disposition);
   }
@@ -683,16 +763,12 @@ export async function executeSelectiveWorkflowPlan(
       failures.set(settled.nodeId, safeFailure(settled.error, configuration.sanitizeFailure));
       continue;
     }
-    let structurallyValid = false;
-    try {
-      structurallyValid = hasValidResult(settled.result)
-        && settled.result.cacheKey === plan.materialKeys[settled.nodeId];
-    } catch {
-      structurallyValid = false;
-    }
+    const resultSnapshot = snapshotExecutorResult(settled.result);
+    const structurallyValid = resultSnapshot !== null
+      && resultSnapshot.cacheKey === plan.materialKeys[settled.nodeId];
     let ownershipValid = false;
-    if (structurallyValid && settled.result) {
-      const hasCollision = settled.result.outputIds.some((outputId) => {
+    if (structurallyValid && resultSnapshot) {
+      const hasCollision = resultSnapshot.outputIds.some((outputId) => {
         const owner = outputOwners.get(outputId);
         return owner !== undefined && owner !== settled.nodeId;
       });
@@ -701,8 +777,8 @@ export async function executeSelectiveWorkflowPlan(
           ownershipValid = configuration.validateResultOwnership(detachedFrozen({
             nodeId: settled.nodeId,
             result: {
-              cacheKey: settled.result.cacheKey,
-              outputIds: [...settled.result.outputIds],
+              cacheKey: resultSnapshot.cacheKey,
+              outputIds: [...resultSnapshot.outputIds],
             },
           })) === true;
         } catch {
@@ -710,7 +786,7 @@ export async function executeSelectiveWorkflowPlan(
         }
       }
     }
-    if (!structurallyValid || !ownershipValid || !settled.result) {
+    if (!structurallyValid || !ownershipValid || !resultSnapshot) {
       failures.set(settled.nodeId, {
         code: 'INVALID_EXECUTOR_RESULT',
         message: `Executor result for node "${settled.nodeId}" failed material, shape, identity, or ownership validation.`,
@@ -718,8 +794,8 @@ export async function executeSelectiveWorkflowPlan(
       continue;
     }
     const projectedResult: WorkflowExecutionResult = {
-      cacheKey: settled.result.cacheKey,
-      outputIds: [...settled.result.outputIds],
+      cacheKey: resultSnapshot.cacheKey,
+      outputIds: [...resultSnapshot.outputIds],
     };
     results.set(settled.nodeId, projectedResult);
     projectedResult.outputIds.forEach((outputId) => outputOwners.set(outputId, settled.nodeId));

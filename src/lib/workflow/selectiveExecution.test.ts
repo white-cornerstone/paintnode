@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowExecutionResult } from './execution';
 import {
+  createWorkflowExecutionRestrictions,
   executeSelectiveWorkflowPlan,
   planSelectiveWorkflowExecution,
   type WorkflowSelectiveExecutionPlan,
@@ -135,6 +136,37 @@ async function execute(plan: WorkflowSelectiveExecutionPlan, calls: string[]): P
 }
 
 describe('selective workflow planning', () => {
+  it('rejects a proxy around trusted execution restrictions without invoking reflection traps', () => {
+    const input = graph();
+    const trusted = createWorkflowExecutionRestrictions([{
+      nodeId: 'transform-a',
+      kind: 'unavailable',
+      reason: 'Disabled for this run.',
+    }]);
+    const traps = { getPrototypeOf: 0, ownKeys: 0, getOwnPropertyDescriptor: 0 };
+    const hostile = new Proxy(trusted, {
+      getPrototypeOf: () => {
+        traps.getPrototypeOf += 1;
+        throw new Error('/private/getPrototypeOf auth=secret');
+      },
+      ownKeys: () => {
+        traps.ownKeys += 1;
+        throw new Error('/private/ownKeys auth=secret');
+      },
+      getOwnPropertyDescriptor: () => {
+        traps.getOwnPropertyDescriptor += 1;
+        throw new Error('/private/descriptor auth=secret');
+      },
+    });
+
+    expect(() => planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'output',
+      materialKeys: keys(input),
+      executionRestrictions: hostile,
+    })).toThrow('Execution restrictions were not created by the trusted workflow boundary.');
+    expect(traps).toEqual({ getPrototypeOf: 0, ownKeys: 0, getOwnPropertyDescriptor: 0 });
+  });
   it('runs only the selected node after satisfying its required upstream closure from exact #77 records', async () => {
     const input = graph();
     for (const nodeId of ['input-a', 'input-b', 'transform-a', 'transform-b']) {
@@ -145,11 +177,6 @@ describe('selective workflow planning', () => {
       mode: 'run-node',
       nodeId: 'review',
       materialKeys: keys(input),
-      executionDisposition: (candidate) => candidate.id === 'review'
-        ? { kind: 'available' }
-        : candidate.type === 'transform'
-          ? { kind: 'available' }
-          : { kind: 'not-required' },
       isRunRecordReusable: () => true,
     });
     const calls: string[] = [];
@@ -183,11 +210,10 @@ describe('selective workflow planning', () => {
       mode: 'run-from-here',
       nodeId: 'input-a',
       materialKeys,
-      executionDisposition: (candidate) => candidate.id === 'review'
-        ? { kind: 'not-required' }
-        : candidate.type === 'transform'
-          ? { kind: 'available' }
-          : { kind: 'not-required' },
+      executionRestrictions: createWorkflowExecutionRestrictions([{
+        nodeId: 'review',
+        kind: 'not-required',
+      }]),
       isRunRecordReusable: () => true,
     });
     const calls: string[] = [];
@@ -232,11 +258,11 @@ describe('selective workflow planning', () => {
       mode: 'run-from-here',
       nodeId: 'transform-a',
       materialKeys: keys(input),
-      executionDisposition: (candidate) => candidate.id === 'transform-a'
-        ? { kind: 'unavailable', reason: 'Generate is disabled until an executor is configured.' }
-        : candidate.type === 'transform'
-          ? { kind: 'available' }
-          : { kind: 'not-required' },
+      executionRestrictions: createWorkflowExecutionRestrictions([{
+        nodeId: 'transform-a',
+        kind: 'unavailable',
+        reason: 'Generate is disabled until an executor is configured.',
+      }]),
     });
     const calls: string[] = [];
     await execute(plan, calls);
@@ -257,11 +283,6 @@ describe('selective workflow planning', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: { 'transform-b': 'key-transform-b' },
-      executionDisposition: (candidate) => candidate.type === 'review'
-        ? { kind: 'not-required' }
-        : candidate.type === 'transform'
-          ? { kind: 'available' }
-          : { kind: 'not-required' },
     });
 
     expect(plan.preflight).toEqual(expect.arrayContaining([
@@ -302,11 +323,15 @@ describe('selective workflow planning', () => {
     const input = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
     input.nodes.find((candidate) => candidate.id === 'transform-generate-square')!.config.capability = 'relight';
 
+    expect(() => createWorkflowExecutionRestrictions([{
+      nodeId: 'transform-generate-square',
+      kind: 'available',
+    } as never])).toThrow(/only demote or disable/i);
+
     const plan = planSelectiveWorkflowExecution(input, {
       mode: 'run-node',
       nodeId: 'output-square',
       materialKeys: {},
-      executionDisposition: () => ({ kind: 'available' }),
     });
 
     expect(plan.executionNodeIds).toEqual([]);
@@ -319,44 +344,6 @@ describe('selective workflow planning', () => {
       expect.objectContaining({ nodeId: 'output-square', state: 'blocked' }),
     ]));
   });
-
-  it.each(['stateful', 'throwing'] as const)(
-    'rejects a %s disposition accessor without promotion, leakage, or executor calls',
-    async (behavior) => {
-      const input = instantiateWorkflowTemplate('campaign-composer');
-      let getterReads = 0;
-      const malicious = Object.defineProperty({}, 'kind', {
-        enumerable: true,
-        get: () => {
-          getterReads += 1;
-          if (behavior === 'throwing') throw new Error('/private/project auth=secret');
-          return getterReads === 1 ? 'unavailable' : 'available';
-        },
-      });
-      const plan = planSelectiveWorkflowExecution(input, {
-        mode: 'run-node',
-        nodeId: 'output-square',
-        materialKeys: { 'transform-generate-square': 'key-generate' },
-        executionDisposition: (candidate) => candidate.id === 'slot-product'
-          ? malicious as never
-          : candidate.type === 'transform'
-            ? { kind: 'available' }
-            : { kind: 'not-required' },
-      });
-      const calls: string[] = [];
-      await execute(plan, calls);
-
-      const product = plan.preflight.find((entry) => entry.nodeId === 'slot-product');
-      expect(product).toMatchObject({
-        state: 'blocked',
-        reason: { code: 'NODE_DISABLED', message: 'Execution availability could not be determined safely.' },
-      });
-      expect(product?.reason.message).not.toMatch(/private|auth|secret/);
-      expect(plan.executionNodeIds).toEqual([]);
-      expect(getterReads).toBe(0);
-      expect(calls).toEqual([]);
-    },
-  );
 
   it('fails closed without explicit artifact proof and snapshots validated material keys', () => {
     const input = graph();
@@ -395,7 +382,6 @@ describe('selective workflow scheduling', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: keys(input),
-      executionDisposition: () => ({ kind: 'available' }),
     });
     const started: string[] = [];
     const active = new Map<string, number>();
@@ -590,6 +576,95 @@ describe('selective workflow scheduling', () => {
     expect(boundaryCalls).toBe(0);
   });
 
+  it('snapshots executor data once and rejects a state-changing result proxy without leakage', async () => {
+    const input = graph();
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'unrelated',
+      materialKeys: keys(input),
+    });
+    const trapReads = {
+      get: 0,
+      cacheKey: 0,
+      outputIds: 0,
+      getPrototypeOf: 0,
+      ownKeys: 0,
+      descriptor: 0,
+    };
+    const hostileResult = new Proxy({
+      cacheKey: 'key-unrelated',
+      outputIds: ['owned-unrelated'],
+    }, {
+      get: (target, property, receiver) => {
+        trapReads.get += 1;
+        if (property === 'then') return undefined;
+        if (property === 'cacheKey') {
+          trapReads.cacheKey += 1;
+          return trapReads.cacheKey === 1 ? 'key-unrelated' : 'foreign-key';
+        }
+        if (property === 'outputIds') trapReads.outputIds += 1;
+        return Reflect.get(target, property, receiver);
+      },
+      getPrototypeOf: () => {
+        trapReads.getPrototypeOf += 1;
+        throw new Error('/private/result getPrototypeOf auth=secret');
+      },
+      ownKeys: () => {
+        trapReads.ownKeys += 1;
+        throw new Error('/private/result ownKeys auth=secret');
+      },
+      getOwnPropertyDescriptor: () => {
+        trapReads.descriptor += 1;
+        throw new Error('/private/result descriptor auth=secret');
+      },
+    });
+
+    const result = await executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => 'fake',
+      providerConcurrency: { fake: 1 },
+      validateResultOwnership: () => true,
+      executeNode: async () => hostileResult,
+    });
+
+    expect(result.failures.unrelated).toEqual(expect.objectContaining({ code: 'INVALID_EXECUTOR_RESULT' }));
+    expect(result.failures.unrelated?.message).not.toMatch(/private|auth|secret/);
+    expect(result.results.unrelated).toBeUndefined();
+    expect(trapReads.cacheKey).toBe(0);
+    expect(trapReads.outputIds).toBe(0);
+  });
+
+  it('validates and commits one detached snapshot when executor getters can change later', async () => {
+    const input = graph();
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node',
+      nodeId: 'unrelated',
+      materialKeys: keys(input),
+    });
+    let cacheKeyReads = 0;
+    let outputReads = 0;
+    const result = await executeSelectiveWorkflowPlan(plan, {
+      maxConcurrency: 1,
+      providerKeyForNode: () => 'fake',
+      providerConcurrency: { fake: 1 },
+      validateResultOwnership: ({ result: snapshot }) => snapshot.outputIds[0] === 'owned-unrelated',
+      executeNode: async () => Object.defineProperties({}, {
+        cacheKey: {
+          enumerable: true,
+          get: () => (++cacheKeyReads === 1 ? 'key-unrelated' : 'foreign-key'),
+        },
+        outputIds: {
+          enumerable: true,
+          get: () => (++outputReads === 1 ? ['owned-unrelated'] : ['foreign-output']),
+        },
+      }) as WorkflowExecutionResult,
+    });
+
+    expect(cacheKeyReads).toBe(1);
+    expect(outputReads).toBe(1);
+    expect(result.results.unrelated).toEqual({ cacheKey: 'key-unrelated', outputIds: ['owned-unrelated'] });
+  });
+
   it('rejects cross-node output collisions and returns a detached immutable outcome', async () => {
     const input = graph();
     input.nodes.filter((candidate) => candidate.id !== 'unrelated').forEach((candidate) => {
@@ -600,7 +675,6 @@ describe('selective workflow scheduling', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: keys(input),
-      executionDisposition: () => ({ kind: 'available' }),
     });
 
     const result = await executeSelectiveWorkflowPlan(plan, {
@@ -629,9 +703,6 @@ describe('selective workflow scheduling', () => {
       mode: 'run-node',
       nodeId: 'output',
       materialKeys: keys(input),
-      executionDisposition: (candidate) => candidate.type === 'transform' || candidate.type === 'review'
-        ? { kind: 'available' }
-        : { kind: 'not-required' },
     });
     const completed: string[] = [];
 

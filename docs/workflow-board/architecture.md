@@ -290,13 +290,14 @@ is `transform`: the configured capability must match the registry's available
 capability. A boundary may inject a stricter disposition, but unsupported Edit,
 Relight, or Remove Background configurations remain blocked until their real
 executor is registered.
-Disposition overrides are monotonic restrictions: they may demote or disable a
+Execution restrictions are monotonic: they may demote or disable a
 registry-available capability, but cannot promote `draft-only`, unsupported, or
 `not-required` definitions into executable work.
-The boundary accepts only an exact plain own-data `{ kind, reason? }` snapshot.
-Accessors, symbols, extra fields, non-plain objects, and exceptions become a
-generic unavailable blocker; the planner never retains or rereads the caller's
-object.
+Trusted boundary code normalizes detached restriction data into an opaque
+branded value. The planner accepts only that value and reads its internal
+snapshot by identity, without reflecting on caller objects. A proxy around the
+opaque value is rejected as an invalid boundary value without invoking its
+prototype, key, or descriptor traps.
 
 Planning never mutates run history. A material change is represented by the
 new current key, so only that node and downstream nodes whose own keys changed
@@ -320,9 +321,13 @@ Executor results are accepted only as the exact `{ cacheKey, outputIds }`
 shape, with the planned key, unique nonblank identities, no cross-node identity
 collision, and an injected ownership check proving that every output belongs
 to the current node and project. Extra metadata and foreign output identities
-are failures. The returned outcome strictly projects those fields into a
-detached deeply frozen snapshot; callers cannot mutate result arrays, failure
-records, or outcome collections after execution.
+are failures. Each executor-owned result is detached and deeply frozen exactly
+once before shape, material, collision, or ownership validation; every later
+decision and the committed result use only that snapshot. Stateful getters or
+proxies cannot change a value between validation and commit. The returned
+outcome strictly projects those fields into another detached deeply frozen
+snapshot; callers cannot mutate result arrays, failure records, or outcome
+collections after execution.
 
 Progress and cancellation remain owned by the adjacent runtime work. That
 integration should wrap the injected node executor and consume the plan and
