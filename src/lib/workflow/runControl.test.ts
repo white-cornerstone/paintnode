@@ -26,6 +26,11 @@ const event = (
   sequence,
 });
 
+const asciiPunctuation = Array.from({ length: 94 }, (_, index) => String.fromCharCode(index + 33))
+  .filter((character) => !/[A-Za-z0-9]/.test(character));
+const traversalBoundaryPunctuation = asciiPunctuation
+  .filter((character) => character !== '.' && character !== '_');
+
 describe('workflow run control', () => {
   it('routes concurrent progress only to the exact workflow session, workflow, run, and node', () => {
     const router = new WorkflowRunProgressRouter();
@@ -109,12 +114,21 @@ describe('workflow run control', () => {
     'path=../workspace/result.png',
     'result:(../workspace/result.png)',
     'path=%2e%2e%2fworkspace%2fresult.png',
+    'path=%252e%252e%252fworkspace%252fresult.png',
     String.raw`path=..\workspace\result.png`,
     'Authorization%3A%20Bearer%20private-token',
     '%41%75%74%68%6f%72%69%7a%61%74%69%6f%6e%253A%2520Bearer%2520private-token',
   ])('redacts unsafe provider progress paths: %s', (message) => {
     expect(sanitizeWorkflowProgressMessage(`Writing ${message}`)).toBe('Provider reported progress.');
   });
+
+  it.each(traversalBoundaryPunctuation.map((character) => [JSON.stringify(character), character]))(
+    'redacts traversal after ASCII punctuation %s',
+    (_label, character) => {
+      expect(sanitizeWorkflowProgressMessage(`Writing ${character}../workspace/result.png`))
+        .toBe('Provider reported progress.');
+    },
+  );
 
   it('preserves ordinary percentage progress without treating it as malformed encoding', () => {
     expect(sanitizeWorkflowProgressMessage('Rendered 50% complete')).toBe('Rendered 50% complete');
@@ -125,6 +139,13 @@ describe('workflow run control', () => {
     'Result: (draft preview)',
     'Progress path=workspace/result.png',
     'Rendered 75% complete; checking details...',
+    'Keeping a../workspace token unchanged',
+    'Keeping é../workspace token unchanged',
+    'Keeping 你../workspace token unchanged',
+    'Keeping ٣../workspace token unchanged',
+    'Ellipsis .../workspace is descriptive',
+    'Dot boundary ....\\workspace is descriptive',
+    'Underscore _../workspace is an identifier',
   ])('preserves benign punctuation progress: %s', (message) => {
     expect(sanitizeWorkflowProgressMessage(message)).toBe(message);
   });
