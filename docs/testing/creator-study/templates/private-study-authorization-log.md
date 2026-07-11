@@ -19,12 +19,15 @@
 ## Approved study build
 
 - Current private approved-build record reference:
+- Current private active-build-decisions ledger reference:
 - Current approved-build decision reference:
+- Current active generation and record fingerprint:
 - Initial or mid-study approval:
 - Build approval verified before first affected session: yes / no
 
 Every session must use the literal build identity in the current private
-approved-build record. A clean checkout or current branch head is not approval.
+approved-build record and latest contiguous ledger generation. A clean checkout,
+current branch head, or superseded record/build pair is not approval.
 
 ## Mid-study build-change decisions
 

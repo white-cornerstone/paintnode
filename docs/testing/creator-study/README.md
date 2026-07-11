@@ -16,6 +16,9 @@ study storage.
 - `templates/private-approved-build-record.json` freezes the one literal QA
   build identity approved for sessions. Copy and complete it privately; never
   point setup verification at the blank repository template.
+- `templates/private-active-build-decisions.json` is the privately controlled,
+  append-only active-decision ledger. Its contiguous history makes a superseded
+  record fail even with its matching old app and checkout.
 - `templates/de-identified-recruitment-matrix.csv` may be used for aggregate
   cohort control only after direct identifiers and sensitive detail are
   removed.
@@ -42,14 +45,19 @@ study storage.
    repo-native Provider Free app with `npm run qa:native:provider-free`.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate project. Delete that rehearsal project.
-3. Copy `templates/private-approved-build-record.json` to approved restricted
+3. Copy `templates/private-approved-build-record.json` and
+   `templates/private-active-build-decisions.json` to approved restricted
    storage. Copy the literal `gitSha`, `sourceTreeSha`, `sourceStatusSha256`,
    and `executableSha256` values from the app's provenance sidecar. Record the
    fixed Provider Free bundle ID, rehearsal completion time, owner approval
    time, and a non-identifying decision reference.
-4. Set initial change control to `kind: "initial"`, null replacement/reason,
-   and `comparabilityDecision: "baseline"`. Keep the approved app and its
-   sidecar together and reuse that exact bundle for every session.
+4. Use strict UTC timestamps with millisecond precision. Rehearsal completion
+   must be earlier than owner approval, and approval cannot be in the future.
+5. Set initial change control to `kind: "initial"`, null replacement/reason,
+   and `comparabilityDecision: "baseline"`. Hash the exact completed record
+   bytes with SHA-256, then append generation 1 to the active-decision ledger
+   with that fingerprint and the same private decision reference. Keep the
+   approved app and its sidecar together and reuse that exact bundle.
 
 The current HEAD does not approve itself. Do not regenerate this record from
 `git rev-parse HEAD`, and do not rebuild between sessions: a rebuild has a new
@@ -71,19 +79,24 @@ executable identity even when source files appear unchanged.
    ```sh
    npm run qa:creator-study:setup -- \
      --approved-build-record "ABSOLUTE_PRIVATE_APPROVED_BUILD_RECORD.json" \
+     --active-build-decisions "ABSOLUTE_PRIVATE_ACTIVE_BUILD_DECISIONS.json" \
      --app-bundle "ABSOLUTE_PATH_TO_PROVIDER_FREE_APP" \
      --project-dir "ABSOLUTE_EMPTY_PARTICIPANT_PROJECT" \
      --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT"
    ```
 
-The verifier reads approval only from that private record. It checks the clean
+The verifier reads approval from that private record and the privately
+controlled active-decision ledger. It checks the clean
 checkout, app provenance, actual executable, bundle identity, approved literal
 SHA/tree/status/executable fingerprints, canonicalized paths, empty project,
 deleted rehearsal path, Product hashes/dimensions, and all three QA controls.
-Missing, malformed, in-repository, stale, or mismatched approval records fail
-closed. Its receipt reports the matched build identity but omits the private
-record path, approval date, decision references, change reason, storage data,
-and participant paths. It does not replace rehearsal or authorization.
+Missing, malformed, in-repository, stale, superseded, future-dated, or
+mismatched approval records fail closed. The ledger must contain contiguous,
+unique generations and its latest fingerprint/reference must match the supplied
+record. Its receipt reports the matched identity, active generation, and
+non-sensitive record fingerprint, but omits private paths, approval date,
+decision references, change reason, ledger history, storage data, and participant
+paths. It does not replace rehearsal or authorization.
 
 ## Mid-study build changes
 
@@ -91,8 +104,11 @@ Pause scheduling before changing the approved app. Build the proposed change
 from committed clean source, complete a **new rehearsal**, and copy a new
 private approved-build record. `kind` must be `mid-study`; record the prior
 decision reference, change reason, owner approval, rehearsal completion time,
-and a comparability decision of `comparable` or `restart-required`. The setup
-verifier rejects an incomplete change decision. If the decision is
+and a comparability decision of `comparable` or `restart-required`. Preserve the
+prior record, hash the exact new record bytes, and append the next contiguous
+generation to the active-decision ledger. The replacement reference must equal
+the immediately preceding ledger decision. The setup verifier rejects an
+incomplete, non-current, or replayed change decision. If the decision is
 `restart-required`, do not combine earlier sessions with the new build; record
 which sessions are replaced and recruit replacements under the new baseline.
 Never overwrite the earlier private approval record.

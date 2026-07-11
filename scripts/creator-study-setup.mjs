@@ -11,10 +11,12 @@ export const EXPECTED_BUNDLE_NAME = 'PaintNode Blueprint QA — Provider Free';
 
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const APPROVED_BUILD_RECORD_TYPE = 'paintnode-creator-study-approved-build';
+const ACTIVE_BUILD_DECISIONS_TYPE = 'paintnode-creator-study-active-build-decisions';
 const CLEAN_STATUS_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const GIT_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const DECISION_REFERENCE_PATTERN = /^[A-Z0-9][A-Z0-9._-]{2,63}$/;
+const UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -62,10 +64,14 @@ function exactObject(value, keys, label) {
 }
 
 function validTimestamp(value, label) {
-  if (typeof value !== 'string' || value.trim() === '' || !Number.isFinite(Date.parse(value))) {
-    throw new Error(`${label} must be a valid timestamp.`);
+  if (typeof value !== 'string' || !UTC_TIMESTAMP_PATTERN.test(value)) {
+    throw new Error(`${label} must be a strict UTC timestamp with millisecond precision.`);
   }
-  return value;
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+    throw new Error(`${label} must identify a real calendar instant.`);
+  }
+  return milliseconds;
 }
 
 function validDecisionReference(value, label) {
@@ -84,8 +90,10 @@ function readApprovedBuildRecord(recordPath, canonicalRepo) {
   }
   if (!statSync(canonicalRecord).isFile()) throw new Error('Approved-build record must be a regular file.');
   let parsed;
+  let serialized;
   try {
-    parsed = JSON.parse(readFileSync(canonicalRecord, 'utf8'));
+    serialized = readFileSync(canonicalRecord, 'utf8');
+    parsed = JSON.parse(serialized);
   } catch (error) {
     throw new Error(`Approved-build record must contain valid JSON: ${error instanceof Error ? error.message : error}`);
   }
@@ -121,7 +129,7 @@ function readApprovedBuildRecord(recordPath, canonicalRepo) {
     'Approved-build owner decision',
   );
   if (approval.ownerApproved !== true) throw new Error('Approved-build owner approval must be recorded as true.');
-  validTimestamp(approval.approvedAt, 'Approved-build approval date');
+  const approvedAt = validTimestamp(approval.approvedAt, 'Approved-build approval date');
   validDecisionReference(approval.decisionReference, 'Approved-build decision reference');
 
   const change = exactObject(
@@ -129,8 +137,8 @@ function readApprovedBuildRecord(recordPath, canonicalRepo) {
     ['kind', 'replacesDecisionReference', 'reason', 'rehearsalCompletedAt', 'comparabilityDecision'],
     'Approved-build change control',
   );
-  validTimestamp(change.rehearsalCompletedAt, 'Approved-build rehearsal completion');
-  if (Date.parse(change.rehearsalCompletedAt) > Date.parse(approval.approvedAt)) {
+  const rehearsalCompletedAt = validTimestamp(change.rehearsalCompletedAt, 'Approved-build rehearsal completion');
+  if (rehearsalCompletedAt >= approvedAt) {
     throw new Error('Approved-build owner approval must occur after the recorded rehearsal.');
   }
   if (change.kind === 'initial') {
@@ -155,6 +163,82 @@ function readApprovedBuildRecord(recordPath, canonicalRepo) {
     schemaVersion: record.schemaVersion,
     approvedBuild: Object.freeze({ ...approvedBuild }),
     changeKind: change.kind,
+    approvedAt,
+    decisionReference: approval.decisionReference,
+    replacesDecisionReference: change.replacesDecisionReference,
+    recordSha256: sha256(serialized),
+  });
+}
+
+function readActiveBuildDecisions(decisionsPath, canonicalRepo, approval) {
+  if (!decisionsPath || !isAbsolute(decisionsPath)) {
+    throw new Error('An absolute private active-build-decisions path is required.');
+  }
+  const canonicalDecisions = canonicalExisting(decisionsPath, 'Active-build decisions');
+  if (isInside(canonicalRepo, canonicalDecisions)) {
+    throw new Error('The completed active-build decisions must be outside the Git repository.');
+  }
+  if (!statSync(canonicalDecisions).isFile()) throw new Error('Active-build decisions must be a regular file.');
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(canonicalDecisions, 'utf8'));
+  } catch (error) {
+    throw new Error(`Active-build decisions must contain valid JSON: ${error instanceof Error ? error.message : error}`);
+  }
+  const ledger = exactObject(
+    parsed,
+    ['_copyWarning', '_privacyWarning', 'schemaVersion', 'recordType', 'activeGeneration', 'decisions'],
+    'Active-build decisions',
+  );
+  if (typeof ledger._copyWarning !== 'string' || !ledger._copyWarning.includes('COPY OUTSIDE REPOSITORY')
+    || typeof ledger._privacyWarning !== 'string' || !ledger._privacyWarning.includes('PRIVATE ONLY')) {
+    throw new Error('Active-build decisions must retain their copy-outside-repository and private-only warnings.');
+  }
+  if (ledger.schemaVersion !== 1 || ledger.recordType !== ACTIVE_BUILD_DECISIONS_TYPE) {
+    throw new Error('Active-build decisions schema or record type is unsupported.');
+  }
+  if (!Number.isSafeInteger(ledger.activeGeneration) || ledger.activeGeneration < 1
+    || !Array.isArray(ledger.decisions) || ledger.decisions.length !== ledger.activeGeneration) {
+    throw new Error('Active-build decisions must contain one contiguous entry per positive generation.');
+  }
+  const fingerprints = new Set();
+  const references = new Set();
+  const decisions = ledger.decisions.map((entry, index) => {
+    const decision = exactObject(
+      entry,
+      ['generation', 'approvedBuildRecordSha256', 'decisionReference'],
+      `Active-build decision generation ${index + 1}`,
+    );
+    if (decision.generation !== index + 1) throw new Error('Active-build decision generations must be contiguous and ordered.');
+    if (!SHA256_PATTERN.test(decision.approvedBuildRecordSha256 || '')) {
+      throw new Error('Active-build decision record fingerprint must be a SHA-256 value.');
+    }
+    validDecisionReference(decision.decisionReference, 'Active-build decision reference');
+    if (fingerprints.has(decision.approvedBuildRecordSha256) || references.has(decision.decisionReference)) {
+      throw new Error('Active-build decision fingerprints and references must be unique across generations.');
+    }
+    fingerprints.add(decision.approvedBuildRecordSha256);
+    references.add(decision.decisionReference);
+    return decision;
+  });
+  const active = decisions.at(-1);
+  if (active.approvedBuildRecordSha256 !== approval.recordSha256
+    || active.decisionReference !== approval.decisionReference) {
+    throw new Error('Approved-build record is not the current active private decision.');
+  }
+  if (ledger.activeGeneration === 1) {
+    if (approval.changeKind !== 'initial') throw new Error('The first active build decision must use initial change control.');
+  } else {
+    const previous = decisions.at(-2);
+    if (approval.changeKind !== 'mid-study'
+      || approval.replacesDecisionReference !== previous.decisionReference) {
+      throw new Error('Active mid-study decision must replace the immediately preceding private decision.');
+    }
+  }
+  return Object.freeze({
+    schemaVersion: ledger.schemaVersion,
+    activeGeneration: ledger.activeGeneration,
+    approvedBuildRecordSha256: active.approvedBuildRecordSha256,
   });
 }
 
@@ -216,6 +300,7 @@ export function verifyStudySetup({
   projectDir,
   rehearsalDir,
   approvedBuildRecordPath,
+  activeBuildDecisionsPath,
   fixtureManifest = join(scriptRoot, 'docs/testing/creator-study/materials/manifest.json'),
   actualGitSha,
   actualSourceTreeSha,
@@ -224,13 +309,20 @@ export function verifyStudySetup({
   bundleId,
   appBuild,
   actualExecutableSha256,
+  now = new Date(),
 }) {
   if (!projectDir || !rehearsalDir) throw new Error('Project and rehearsal paths are required.');
-  if (![projectDir, rehearsalDir, approvedBuildRecordPath, fixtureManifest].every((path) => typeof path === 'string' && isAbsolute(path))) {
-    throw new Error('Project, rehearsal, approved-build-record, and fixture-manifest paths must be absolute.');
+  if (![projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, fixtureManifest].every((path) => typeof path === 'string' && isAbsolute(path))) {
+    throw new Error('Project, rehearsal, approved-build-record, active-build-decisions, and fixture-manifest paths must be absolute.');
   }
   const canonicalRepo = canonicalExisting(repoRoot, 'Git repository');
   const approval = readApprovedBuildRecord(approvedBuildRecordPath, canonicalRepo);
+  const nowMilliseconds = now instanceof Date ? now.getTime() : Number.NaN;
+  if (!Number.isFinite(nowMilliseconds)) throw new Error('Setup verification requires a valid current time.');
+  if (approval.approvedAt > nowMilliseconds) {
+    throw new Error('Approved-build owner approval cannot be in the future.');
+  }
+  const activeDecision = readActiveBuildDecisions(activeBuildDecisionsPath, canonicalRepo, approval);
   const approved = approval.approvedBuild;
   if (actualGitSha !== approved.gitSha) {
     throw new Error(`Approved Git SHA mismatch: expected ${approved.gitSha}, received ${actualGitSha || '(missing)'}.`);
@@ -294,6 +386,8 @@ export function verifyStudySetup({
       schemaVersion: approval.schemaVersion,
       validated: true,
       changeKind: approval.changeKind,
+      activeGeneration: activeDecision.activeGeneration,
+      approvedBuildRecordSha256: activeDecision.approvedBuildRecordSha256,
     }),
     projectState: 'empty',
     rehearsalState: 'deleted',
@@ -338,6 +432,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       projectDir: valueAfter(args, '--project-dir'),
       rehearsalDir: valueAfter(args, '--rehearsal-dir'),
       approvedBuildRecordPath: valueAfter(args, '--approved-build-record'),
+      activeBuildDecisionsPath: valueAfter(args, '--active-build-decisions'),
       actualGitSha: sourceState.gitSha,
       actualSourceTreeSha: sourceState.sourceTreeSha,
       actualSourceStatusSha256: sourceState.sourceStatusSha256,

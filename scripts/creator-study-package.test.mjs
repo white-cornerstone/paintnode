@@ -13,6 +13,7 @@ test('every private operational form is blank and warns to copy outside the repo
   const templates = [
     'private-study-authorization-log.md',
     'private-approved-build-record.json',
+    'private-active-build-decisions.json',
     'private-screener-and-recruitment-log.md',
     'private-session-observation.md',
     'private-intervention-log.md',
@@ -25,6 +26,14 @@ test('every private operational form is blank and warns to copy outside the repo
     assert.match(content, /PRIVATE ONLY/);
     assert.doesNotMatch(content, /P(?:0[1-9]|[1-9][0-9])|@|https?:\/\//, `${template} must not contain participant-shaped data`);
   }
+});
+
+test('private active-build ledger starts blank and requires monotonic generations', () => {
+  const ledger = JSON.parse(readFileSync(join(study, 'templates/private-active-build-decisions.json'), 'utf8'));
+  assert.equal(ledger.schemaVersion, 1);
+  assert.equal(ledger.recordType, 'paintnode-creator-study-active-build-decisions');
+  assert.equal(ledger.activeGeneration, 0);
+  assert.deepEqual(ledger.decisions, []);
 });
 
 test('private approved-build template freezes literal identity and change-control fields', () => {
@@ -66,8 +75,9 @@ test('privacy contract keeps identifiable and raw evidence out of repository-saf
   assert.ok(fields.privateOnly.some((field) => /participant code mapping/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /session date.*time zone.*delivery mode/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /facilitator.*observer.*technical operator/i.test(field)));
-  assert.ok(fields.privateOnly.some((field) => /approved-build record path.*approval date.*decision reference.*change reason/i.test(field)));
+  assert.ok(fields.privateOnly.some((field) => /approved-build record.*active-ledger paths.*approval date.*decision references.*ledger history.*change reason/i.test(field)));
   assert.ok(fields.repositoryAllowed.some((field) => /approved build identity match.*provenance.*executable/i.test(field)));
+  assert.ok(fields.repositoryAllowed.some((field) => /active generation.*non-sensitive record fingerprint/i.test(field)));
   assert.ok(fields.repositoryAllowed.every((field) => !/participant name|contact details|raw or potentially identifying quotes|approved storage path/i.test(field)));
 });
 
@@ -135,8 +145,10 @@ test('private handoff templates capture schema fields and concrete scheduling as
     assert.match(recruitment, new RegExp(label));
   }
   assert.match(session, /Approved-build decision reference/);
+  assert.match(session, /Active build generation and record fingerprint/);
   assert.match(session, /Setup receipt approved identity match/);
   assert.match(reset, /approved-build decision reference/i);
+  assert.match(reset, /active generation and record fingerprint/i);
   assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
   for (const id of RECRUITMENT_EXCEPTION_IDS) assert.match(authorization, new RegExp(`\\b${id}\\b`));
   assert.match(authorization, /one requirement never waives the other/i);

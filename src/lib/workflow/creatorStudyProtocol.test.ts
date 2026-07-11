@@ -6,6 +6,7 @@ import materialManifest from '../../../docs/testing/creator-study/materials/mani
 import privateSession from '../../../docs/testing/creator-study/templates/private-session-observation.md?raw';
 import privateRecruitment from '../../../docs/testing/creator-study/templates/private-screener-and-recruitment-log.md?raw';
 import approvedBuildTemplate from '../../../docs/testing/creator-study/templates/private-approved-build-record.json';
+import activeBuildDecisionsTemplate from '../../../docs/testing/creator-study/templates/private-active-build-decisions.json';
 
 describe('Creative Blueprint creator study protocol', () => {
   it('reads access, de-identification, retention, and exceptions aloud before recording opt-in', () => {
@@ -40,6 +41,7 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(protocol).toContain('Product A');
     expect(protocol).toContain('Product B');
     expect(protocol).toContain('--approved-build-record');
+    expect(protocol).toContain('--active-build-decisions');
     expect(protocol).not.toContain('--expected-sha');
     expect(protocol).not.toContain('$(git rev-parse HEAD)');
   });
@@ -49,10 +51,15 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(approvedBuildTemplate.approvedBuild.gitSha).toBe('');
     expect(approvedBuildTemplate.approvedBuild.sourceTreeSha).toBe('');
     expect(approvedBuildTemplate.approvedBuild.executableSha256).toBe('');
+    expect(activeBuildDecisionsTemplate.recordType).toBe('paintnode-creator-study-active-build-decisions');
+    expect(activeBuildDecisionsTemplate.activeGeneration).toBe(0);
+    expect(activeBuildDecisionsTemplate.decisions).toEqual([]);
     expect(protocol).toMatch(/mid-study build change/i);
     expect(protocol).toMatch(/owner approval/i);
     expect(protocol).toMatch(/new rehearsal/i);
     expect(protocol).toMatch(/comparability decision/i);
+    expect(protocol).toMatch(/old\s+record and matching old build/i);
+    expect(protocol).toMatch(/active build generation and (?:non-sensitive )?record fingerprint/i);
     expect(protocol).toContain('Approved-build decision reference:');
     expect(protocol).toContain('Setup receipt approved identity match: yes / no');
   });

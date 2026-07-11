@@ -153,6 +153,7 @@ For every session record:
   and accommodation setup confirmation;
 - exact Git SHA and QA app bundle identity;
 - approved-build decision reference and a passing setup-receipt identity match;
+- active build generation and non-sensitive record fingerprint;
 - operating system, display scale, input method, and app window size;
 - whether recording was permitted;
 - a genuinely empty participant-specific project folder;
@@ -170,18 +171,23 @@ Before the participant arrives, verify the build and failure controls in a
 separate rehearsal folder. Delete the rehearsal project. Do not pre-import the
 Product, pre-create Campaign Composer, or leave a workflow open in the session
 folder. Run `npm run qa:creator-study:setup` with the private
-`--approved-build-record`, preserved approved app bundle, empty participant
-project, and deleted rehearsal path as documented in the operations runbook.
+`--approved-build-record`, private `--active-build-decisions` ledger, preserved
+approved app bundle, empty participant project, and deleted rehearsal path as
+documented in the operations runbook.
 Approval must be the record's literal Git SHA, bundle/provenance identity, and
 executable fingerprint; the current HEAD cannot approve itself. The verifier
-rejects dirty source, stale bundles, malformed or mismatched records,
-executable drift, and symlink aliases into the repository. Its receipt omits
-private paths, approval dates, decision references, and change reasons. The
+rejects dirty source, stale bundles, malformed, future-dated, superseded, or
+mismatched records, executable drift, and symlink aliases into the repository.
+Its receipt exposes only the active generation and non-sensitive record
+fingerprint in addition to the approved identity; it omits private paths,
+approval dates, decision references, ledger history, and change reasons. The
 verifier does not replace the visible rehearsal.
 
 All sessions use one approved build. A mid-study build change pauses sessions
 and requires study-owner approval, a recorded reason, a **new rehearsal**, a
 new immutable private approval record, and an explicit comparability decision.
+Append each replacement to the private monotonic active-decision ledger; an old
+record and matching old build must not become current again.
 When comparability is `restart-required`, earlier sessions cannot be pooled
 with sessions on the new baseline and replacements must be recorded.
 
@@ -496,6 +502,7 @@ not commit identifiable raw notes.
 - Actual start/end time:
 - Build Git SHA and QA bundle identity:
 - Approved-build decision reference:
+- Active build generation and record fingerprint:
 - Setup receipt approved identity match: yes / no
 - OS/display/window/input method:
 - Eligibility summary and cohort bucket:

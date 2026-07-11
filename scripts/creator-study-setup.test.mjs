@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,7 @@ import {
 
 const repoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const fixtureManifest = join(repoRoot, 'docs', 'testing', 'creator-study', 'materials', 'manifest.json');
+const verificationNow = new Date('2026-07-13T00:00:00.000Z');
 const sourceState = {
   actualGitSha: '405524d393f07ecd588d7476e83adc38e00a90cc',
   actualSourceTreeSha: 'b'.repeat(40),
@@ -51,9 +53,31 @@ function approvedBuildRecord(overrides = {}) {
   };
 }
 
-function writeApprovedBuildRecord(root, record = approvedBuildRecord()) {
-  const path = join(root, 'approved-build.private.json');
+function writeApprovedBuildRecord(root, record = approvedBuildRecord(), fileName = 'approved-build.private.json') {
+  const path = join(root, fileName);
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
+  return path;
+}
+
+function approvedBuildRecordSha256(record) {
+  return createHash('sha256').update(`${JSON.stringify(record, null, 2)}\n`).digest('hex');
+}
+
+function writeActiveBuildDecisions(root, records) {
+  const path = join(root, 'active-build-decisions.private.json');
+  const decisions = records.map((record, index) => ({
+    generation: index + 1,
+    approvedBuildRecordSha256: approvedBuildRecordSha256(record),
+    decisionReference: record.approval.decisionReference,
+  }));
+  writeFileSync(path, `${JSON.stringify({
+    _copyWarning: 'COPY OUTSIDE REPOSITORY — complete only in approved restricted research storage.',
+    _privacyWarning: 'PRIVATE ONLY. Never complete this ledger in GitHub, a checkout, worktree, chat, or participant project.',
+    schemaVersion: 1,
+    recordType: 'paintnode-creator-study-active-build-decisions',
+    activeGeneration: decisions.length,
+    decisions,
+  }, null, 2)}\n`);
   return path;
 }
 
@@ -62,22 +86,26 @@ function setupDirectories() {
   const projectDir = join(root, 'participant-project');
   const rehearsalDir = join(root, 'deleted-rehearsal');
   mkdirSync(projectDir);
-  const approvedBuildRecordPath = writeApprovedBuildRecord(root);
-  return { root, projectDir, rehearsalDir, approvedBuildRecordPath };
+  const record = approvedBuildRecord();
+  const approvedBuildRecordPath = writeApprovedBuildRecord(root, record);
+  const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [record]);
+  return { root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath };
 }
 
 test('the committed Product materials are deterministic, distinct, and assigned to Tasks 1 and 6', () => {
-  const { projectDir, rehearsalDir, approvedBuildRecordPath } = setupDirectories();
+  const { projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath } = setupDirectories();
   const receipt = verifyStudySetup({
     repoRoot,
     projectDir,
     rehearsalDir,
     approvedBuildRecordPath,
+    activeBuildDecisionsPath,
     fixtureManifest,
     ...sourceState,
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   });
 
   assert.equal(receipt.ready, true);
@@ -90,15 +118,18 @@ test('the committed Product materials are deterministic, distinct, and assigned 
     schemaVersion: 1,
     validated: true,
     changeKind: 'initial',
+    activeGeneration: 1,
+    approvedBuildRecordSha256: approvedBuildRecordSha256(approvedBuildRecord()),
   });
   assert.equal(JSON.stringify(receipt).includes(projectDir), false, 'receipt must not leak local paths');
   assert.equal(JSON.stringify(receipt).includes(approvedBuildRecordPath), false, 'receipt must not leak private record paths');
+  assert.equal(JSON.stringify(receipt).includes(activeBuildDecisionsPath), false, 'receipt must not leak private ledger paths');
   assert.equal(JSON.stringify(receipt).includes('CB-M2-BUILD-BASELINE-01'), false, 'receipt must not leak private decision references');
   assert.equal(JSON.stringify(receipt).includes('2026-07-11T09:30:00.000Z'), false, 'receipt must not leak private approval dates');
 });
 
 test('setup verification fails closed for dirty projects, retained rehearsal data, wrong build, or wrong bundle', () => {
-  const { projectDir, rehearsalDir, approvedBuildRecordPath } = setupDirectories();
+  const { projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath } = setupDirectories();
   writeFileSync(join(projectDir, '.hidden-state'), 'not empty');
 
   const options = {
@@ -106,12 +137,14 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
     projectDir,
     rehearsalDir,
     approvedBuildRecordPath,
+    activeBuildDecisionsPath,
     fixtureManifest,
     ...sourceState,
     actualGitSha: 'wrong',
     bundleId: 'com.paintnode.editor',
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   };
   assert.throws(() => verifyStudySetup(options), /Git SHA/i);
 
@@ -136,13 +169,14 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
 });
 
 test('setup verification rejects dirty source, stale bundles, and executable fingerprint drift', () => {
-  const { projectDir, rehearsalDir, approvedBuildRecordPath } = setupDirectories();
+  const { projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath } = setupDirectories();
   const options = {
-    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, fixtureManifest,
+    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, fixtureManifest,
     ...sourceState,
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild: { ...appBuild },
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   };
 
   options.sourceDirty = true;
@@ -162,15 +196,16 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
 });
 
 test('project and deleted rehearsal paths are canonicalized through symlinks', () => {
-  const { root, projectDir, rehearsalDir, approvedBuildRecordPath } = setupDirectories();
+  const { root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath } = setupDirectories();
   const linkedProject = join(root, 'linked-project');
   symlinkSync(projectDir, linkedProject);
   const options = {
-    repoRoot, projectDir: linkedProject, rehearsalDir, approvedBuildRecordPath, fixtureManifest,
+    repoRoot, projectDir: linkedProject, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, fixtureManifest,
     ...sourceState,
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   };
   assert.equal(verifyStudySetup(options).ready, true);
 
@@ -186,14 +221,25 @@ test('project and deleted rehearsal paths are canonicalized through symlinks', (
 });
 
 test('approved build record is mandatory, private, strict, and cannot dynamically approve current HEAD', () => {
-  const { root, projectDir, rehearsalDir, approvedBuildRecordPath } = setupDirectories();
+  const { root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath } = setupDirectories();
   const options = {
-    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, fixtureManifest,
+    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, fixtureManifest,
     ...sourceState,
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   };
+
+  const originalActiveBuildDecisionsPath = activeBuildDecisionsPath;
+  options.activeBuildDecisionsPath = join(root, 'missing-ledger.json');
+  assert.throws(() => verifyStudySetup(options), /active-build decisions.*exist/i);
+  options.activeBuildDecisionsPath = join(repoRoot, 'docs/testing/creator-study/templates/private-active-build-decisions.json');
+  assert.throws(() => verifyStudySetup(options), /outside the Git repository/i);
+  options.activeBuildDecisionsPath = join(root, 'malformed-ledger.json');
+  writeFileSync(options.activeBuildDecisionsPath, '{not json');
+  assert.throws(() => verifyStudySetup(options), /active-build decisions.*JSON/i);
+  options.activeBuildDecisionsPath = originalActiveBuildDecisionsPath;
 
   options.approvedBuildRecordPath = join(root, 'missing.json');
   assert.throws(() => verifyStudySetup(options), /approved-build record.*exist/i);
@@ -216,7 +262,9 @@ test('approved build record is mandatory, private, strict, and cannot dynamicall
   assert.throws(() => verifyStudySetup(options), /outside the Git repository/i);
 
   options.approvedBuildRecordPath = approvedBuildRecordPath;
-  writeFileSync(approvedBuildRecordPath, `${JSON.stringify(approvedBuildRecord({ approvedBuild: { ...appBuild, gitSha: 'f'.repeat(40) } }))}\n`);
+  const staleRecord = approvedBuildRecord({ approvedBuild: { ...appBuild, gitSha: 'f'.repeat(40) } });
+  writeApprovedBuildRecord(root, staleRecord);
+  options.activeBuildDecisionsPath = writeActiveBuildDecisions(root, [staleRecord]);
   assert.throws(() => verifyStudySetup(options), /approved Git SHA/i);
 });
 
@@ -228,6 +276,7 @@ test('every approved build identity and provenance mismatch fails closed', () =>
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   };
   const mismatches = [
     ['bundleId', 'wrong.bundle', /approved bundle identity/i],
@@ -239,10 +288,12 @@ test('every approved build identity and provenance mismatch fails closed', () =>
     ['sourceDirty', true, /approved dirty source/i],
   ];
   for (const [field, value, pattern] of mismatches) {
-    const approvedBuildRecordPath = writeApprovedBuildRecord(root, approvedBuildRecord({
+    const record = approvedBuildRecord({
       approvedBuild: { ...appBuild, [field]: value },
-    }));
-    assert.throws(() => verifyStudySetup({ ...options, approvedBuildRecordPath }), pattern);
+    });
+    const approvedBuildRecordPath = writeApprovedBuildRecord(root, record);
+    const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [record]);
+    assert.throws(() => verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }), pattern);
   }
 });
 
@@ -254,6 +305,7 @@ test('mid-study build changes require owner approval, reason, rehearsal, replace
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
   };
   const validChange = approvedBuildRecord({
     approval: {
@@ -286,16 +338,109 @@ test('mid-study build changes require owner approval, reason, rehearsal, replace
       changeControl: override.changeControl ?? validChange.changeControl,
     };
     const approvedBuildRecordPath = writeApprovedBuildRecord(root, record);
-    assert.throws(() => verifyStudySetup({ ...options, approvedBuildRecordPath }), pattern);
+    const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [approvedBuildRecord(), record]);
+    assert.throws(() => verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }), pattern);
   }
 
   const approvedBuildRecordPath = writeApprovedBuildRecord(root, validChange);
-  const receipt = verifyStudySetup({ ...options, approvedBuildRecordPath });
+  const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [approvedBuildRecord(), validChange]);
+  const receipt = verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath });
   assert.equal(receipt.approvalRecord.changeKind, 'mid-study');
+  assert.equal(receipt.approvalRecord.activeGeneration, 2);
   const serialized = JSON.stringify(receipt);
   assert.equal(serialized.includes(validChange.changeControl.reason), false);
   assert.equal(serialized.includes(validChange.approval.decisionReference), false);
   assert.equal(serialized.includes(validChange.changeControl.replacesDecisionReference), false);
+});
+
+test('approval timing is strict, ordered, completed by now, and deterministically testable', () => {
+  const { root, projectDir, rehearsalDir } = setupDirectories();
+  const options = {
+    repoRoot, projectDir, rehearsalDir, fixtureManifest,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
+  };
+  const invalidTiming = [
+    [approvedBuildRecord({
+      approval: { ownerApproved: true, approvedAt: '2026-07-14T09:30:00.000Z', decisionReference: 'CB-FUTURE-01' },
+      changeControl: { kind: 'initial', replacesDecisionReference: null, reason: null, rehearsalCompletedAt: '2026-07-14T09:00:00.000Z', comparabilityDecision: 'baseline' },
+    }), /cannot be in the future/i],
+    [approvedBuildRecord({
+      approval: { ownerApproved: true, approvedAt: '2026-07-11T09:30:00.000Z', decisionReference: 'CB-EQUAL-01' },
+      changeControl: { kind: 'initial', replacesDecisionReference: null, reason: null, rehearsalCompletedAt: '2026-07-11T09:30:00.000Z', comparabilityDecision: 'baseline' },
+    }), /approval must occur after/i],
+    [approvedBuildRecord({
+      approval: { ownerApproved: true, approvedAt: '2026-02-30T09:30:00.000Z', decisionReference: 'CB-ROLLOVER-01' },
+    }), /real calendar instant/i],
+    [approvedBuildRecord({
+      approval: { ownerApproved: true, approvedAt: '2026-07-11', decisionReference: 'CB-DATEONLY-01' },
+    }), /strict UTC timestamp/i],
+  ];
+  for (const [record, pattern] of invalidTiming) {
+    const approvedBuildRecordPath = writeApprovedBuildRecord(root, record);
+    const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [record]);
+    assert.throws(() => verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }), pattern);
+  }
+
+  const boundary = approvedBuildRecord({
+    approval: { ownerApproved: true, approvedAt: verificationNow.toISOString(), decisionReference: 'CB-NOW-BOUNDARY-01' },
+  });
+  const approvedBuildRecordPath = writeApprovedBuildRecord(root, boundary);
+  const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [boundary]);
+  assert.equal(verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }).ready, true);
+});
+
+test('active decision ledger rejects adversarial old to new to old record replay', () => {
+  const { root, projectDir, rehearsalDir } = setupDirectories();
+  const initial = approvedBuildRecord();
+  const replacement = approvedBuildRecord({
+    approval: {
+      ownerApproved: true,
+      approvedAt: '2026-07-12T09:30:00.000Z',
+      decisionReference: 'CB-M2-BUILD-CHANGE-02',
+    },
+    changeControl: {
+      kind: 'mid-study',
+      replacesDecisionReference: initial.approval.decisionReference,
+      reason: 'Approved integrity correction.',
+      rehearsalCompletedAt: '2026-07-12T09:00:00.000Z',
+      comparabilityDecision: 'comparable',
+    },
+  });
+  const initialPath = writeApprovedBuildRecord(root, initial, 'initial.private.json');
+  const replacementPath = writeApprovedBuildRecord(root, replacement, 'replacement.private.json');
+  const baseOptions = {
+    repoRoot, projectDir, rehearsalDir, fixtureManifest,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
+  };
+
+  let activeBuildDecisionsPath = writeActiveBuildDecisions(root, [initial]);
+  assert.equal(verifyStudySetup({
+    ...baseOptions,
+    approvedBuildRecordPath: initialPath,
+    activeBuildDecisionsPath,
+  }).approvalRecord.activeGeneration, 1);
+
+  activeBuildDecisionsPath = writeActiveBuildDecisions(root, [initial, replacement]);
+  const currentReceipt = verifyStudySetup({
+    ...baseOptions,
+    approvedBuildRecordPath: replacementPath,
+    activeBuildDecisionsPath,
+  });
+  assert.equal(currentReceipt.approvalRecord.activeGeneration, 2);
+  assert.equal(currentReceipt.approvalRecord.approvedBuildRecordSha256, approvedBuildRecordSha256(replacement));
+  assert.throws(() => verifyStudySetup({
+    ...baseOptions,
+    approvedBuildRecordPath: initialPath,
+    activeBuildDecisionsPath,
+  }), /not the current active private decision/i);
 });
 
 test('material manifest hashes match the committed bytes', () => {
