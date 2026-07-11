@@ -58,7 +58,9 @@ remains open, so visible empty-state attestation and setup continue in the same
 terminal. Per-session launch and boot evidence is stored separately and cannot
 rewrite the static sidecar or executable. Static provenance pins the approved
 macOS CDHash; after spawn, `codesign` dynamically verifies the running PID against
-that exact CDHash before boot evidence is accepted.
+that exact CDHash before the parent releases native startup. The parent removes
+any pre-attestation boot file, releases startup with the current nonce, requires
+new create-only boot evidence, and re-attests the same PID after boot.
 
 The generated raw 16-byte profile identifier remains in an ignored local state
 file. Build provenance and the setup receipt contain only its SHA-256

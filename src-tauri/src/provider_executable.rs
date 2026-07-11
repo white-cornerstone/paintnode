@@ -21,6 +21,7 @@ const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
 const PROVIDER_FREE_STUDY_PROFILE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_PROFILE";
 const PROVIDER_FREE_STUDY_BOOT_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE";
 const PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE";
+const PROVIDER_FREE_STUDY_BOOT_RELEASE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_RELEASE";
 const PROVIDER_FREE_STUDY_BUILD_IDENTITY_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY";
 const PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV: &str =
     "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_PROFILE";
@@ -1426,30 +1427,31 @@ pub(crate) struct StudyEvidenceRequest {
     nonce: [u8; 32],
     build_identity: Option<[u8; 32]>,
     path: std::path::PathBuf,
-    cleanup_release_path: Option<std::path::PathBuf>,
+    release_path: Option<std::path::PathBuf>,
 }
 
 impl StudyEvidenceRequest {
-    pub(crate) fn wait_for_cleanup_release(&self) -> Result<(), String> {
+    pub(crate) fn wait_for_parent_release(&self) -> Result<(), String> {
         use sha2::Digest;
-        let Some(path) = self.cleanup_release_path.as_ref() else {
-            return Ok(());
-        };
+        let path = self
+            .release_path
+            .as_ref()
+            .ok_or_else(|| "Provider Free lifecycle parent release path is missing.".to_string())?;
         let expected = format!("{:x}", sha2::Sha256::digest(self.nonce));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             match std::fs::read_to_string(path) {
                 Ok(value) if value.trim() == expected => return Ok(()),
-                Ok(_) => return Err("Provider Free cleanup release evidence is invalid.".into()),
+                Ok(_) => return Err("Provider Free lifecycle release evidence is invalid.".into()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(format!(
-                        "Could not read Provider Free cleanup release: {error}"
+                        "Could not read Provider Free lifecycle release: {error}"
                     ));
                 }
             }
             if std::time::Instant::now() >= deadline {
-                return Err("Provider Free cleanup dynamic-code verification timed out.".into());
+                return Err("Provider Free lifecycle dynamic-code verification timed out.".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -1531,27 +1533,18 @@ fn study_evidence_request_in_mode(
     } else {
         None
     };
-    let cleanup_release_path = if profile_only_is_resume {
-        if raw_cleanup_release_path.is_some() {
-            return Err("Provider Free boot must not carry a cleanup release path.".into());
-        }
-        None
-    } else {
-        Some(
-            raw_cleanup_release_path
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .ok_or_else(|| {
-                    "Provider Free cleanup release path must be absolute.".to_string()
-                })?,
-        )
-    };
+    let release_path = Some(
+        raw_cleanup_release_path
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| "Provider Free lifecycle release path must be absolute.".to_string())?,
+    );
     Ok(Some(StudyEvidenceRequest {
         profile: parse_study_hex::<16>(raw_profile, "Provider Free study profile")?,
         nonce: parse_study_hex::<32>(raw_nonce, "Provider Free study lifecycle nonce")?,
         build_identity,
         path,
-        cleanup_release_path,
+        release_path,
     }))
 }
 
@@ -1585,7 +1578,7 @@ pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidence
         PROVIDER_FREE_STUDY_BOOT_NONCE_ENV,
         PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV,
         Some(PROVIDER_FREE_STUDY_BUILD_IDENTITY_ENV),
-        None,
+        Some(PROVIDER_FREE_STUDY_BOOT_RELEASE_ENV),
         true,
     )
 }
@@ -1762,13 +1755,14 @@ mod tests {
         let path = std::ffi::OsStr::new("/tmp/paintnode-study-boot-evidence.json");
         let build_identity_text = "22".repeat(32);
         let build_identity = std::ffi::OsStr::new(&build_identity_text);
+        let release = std::ffi::OsStr::new("/tmp/paintnode-study-boot-release");
         let request = study_evidence_request_in_mode(
             "provider-free",
             Some(profile),
             Some(nonce),
             Some(path),
             Some(build_identity),
-            None,
+            Some(release),
             true,
         )
         .expect("fresh launch lifecycle request")
@@ -1801,7 +1795,7 @@ mod tests {
             nonce: [2; 32],
             build_identity: Some([3; 32]),
             path: root.join("boot.json"),
-            cleanup_release_path: None,
+            release_path: None,
         };
         write_study_lifecycle_evidence(&request, "app-boot").expect("write boot evidence");
         let evidence: serde_json::Value =
@@ -1824,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn study_cleanup_waits_for_the_parent_dynamic_code_release() {
+    fn study_lifecycle_waits_for_the_parent_dynamic_code_release() {
         use sha2::Digest;
         let root = std::env::temp_dir().join(format!(
             "paintnode-study-cleanup-release-{}-{}",
@@ -1839,7 +1833,7 @@ mod tests {
             nonce: [7; 32],
             build_identity: None,
             path: root.join("cleanup.json"),
-            cleanup_release_path: Some(release_path.clone()),
+            release_path: Some(release_path.clone()),
         };
         std::fs::write(
             &release_path,
@@ -1847,10 +1841,10 @@ mod tests {
         )
         .expect("write trusted parent release");
         request
-            .wait_for_cleanup_release()
+            .wait_for_parent_release()
             .expect("matching release permits cleanup");
         std::fs::write(&release_path, "forged\n").expect("write forged release");
-        assert!(request.wait_for_cleanup_release().is_err());
+        assert!(request.wait_for_parent_release().is_err());
         std::fs::remove_dir_all(root).expect("remove release fixture");
     }
 

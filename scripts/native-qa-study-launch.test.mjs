@@ -60,6 +60,18 @@ function studyBundle() {
   return { root, appBundle, executable };
 }
 
+function writeBootEvidence(env) {
+  const profileBytes = Buffer.from(env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE, 'hex');
+  const bootNonce = Buffer.from(env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE, 'hex');
+  writeFileSync(env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE, JSON.stringify({
+    version: 3,
+    event: 'app-boot',
+    profileSha256: createHash('sha256').update(profileBytes).digest('hex'),
+    bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
+    buildIdentitySha256: env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
+  }), { flag: 'wx' });
+}
+
 test('launch-existing fresh returns after boot without rebuilding or mutating static provenance', async () => {
   const { root, appBundle, executable } = studyBundle();
   const statePath = join(root, 'session.json');
@@ -68,6 +80,7 @@ test('launch-existing fresh returns after boot without rebuilding or mutating st
   const beforeExecutable = readFileSync(executable);
   let unrefCalled = false;
   let spawnedExecutable;
+  let spawnedEnv;
 
   const receipt = await launchExistingProviderFreeStudyApp({
     appBundle,
@@ -78,17 +91,10 @@ test('launch-existing fresh returns after boot without rebuilding or mutating st
     randomUUID: () => FIRST_UUID,
     ...fakeAppReads,
     attestRunningProcess: fakeAttest,
+    afterLaunchRelease: () => writeBootEvidence(spawnedEnv),
     spawn(executablePath, _args, options) {
       spawnedExecutable = executablePath;
-      const profileBytes = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE, 'hex');
-      const bootNonce = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE, 'hex');
-      writeFileSync(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE, JSON.stringify({
-        version: 3,
-        event: 'app-boot',
-        profileSha256: createHash('sha256').update(profileBytes).digest('hex'),
-        bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
-        buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
-      }));
+      spawnedEnv = options.env;
       return { pid: 4242, exitCode: null, unref() { unrefCalled = true; } };
     },
   });
@@ -139,6 +145,7 @@ test('fresh launch rejects child exit, hung boot, executable swap, and swap-rest
         : fakeAttest,
       bootTimeoutMs: 2,
       bootPollMs: 1,
+      afterLaunchRelease: failure === 'swap' ? ({ env }) => writeBootEvidence(env) : undefined,
       spawn(_executablePath, _args, options) {
         if (failure === 'swap' || failure === 'swap-restore') {
           const approvedBytes = readFileSync(executable);
@@ -166,18 +173,39 @@ test('fresh launch rejects child exit, hung boot, executable swap, and swap-rest
   }
 });
 
+test('forge-then-exec-approved cannot reuse pre-attestation boot evidence', async () => {
+  const { root, appBundle } = studyBundle();
+  const statePath = join(root, 'session.json');
+  let attestations = 0;
+  await assert.rejects(() => launchExistingProviderFreeStudyApp({
+    appBundle,
+    statePath,
+    fresh: true,
+    platform: 'darwin',
+    productVersion: '14.6',
+    randomUUID: () => FIRST_UUID,
+    ...fakeAppReads,
+    attestRunningProcess(pid, identity) {
+      attestations += 1;
+      fakeAttest(pid, identity);
+    },
+    bootTimeoutMs: 2,
+    bootPollMs: 1,
+    spawn(_executablePath, _args, options) {
+      writeBootEvidence(options.env);
+      return { pid: 4242, exitCode: null, kill() {}, unref() {} };
+    },
+  }), /timed out/i);
+  assert.equal(attestations, 1, 'pre-release forgery must not reach post-boot re-attestation');
+  assert.equal(existsSync(studySessionBootEvidencePath(statePath)), false);
+});
+
 test('resume uses the same preserved bundle without fresh boot evidence', async () => {
   const { root, appBundle } = studyBundle();
   const statePath = join(root, 'session.json');
+  let freshEnv;
   const spawnFresh = (_executablePath, _args, options) => {
-    const profileBytes = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE, 'hex');
-    const bootNonce = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE, 'hex');
-    writeFileSync(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE, JSON.stringify({
-      version: 3, event: 'app-boot',
-      profileSha256: createHash('sha256').update(profileBytes).digest('hex'),
-      bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
-      buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
-    }));
+    freshEnv = options.env;
     return { pid: 4242, exitCode: null, unref() {} };
   };
   const fresh = await launchExistingProviderFreeStudyApp({
@@ -186,6 +214,7 @@ test('resume uses the same preserved bundle without fresh boot evidence', async 
     ...fakeAppReads,
     attestRunningProcess: fakeAttest,
     spawn: spawnFresh,
+    afterLaunchRelease: () => writeBootEvidence(freshEnv),
   });
   const qaReceipt = consumeQaOnlyStudySession({ appBundle, statePath, ...fakeAppReads });
   assert.equal(qaReceipt.qaOnly, true);
@@ -211,15 +240,9 @@ test('resume uses the same preserved bundle without fresh boot evidence', async 
 test('concurrent fresh launch and symlinked static provenance fail closed', async () => {
   const { root, appBundle } = studyBundle();
   const statePath = join(root, 'session.json');
+  let spawnEnv;
   const spawnBoot = (_executablePath, _args, options) => {
-    const profileBytes = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE, 'hex');
-    const bootNonce = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE, 'hex');
-    writeFileSync(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE, JSON.stringify({
-      version: 3, event: 'app-boot',
-      profileSha256: createHash('sha256').update(profileBytes).digest('hex'),
-      bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
-      buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
-    }));
+    spawnEnv = options.env;
     return { pid: 4242, exitCode: null, unref() {} };
   };
   const options = {
@@ -228,6 +251,7 @@ test('concurrent fresh launch and symlinked static provenance fail closed', asyn
     ...fakeAppReads,
     attestRunningProcess: fakeAttest,
     spawn: spawnBoot,
+    afterLaunchRelease: () => writeBootEvidence(spawnEnv),
   };
   const results = await Promise.allSettled([
     launchExistingProviderFreeStudyApp(options),

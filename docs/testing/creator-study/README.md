@@ -138,7 +138,9 @@ executable identity even when source files appear unchanged.
    build/configuration step. It returns to this terminal only after current-nonce
    native boot evidence and the kernel-backed running-process CDHash are verified
    while PaintNode remains open. A restored on-disk executable cannot make a
-   swapped interpreter or script satisfy that dynamic code requirement.
+   swapped interpreter or script satisfy that dynamic code identity. Native
+   startup waits behind a parent release barrier; pre-attestation boot evidence
+   is removed, and the same PID is re-attested after new create-only evidence.
 
 6. Before opening any folder, visibly confirm the Project panel has no open
    project or imported assets and no workflow is open. Close the app if either
@@ -205,9 +207,10 @@ fingerprint. Native boot evidence repeats the build-identity and current nonce
 fingerprints. Setup requires all three identities to match and rechecks the
 executable; resume and cleanup resolve the same preserved executable through that
 binding. Fresh allocation claims its create-only state before clearing stale
-evidence, so a losing concurrent caller cannot delete the winning launch. Cleanup
-waits behind a trusted release barrier until its running PID passes the same
-dynamic CDHash requirement.
+evidence, so a losing concurrent caller cannot delete the winning launch. Fresh
+startup and cleanup both wait behind trusted release barriers until their running
+PIDs pass dynamic validity and exact CDHash comparison. Strict static verification
+targets the canonical signed app bundle, including its sealed resources.
 
 The technical setup receipt is single-use. It reports `appBootObserved: true`
 only after the Provider Free executable has actually created the isolated window, and

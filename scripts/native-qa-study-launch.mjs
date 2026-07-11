@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +13,7 @@ import {
   readProviderFreeStudySession,
   resolveProviderFreeStudySession,
   studySessionBootEvidencePath,
+  studySessionBootReleasePath,
   studySessionLaunchEvidencePath,
 } from './native-qa-session.mjs';
 
@@ -122,6 +123,7 @@ export async function launchExistingProviderFreeStudyApp({
   spawn = nodeSpawn,
   bootTimeoutMs = 20_000,
   bootPollMs = 50,
+  afterLaunchRelease,
 }) {
   if (fresh === resume) throw new Error('Choose exactly one of --fresh-study-session or --resume-study-session.');
   let version = productVersion;
@@ -179,9 +181,15 @@ export async function launchExistingProviderFreeStudyApp({
   try {
     attestRunningProcess(child.pid, before.codeIdentity);
     if (fresh) {
+      rmSync(studySessionBootEvidencePath(statePath), { force: true });
+      writeFileSync(studySessionBootReleasePath(statePath), `${session.bootNonceSha256}\n`, {
+        flag: 'wx', mode: 0o600,
+      });
+      afterLaunchRelease?.({ child, env, session, app: before });
       await waitForCurrentBoot({
         statePath, session, app: before, child, timeoutMs: bootTimeoutMs, pollMs: bootPollMs,
       });
+      attestRunningProcess(child.pid, before.codeIdentity);
       const afterBoot = readExistingStudyApp({ appBundle, readBundleIdentifier, readStaticCodeIdentity });
       if (!sameStaticStudyApp(before, afterBoot)) throw new Error('Provider Free static bundle changed during launch.');
     } else {
@@ -202,6 +210,8 @@ export async function launchExistingProviderFreeStudyApp({
   } catch (error) {
     child.kill?.();
     throw error;
+  } finally {
+    if (fresh) rmSync(studySessionBootReleasePath(statePath), { force: true });
   }
 }
 

@@ -70,6 +70,10 @@ export function studySessionBootEvidencePath(statePath) {
   return `${statePath}.boot.json`;
 }
 
+export function studySessionBootReleasePath(statePath) {
+  return `${statePath}.boot.release`;
+}
+
 export function studySessionCleanupEvidencePath(statePath) {
   return `${statePath}.cleanup.json`;
 }
@@ -190,6 +194,7 @@ export function resolveProviderFreeStudySession({
     }
     try {
       rmSync(studySessionBootEvidencePath(statePath), { force: true });
+      rmSync(studySessionBootReleasePath(statePath), { force: true });
       rmSync(studySessionCleanupEvidencePath(statePath), { force: true });
       rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
       removeInactiveConsumeLock(statePath);
@@ -223,6 +228,7 @@ export function providerFreeStudyBootEnvironment(session, statePath) {
   return Object.freeze({
     PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE: valid.bootNonce,
     PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE: studySessionBootEvidencePath(statePath),
+    PAINTNODE_PROVIDER_FREE_STUDY_BOOT_RELEASE: studySessionBootReleasePath(statePath),
   });
 }
 
@@ -314,6 +320,7 @@ export function prepareStudySessionCleanup(statePath, options = {}) {
 function removeStudySessionLifecycleFiles(statePath, evidencePath) {
   rmSync(statePath, { force: true });
   rmSync(studySessionBootEvidencePath(statePath), { force: true });
+  rmSync(studySessionBootReleasePath(statePath), { force: true });
   rmSync(evidencePath, { force: true });
   rmSync(studySessionCleanupReleasePath(statePath), { force: true });
   rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
