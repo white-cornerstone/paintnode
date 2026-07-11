@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import { captureSourceState, readQaBuildProvenance, sha256File } from './native-qa-build-provenance.mjs';
+import { verifyAndConsumeStudySessionBoot } from './native-qa-session.mjs';
+import { createMacKeychainStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
 
 export const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.free';
 export const EXPECTED_BUNDLE_NAME = 'PaintNode Blueprint QA — Provider Free';
@@ -676,6 +678,10 @@ export function verifyStudySetup({
   actualExecutableSha256,
   now = new Date(),
   activeBuildAnchor,
+  visibleEmptyStateAttested,
+  macosMajorVersion,
+  studySessionStatePath,
+  studySessionConsumptionAnchor,
 }) {
   if (!projectDir || !rehearsalDir) throw new Error('Project and rehearsal paths are required.');
   if (![projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, fixtureManifest].every((path) => typeof path === 'string' && isAbsolute(path))) {
@@ -727,6 +733,20 @@ export function verifyStudySetup({
     || approved.executableSha256 !== appBuild.executableSha256) {
     throw new Error('Approved executable fingerprint does not match the app executable and provenance.');
   }
+  const studySession = appBuild.studySession;
+  if (!studySession || studySession.version !== 3 || studySession.isolatedProfile !== true
+    || !/^[a-f0-9]{64}$/.test(studySession.profileSha256 || '')) {
+    throw new Error('Provider Free app does not use a valid isolated study profile. Start it with --fresh-study-session.');
+  }
+  if (studySession.launchIntent !== 'fresh') {
+    throw new Error('Creator-study setup requires a fresh study session launch, not a resumed session.');
+  }
+  if (visibleEmptyStateAttested !== true) {
+    throw new Error('The operator must attest the visible empty Project and Workflow state.');
+  }
+  if (!Number.isInteger(macosMajorVersion) || macosMajorVersion < 14) {
+    throw new Error('Provider Free study isolation requires macOS 14 or newer.');
+  }
 
   const canonicalProject = canonicalExisting(projectDir, 'Participant project folder');
   const canonicalRehearsal = canonicalDeletedPath(rehearsalDir);
@@ -741,7 +761,15 @@ export function verifyStudySetup({
   assertEmptyProject(canonicalProject);
   verifyScenarioControls(canonicalRepo);
   const materials = verifyMaterials(canonicalManifest);
+  if (!studySessionStatePath || !isAbsolute(studySessionStatePath)) {
+    throw new Error('Provider Free study session state path must be absolute.');
+  }
   protectedAnchor.commit();
+  const launchEvidence = verifyAndConsumeStudySessionBoot({
+    statePath: studySessionStatePath,
+    profileSha256: studySession.profileSha256,
+    consumptionAnchor: studySessionConsumptionAnchor,
+  });
 
   return Object.freeze({
     schemaVersion: 1,
@@ -759,10 +787,16 @@ export function verifyStudySetup({
     }),
     projectState: 'empty',
     rehearsalState: 'deleted',
+    sessionReset: Object.freeze({
+      isolatedProfile: true,
+      profileSha256: studySession.profileSha256,
+      macosMajorVersion,
+      ...launchEvidence,
+    }),
+    manualAttestations: Object.freeze({ visibleEmptyProjectAndWorkflow: true }),
     scenarioControls: ['standard', 'branch-recovery', 'format-recovery'],
     materials,
     manualChecksStillRequired: [
-      'fresh app state',
       'visible rehearsal of both failure checkpoints',
       'editor return, save/reopen, and Place',
       'private study authorization and recording state',
@@ -790,6 +824,15 @@ function readAppBundle(appBundle) {
   };
 }
 
+function readMacosMajorVersion() {
+  if (process.platform !== 'darwin') throw new Error('Creator-study native setup requires macOS 14 or newer.');
+  const result = spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`Could not read macOS version: ${result.stderr || result.error}`);
+  const major = Number.parseInt(result.stdout.trim().split('.')[0] ?? '', 10);
+  if (!Number.isInteger(major)) throw new Error('Could not parse the macOS version.');
+  return major;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2);
@@ -812,6 +855,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         actualSourceStatusSha256: sourceState.sourceStatusSha256,
         sourceDirty: sourceState.sourceDirty,
         activeBuildAnchor: createMacosActiveBuildAnchor(),
+        visibleEmptyStateAttested: args.includes('--visible-empty-state-attested'),
+        macosMajorVersion: readMacosMajorVersion(),
+        studySessionStatePath: join(scriptRoot, 'src-tauri', '.provider-free-study-session.json'),
+        studySessionConsumptionAnchor: createMacKeychainStudySessionConsumptionAnchor(),
         ...app,
       });
       process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);

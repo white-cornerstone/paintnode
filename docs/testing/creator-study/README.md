@@ -110,8 +110,20 @@ executable identity even when source files appear unchanged.
    current hint instrument version, SHA-256, and approved Git change reference.
 4. Create a different, genuinely empty participant project folder outside the
    repository.
-5. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
-6. Run:
+5. Start a new isolated study profile. This generates a cryptographically random
+   WebKit data-store identifier that has no access to the generic QA profile,
+   rehearsal, or any prior participant profile. The study mechanism requires
+   macOS 14 or newer and fails closed on older systems:
+
+   ```sh
+   npm run qa:native:provider-free -- --fresh-study-session
+   ```
+
+6. Before opening any folder, visibly confirm the Project panel has no open
+   project or imported assets and no workflow is open. Close the app if either
+   is present; do not continue the session.
+7. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle and
+   run the setup verifier only after making that visible check:
 
    ```sh
    npm run qa:creator-study:setup -- \
@@ -119,34 +131,89 @@ executable identity even when source files appear unchanged.
      --active-build-decisions "ABSOLUTE_PRIVATE_ACTIVE_BUILD_DECISIONS.json" \
      --app-bundle "ABSOLUTE_PATH_TO_PROVIDER_FREE_APP" \
      --project-dir "ABSOLUTE_EMPTY_PARTICIPANT_PROJECT" \
-     --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT"
+     --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT" \
+     --visible-empty-state-attested
    ```
 
-The verifier reads approval from that private record and the privately
-controlled active-decision ledger. It checks the clean
-checkout, app provenance, actual executable, bundle identity, approved literal
-SHA/tree/status/executable fingerprints, canonicalized paths, empty project,
-deleted rehearsal path, Product hashes/dimensions, and all three QA controls.
-Missing, malformed, duplicate-key, in-repository, stale, superseded,
-future-dated, or
-mismatched approval records fail closed. The ledger must contain contiguous,
-unique generations with strictly increasing approval timestamps; its latest
-approval ID/reference/time must match the supplied record. The separate Keychain
-anchor must match the complete current head or advance by exactly one generation
-from an exact protected previous-head and chain-prefix match. Advancement is
-serialized under an exclusive process lock, then re-reads, validates, writes, and
-re-reads the Keychain item before setup can return ready. Its receipt reports the
-matched identity, active generation, and random non-derived approval ID, but
-omits the anchor's private commitments, approval date, and decision reference
-along with private paths, change reason, ledger history, storage data, and
-participant paths. It does not replace rehearsal or authorization.
+8. To test quit/reopen within this same participant session, relaunch with the
+   same isolated profile:
 
-Use the same approved study Mac for the whole study. Do not delete, reset,
-export, or restore the `com.paintnode.creator-study.active-build` Keychain item.
-Legacy version-1 or version-2 anchor payloads fail closed rather than being
-migrated without authenticated build and change-control history.
-If that protected anchor is unavailable or conflicts with private files, pause
-the study and resolve it as an owner-controlled integrity incident.
+   ```sh
+   npm run qa:native:provider-free -- --resume-study-session
+   ```
+
+   `--resume-study-session` must never start a new participant. The next
+   participant always begins again at step 5 with `--fresh-study-session`.
+
+The verifier reads approval from the private approved-build record and
+active-decision ledger. It checks the clean checkout, app provenance and actual
+executable, approved literal SHA/tree/status/executable fingerprints,
+canonicalized paths, empty project, deleted rehearsal path, a freshly generated
+isolated study profile, Product hashes/dimensions, all three QA controls, and the
+operator's visible-empty-state attestation. Generic or resumed profiles and
+missing, malformed, duplicate-key, in-repository, stale, superseded,
+future-dated, or mismatched approval records fail closed.
+
+The ledger must contain contiguous unique generations with strictly increasing
+approval timestamps, and its latest canonical decision commitment must match
+the supplied record. The separate approved-build Keychain anchor must match the
+complete current head or advance by exactly one generation from an exact
+protected previous-head and chain-prefix match. Advancement is serialized under
+an exclusive process lock and re-read after writing. Legacy version-1 or
+version-2 anchor payloads fail closed. Use the same approved study Mac for the
+whole study; do not delete, reset, export, or restore the
+`com.paintnode.creator-study.active-build` item. The lifecycle-consumption
+Keychain marker is separate and create-once.
+
+The receipt reports the matched approved identity, active generation, random
+non-derived approval ID, one-way profile fingerprint, native boot consumption,
+and visible-empty attestation. It omits raw profile identifiers, private anchor
+commitments, approval dates/references, paths, change reasons, ledger history,
+and storage data. It does not replace rehearsal or private authorization.
+
+The setup receipt is single-use. It reports `appBootObserved: true` only after
+the Provider Free executable has actually created the isolated window, and
+`setupEvidenceConsumed: true` when that boot generation is consumed. A
+`--build-only` bundle, missing boot marker, stale marker, or second setup attempt
+for the same generation fails closed; the manual visible-empty attestation is
+recorded separately and is never treated as machine-observed UI evidence.
+Consumption is also recorded create-once in the macOS login Keychain as a
+monotonic single-Mac anchor. Restoring the ignored state and boot-evidence files
+cannot restore that marker or make the same profile consumable again. Do not
+delete those Keychain markers during the study.
+
+`--fresh-study-session --build-only` writes non-live `build-only` provenance but
+does not allocate a profile, nonce, state file, or Keychain marker. It is safe
+for build validation, but the resulting bundle cannot pass participant setup.
+
+## After every session
+
+After Task 8 save/reopen is complete, close PaintNode and run:
+
+```sh
+npm run qa:creator-study:finalize-session
+```
+
+This launches the repo-built Provider Free executable in cleanup-only mode,
+removes the session's persistent macOS WebKit data store, verifies one-time
+native cleanup evidence, deletes the local raw profile handle, and prints a
+path-free receipt containing only its fingerprint and `dataStoreRemoved: true`.
+Copy that receipt to the private session log. A new `--fresh-study-session`
+fails closed until the prior session is finalized. The app profile is transient
+operational state and is never retained as research evidence; apply approved
+retention rules to the participant project/evidence instead.
+
+If the build fails, the first app launch fails, PaintNode is closed before setup,
+or the session is abandoned before setup evidence is consumed, run:
+
+```sh
+npm run qa:creator-study:abort-session
+```
+
+An abort before any launch attempt releases the unused handle without claiming
+a data store existed. Once launch was attempted, abort uses the same native
+WebKit removal and verified cleanup evidence as finalization. Failure retains
+the raw handle and blocks the next fresh session; manual deletion is unsupported.
 
 ## Mid-study build changes
 
@@ -156,14 +223,16 @@ private approved-build record. `kind` must be `mid-study`; record the prior
 decision reference, change reason, owner approval, rehearsal completion time,
 and a comparability decision of `comparable` or `restart-required`. Create a new
 random `approvalId`, preserve the prior record, and append the next contiguous
-generation with the new ID/reference/time to the active-decision ledger. Its
-approval time must be later than every prior generation, the new rehearsal must
-occur after the preceding approval, and the replacement reference must equal
-the immediately preceding ledger decision. The setup verifier rejects an
-incomplete, non-current, or replayed change decision. If the decision is
-`restart-required`, do not combine earlier sessions with the new build; record
-which sessions are replaced and recruit replacements under the new baseline.
-Never overwrite the earlier private approval record.
+generation with its canonical decision commitment to the active-decision
+ledger. The approval time must increase, the new rehearsal must follow the
+preceding approval, and the replacement reference must identify the immediately
+preceding decision. Never overwrite the earlier private approval record.
+
+The approved-build Keychain anchor must advance atomically to that exact head.
+If comparability is `restart-required`, do not combine earlier sessions with the
+new build; record which sessions are replaced and recruit replacements under the
+new baseline. The Provider Free lifecycle remains per participant: abort or
+finalize the current isolated profile before starting another fresh session.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either

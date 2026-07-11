@@ -9,8 +9,15 @@ import {
   approvedBuildDecisionCommitment,
   createMacosActiveBuildAnchor,
   EXPECTED_BUNDLE_ID,
-  verifyStudySetup,
+  verifyStudySetup as verifyStudySetupImplementation,
 } from './creator-study-setup.mjs';
+import {
+  createFreshProviderFreeStudySession,
+  markStudySessionLaunchAttempted,
+  studySessionBootEvidencePath,
+  writeProviderFreeStudySession,
+} from './native-qa-session.mjs';
+import { createMemoryStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
 
 const repoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const fixtureManifest = join(repoRoot, 'docs', 'testing', 'creator-study', 'materials', 'manifest.json');
@@ -23,7 +30,11 @@ const sourceState = {
   actualSourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
   sourceDirty: false,
 };
-const appBuild = {
+const sessionFixture = createFreshProviderFreeStudySession({
+  randomUUID: () => '00112233-4455-4677-8899-aabbccddeeff',
+  randomBytes: () => Buffer.alloc(32, 3),
+});
+const approvedBuildIdentity = {
   version: 1,
   mode: 'provider-free',
   bundleId: EXPECTED_BUNDLE_ID,
@@ -33,6 +44,26 @@ const appBuild = {
   sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
   executableSha256: 'a'.repeat(64),
 };
+const appBuild = {
+  ...approvedBuildIdentity,
+  studySession: {
+    version: 3,
+    isolatedProfile: true,
+    launchIntent: 'fresh',
+    profileSha256: sessionFixture.profileSha256,
+  },
+};
+const lifecycleFixturesByProject = new Map();
+
+function verifyStudySetup(options) {
+  const inferredLifecycle = lifecycleFixturesByProject.get(options.projectDir) ?? {};
+  return verifyStudySetupImplementation({
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    ...inferredLifecycle,
+    ...options,
+  });
+}
 
 function approvedBuildRecord(overrides = {}) {
   return {
@@ -40,7 +71,7 @@ function approvedBuildRecord(overrides = {}) {
     _privacyWarning: 'PRIVATE ONLY. Never complete this record in GitHub, a checkout, worktree, chat, or participant project.',
     schemaVersion: 1,
     recordType: 'paintnode-creator-study-approved-build',
-    approvedBuild: { ...appBuild },
+    approvedBuild: { ...approvedBuildIdentity },
     approval: {
       ownerApproved: true,
       approvedAt: '2026-07-11T09:30:00.000Z',
@@ -158,7 +189,33 @@ function setupDirectories() {
   const approvedBuildRecordPath = writeApprovedBuildRecord(root, record);
   const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [record]);
   const activeBuildAnchor = memoryActiveBuildAnchor();
-  return { root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor };
+  const studySessionStatePath = join(root, 'session.json');
+  writeProviderFreeStudySession(studySessionStatePath, sessionFixture);
+  markStudySessionLaunchAttempted(studySessionStatePath);
+  writeFileSync(studySessionBootEvidencePath(studySessionStatePath), JSON.stringify({
+    version: 3,
+    event: 'app-boot',
+    profileSha256: sessionFixture.profileSha256,
+    bootNonceSha256: sessionFixture.bootNonceSha256,
+  }));
+  const studySessionConsumptionAnchor = createMemoryStudySessionConsumptionAnchor();
+  lifecycleFixturesByProject.set(projectDir, {
+    approvedBuildRecordPath,
+    activeBuildDecisionsPath,
+    activeBuildAnchor,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
+  });
+  return {
+    root,
+    projectDir,
+    rehearsalDir,
+    approvedBuildRecordPath,
+    activeBuildDecisionsPath,
+    activeBuildAnchor,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
+  };
 }
 
 test('protected active-build anchor pins the complete private decision head in the study Mac keychain', () => {
@@ -200,11 +257,9 @@ test('protected active-build anchor pins the complete private decision head in t
 test('the committed Product materials are deterministic, distinct, and assigned to Tasks 1 and 6', () => {
   const {
     projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor,
+    studySessionStatePath, studySessionConsumptionAnchor,
   } = setupDirectories();
-  assert.deepEqual(approvedBuildDecisionCommitment({
-    repoRoot,
-    approvedBuildRecordPath,
-  }), {
+  assert.deepEqual(approvedBuildDecisionCommitment({ repoRoot, approvedBuildRecordPath }), {
     ledgerSchemaVersion: 2,
     decisionRecordSha256: canonicalDecisionRecordSha256(approvedBuildRecord()),
   });
@@ -221,6 +276,10 @@ test('the committed Product materials are deterministic, distinct, and assigned 
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
     now: verificationNow,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   });
 
   assert.equal(receipt.ready, true);
@@ -228,13 +287,24 @@ test('the committed Product materials are deterministic, distinct, and assigned 
   assert.equal(new Set(receipt.materials.map(({ sha256 }) => sha256)).size, 2);
   assert.equal(receipt.projectState, 'empty');
   assert.equal(receipt.rehearsalState, 'deleted');
-  assert.deepEqual(receipt.approvedBuildIdentity, { matched: true, ...appBuild });
+  assert.deepEqual(receipt.approvedBuildIdentity, { matched: true, ...approvedBuildIdentity });
   assert.deepEqual(receipt.approvalRecord, {
     schemaVersion: 1,
     validated: true,
     changeKind: 'initial',
     activeGeneration: 1,
     approvalId: INITIAL_APPROVAL_ID,
+  });
+  assert.deepEqual(receipt.sessionReset, {
+    isolatedProfile: true,
+    profileSha256: appBuild.studySession.profileSha256,
+    macosMajorVersion: 14,
+    appBootObserved: true,
+    setupEvidenceConsumed: true,
+    monotonicAnchorRecorded: true,
+  });
+  assert.deepEqual(receipt.manualAttestations, {
+    visibleEmptyProjectAndWorkflow: true,
   });
   assert.equal(JSON.stringify(receipt).includes(projectDir), false, 'receipt must not leak local paths');
   assert.equal(JSON.stringify(receipt).includes(approvedBuildRecordPath), false, 'receipt must not leak private record paths');
@@ -266,13 +336,14 @@ test('protected decision commitment rejects build A to build B rewrite under the
   assert.equal(verifyStudySetup(options).ready, true);
   const acceptedAnchor = activeBuildAnchor.snapshot();
 
-  const buildB = {
-    ...appBuild,
+  const buildBIdentity = {
+    ...approvedBuildIdentity,
     gitSha: '5'.repeat(40),
     sourceTreeSha: 'c'.repeat(40),
     executableSha256: 'd'.repeat(64),
   };
-  const rewrittenRecord = approvedBuildRecord({ approvedBuild: buildB });
+  const buildB = { ...buildBIdentity, studySession: { ...appBuild.studySession } };
+  const rewrittenRecord = approvedBuildRecord({ approvedBuild: buildBIdentity });
   options.approvedBuildRecordPath = writeApprovedBuildRecord(root, rewrittenRecord);
   options.activeBuildDecisionsPath = writeActiveBuildDecisions(root, [rewrittenRecord]);
   options.actualGitSha = buildB.gitSha;
@@ -333,8 +404,43 @@ test('stale generation-1 verifier cannot overwrite a concurrent generation-2 anc
   assert.deepEqual(anchorValue, concurrentGenerationTwo);
 });
 
+test('setup requires actual app boot evidence and consumes it exactly once', () => {
+  const {
+    root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath,
+    activeBuildAnchor, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
+  const options = {
+    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath,
+    activeBuildAnchor, studySessionStatePath, fixtureManifest,
+    expectedGitSha: sourceState.actualGitSha,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionConsumptionAnchor,
+  };
+  rmSync(studySessionBootEvidencePath(studySessionStatePath));
+  assert.throws(() => verifyStudySetup(options), /boot evidence is missing/i);
+  writeFileSync(studySessionBootEvidencePath(studySessionStatePath), JSON.stringify({
+    version: 3, event: 'app-boot', profileSha256: sessionFixture.profileSha256,
+    bootNonceSha256: sessionFixture.bootNonceSha256,
+  }));
+  assert.equal(verifyStudySetup(options).ready, true);
+  const secondProject = join(root, 'participant-project-2');
+  mkdirSync(secondProject);
+  assert.throws(
+    () => verifyStudySetup({ ...options, projectDir: secondProject }),
+    /already been consumed/i,
+  );
+});
+
 test('setup verification fails closed for dirty projects, retained rehearsal data, wrong build, or wrong bundle', () => {
-  const { projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor } = setupDirectories();
+  const {
+    projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor,
+    studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   writeFileSync(join(projectDir, '.hidden-state'), 'not empty');
 
   const options = {
@@ -351,6 +457,10 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
     now: verificationNow,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   };
   assert.throws(() => verifyStudySetup(options), /Git SHA/i);
 
@@ -375,7 +485,10 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
 });
 
 test('setup verification rejects dirty source, stale bundles, and executable fingerprint drift', () => {
-  const { projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor } = setupDirectories();
+  const {
+    projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor,
+    studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   const options = {
     repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor, fixtureManifest,
     ...sourceState,
@@ -383,6 +496,10 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
     appBuild: { ...appBuild },
     actualExecutableSha256: appBuild.executableSha256,
     now: verificationNow,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   };
 
   options.sourceDirty = true;
@@ -399,10 +516,29 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
 
   options.actualExecutableSha256 = 'b'.repeat(64);
   assert.throws(() => verifyStudySetup(options), /executable fingerprint/i);
+  options.actualExecutableSha256 = appBuild.executableSha256;
+
+  options.appBuild.studySession.launchIntent = 'resume';
+  assert.throws(() => verifyStudySetup(options), /fresh study session/i);
+  options.appBuild.studySession.launchIntent = 'fresh';
+
+  options.appBuild.studySession.isolatedProfile = false;
+  assert.throws(() => verifyStudySetup(options), /isolated study profile/i);
+  options.appBuild.studySession.isolatedProfile = true;
+
+  options.visibleEmptyStateAttested = false;
+  assert.throws(() => verifyStudySetup(options), /visible empty Project and Workflow/i);
+  options.visibleEmptyStateAttested = true;
+
+  options.macosMajorVersion = 13;
+  assert.throws(() => verifyStudySetup(options), /macOS 14/i);
 });
 
 test('project and deleted rehearsal paths are canonicalized through symlinks', () => {
-  const { root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor } = setupDirectories();
+  const {
+    root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath,
+    activeBuildAnchor, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   const linkedProject = join(root, 'linked-project');
   symlinkSync(projectDir, linkedProject);
   const options = {
@@ -412,6 +548,10 @@ test('project and deleted rehearsal paths are canonicalized through symlinks', (
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
     now: verificationNow,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   };
   assert.equal(verifyStudySetup(options).ready, true);
 
@@ -472,7 +612,9 @@ test('approved build record is mandatory, private, strict, and cannot dynamicall
   assert.throws(() => verifyStudySetup(options), /outside the Git repository/i);
 
   options.approvedBuildRecordPath = approvedBuildRecordPath;
-  const staleRecord = approvedBuildRecord({ approvedBuild: { ...appBuild, gitSha: 'f'.repeat(40) } });
+  const staleRecord = approvedBuildRecord({
+    approvedBuild: { ...approvedBuildIdentity, gitSha: 'f'.repeat(40) },
+  });
   writeApprovedBuildRecord(root, staleRecord);
   options.activeBuildDecisionsPath = writeActiveBuildDecisions(root, [staleRecord]);
   assert.throws(() => verifyStudySetup(options), /approved Git SHA/i);
@@ -500,7 +642,7 @@ test('every approved build identity and provenance mismatch fails closed', () =>
   ];
   for (const [field, value, pattern] of mismatches) {
     const record = approvedBuildRecord({
-      approvedBuild: { ...appBuild, [field]: value },
+      approvedBuild: { ...approvedBuildIdentity, [field]: value },
     });
     const approvedBuildRecordPath = writeApprovedBuildRecord(root, record);
     const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [record]);
@@ -792,6 +934,28 @@ test('active decision ledger rejects adversarial old to new to old record replay
     activeBuildDecisionsPath,
   }).approvalRecord.activeGeneration, 1);
 
+  const replacementSession = createFreshProviderFreeStudySession({
+    randomUUID: () => '11111111-2222-4333-8444-555555555555',
+    randomBytes: () => Buffer.alloc(32, 4),
+  });
+  const replacementSessionPath = join(root, 'replacement-session.json');
+  writeProviderFreeStudySession(replacementSessionPath, replacementSession);
+  markStudySessionLaunchAttempted(replacementSessionPath);
+  writeFileSync(studySessionBootEvidencePath(replacementSessionPath), JSON.stringify({
+    version: 3,
+    event: 'app-boot',
+    profileSha256: replacementSession.profileSha256,
+    bootNonceSha256: replacementSession.bootNonceSha256,
+  }));
+  baseOptions.appBuild = {
+    ...appBuild,
+    studySession: {
+      ...appBuild.studySession,
+      profileSha256: replacementSession.profileSha256,
+    },
+  };
+  baseOptions.studySessionStatePath = replacementSessionPath;
+  baseOptions.studySessionConsumptionAnchor = createMemoryStudySessionConsumptionAnchor();
   activeBuildDecisionsPath = writeActiveBuildDecisions(root, [initial, replacement]);
   const currentReceipt = verifyStudySetup({
     ...baseOptions,

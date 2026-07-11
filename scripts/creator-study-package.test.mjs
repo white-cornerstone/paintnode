@@ -164,8 +164,25 @@ test('private handoff templates capture schema fields and concrete scheduling as
   assert.match(reset, /approved-build decision reference/i);
   assert.match(reset, /active generation and complete private ledger head.*protected study-Mac anchor/i);
   assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
+  assert.match(reset, /--fresh-study-session/);
+  assert.match(reset, /Project visibly shows no open project\/imported assets/i);
+  assert.match(reset, /--visible-empty-state-attested/);
   for (const id of RECRUITMENT_EXCEPTION_IDS) assert.match(authorization, new RegExp(`\\b${id}\\b`));
   assert.match(authorization, /one requirement never waives the other/i);
+});
+
+test('operations require a fresh isolated profile and preserve only same-session reopen', () => {
+  const operations = readFileSync(join(study, 'README.md'), 'utf8');
+  assert.match(operations, /--fresh-study-session/);
+  assert.match(operations, /--resume-study-session/);
+  assert.match(operations, /--visible-empty-state-attested/);
+  assert.match(operations, /must never start a new participant/i);
+  assert.match(operations, /qa:creator-study:finalize-session/);
+  assert.match(operations, /qa:creator-study:abort-session/);
+  assert.match(operations, /dataStoreRemoved: true/);
+  assert.match(operations, /single-use/);
+  assert.match(operations, /monotonic single-Mac anchor/);
+  assert.match(operations, /build-only[\s\S]*does not allocate/i);
 });
 
 test('repository-safe decision handoff excludes private scheduling and identity fields', () => {
