@@ -132,26 +132,53 @@ matching provider adapter; it never falls back silently. Boundary-owned values
 such as project path, run identity, and Director mode cannot be replaced by a
 saved options object.
 
-### Campaign Composer thin-slice path
+### Campaign Composer accepted-direction family
 
-The first executable path is deliberately narrow:
+The historical first executable thin slice was deliberately narrow:
 
 `Product / optional Subject / optional Style -> Brief -> Art Direction -> Generate Transform -> Square Output`
 
-Only Square Output uses the Generate Transform in this slice. Portrait and
-Landscape remain structurally present for later branches. Saved v2 graphs that
-connect Art Direction directly to an Output continue to validate, serialize,
-and reopen, but that legacy direct edge cannot invoke the new Transform
-executor.
+That Product-to-Square shape and older direct Art Direction-to-Output graphs
+remain valid saved v2 graphs, serialize, and reopen unchanged. A legacy direct
+edge still cannot invoke the Transform executor.
 
-The UI store owns transient `running`, `succeeded`, and `failed` presentation
-and commits a successful returned graph atomically. Per-Transform run tokens
-prevent an older overlapping run from overwriting a newer result. Before
+New Campaign Composer instances and equivalent Director drafts use the current
+accepted-direction family topology:
+
+`Art Direction -> Generate Concepts -> Review -> accepted Square`
+
+The same Review decision fans out to `Generate Portrait -> Portrait 4:5` and
+`Generate Landscape -> Landscape 16:9`. Each format Transform materializes the
+exact effective promoted result as its first mandatory source. When the creator
+returns an editor revision, that edited asset identity and content hash replace
+the original promoted raster in downstream material keys without rewriting the
+candidate run or promotion history.
+
+The UI store owns transient queued/running progress and commits terminal
+cancelled, failed, or successful run records atomically. Progress events are
+runtime-only, sanitized, strictly sequenced, and routed by the complete
+workflow-session, workflow, run, and node identity; they are never serialized.
+Per-Transform run tokens prevent an older overlapping run from overwriting a
+newer result. Before
 binding, the store rechecks the workflow session identity, domain and reactive
 graph revisions, active run token, and project identity captured at start. A
 workflow edit, open/new/close action, project switch, or newer run makes the
 result non-committable; the current graph is preserved and the board cannot
-announce success. Placing the
+announce success.
+
+Cancellation aborts the executor signal synchronously and closes progress
+routing before asking the provider to terminate. Provider termination is
+hard-bounded; failure or timeout becomes a safe detach, and the detached
+promise's late progress, output, or failure is ignored. Opening a different
+workflow or starting a newer attempt applies the same abort-and-detach rule.
+Retry creates a new attempt linked to the latest failed or cancelled attempt on
+the same node and preserves all earlier accepted outputs. A legacy persisted
+`running` record is normalized on load or serialization to a stable failed
+attempt with the creator-safe `INTERRUPTED` recovery message. New executions do
+not persist a running record, so saving during execution cannot reopen into a
+permanent spinner.
+
+Placing the
 Square result is a separate editor action and reports success only when the
 editor returns a real inserted layer identifier; an absent active document is
 surfaced as a recovery action rather than a false success.
@@ -230,6 +257,143 @@ allowing accidental cycles.
 7. Mark downstream results stale when a material input changes.
 8. Never delete an accepted result merely because a new branch or rerun starts.
 
+### Selective planning and execution
+
+Selective execution is a framework-independent two-stage contract:
+
+- **Run this node** plans the selected node and the upstream closure required
+  to satisfy it. An exact reusable result may satisfy an upstream dependency,
+  so work behind that cached boundary is not scheduled.
+- **Run from here** treats the selected node and every reachable downstream
+  node as affected work. It also includes side-branch upstream dependencies
+  required by a reachable merge or configured Output.
+
+The planner receives a detached snapshot of the current material key for every
+unblocked `available` node. These are the same keys persisted by the provenance
+contract;
+the selective planner does not calculate a second cache identity. A persisted
+successful run is reusable only when its material key matches exactly and the
+caller explicitly verifies that every referenced output artifact is still
+available and current. Missing verification, an exception while checking, a
+missing artifact, an invalid key, or a mismatched key is a cache miss. There is
+no process-global cache or separate trust metadata.
+
+Preflight reports the active execution frontier in stable graph order:
+
+- `planned` is satisfied structural context or has no reusable result;
+- `cached` has an exact verified result and will be reused;
+- `stale` has a successful result for different material and will execute;
+- `blocked` cannot execute, with a missing-input, disabled-node, unsupported,
+  or upstream-blocked recovery reason.
+
+Every preflight entry also says whether it will produce an executor call.
+Registry disposition is explicit: `not-required` nodes such as Input, Brief,
+Art Direction, and Output remain visible as satisfied material context;
+`available` capability nodes may execute or reuse a result; and `unavailable`
+capability nodes block with their creator-facing recovery reason. A normal
+Campaign output run therefore executes Generate, not every structural node on
+the path. Planning continues through a propagated blocker so preflight exposes
+the disabled or missing-input root cause as well as affected downstream nodes.
+The default disposition is derived from the creator registry and the node's
+configured capability. A Transform cannot execute merely because its node type
+is `transform`: the configured capability must match the registry's available
+capability. A boundary may inject a stricter disposition, but unsupported Edit,
+Relight, or Remove Background configurations remain blocked until their real
+executor is registered.
+Execution restrictions are monotonic: they may demote or disable a
+registry-available capability, but cannot promote `draft-only`, unsupported, or
+`not-required` definitions into executable work.
+Trusted boundary code normalizes detached restriction data into an opaque
+branded value. The planner accepts only that value and reads its internal
+snapshot by identity, without reflecting on caller objects. A proxy around the
+opaque value is rejected as an invalid boundary value without invoking its
+prototype, key, or descriptor traps.
+
+Planning never mutates run history. A material change is represented by the
+new current key, so only that node and downstream nodes whose own keys changed
+become stale. Successful or accepted results on unrelated branches remain
+available.
+
+### Review promotion boundary
+
+A Review node is a semantic cache boundary, not an executor and not a shortcut
+to the newest Transform run. It accepts candidate branches from exactly one
+Transform and may feed exactly one Output. Zero, ambiguous, or reconnected
+paths remain recoverably blocked until the graph is repaired.
+
+Promotion appends an immutable decision to the workflow-level
+`reviewPromotions` ledger. The decision snapshots the Review node revision,
+candidate lineage, exact run, asset reference, project-relative path, content
+hash, material key, and prior decision identity. Re-promotion appends another
+decision and preserves every earlier decision, candidate, and retry. Candidate
+run outputs are never mutated with `acceptedAt`.
+
+The latest decision is reusable only after the application boundary:
+
+1. prepares the currently connected Transform material and proves it still
+   matches the promoted candidate;
+2. re-reads the promoted project asset and proves its identity, path, bytes,
+   and SHA-256 hash match the decision;
+3. proves the decision's source Transform is still the Transform connected to
+   this Review; and
+4. confirms the workflow, project, and asset snapshot did not drift during
+   verification.
+
+Verification is also scoped to an explicit execution-options identity:
+provider, caller identity, project, asset fingerprint, and sorted executor
+capability/version descriptors. Overlapping refreshes use a per-Review
+monotonic sequence. A superseded refresh cannot mutate shared Review state,
+and selective planning consumes the exact frozen snapshot returned by its own
+refresh rather than rereading a mutable global result. The Board checklist and
+Generate preflight use this same verified resolution and fail closed while no
+current snapshot exists.
+
+Until all checks pass, the Review reports a recoverable stale, missing, or
+unavailable state. Selective planning must not install the Review cached result,
+consume the asset, or schedule the upstream Transform as an implicit bypass.
+When verification passes, the exact promoted asset-reference ID is injected as
+the Review result and traversal stops there. Its downstream material key hashes
+the Review revision and exact promoted run/output/content hash. Consequently,
+re-promotion stales only dependent downstream work; it does not stale or erase
+the candidate branch history.
+
+Running an Output connected through Review uses this selective cached-result
+path and never schedules the upstream Transform. Board preview and placement
+derive from the current verified Review result rather than copying the choice
+into mutable Output configuration. Direct Transform-to-Output paths retain the
+normal Generate behavior.
+
+The scheduler receives the global concurrency limit, provider key mapping, and
+per-provider limits from its boundary. It starts independently ready nodes in
+stable graph order. A failed executor blocks only dependent pending nodes;
+already-ready unrelated work continues and is returned with the failure and
+blocked-node outcome. Raw executor errors are replaced by a safe generic
+failure unless the boundary injects a validated sanitizer. Zero, missing, or
+invalid provider capacity is a configuration error raised before the first
+executor call, and exceptions from provider mapping are converted to the same
+stable safe boundary without exposing paths, credentials, or adapter details.
+Provider limits are read, validated, and checked for consistency for every
+planned executor during this preflight, then scheduling uses only the detached
+snapshot. A stateful getter or proxy cannot change capacity after validation.
+
+Executor results are accepted only as the exact `{ cacheKey, outputIds }`
+shape, with the planned key, unique nonblank identities, no cross-node identity
+collision, and an injected ownership check proving that every output belongs
+to the current node and project. Extra metadata and foreign output identities
+are failures. Each executor-owned result is detached and deeply frozen exactly
+once before shape, material, collision, or ownership validation; every later
+decision and the committed result use only that snapshot. Stateful getters or
+proxies cannot change a value between validation and commit. The returned
+outcome strictly projects those fields into another detached deeply frozen
+snapshot; callers cannot mutate result arrays, failure records, or outcome
+collections after execution.
+
+Progress and cancellation remain owned by the adjacent runtime work. That
+integration should wrap the injected node executor and consume the plan and
+outcome; it must not duplicate closure, cache, preflight, or scheduling rules
+inside UI state. The selective foundation has no Svelte, provider, network,
+filesystem, editor, or computer-use dependency.
+
 Node states:
 
 - `blocked`
@@ -255,6 +419,13 @@ Every image-producing run records:
 
 Provenance supports debugging and reproducibility. Provider-internal traces
 remain governed by PaintNode's existing debug-artifact setting.
+
+Candidate comparison exposes the recorded Brief, Art Direction, provider/model,
+source assets, run identity, terminal state, and availability. Keyboard focus
+uses a roving tab stop: Left/Right cycle, Home/End jump, and focus follows the
+newly selected candidate. Stable `tab`/`tabpanel` relationships keep the active
+provenance context explicit to assistive technology. Promotion is always an
+explicit labelled action; selection alone never changes workflow history.
 
 ## Persistence and migration
 
@@ -292,16 +463,24 @@ Start test-first with pure domain coverage:
 6. stale propagation and cache keys;
 7. run-state transitions and failure recovery;
 8. serialization round trips and forward-compatible unknown nodes.
+9. selective closures, exact cache hit and miss behavior, stale isolation,
+   disabled blockers, deterministic ready order, provider concurrency, and
+   branch-local executor failure.
 
 Browser tests should then cover the Campaign Composer happy path, keyboard
 graph operations, node editing, branch comparison, and reopening a saved
 workflow.
 
-Before browser automation is added, the Campaign Composer thin slice is covered
-through a pure fake-executor integration test that proves readiness, exact
-dependency planning, source materialization, execution, project-asset binding,
-serialization, and reopen without provider, authentication, picker, network,
-filesystem, editor, or Svelte side effects.
+Before browser automation is added, Campaign Composer is covered through
+the integrated `campaignComposerFlagshipAcceptance.test.ts` journey plus focused
+provider-free tests for the full flagship topology: Art Direction
+to Generate Concepts to Review; Review directly supplies the accepted Square
+and fans out to Portrait and Landscape Generate transforms. Format transforms
+must materialize the exact effective Review result first, including an
+editor-returned revision, and include its asset identity and content hash in
+the material key. Tests also prove serialization, reopen, migration, selective
+planning, failure recovery, and keyboard candidate navigation without provider
+authentication or network access.
 
 ## Decisions to validate during Foundation
 

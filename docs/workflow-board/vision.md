@@ -87,6 +87,13 @@ The first end-to-end proof is **Campaign Composer**:
 7. Produce consistent 1:1, 4:5, and 16:9 outputs.
 8. Save the board as a reusable recipe with replaceable inputs.
 
+Candidate promotion is an explicit, append-only creative decision. The Review
+node compares alternatives with their Brief, Art Direction, and run provenance;
+it never silently chooses the newest result. If upstream material or the
+promoted project asset changes, the decision becomes recoverably blocked until
+the creator verifies and promotes a current candidate. Re-promotion preserves
+the earlier direction and alternatives as decision history.
+
 ## Initial non-goals
 
 - A general-purpose automation platform.

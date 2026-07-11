@@ -38,7 +38,7 @@ export interface FontEmbedPrompt {
 
 export interface SaveChangesPrompt {
   name: string;
-  kind: 'document' | 'workflow';
+  kind: 'document' | 'workflow' | 'workflow-return';
   index: number;
   total: number;
 }

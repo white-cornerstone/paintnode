@@ -57,6 +57,8 @@ pub fn run() {
             app::set_app_menu_enabled,
             ai::cancel_ai_run,
             ai::submit_ai_director_input,
+            ai::workflow_director::draft_workflow_with_director,
+            ai::workflow_director::revise_workflow_with_director,
             ai::codex::detect_codex,
             ai::codex::discover_codex_capabilities,
             ai::claude::detect_claude,
@@ -67,7 +69,7 @@ pub fn run() {
             managed_runtime::install_managed_runtime,
             managed_runtime::login_managed_runtime,
             provider_executable::provider_qa_mode,
-            provider_executable::provider_free_qa_square_png,
+            provider_executable::provider_free_qa_png,
             ai::codex::generate_codex_image,
             ai::codex::generate_codex_fill_image,
             ai::codex::generate_codex_retouch_image,
@@ -83,7 +85,11 @@ pub fn run() {
             project::project_open_folder,
             project::project_refresh,
             project::project_store_asset_bytes,
+            project::project_commit_workflow_editor_return,
+            project::project_finalize_workflow_editor_return,
+            project::project_rollback_workflow_editor_return,
             project::project_read_asset,
+            project::project_resolve_asset_material,
             project::project_reveal,
             project::project_reveal_file,
             project::project_read_file,
@@ -113,4 +119,8 @@ pub fn run() {
                 queue_native_open_paths(app, paths);
             }
         });
+}
+
+pub fn run_ai_provider_wrapper_if_requested() -> Option<i32> {
+    ai::run_provider_process_wrapper_if_requested()
 }

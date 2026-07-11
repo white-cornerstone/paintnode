@@ -175,7 +175,7 @@
   }
 
   function managedRuntimeChanged(status: ManagedRuntimeStatus | null): void {
-    if (status && (status.state === 'ready' || status.state === 'updateAvailable') && status.authenticated !== false) {
+    if (status?.state === 'ready' && status.authenticated !== false) {
       void runDetection('codex', '');
     }
   }

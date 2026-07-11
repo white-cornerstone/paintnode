@@ -6,6 +6,7 @@
 
   const prompt = $derived(ui.saveChanges);
   const itemLabel = $derived(prompt?.kind === 'workflow' ? 'workflow' : 'document');
+  const isWorkflowReturn = $derived(prompt?.kind === 'workflow-return');
   const progress = $derived(prompt && prompt.total > 1 ? `${prompt.index} of ${prompt.total}` : '');
 </script>
 
@@ -20,15 +21,17 @@
           <div class="progress">{progress}</div>
         {/if}
         <p class="question">
-          Save changes to the PaintNode {itemLabel} "{prompt.name}" before closing?
+          {isWorkflowReturn
+            ? `Return changes in "${prompt.name}" to the workflow before closing?`
+            : `Save changes to the PaintNode ${itemLabel} "${prompt.name}" before closing?`}
         </p>
-        <p class="note">If you don't save, your changes will be lost.</p>
+        <p class="note">{isWorkflowReturn ? 'If you discard them, these editor changes will not update the workflow.' : "If you don't save, your changes will be lost."}</p>
       </div>
     </div>
     <div class="dlg-actions">
-      <button onclick={() => ui.resolveSaveChanges('discard')}>Don't Save</button>
+      <button onclick={() => ui.resolveSaveChanges('discard')}>{isWorkflowReturn ? 'Discard' : "Don't Save"}</button>
       <button onclick={() => ui.resolveSaveChanges('cancel')}>Cancel</button>
-      <button class="dlg-primary" onclick={() => ui.resolveSaveChanges('save')}>Save</button>
+      <button class="dlg-primary" onclick={() => ui.resolveSaveChanges('save')}>{isWorkflowReturn ? 'Return to Workflow' : 'Save'}</button>
     </div>
   </Modal>
 {/if}

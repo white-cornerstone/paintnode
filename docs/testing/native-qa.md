@@ -18,23 +18,72 @@ disabled. Use this exact bundle identity for routine workflow-board interaction
 and Computer Use validation.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
-Fake** Generate path after native QA mode detection completes. It creates a
-deterministic 1024 x 1024 PNG in memory and stores it through the normal project
+Fake** Generate path after native QA mode detection completes. It creates
+deterministic 1024 x 1024, 1024 x 1280, and 1280 x 720 PNGs in memory and stores them through the normal project
 asset store. It never invokes Codex, Antigravity, provider authentication,
 pickers, network requests, or visual-input file reads. The command that creates
 the PNG rejects normal and provider-E2E modes.
 
 Manual Creative Blueprint checkpoint:
 
-1. Open a project folder that already contains a Product asset.
-2. Create Campaign Composer and assign Product; leave optional Subject and
-   Style empty.
-3. Confirm the green QA Fake notice, run Square, and observe Running then
-   Generated on the Transform card.
-4. Confirm Square preview and asset binding, save the workflow, reopen it, and
-   confirm the binding remains.
-5. Open or create an image document and use Place; success is valid only when a
+1. Create a genuinely empty local folder outside PaintNode. It must contain no
+   PaintNode manifest, assets, workflows, or copied QA fixture.
+2. Launch the provider-free QA app. In the Project panel choose **Open Project
+   Folder**, select that empty folder, and confirm **Assets / Imported** is empty.
+3. In **Assets / Imported**, choose **Import images** (or the **Import external
+   images** icon), select a Product PNG through the app picker, and wait for the
+   imported Product card to appear. Do not seed the project from the filesystem.
+4. Choose **File > New**, open the **Workflow** tab, select **Campaign Composer**,
+   confirm Product is required while Subject and Style are optional, then choose
+   **Create**.
+5. Assign the Product from **Assets / Imported** to the guided Product slot;
+   leave optional Subject and Style empty.
+6. Generate concept branches, use arrow/Home/End keys to compare them, simulate
+   and retry one candidate failure, then promote one direction.
+7. Return an editor revision of the promoted direction, run downstream, and
+   confirm Square, Portrait 4:5, and Landscape 16:9 use that accepted direction.
+8. Run unchanged downstream again and confirm selective preflight schedules no
+   provider work. Change Product and confirm only affected descendants stale.
+9. Simulate one format failure, retry it, and confirm completed siblings remain.
+10. Save the workflow, quit the QA app, reopen the project and workflow, and
+   confirm promotion, editor revision, outputs, and retry history remain.
+11. Open or create an image document and use Place; success is valid only when a
    real layer is inserted.
+
+The provider-free automation for this journey is
+`src/lib/workflow/campaignComposerFlagshipAcceptance.test.ts`; focused tests
+cover additional boundary cases. This scenario is draft exit evidence only. Issue #85 remains
+open for exit purposes until a configured-provider native invocation and a
+moderated 6–8 creator walkthrough are recorded separately.
+
+Editor round-trip checkpoint:
+
+1. Open an accepted Transform result, or the currently promoted verified Review
+   result, with **Open in Editor**. Unpromoted candidates must not expose the
+   action.
+2. Edit the document and choose **Return to Workflow**. Confirm the workflow
+   preview and downstream Output use the edited PNG while the original run and
+   candidate remain unchanged.
+3. Reopen the same result and confirm PaintNode restores the latest layered ORA,
+   not a flattened PNG. Return a second edit and confirm it supersedes the first
+   binding without deleting either revision.
+4. Make another edit, close the tab, and verify the prompt offers **Return to
+   Workflow**, **Discard**, and **Cancel**. Discard must leave the last returned
+   workflow result unchanged.
+5. For a promoted candidate, promote a different candidate while the first is
+   open. Returning the old tab must fail safely and must not link its newly
+   stored artifacts into the workflow.
+
+A missing ORA recovers from its exact-hash PNG as a flattened one-layer repair;
+a missing PNG recovers from its exact-hash ORA so Return can recreate the
+flattened output. If both are missing, or either present file has the wrong
+hash, opening blocks rather than substituting a different project asset.
+
+Workflow close and project switch/close remain blocked while any editor tab is
+linked to that workflow. Return, discard, or close those tabs first so their
+private return authority cannot outlive the workflow or project it belongs to.
+When quitting, a successful Return must also persist the newly dirty workflow;
+if that workflow save fails or is cancelled, quit must stop.
 
 Normal PaintNode and **Provider E2E** never expose this fake executor.
 

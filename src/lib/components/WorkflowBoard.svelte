@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
   import AiRunOptionsControl from './AiRunOptionsControl.svelte';
@@ -8,9 +7,11 @@
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
+    cancelAiRun,
     isDesktop,
     providerQaMode,
     readProjectFile,
+    resolveProjectAssetMaterial,
     storeProjectAssetBytes,
     type ProjectAsset,
   } from '../integrations/desktop';
@@ -28,8 +29,9 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { aiRunningLabel, imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import {
     workflow,
     type WorkflowAssetNode,
@@ -37,39 +39,58 @@
     type WorkflowConnection,
     type WorkflowCreatorNode,
     type WorkflowOutputNode,
+    type WorkflowStoreRunOptions,
     type WorkflowUnsupportedNode,
   } from '../state/workflow.svelte';
+  import { WorkflowSelectiveUiState } from '../state/workflowSelectiveUiState.svelte';
+  import {
+    nextWorkflowCandidateIndex,
+    type WorkflowCandidateNavigationKey,
+  } from '../workflow/candidateKeyboard';
   import {
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
+    createWorkflowBoardRunIdGenerator,
+    createWorkflowReviewRefreshIdentity,
     findOpenCreatorNodePlacement,
-    runWithAsyncObserver,
+    resolveWorkflowBoardProjectAsset,
+    resolveWorkflowStoryboardRead,
+    selectiveExecutionOutcomeSummary,
+    selectiveExecutionPreviewSummary,
+    selectiveExecutionRunAvailability,
     workflowProviderSelection,
     workflowReadiness,
+    resolveWorkflowCampaignPath,
     type CreatorNodeType,
     type WorkflowNodePort,
+    type WorkflowSelectiveExecutionOutcome,
+    type WorkflowSelectiveRunMode,
     type WorkflowStoryboardDescriptor,
+    WorkflowReviewRefreshGate,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
-  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
+  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
+  import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
     createCodexWorkflowTransformExecutor,
   } from '../integrations/workflowCompositionExecutors';
-  import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
+  import {
+    createProviderFreeQaWorkflowExecutor,
+    type ProviderFreeQaScenario,
+  } from '../integrations/providerFreeQaWorkflowExecutor';
+  import WorkflowDirectorDialog from './WorkflowDirectorDialog.svelte';
+  import WorkflowDirectorRevisionDialog from './WorkflowDirectorRevisionDialog.svelte';
+  import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
+  import { createConfiguredWorkflowRevisionRequester } from '../integrations/workflowDirectorRevisionAdapters';
+  import type { WorkflowDirectorRevisionRequester } from '../workflow';
 
-  type CodexProgressPayload = {
-    runId: string;
-    message: string;
-    kind?: string;
-    provider?: string;
-    detail?: string;
-  };
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
   type WorkflowMapRect = {
@@ -98,6 +119,13 @@
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
   let qaModeResolved = $state(!desktop);
+  let qaScenario = $state<ProviderFreeQaScenario>('success');
+  let candidateCount = $state(3);
+  let candidateConcurrency = $state(2);
+  let selectedReviewCandidates = $state<Record<string, string>>({});
+  let reviewVerificationEpoch = 0;
+  const reviewRefreshGate = new WorkflowReviewRefreshGate();
+  let activeCandidateController: AbortController | null = null;
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
@@ -112,6 +140,9 @@
   let boardEl = $state<HTMLDivElement>();
   let paletteButton = $state<HTMLButtonElement>();
   let paletteOpen = $state(false);
+  let directorOpen = $state(false);
+  let revisionDirectorOpen = $state(false);
+  let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -132,7 +163,16 @@
   let storyboardLast = { x: 0, y: 0 };
   let storyboardAnnotationDraft = $state<AnnotationItem | null>(null);
   let storyboardAnnotationDragStart: { x: number; y: number } | null = null;
-  let stopProgress: UnlistenFn | null = null;
+  let activeTransformNodeId = $state<string | null>(null);
+  let activeWorkflowTaskId = $state<string | null>(null);
+  const selectiveUiState = new WorkflowSelectiveUiState();
+  let selectiveTargetNodeId = $state<string | null>(null);
+  let selectiveMode = $state<WorkflowSelectiveRunMode | null>(null);
+  let selectiveOutcome = $state<WorkflowSelectiveExecutionOutcome | null>(null);
+  let selectiveRunning = $state(false);
+  let selectiveMessage = $state('');
+  let selectiveError = $state('');
+  let lastSelectiveContextIdentity = '';
   let boardDestroyed = false;
   let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
@@ -152,6 +192,14 @@
   );
   const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
+  function verifiedReviewResolutions() {
+    return Object.fromEntries(workflow.graphSnapshot().nodes
+      .filter((node) => node.type === 'review')
+      .map((node) => [
+        node.id,
+        workflow.reviewResolution(node.id, assets, true, project.identity),
+      ]));
+  }
   const readiness = $derived.by(() => {
     workflow.rev;
     project.current;
@@ -161,6 +209,8 @@
       assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
       provider: providerSelection.provider,
       supportedProviders: providerSelection.supportedProviders,
+      requireVerifiedReview: true,
+      reviewResolutions: verifiedReviewResolutions(),
     });
   });
 
@@ -172,8 +222,32 @@
       provider: providerSelection.provider,
       supportedProviders: providerSelection.supportedProviders,
       targetNodeId: outputNodeId,
+      requireVerifiedReview: true,
+      reviewResolutions: verifiedReviewResolutions(),
     });
   }
+
+  function selectivePreviewContextIdentity(): string {
+    workflow.rev;
+    return JSON.stringify({
+      graphRevision: workflow.rev,
+      projectIdentity: project.identity,
+      provider: providerSelection.provider,
+      qaScenario,
+      options: JSON.stringify(runOptions),
+      keepAiDebugArtifacts: settings.value.workspace.keepAiDebugArtifacts,
+      assets: assets.map((asset) => [asset.id, asset.relativePath, asset.exists]),
+    });
+  }
+
+  $effect(() => {
+    const identity = selectivePreviewContextIdentity();
+    if (lastSelectiveContextIdentity && identity !== lastSelectiveContextIdentity && !selectiveRunning) {
+      invalidateSelectivePreview();
+    }
+    lastSelectiveContextIdentity = identity;
+  });
+
   $effect(() => {
     const request = ui.workflowFocusRequest;
     if (request === 0 || request === handledFocusRequest) return;
@@ -195,7 +269,6 @@
   onDestroy(() => {
     boardDestroyed = true;
     endStoryboardEditSession();
-    stopProgress?.();
     if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
@@ -365,7 +438,30 @@
     }
   }
 
+  function openRevisionDirector(): void {
+    revisionDirectorRequester = qaMode === 'provider-free'
+      ? createProviderFreeWorkflowRevisionRequester()
+      : createConfiguredWorkflowRevisionRequester(runOptions);
+    revisionDirectorOpen = true;
+  }
+
   function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
+    const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: node.id });
+    if (path?.reviewNodeId) {
+      const resolution = workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity);
+      if (resolution.state !== 'ready') return null;
+      return assets.find((asset) => (
+        asset.id === resolution.output.assetId && asset.relativePath === resolution.output.relativePath
+      )) ?? null;
+    }
+    if (path?.transformNodeId) {
+      const effective = workflow.effectiveAcceptedEditorOutput(path.transformNodeId);
+      if (effective) {
+        return assets.find((asset) => (
+          asset.id === effective.assetId && asset.relativePath === effective.relativePath
+        )) ?? null;
+      }
+    }
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 
@@ -389,6 +485,15 @@
       editor.flash(`Placed ${outputAsset.name}`);
     } catch (e) {
       editor.flash('Place output failed: ' + ((e as Error)?.message ?? String(e)));
+    }
+  }
+
+  async function openResultInEditor(request: OpenWorkflowResultRequest): Promise<void> {
+    try {
+      await openWorkflowResultInEditor(request);
+      editor.flash('Opened workflow result in editor');
+    } catch (cause) {
+      editor.flash('Open in editor failed: ' + ((cause as Error)?.message ?? String(cause)));
     }
   }
 
@@ -1500,16 +1605,228 @@
     return connected ?? workflow.outputNodes[0];
   }
 
-  function outputForTransform(transformNodeId: string): WorkflowOutputNode | undefined {
-    return workflow.outgoing(transformNodeId)
-      .filter((connection) => connection.sourcePortId === 'result')
-      .map((connection) => workflow.outputNode(connection.to))
-      .find((output): output is WorkflowOutputNode => Boolean(output));
+  function invalidateSelectivePreview(): void {
+    if (selectiveUiState.busy && !selectiveRunning) void workflow.cancelSelectiveExecution();
+    selectiveUiState.invalidatePreview();
+    selectiveOutcome = null;
+    selectiveTargetNodeId = null;
+    selectiveMode = null;
+    selectiveMessage = '';
+    selectiveError = '';
   }
 
-  function transformOutputReadiness(transformNodeId: string) {
-    const output = outputForTransform(transformNodeId);
-    return output ? outputReadiness(output.id) : null;
+  function preflightForNode(nodeId: string) {
+    return selectiveUiState.preflight?.stateByNodeId[nodeId] ?? null;
+  }
+
+  function workflowExecutionOptionsIdentity(): string {
+    return JSON.stringify({
+      provider: providerSelection.provider,
+      qaMode,
+      qaScenario,
+      options: JSON.stringify(runOptions),
+      keepAiDebugArtifacts: settings.value.workspace.keepAiDebugArtifacts,
+      assets: assets.map((asset) => [asset.id, asset.relativePath, asset.exists]),
+    });
+  }
+
+  function createWorkflowExecutionContext(runId: string) {
+    const runSelection = providerSelection;
+    if (!runSelection.ready || !runSelection.provider) {
+      throw new Error('Wait for native QA mode detection before preparing execution.');
+    }
+    const runProjectPath = project.path;
+    const runProvider = runSelection.provider;
+    const runAssets = assets.map((asset) => ({ ...asset }));
+    const runIdGenerator = createWorkflowBoardRunIdGenerator(runId);
+    const executors = runSelection.qaFake
+      ? [createProviderFreeQaWorkflowExecutor('provider-free', undefined, { scenario: qaScenario })]
+      : [
+          createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+          createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+        ];
+    const options: WorkflowStoreRunOptions = {
+      projectPath: runProjectPath,
+      provider: runProvider,
+      executors,
+      assets: runAssets,
+      selectiveExecutionIdentity: workflowExecutionOptionsIdentity(),
+      currentProjectIdentity: () => project.identity,
+      runIdGenerator,
+      ...(runSelection.qaFake ? {} : {
+        cancelExecutionForRun: async (attemptRunId: string) => {
+          await cancelAiRun(attemptRunId);
+          return { disposition: 'detached' as const };
+        },
+      }),
+      onProgress: (event) => {
+        progress = event.message;
+        if (activeWorkflowTaskId) aiTasks.setProgress(activeWorkflowTaskId, event.message);
+      },
+      resolveAsset: (asset) => resolveWorkflowBoardProjectAsset(runProjectPath, asset, resolveProjectAssetMaterial),
+      readStoryboard: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => resolveWorkflowStoryboardRead(
+        storyboard,
+        {
+          readEmbedded: async (dataUrl) => new Uint8Array(await (await fetch(dataUrl)).arrayBuffer()),
+          readOra: async (relativePath) => {
+            if (!runProjectPath) throw new Error('No project is open.');
+            const bytes = await readProjectFile(runProjectPath, relativePath);
+            const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+            return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
+          },
+        },
+      ),
+      storeAsset: async (artifact) => (await storeProjectAssetBytes({
+        projectPath: artifact.projectPath,
+        name: artifact.name,
+        bytes: artifact.bytes,
+        kind: 'generated',
+        prompt: artifact.prompt,
+        width: artifact.width,
+        height: artifact.height,
+        mime: artifact.mime,
+      })).asset,
+    };
+    return { runProjectPath, runProvider, options };
+  }
+
+  $effect(() => {
+    workflow.rev;
+    project.identity;
+    const workflowId = workflow.graphSnapshot().id;
+    const assetIdentity = assets.map((asset) => [asset.id, asset.relativePath, asset.exists] as const);
+    const executionOptionsIdentity = workflowExecutionOptionsIdentity();
+    const reviewNodeIds = workflow.graphSnapshot().nodes
+      .filter((node) => node.type === 'review')
+      .map((node) => node.id);
+    const ready = providerSelection.ready && Boolean(providerSelection.provider);
+    if (!ready) {
+      untrack(() => workflow.invalidateReviewState(reviewNodeIds));
+      reviewRefreshGate.reset();
+      reviewVerificationEpoch += 1;
+      return;
+    }
+    if (reviewNodeIds.length === 0) {
+      reviewRefreshGate.reset();
+      reviewVerificationEpoch += 1;
+      return;
+    }
+    const refreshIdentity = createWorkflowReviewRefreshIdentity({
+      workflowId,
+      workflowRevision: workflow.rev,
+      projectIdentity: project.identity,
+      executionOptionsIdentity,
+      assetIdentity,
+    });
+    if (!reviewRefreshGate.shouldRefresh(refreshIdentity)) return;
+    const epoch = ++reviewVerificationEpoch;
+    void (async () => {
+      const context = untrack(() => createWorkflowExecutionContext(createRunId()));
+      void assetIdentity;
+      for (const reviewNodeId of reviewNodeIds) {
+        try {
+          await untrack(() => workflow.refreshReviewState(reviewNodeId, context.options));
+        } catch {
+          // The node remains recoverably stale/unavailable until a current snapshot verifies.
+        }
+        if (epoch !== reviewVerificationEpoch || boardDestroyed) return;
+      }
+    })();
+  });
+
+  async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
+    invalidateSelectivePreview();
+    selectiveTargetNodeId = nodeId;
+    selectiveMode = mode;
+    if (!providerSelection.ready || !providerSelection.provider) {
+      selectiveError = providerSelection.label;
+      return;
+    }
+    const previewEpoch = selectiveUiState.beginPreview();
+    if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
+    if (storyboardCanvas) persistStoryboard();
+    selectiveMessage = 'Preparing selective run preview…';
+    const runId = createRunId();
+    try {
+      const context = createWorkflowExecutionContext(runId);
+      selectiveUiState.runOptions = context.options;
+      const preflight = await workflow.preflightSelectiveExecution(mode, nodeId, context.options);
+      if (!selectiveUiState.isCurrentPreview(previewEpoch)) return;
+      selectiveUiState.capture(preflight, context.options);
+      selectiveMessage = selectiveExecutionPreviewSummary(preflight.plan.preflight);
+    } catch (cause) {
+      if (!selectiveUiState.isCurrentPreview(previewEpoch)) return;
+      selectiveUiState.runOptions = null;
+      selectiveError = (cause as Error)?.message ?? String(cause);
+      selectiveMessage = '';
+    } finally {
+      selectiveUiState.settlePreview(previewEpoch);
+    }
+  }
+
+  async function confirmSelectiveExecution(): Promise<void> {
+    const preflight = selectiveUiState.preflight;
+    const options = selectiveUiState.runOptions;
+    if (!preflight || !options || !selectiveTargetNodeId) return;
+    const availability = selectiveExecutionRunAvailability(preflight.plan.preflight);
+    if (!availability.enabled) {
+      selectiveError = availability.reason;
+      return;
+    }
+    selectiveUiState.beginRun();
+    selectiveRunning = true;
+    busy = true;
+    selectiveError = '';
+    progress = 'Running selective workflow…';
+    const task = aiTasks.create({
+      projectPath: options.projectPath,
+      kind: 'workflow',
+      title: `Workflow: ${selectiveMode === 'run-node' ? 'Run this node' : 'Run from here'}`,
+      subtitle: options.provider,
+      progress,
+      detail: {
+        kind: 'workflow', providerLabel: options.provider, outputName: 'Selective execution',
+      },
+    });
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => {
+      await workflow.cancelSelectiveExecution();
+    });
+    try {
+      const outcome = await workflow.runSelectiveExecution(preflight, options, { maxConcurrency: 1 });
+      selectiveUiState.clear();
+      selectiveOutcome = outcome;
+      selectiveMessage = selectiveExecutionOutcomeSummary(outcome);
+      if (outcome.executedNodeIds.length > 0 && options.projectPath) await project.refresh(options.projectPath);
+      if (outcome.cancelledNodeIds.length > 0) aiTasks.markCancelled(task.id);
+      else if (Object.keys(outcome.failures).length > 0) aiTasks.fail(task.id, selectiveMessage);
+      else aiTasks.complete(task.id, selectiveMessage);
+      editor.flash(selectiveMessage);
+    } catch (cause) {
+      selectiveUiState.clear();
+      selectiveError = (cause as Error)?.message ?? String(cause);
+      if ((cause as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(task.id);
+      else aiTasks.fail(task.id, selectiveError);
+    } finally {
+      aiTasks.setCancel(task.id, null);
+      activeWorkflowTaskId = null;
+      busy = false;
+      selectiveUiState.settleRun();
+      lastSelectiveContextIdentity = selectivePreviewContextIdentity();
+      selectiveRunning = false;
+      progress = '';
+    }
+  }
+
+  async function cancelSelectiveExecution(): Promise<void> {
+    selectiveMessage = selectiveRunning ? 'Cancelling selective run…' : 'Cancelling preview…';
+    if (activeWorkflowTaskId) await aiTasks.cancel(activeWorkflowTaskId);
+    else await workflow.cancelSelectiveExecution();
+    if (!selectiveRunning) invalidateSelectivePreview();
   }
 
   async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
@@ -1528,98 +1845,201 @@
       error = 'Wait for native QA mode detection before generating.';
       return;
     }
+    const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id });
+    const reviewedOutput = Boolean(path?.reviewNodeId);
     busy = true;
-    progress = providerSelection.qaFake
+    progress = reviewedOutput
+      ? 'Verifying promoted Review output…'
+      : providerSelection.qaFake
       ? 'Running deterministic QA Fake output…'
       : 'Preparing workflow assets...';
     const runId = createRunId();
-    const runProjectPath = project.path;
-    const runSelection = providerSelection;
-    const runProvider = runSelection.provider!;
-    const runAssets = assets.map((asset) => ({ ...asset }));
-    const executors = runSelection.qaFake
-      ? [createProviderFreeQaWorkflowExecutor('provider-free')]
-      : [
-          createCodexWorkflowTransformExecutor(codexConfigFromRunOptions(
-            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-          )),
-          createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
-            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
-          )),
-        ];
-    stopProgress?.();
-    stopProgress = null;
-
+    const context = createWorkflowExecutionContext(runId);
+    const { runProjectPath, runProvider } = context;
     try {
-      const outcome = await runWithAsyncObserver({
-        register: async () => {
-          const unlisten = await listen<CodexProgressPayload>('codex-generation-progress', (event) => {
-            if (event.payload.runId === runId && event.payload.message.trim()) {
-              progress = event.payload.message.trim();
-            }
-          });
-          let disposed = false;
-          const dispose = () => {
-            if (disposed) return;
-            disposed = true;
-            if (stopProgress === dispose) stopProgress = null;
-            unlisten();
-          };
-          if (boardDestroyed) dispose();
-          else stopProgress = dispose;
-          return dispose;
+      activeTransformNodeId = reviewedOutput
+        ? null
+        : workflow.incoming(targetOutput.id)
+          .find((connection) => connection.targetPortId === 'source')?.from ?? null;
+      const task = aiTasks.create({
+        projectPath: runProjectPath,
+        kind: 'workflow',
+        title: `Workflow: ${targetOutput.name || 'Generate output'}`,
+        subtitle: runProvider,
+        progress,
+        runId,
+        detail: {
+          kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
         },
-        onRegistrationError: () => {
-          progress = runSelection.qaFake
-            ? 'Running deterministic QA Fake output…'
-            : aiRunningLabel(runProvider as 'codex' | 'antigravity');
-        },
-        run: () => workflow.runCampaignGenerate(targetOutput.id, {
-          projectPath: runProjectPath,
-          provider: runProvider,
-          executors,
-          assets: runAssets,
-          currentProjectIdentity: () => project.identity,
-          readAsset: (asset) => {
-            if (!runProjectPath) throw new Error('No project is open.');
-            return readProjectFile(runProjectPath, asset.relativePath);
-          },
-          readStoryboard: async (storyboard: Readonly<WorkflowStoryboardDescriptor>) => {
-            if (storyboard.dataUrl) {
-              return new Uint8Array(await (await fetch(storyboard.dataUrl)).arrayBuffer());
-            }
-            if (!storyboard.oraPath) return null;
-            if (!runProjectPath) throw new Error('No project is open.');
-            const bytes = await readProjectFile(runProjectPath, storyboard.oraPath);
-            const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-            return canvasToPngBytes(compositeToCanvas(await loadOra(buffer)));
-          },
-          storeAsset: async (artifact) => (await storeProjectAssetBytes({
-            projectPath: artifact.projectPath,
-            name: artifact.name,
-            bytes: artifact.bytes,
-            kind: 'generated',
-            prompt: artifact.prompt,
-            width: artifact.width,
-            height: artifact.height,
-            mime: artifact.mime,
-          })).asset,
-        }),
       });
+      activeWorkflowTaskId = task.id;
+      aiTasks.setCancel(task.id, async () => {
+        if (reviewedOutput) await workflow.cancelSelectiveExecution();
+        else if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
+      });
+      if (reviewedOutput) {
+        const outcome = await workflow.runReviewedOutput(targetOutput.id, context.options);
+        const summary = selectiveExecutionOutcomeSummary(outcome);
+        aiTasks.complete(task.id, `Promoted Review output ready · ${summary}`);
+        editor.flash('Promoted Review output is ready');
+        return;
+      }
+      const outcome = await workflow.runCampaignGenerate(targetOutput.id, context.options);
       if (!outcome.committed) {
         if (project.path === runProjectPath) await project.refresh(runProjectPath);
         error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
         return;
       }
       await project.refresh();
+      aiTasks.complete(task.id, 'Workflow generation completed');
       editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
-      editor.flash('Workflow generation failed');
+      const cancelled = (e as { code?: unknown })?.code === 'CANCELLED';
+      if (activeWorkflowTaskId) {
+        if (cancelled) aiTasks.markCancelled(activeWorkflowTaskId);
+        else aiTasks.fail(activeWorkflowTaskId, error);
+      }
+      editor.flash(cancelled ? 'Workflow generation cancelled' : 'Workflow generation failed');
     } finally {
+      if (activeWorkflowTaskId) aiTasks.setCancel(activeWorkflowTaskId, null);
+      busy = false;
+      activeTransformNodeId = null;
+      activeWorkflowTaskId = null;
+      progress = '';
+    }
+  }
+
+  function outputForTransform(nodeId: string): WorkflowOutputNode | null {
+    const outputId = resolveWorkflowCampaignPath(workflow.serialize(), { transformNodeId: nodeId })?.outputNodeId ?? null;
+    return outputId ? workflow.outputNode(outputId) ?? null : null;
+  }
+
+  function selectedReviewCandidate(nodeId: string) {
+    const candidates = workflow.reviewCandidates(nodeId, assets, true, project.identity);
+    const selectedId = selectedReviewCandidates[nodeId];
+    return candidates.find((candidate) => candidate.candidateId === selectedId) ?? candidates[0] ?? null;
+  }
+
+  async function reviewCandidateKeydown(event: KeyboardEvent, nodeId: string): Promise<void> {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    const candidates = workflow.reviewCandidates(nodeId, assets, true, project.identity);
+    if (candidates.length === 0) return;
+    const current = selectedReviewCandidate(nodeId);
+    const currentIndex = Math.max(0, candidates.findIndex((candidate) => candidate.candidateId === current?.candidateId));
+    const nextIndex = nextWorkflowCandidateIndex(
+      event.key as WorkflowCandidateNavigationKey,
+      currentIndex,
+      candidates.length,
+    );
+    if (nextIndex === null) return;
+    const next = candidates[nextIndex];
+    selectedReviewCandidates[nodeId] = next.candidateId;
+    await tick();
+    document.getElementById(`review-candidate-tab-${nodeId}-${next.candidateId}`)?.focus();
+  }
+
+  async function promoteReviewCandidate(nodeId: string): Promise<void> {
+    const candidate = selectedReviewCandidate(nodeId);
+    if (!candidate || candidate.state !== 'eligible') return;
+    busy = true;
+    error = '';
+    const context = createWorkflowExecutionContext(createRunId());
+    try {
+      await workflow.promoteCandidate(nodeId, candidate.candidateId, context.options);
+      editor.flash(`Promoted Candidate ${candidate.ordinal}`);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Candidate promotion failed.';
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function generateCandidateBranches(nodeId: string): Promise<void> {
+    const output = outputForTransform(nodeId);
+    if (!output) {
+      error = 'Connect this Transform to an Output before generating candidate branches.';
+      return;
+    }
+    if (!providerSelection.ready || !providerSelection.provider) {
+      error = 'Wait for native QA mode detection before generating candidate branches.';
+      return;
+    }
+    busy = true;
+    error = '';
+    progress = `Generating ${candidateCount} independent candidates…`;
+    const controller = new AbortController();
+    activeCandidateController = controller;
+    const context = createWorkflowExecutionContext(createRunId());
+    try {
+      const outcome = await workflow.runCandidateBranches(output.id, {
+        ...context.options,
+        signal: controller.signal,
+      }, {
+        branchGroupId: `branch-${createRunId()}`,
+        count: candidateCount,
+        maxConcurrency: Math.min(candidateConcurrency, candidateCount),
+      });
+      if (!outcome.committed) {
+        if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
+        error = outcome.commitMessage;
+      } else {
+        if (context.runProjectPath) await project.refresh(context.runProjectPath);
+        editor.flash(outcome.commitMessage);
+      }
+    } catch (cause) {
+      error = (cause as Error)?.message ?? String(cause);
+    } finally {
+      if (activeCandidateController === controller) activeCandidateController = null;
       busy = false;
       progress = '';
     }
+  }
+
+  async function retryCandidate(candidateId: string): Promise<void> {
+    if (!providerSelection.ready || !providerSelection.provider) return;
+    busy = true;
+    error = '';
+    progress = 'Retrying one candidate while preserving its siblings…';
+    const controller = new AbortController();
+    activeCandidateController = controller;
+    const context = createWorkflowExecutionContext(createRunId());
+    try {
+      const outcome = await workflow.retryCandidateBranch(candidateId, {
+        ...context.options,
+        signal: controller.signal,
+      });
+      if (!outcome.committed) {
+        if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
+        error = outcome.commitMessage;
+      } else {
+        if (context.runProjectPath) await project.refresh(context.runProjectPath);
+        editor.flash(outcome.commitMessage);
+      }
+    } catch (cause) {
+      error = (cause as Error)?.message ?? String(cause);
+    } finally {
+      if (activeCandidateController === controller) activeCandidateController = null;
+      busy = false;
+      progress = '';
+    }
+  }
+
+  async function cancelGenerate(): Promise<void> {
+    if (activeCandidateController) {
+      progress = 'Cancelling candidate branches…';
+      activeCandidateController.abort();
+      return;
+    }
+    if (activeWorkflowTaskId) {
+      await aiTasks.cancel(activeWorkflowTaskId);
+      return;
+    }
+    if (!activeTransformNodeId) return;
+    progress = 'Cancelling…';
+    await workflow.cancelCampaignGenerate(activeTransformNodeId);
   }
 </script>
 
@@ -1638,17 +2058,42 @@
     <aside class="asset-tray">
       <div class="tray-head node-library">
         <span>Nodes</span>
-        <button
-          bind:this={paletteButton}
-          type="button"
-          aria-label="Add workflow node"
-          aria-haspopup="dialog"
-          aria-expanded={paletteOpen}
-          use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
-          onclick={() => (paletteOpen = !paletteOpen)}
-        >
-          <Icon svg={Add} size={14} />
-        </button>
+        <div class="tray-head-actions">
+          {#if qaModeResolved && (qaMode === 'provider-free' || desktop)}
+            <button
+              type="button"
+              aria-label="Revise current workflow"
+              aria-haspopup="dialog"
+              use:tooltip={{
+                text: `Revise current workflow · ${qaMode === 'provider-free' ? 'QA Fake' : runOptions.directorProvider}`,
+                placement: 'right',
+              }}
+              onclick={openRevisionDirector}
+            >
+              <Icon svg={ArrowSync} size={14} />
+            </button>
+          {/if}
+          <button
+            type="button"
+            aria-label="Draft with AI Director"
+            aria-haspopup="dialog"
+            use:tooltip={{ text: 'Draft with AI Director', placement: 'right' }}
+            onclick={() => (directorOpen = true)}
+          >
+            <Icon svg={Sparkle} size={14} />
+          </button>
+          <button
+            bind:this={paletteButton}
+            type="button"
+            aria-label="Add workflow node"
+            aria-haspopup="dialog"
+            aria-expanded={paletteOpen}
+            use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
+            onclick={() => (paletteOpen = !paletteOpen)}
+          >
+            <Icon svg={Add} size={14} />
+          </button>
+        </div>
       </div>
       {#if paletteOpen}
         <WorkflowNodePalette
@@ -1835,6 +2280,7 @@
                 </button>
               </div>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="specialized-node-body asset-node-body">
               <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
                 {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
@@ -1894,6 +2340,7 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
               <small>{briefCreatorDefinition.label}</small>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
               <p>{brief.guidance}</p>
               <textarea
@@ -1908,6 +2355,8 @@
 
         {#each workflow.creatorNodes as node (node.id)}
           {@const definition = creatorNodeDefinition(node.type)}
+          {@const transformRunState = workflow.transformExecution(node.id)}
+          {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -1947,6 +2396,7 @@
                 ><Icon svg={Delete} size={13} /></button>
               </div>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>{definition.description}</p>
               {#if node.type === 'art-direction'}
@@ -2001,6 +2451,75 @@
                     oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
                   ></textarea>
                 </label>
+                {@const reviewCandidates = workflow.reviewCandidates(node.id, assets, true, project.identity)}
+                {@const reviewCandidate = selectedReviewCandidate(node.id)}
+                {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
+                <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
+                  <p class="review-resolution" data-review-state={reviewResolution.state}>
+                    {reviewResolution.state === 'ready'
+                      ? `Promoted Candidate ${reviewCandidates.find((candidate) => candidate.candidateId === reviewResolution.promotion.candidateId)?.ordinal ?? ''}`
+                      : reviewResolution.reason.message}
+                  </p>
+                  {#if reviewResolution.state === 'ready'}
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onclick={() => void openResultInEditor({
+                        nodeId: reviewResolution.promotion.sourceNodeId,
+                        rootRunId: reviewResolution.promotion.candidateRunId,
+                        assetReferenceId: reviewResolution.promotion.assetReferenceId,
+                        promotionId: reviewResolution.promotion.id,
+                      })}
+                    >Open promoted result in Editor</button>
+                  {/if}
+                  <div
+                    class="review-candidate-tabs"
+                    role="tablist"
+                    tabindex="-1"
+                    aria-label="Concept candidates"
+                    onkeydown={(event) => void reviewCandidateKeydown(event, node.id)}
+                  >
+                    {#each reviewCandidates as candidate (candidate.candidateId)}
+                      <button
+                        type="button"
+                        role="tab"
+                        id={`review-candidate-tab-${node.id}-${candidate.candidateId}`}
+                        aria-controls={`review-candidate-panel-${node.id}`}
+                        aria-selected={candidate.candidateId === reviewCandidate?.candidateId}
+                        tabindex={candidate.candidateId === reviewCandidate?.candidateId ? 0 : -1}
+                        data-candidate-state={candidate.state}
+                        onclick={() => { selectedReviewCandidates[node.id] = candidate.candidateId; }}
+                      >Candidate {candidate.ordinal} · {candidate.state}</button>
+                    {/each}
+                  </div>
+                  {#if reviewCandidate}
+                    <div
+                      class="review-candidate-context"
+                      role="tabpanel"
+                      id={`review-candidate-panel-${node.id}`}
+                      aria-labelledby={`review-candidate-tab-${node.id}-${reviewCandidate.candidateId}`}
+                      tabindex="0"
+                    >
+                      <p><strong>Brief</strong> {reviewCandidate.brief || 'No brief recorded.'}</p>
+                      <p><strong>Art direction</strong> {reviewCandidate.artDirection || 'No art direction recorded.'}</p>
+                      <small>
+                        Provenance: {reviewCandidate.providerId}{reviewCandidate.model ? ` / ${reviewCandidate.model}` : ''}
+                        · {reviewCandidate.sourceAssetIds.length} sources · run {reviewCandidate.latestRunId}
+                      </small>
+                      {#if reviewCandidate.failure}<p>{reviewCandidate.failure.message}</p>{/if}
+                      <button
+                        type="button"
+                        disabled={busy || reviewCandidate.state !== 'eligible'}
+                        onclick={() => void promoteReviewCandidate(node.id)}
+                      >Promote this candidate</button>
+                      {#if reviewCandidate.state !== 'eligible'}
+                        <small>Resolve this candidate’s {reviewCandidate.state} state before promotion.</small>
+                      {/if}
+                    </div>
+                  {:else}
+                    <p class="draft-reason">Generate concept branches upstream to compare and promote them here.</p>
+                  {/if}
+                </section>
               {/if}
               {#if node.ports.inputs.length > 0}
                 <div class="creator-port-list">
@@ -2019,28 +2538,121 @@
                 </div>
               {/if}
               {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
-                <button
-                  type="button"
-                  class="draft-run"
-                  disabled={busy || !transformOutputReadiness(node.id)?.ready}
-                  onclick={() => void generate(outputForTransform(node.id))}
-                >
-                  <Icon svg={PaintBrush} size={14} />
-                  {providerSelection.qaFake ? 'Run QA Fake' : 'Run Generate'}
-                </button>
-                <p class="transform-run-state" aria-live="polite">
-                  {workflow.transformExecution(node.id).state === 'idle'
-                    ? transformOutputReadiness(node.id)?.nextAction?.action
-                      ?? (providerSelection.qaFake ? providerSelection.label : 'Ready to run')
-                    : workflow.transformExecution(node.id).message}
+                {#if acceptedEditorResult}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onclick={() => void openResultInEditor(acceptedEditorResult)}
+                  >Open accepted result in Editor</button>
+                {/if}
+                {@const branchGroups = workflow.candidateBranchGroups(node.id)}
+                {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
+                  <p
+                    class="selective-running-state"
+                    data-workflow-selective-running-state={transformRunState.state}
+                    aria-live="polite"
+                  ><strong>{transformRunState.state}</strong> {transformRunState.message}</p>
+                {/if}
+                <div class="selective-node-actions" role="group" aria-label="Preview selective run">
+                  <button
+                    type="button"
+                    disabled={busy || selectiveUiState.busy || !providerSelection.ready}
+                    aria-describedby={`selective-action-reason-${node.id}`}
+                    onclick={() => void previewSelectiveExecution('run-node', node.id)}
+                  >Run this node</button>
+                  <button
+                    type="button"
+                    disabled={busy || selectiveUiState.busy || !providerSelection.ready}
+                    aria-describedby={`selective-action-reason-${node.id}`}
+                    onclick={() => void previewSelectiveExecution('run-from-here', node.id)}
+                  >Run from here</button>
+                </div>
+                <p class="transform-run-state" id={`selective-action-reason-${node.id}`}>
+                  {providerSelection.ready
+                    ? 'Preview planned, cached, blocked, and stale nodes before anything executes.'
+                    : providerSelection.label}
                 </p>
+                {#if selectiveTargetNodeId === node.id}
+                  <div class="selective-preview" aria-label="Confirm selective run" aria-live="polite">
+                    <strong>{selectiveMode === 'run-node' ? 'Run this node' : 'Run from here'} preview</strong>
+                    {#if selectiveMessage}<p>{selectiveMessage}</p>{/if}
+                    {#if selectiveError}<p class="selective-error">{selectiveError}</p>{/if}
+                    {#if selectiveUiState.preflight}
+                      {@const runAvailability = selectiveExecutionRunAvailability(selectiveUiState.preflight.plan.preflight)}
+                      <div class="selective-preview-actions">
+                        <button
+                          type="button"
+                          disabled={selectiveUiState.busy || !runAvailability.enabled}
+                          aria-describedby={`selective-run-reason-${node.id}`}
+                          onclick={() => void confirmSelectiveExecution()}
+                        >Confirm selective run</button>
+                        <button type="button" onclick={() => void cancelSelectiveExecution()}>Cancel</button>
+                      </div>
+                      <p id={`selective-run-reason-${node.id}`}>{runAvailability.reason}</p>
+                    {:else if selectiveUiState.busy}
+                      <button type="button" onclick={() => void cancelSelectiveExecution()}>Cancel</button>
+                    {:else if selectiveOutcome}
+                      <button type="button" onclick={invalidateSelectivePreview}>Dismiss</button>
+                    {/if}
+                  </div>
+                {/if}
+                <section class="candidate-branches" aria-label={`${node.name} concept branches`} aria-live="polite">
+                  <div class="candidate-branch-head">
+                    <strong>Concept branches</strong>
+                    <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
+                  </div>
+                  <div class="candidate-branch-controls" role="group" aria-label="Generate concept branches">
+                    <label>
+                      <span>Count</span>
+                      <select bind:value={candidateCount} disabled={busy} aria-label="Candidate count">
+                        <option value={2}>2</option>
+                        <option value={3}>3</option>
+                        <option value={4}>4</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Parallel</span>
+                      <select bind:value={candidateConcurrency} disabled={busy} aria-label="Candidate concurrency">
+                        <option value={1}>1</option>
+                        <option value={2}>2</option>
+                        <option value={3}>3</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={busy || !providerSelection.ready || !outputForTransform(node.id)}
+                      onclick={() => void generateCandidateBranches(node.id)}
+                    >Generate branches</button>
+                  </div>
+                  {#each branchGroups as group (group.id)}
+                    <div class="candidate-group">
+                      <p><strong>{group.candidates.length} branches</strong> from {group.sourceNodeId}</p>
+                      <ol>
+                        {#each group.candidates as candidate (candidate.candidateId)}
+                          <li data-candidate-state={candidate.status}>
+                            <span><b>Candidate {candidate.ordinal}</b> · {candidate.status}</span>
+                            <small>
+                              Lineage: {candidate.sourceAssetIds.length} sources · material {candidate.materialKey.slice(-10)} · run {candidate.latestRunId}
+                            </small>
+                            {#if candidate.failure}<small>{candidate.failure.message}</small>{/if}
+                            {#if candidate.status === 'failed' || candidate.status === 'cancelled'}
+                              <button type="button" disabled={busy} onclick={() => void retryCandidate(candidate.candidateId)}>
+                                Retry candidate
+                              </button>
+                            {/if}
+                          </li>
+                        {/each}
+                      </ol>
+                    </div>
+                  {/each}
+                </section>
               {:else if node.type === 'transform' && definition.executor.status === 'available'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>
                   Only the Generate capability is executable in this slice. Configure this Transform as Generate to run it.
                 </p>
                 <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
               {/if}
-              {#if definition.executor.status === 'draft-only'}
+              {#if definition.executor.status === 'draft-only' && node.type !== 'review'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
                 <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
               {/if}
@@ -2066,6 +2678,7 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>{node.name}</span>
               <small>Unsupported</small>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>This “{node.unsupportedType}” node is preserved for a compatible future PaintNode version.</p>
               {#if node.ports.inputs.length + node.ports.outputs.length > 0}
@@ -2109,6 +2722,7 @@
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
           </div>
+          <WorkflowNodePreflight entry={preflightForNode('composition')} />
           <div
             class="storyboard"
             class:editing={workflow.storyboardEditing}
@@ -2236,12 +2850,28 @@
           {/if}
           <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
             {#if providerSelection.qaFake}
-              <div class="qa-fake-banner" role="status">
-                <strong>QA Fake</strong>
-                <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
+              <div class="qa-fake-banner">
+                <div role="status">
+                  <strong>QA Fake</strong>
+                  <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
+                </div>
+                <label>
+                  <span>Native QA scenario</span>
+                  <select
+                    aria-label="QA Fake scenario"
+                    disabled={busy || selectiveUiState.busy}
+                    value={qaScenario}
+                    onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}
+                  >
+                    <option value="success">Success</option>
+                    <option value="slow-success">Slow / cancellable</option>
+                    <option value="failure">Failure / retry</option>
+                    <option value="branch-one-failure">Branches / candidate 2 fails once</option>
+                  </select>
+                </label>
               </div>
             {:else}
-              <AiRunOptionsControl bind:options={runOptions} disabled={busy || !providerSelection.ready} />
+              <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveUiState.busy || !providerSelection.ready} />
             {/if}
           </div>
           <div class="readiness-checklist" role="group" aria-label="Generate checklist" tabindex="-1" data-workflow-checklist onpointerdown={(event) => event.stopPropagation()}>
@@ -2259,7 +2889,12 @@
               </div>
             {/each}
           </div>
-          {#if busy}<p class="progress">{progress}</p>{/if}
+          {#if busy}
+            <p class="progress">
+              {progress}
+              <button type="button" onclick={() => void cancelGenerate()}>Cancel</button>
+            </p>
+          {/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
 
@@ -2267,6 +2902,7 @@
           {@const outputAsset = outputAssetFor(outputNode)}
           {@const ports = workflowNodePorts(outputNode.id)}
           {@const targetReadiness = outputReadiness(outputNode.id)}
+          {@const reviewedOutput = Boolean(resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: outputNode.id })?.reviewNodeId)}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
@@ -2304,6 +2940,7 @@
                 ><Icon svg={Delete} size={13} /></button>
               </div>
             </div>
+            <WorkflowNodePreflight entry={preflightForNode(outputNode.id)} />
             <div class="specialized-node-body output-node-body">
               <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
                 {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
@@ -2324,9 +2961,9 @@
                 </div>
               </div>
               <div class="output-actions">
-                <button onclick={() => void generate(outputNode)} disabled={busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
+                <button onclick={() => void generate(outputNode)} disabled={busy || selectiveUiState.busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
-                  {providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
+                  {reviewedOutput ? 'Use promoted' : providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
                 </button>
                 <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
                   <Icon svg={Open} size={14} />
@@ -2345,6 +2982,29 @@
     </div>
   </div>
 </section>
+
+{#if directorOpen}
+  <WorkflowDirectorDialog
+    {assets}
+    {runOptions}
+    {desktop}
+    {qaMode}
+    {qaModeResolved}
+    imageCapabilityAvailable={providerSelection.ready}
+    imageCapabilityReason={providerSelection.ready ? null : providerSelection.label}
+    onClose={() => (directorOpen = false)}
+  />
+{/if}
+
+{#if revisionDirectorOpen && revisionDirectorRequester}
+  <WorkflowDirectorRevisionDialog
+    requester={revisionDirectorRequester}
+    onClose={() => {
+      revisionDirectorOpen = false;
+      revisionDirectorRequester = null;
+    }}
+  />
+{/if}
 
 <style>
   .workflow-shell {
@@ -2386,6 +3046,11 @@
     font-weight: 700;
     text-transform: uppercase;
     color: var(--text-dim);
+  }
+  .tray-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
   .workflows {
     border-top: 1px solid var(--border);
@@ -2854,6 +3519,172 @@
   .draft-run {
     width: 100%;
   }
+  .selective-node-actions,
+  .selective-preview-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .selective-node-actions button,
+  .selective-preview-actions button {
+    min-width: 0;
+    padding: 5px;
+    font-size: 10px;
+  }
+  .selective-preview {
+    display: grid;
+    gap: 6px;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 8%, #252629);
+  }
+  .selective-preview strong {
+    color: var(--text-bright);
+    font-size: 10px;
+  }
+  .selective-preview p {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.35;
+  }
+  .selective-preview .selective-error {
+    color: #ffb0b0;
+  }
+  .candidate-branches {
+    display: grid;
+    gap: 6px;
+    padding: 7px;
+    border-top: 1px solid #4b4d52;
+    background: #292a2e;
+  }
+
+  .review-compare {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .review-candidate-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+  }
+
+  .review-candidate-tabs button {
+    flex: 0 0 auto;
+    font-size: 11px;
+  }
+
+  .review-candidate-tabs button[aria-selected='true'] {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .review-candidate-context {
+    display: grid;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--panel-bg) 88%, white 12%);
+  }
+
+  .review-candidate-context p,
+  .review-candidate-context small {
+    margin: 0;
+  }
+  .candidate-branch-head,
+  .candidate-branch-controls,
+  .candidate-branch-controls label,
+  .candidate-group li {
+    display: flex;
+    align-items: center;
+  }
+  .candidate-branch-head {
+    justify-content: space-between;
+    color: var(--text-bright);
+    font-size: 10px;
+  }
+  .candidate-branch-head span,
+  .candidate-group small {
+    color: var(--text-dim);
+  }
+  .candidate-branch-controls {
+    gap: 5px;
+  }
+  .candidate-branch-controls label {
+    gap: 3px;
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .candidate-branch-controls select {
+    width: 42px;
+    min-width: 42px;
+    height: 24px;
+    padding: 2px;
+    font-size: 10px;
+  }
+  .candidate-branch-controls button,
+  .candidate-group button {
+    min-width: 0;
+    padding: 4px 6px;
+    font-size: 10px;
+  }
+  .candidate-group {
+    display: grid;
+    gap: 4px;
+    padding: 5px;
+    border: 1px solid #45474c;
+    border-radius: 4px;
+    background: #252629;
+  }
+  .candidate-group p,
+  .candidate-group ol {
+    margin: 0;
+  }
+  .candidate-group p {
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .candidate-group ol {
+    display: grid;
+    gap: 4px;
+    padding: 0;
+    list-style: none;
+  }
+  .candidate-group li {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    border-left: 2px solid #777b84;
+    font-size: 9px;
+  }
+  .candidate-group li[data-candidate-state='succeeded'] {
+    border-left-color: #70bd8b;
+  }
+  .candidate-group li[data-candidate-state='failed'],
+  .candidate-group li[data-candidate-state='cancelled'] {
+    border-left-color: #d28b78;
+  }
+  .selective-running-state {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 5px;
+    align-items: baseline;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    color: var(--text);
+  }
+  .selective-running-state strong {
+    color: #a9d5ff;
+    text-transform: uppercase;
+  }
   .brief-node textarea {
     min-height: 105px;
   }
@@ -2966,8 +3797,20 @@
     color: #d8f3e3;
     font-size: 10px;
   }
+  .qa-fake-banner > div,
+  .qa-fake-banner label {
+    display: grid;
+    gap: 2px;
+  }
   .qa-fake-banner span {
     color: #acd5bd;
+  }
+  .qa-fake-banner label {
+    margin-top: 4px;
+  }
+  .qa-fake-banner select {
+    min-width: 0;
+    width: 100%;
   }
   .readiness-checklist {
     display: grid;

@@ -2,19 +2,23 @@
 import { Codex } from '@openai/codex-sdk';
 import { writeFileSync } from 'node:fs';
 import { directorActionSchema } from './director-action-schema.mjs';
+import {
+  workflowDirectorGraphDraftSchema,
+  workflowDirectorRevisionSchema,
+} from './workflow-director-schema.mjs';
 
-function writeDirectorAction(path, value) {
+function writeStructuredOutput(path, value, schemaName) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('The SDK did not return a Director action object');
+    throw new Error('The SDK did not return a structured object');
   }
-  if (!directorActionSchema.properties.action.enum.includes(value.action)) {
+  if (schemaName === 'director-action' && !directorActionSchema.properties.action.enum.includes(value.action)) {
     throw new Error(`The SDK returned an unknown Director action: ${String(value.action)}`);
   }
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
 function usage() {
-  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
+  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -30,6 +34,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     sessionId: undefined,
     outputFile: undefined,
+    outputSchema: 'director-action',
     codexPath: undefined,
     model: undefined,
     reasoning: undefined,
@@ -67,6 +72,12 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--output-file') {
       options.outputFile = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--output-schema') {
+      options.outputSchema = requireValue(argv, index, arg);
+      if (!['director-action', 'workflow-draft', 'workflow-revision'].includes(options.outputSchema)) {
+        throw new Error(`Unknown output schema: ${options.outputSchema}`);
+      }
       index += 2;
     } else if (arg === '--codex-path') {
       options.codexPath = requireValue(argv, index, arg);
@@ -153,9 +164,16 @@ async function main() {
     ...options.images.map((path) => ({ type: 'local_image', path })),
     { type: 'text', text: prompt },
   ];
+  const outputSchemas = {
+    'director-action': directorActionSchema,
+    'workflow-draft': workflowDirectorGraphDraftSchema,
+    'workflow-revision': workflowDirectorRevisionSchema,
+  };
   const { events } = await thread.runStreamed(
     input,
-    options.outputFile ? { outputSchema: directorActionSchema } : undefined,
+    options.outputFile
+      ? { outputSchema: outputSchemas[options.outputSchema] }
+      : undefined,
   );
   let failed = false;
   let finalResponse = null;
@@ -167,8 +185,8 @@ async function main() {
     }
   }
   if (!failed && options.outputFile) {
-    if (!finalResponse) throw new Error('Codex did not return a structured Director action');
-    writeDirectorAction(options.outputFile, JSON.parse(finalResponse));
+    if (!finalResponse) throw new Error('Codex did not return structured output');
+    writeStructuredOutput(options.outputFile, JSON.parse(finalResponse), options.outputSchema);
     process.stdout.write(
       `${JSON.stringify({ type: 'provider.progress', kind: 'actionReady', message: 'Codex returned a structured Director action' })}\n`,
     );

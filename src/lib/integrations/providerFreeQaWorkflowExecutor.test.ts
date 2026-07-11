@@ -5,7 +5,7 @@ import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from '../workflow/sche
 import { instantiateWorkflowTemplate } from '../workflow/templates';
 import { createProviderFreeQaWorkflowExecutor } from './providerFreeQaWorkflowExecutor';
 
-function request(): WorkflowTransformExecutionRequest {
+function request(width = 1024, height = 1024): WorkflowTransformExecutionRequest {
   return {
     workflowId: 'qa-workflow',
     nodeId: 'transform-generate-square',
@@ -18,7 +18,7 @@ function request(): WorkflowTransformExecutionRequest {
     prompt: 'Provider-free QA campaign',
     sources: [],
     storyboard: null,
-    output: { nodeId: 'output-square', title: 'Square 1:1', width: 1024, height: 1024 },
+    output: { nodeId: 'output-square', title: 'Campaign output', width, height },
   };
 }
 
@@ -50,18 +50,122 @@ describe('provider-free QA workflow executor', () => {
       });
       expect(second).toEqual(first);
       expect(loadPng).toHaveBeenCalledTimes(2);
+      expect(loadPng).toHaveBeenNthCalledWith(1, 1024, 1024);
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it('rejects any output contract other than the QA Square fixture before loading bytes', async () => {
+  it('offers a cancellable slow scenario for native progress and cancellation QA', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const loadPng = vi.fn(async () => new Uint8Array(png));
+    const controller = new AbortController();
+    const progress: string[] = [];
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'slow-success',
+      progressSteps: 4,
+      stepDelayMs: 5,
+    });
+
+    const operation = executor.execute(request(), {
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId: 'qa-run', nodeId: 'transform-generate-square',
+      },
+      signal: controller.signal,
+      reportProgress: (event) => {
+        progress.push(event.message);
+        if (progress.length === 1) controller.abort();
+      },
+    });
+
+    await expect(operation).rejects.toThrow(/cancelled/i);
+    expect(progress[0]).toMatch(/slow provider-free QA/i);
+    expect(loadPng).not.toHaveBeenCalled();
+  });
+
+  it('completes the slow scenario with bounded structured progress when it is not cancelled', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const progress: Array<{ message: string; completed?: number; total?: number }> = [];
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', async () => png, {
+      scenario: 'slow-success',
+      progressSteps: 2,
+      stepDelayMs: 1,
+    });
+
+    await expect(executor.execute(request(), {
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId: 'qa-run', nodeId: 'transform-generate-square',
+      },
+      reportProgress: (event) => progress.push({ ...event }),
+    })).resolves.toMatchObject({ kind: 'bytes', bytes: png });
+    expect(progress).toEqual([
+      { message: 'Slow provider-free QA 1 of 2', completed: 0, total: 2 },
+      { message: 'Slow provider-free QA 2 of 2', completed: 1, total: 2 },
+    ]);
+  });
+
+  it('offers an actionable fixed failure without loading provider output bytes', async () => {
     const loadPng = vi.fn();
-    const invalid = request();
-    invalid.output = { ...invalid.output, width: 1024, height: 1280 };
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'failure',
+    });
+
+    await expect(executor.execute(request())).rejects.toThrow(
+      'QA Fake simulated a provider failure. Review the workflow inputs, then retry Generate.',
+    );
+    expect(loadPng).not.toHaveBeenCalled();
+    expect(executor.describeRun(request())).toEqual({
+      id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' },
+    });
+  });
+
+  it('fails only candidate two attempt one for branch retry QA', async () => {
+    const loadPng = vi.fn(async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'branch-one-failure',
+    });
+    const context = (runId: string) => ({
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId,
+        nodeId: 'transform-generate-square',
+      },
+      reportProgress: vi.fn(),
+    });
+
+    await expect(executor.execute(
+      request(), context('candidate-2-abcdef0123456789abcd-attempt-1'),
+    )).rejects.toThrow(/candidate 2 failed safely/i);
+    await expect(executor.execute(
+      request(), context('candidate-2-abcdef0123456789abcd-attempt-2'),
+    )).resolves.toMatchObject({ kind: 'bytes' });
+    await expect(executor.execute(
+      request(), context('candidate-1-abcdef0123456789abcd-attempt-1'),
+    )).resolves.toMatchObject({ kind: 'bytes' });
+    expect(loadPng).toHaveBeenCalledTimes(2);
+  });
+
+  it('supports the exact three Campaign Composer shapes through the dimension-aware loader', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const loadPng = vi.fn(async () => png);
     const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
-    await expect(executor.execute(invalid)).rejects.toThrow(/1024 x 1024/i);
+
+    await expect(executor.execute(request(1024, 1024))).resolves.toMatchObject({
+      name: 'paintnode-provider-free-qa-square.png', width: 1024, height: 1024,
+    });
+    await expect(executor.execute(request(1024, 1280))).resolves.toMatchObject({
+      name: 'paintnode-provider-free-qa-portrait.png', width: 1024, height: 1280,
+    });
+    await expect(executor.execute(request(1280, 720))).resolves.toMatchObject({
+      name: 'paintnode-provider-free-qa-landscape.png', width: 1280, height: 720,
+    });
+    expect(loadPng.mock.calls).toEqual([[1024, 1024], [1024, 1280], [1280, 720]]);
+  });
+
+  it('rejects any output contract outside the three Campaign Composer fixtures before loading bytes', async () => {
+    const loadPng = vi.fn();
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
+    await expect(executor.execute(request(900, 900))).rejects.toThrow(/1:1, 4:5, and 16:9/i);
     expect(loadPng).not.toHaveBeenCalled();
   });
 
@@ -72,7 +176,12 @@ describe('provider-free QA workflow executor', () => {
     const product = graph.nodes.find((node) => node.id === 'slot-product')!;
     product.config.assetId = 'product';
     product.config.relativePath = 'assets/Product.png';
-    const readAsset = vi.fn();
+    const resolveAsset = vi.fn(async () => ({
+      assetId: 'product',
+      relativePath: 'assets/Product.png',
+      bytes: null,
+      contentHash: `sha256:${'5'.repeat(64)}`,
+    }));
     const readStoryboard = vi.fn();
     const storeAsset = vi.fn(async () => ({
       id: 'qa-square',
@@ -86,6 +195,12 @@ describe('provider-free QA workflow executor', () => {
       'provider-free',
       async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
     );
+    expect(executor.executor).toEqual({
+      id: 'paintnode-qa-fake-campaign', version: '2', requestSchemaVersion: '1',
+    });
+    expect(executor.describeRun(request())).toEqual({
+      id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' },
+    });
 
     const outcome = await executeCampaignGenerateTransform(graph, 'output-square', {
       projectPath: '/virtual/project',
@@ -95,12 +210,13 @@ describe('provider-free QA workflow executor', () => {
         id: 'product', name: 'Product.png', relativePath: 'assets/Product.png',
         width: 1200, height: 1200, mime: 'image/png',
       }],
-      readAsset,
+      resolveAsset,
       readStoryboard,
       storeAsset,
+      allowUnpromotedReview: true,
     });
 
-    expect(readAsset).not.toHaveBeenCalled();
+    expect(resolveAsset).toHaveBeenCalledOnce();
     expect(readStoryboard).not.toHaveBeenCalled();
     expect(storeAsset).toHaveBeenCalledOnce();
     expect(outcome.asset).toMatchObject({

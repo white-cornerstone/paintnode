@@ -431,23 +431,30 @@ pub(crate) fn provider_qa_mode() -> Option<String> {
     }
 }
 
-fn provider_free_qa_square_png_in_mode(qa_mode: &str) -> Result<Vec<u8>, String> {
+fn provider_free_qa_png_in_mode(qa_mode: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
     if qa_mode != "provider-free" {
         return Err("QA Fake output is available only in provider-free native QA mode.".into());
     }
-    let image = image::RgbaImage::from_fn(1024, 1024, |x, y| {
+    if !matches!((width, height), (1024, 1024) | (1024, 1280) | (1280, 720)) {
+        return Err("QA Fake supports only Campaign Composer 1:1, 4:5, and 16:9 outputs.".into());
+    }
+    let image = image::RgbaImage::from_fn(width, height, |x, y| {
         let grid = ((x / 128) + (y / 128)) % 2;
         let red = if grid == 0 { 38 } else { 69 };
-        let green = ((x * 160) / 1023) as u8 + 60;
-        let blue = ((y * 150) / 1023) as u8 + 70;
+        let green = ((x * 160) / width.saturating_sub(1).max(1)) as u8 + 60;
+        let blue = ((y * 150) / height.saturating_sub(1).max(1)) as u8 + 70;
         image::Rgba([red, green, blue, 255])
     });
-    crate::png::encode_rgba_png(image, "provider-free QA Square")
+    crate::png::encode_rgba_png(image, "provider-free QA Campaign")
 }
 
 #[tauri::command]
-pub(crate) fn provider_free_qa_square_png() -> Result<Vec<u8>, String> {
-    provider_free_qa_square_png_in_mode(&std::env::var(QA_MODE_ENV).unwrap_or_default())
+pub(crate) fn provider_free_qa_png(width: u32, height: u32) -> Result<Vec<u8>, String> {
+    provider_free_qa_png_in_mode(
+        &std::env::var(QA_MODE_ENV).unwrap_or_default(),
+        width,
+        height,
+    )
 }
 
 #[cfg(test)]
@@ -461,20 +468,25 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[test]
-    fn provider_free_qa_square_is_exact_deterministic_png_and_mode_gated() {
-        let first =
-            provider_free_qa_square_png_in_mode("provider-free").expect("provider-free QA PNG");
-        let second = provider_free_qa_square_png_in_mode("provider-free")
-            .expect("deterministic provider-free QA PNG");
-        assert_eq!(first, second);
-        assert_eq!(
-            crate::png::png_dimensions_from_bytes(&first),
-            Some((1024, 1024))
-        );
-        assert!(crate::png::decode_png_rgba(&first, "provider-free QA Square").is_ok());
+    fn provider_free_qa_campaign_shapes_are_exact_deterministic_pngs_and_mode_gated() {
+        for dimensions in [(1024, 1024), (1024, 1280), (1280, 720)] {
+            let first = provider_free_qa_png_in_mode("provider-free", dimensions.0, dimensions.1)
+                .expect("provider-free QA PNG");
+            let second = provider_free_qa_png_in_mode("provider-free", dimensions.0, dimensions.1)
+                .expect("deterministic provider-free QA PNG");
+            assert_eq!(first, second);
+            assert_eq!(
+                crate::png::png_dimensions_from_bytes(&first),
+                Some(dimensions)
+            );
+            assert!(crate::png::decode_png_rgba(&first, "provider-free QA Campaign").is_ok());
+        }
+        assert!(provider_free_qa_png_in_mode("provider-free", 640, 640)
+            .expect_err("unsupported shape must be rejected")
+            .contains("1:1, 4:5, and 16:9"));
 
         for mode in ["", "provider-e2e", "unexpected"] {
-            assert!(provider_free_qa_square_png_in_mode(mode)
+            assert!(provider_free_qa_png_in_mode(mode, 1024, 1024)
                 .expect_err("non-provider-free modes must be rejected")
                 .contains("only in provider-free"));
         }

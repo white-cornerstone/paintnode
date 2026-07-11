@@ -199,15 +199,34 @@ function outputNode(output: WorkflowTemplateOutput, index: number, x = 925): Wor
   });
 }
 
-function campaignGenerateTransform(): WorkflowNodeV2 {
+function campaignGenerateTransform(
+  id: string,
+  title: string,
+  instructions: string,
+  position: { x: number; y: number },
+  templateRole: string,
+): WorkflowNodeV2 {
   return createCreatorNode('transform', {
-    id: 'transform-generate-square',
-    title: 'Generate Square',
-    position: { x: 925, y: 50 },
+    id,
+    title,
+    position,
     config: {
-      templateRole: 'campaign-generate-square',
+      templateRole,
       capability: 'generate',
-      instructions: 'Generate the configured Square 1:1 campaign result from the Product, Brief, and Art Direction.',
+      instructions,
+    },
+  });
+}
+
+function campaignReviewNode(): WorkflowNodeV2 {
+  return createCreatorNode('review', {
+    id: 'review-campaign-direction',
+    title: 'Choose Campaign Direction',
+    position: { x: 1195, y: 50 },
+    config: {
+      templateRole: 'campaign-direction-review',
+      mode: 'human',
+      instructions: 'Choose the strongest campaign direction before adapting it to every publishing format.',
     },
   });
 }
@@ -220,8 +239,25 @@ export function instantiateWorkflowTemplate(
   const slots = definition.slots.map(assetSlotNode);
   const brief = briefNode(definition);
   const artDirection = artDirectionNode(definition);
-  const campaignTransform = id === 'campaign-composer' ? campaignGenerateTransform() : null;
-  const outputs = definition.outputs.map((output, index) => outputNode(output, index, campaignTransform ? 1195 : 925));
+  const campaignNodes = id === 'campaign-composer' ? {
+    concept: campaignGenerateTransform(
+      'transform-generate-square', 'Generate Concepts',
+      'Generate coordinated Square 1:1 campaign concepts from the Product, Brief, and Art Direction.',
+      { x: 925, y: 50 }, 'campaign-generate-concepts',
+    ),
+    review: campaignReviewNode(),
+    portrait: campaignGenerateTransform(
+      'transform-generate-portrait', 'Generate Portrait',
+      'Adapt the accepted campaign direction to the configured Portrait 4:5 output while preserving product and brand identity.',
+      { x: 1465, y: 306 }, 'campaign-generate-portrait',
+    ),
+    landscape: campaignGenerateTransform(
+      'transform-generate-landscape', 'Generate Landscape',
+      'Adapt the accepted campaign direction to the configured Landscape 16:9 output while preserving product and brand identity.',
+      { x: 1465, y: 562 }, 'campaign-generate-landscape',
+    ),
+  } : null;
+  const outputs = definition.outputs.map((output, index) => outputNode(output, index, campaignNodes ? 1735 : 925));
   const graph: WorkflowGraphV2 = {
     version: WORKFLOW_GRAPH_VERSION,
     id: options.graphId?.trim() || freshWorkflowGraphId(),
@@ -230,8 +266,12 @@ export function instantiateWorkflowTemplate(
       sourceVersion: null,
       migrations: [],
     },
-    viewport: { panX: 10, panY: 10, zoom: campaignTransform ? 0.62 : 0.72 },
-    nodes: [...slots, brief, artDirection, ...(campaignTransform ? [campaignTransform] : []), ...outputs],
+    viewport: { panX: 10, panY: 10, zoom: campaignNodes ? 0.44 : 0.72 },
+    nodes: [
+      ...slots, brief, artDirection,
+      ...(campaignNodes ? [campaignNodes.concept, campaignNodes.review, campaignNodes.portrait, campaignNodes.landscape] : []),
+      ...outputs,
+    ],
     edges: [
       ...slots.map((slot) => ({
         id: `edge-${slot.id}-composition`,
@@ -243,22 +283,42 @@ export function instantiateWorkflowTemplate(
         source: { nodeId: 'brief', portId: 'prompt' },
         target: { nodeId: 'composition', portId: 'brief' },
       },
-      ...(campaignTransform ? [
+      ...(campaignNodes ? [
         {
           id: 'edge-composition-transform-generate-square',
           source: { nodeId: 'composition', portId: 'layout' },
-          target: { nodeId: campaignTransform.id, portId: 'source' },
+          target: { nodeId: campaignNodes.concept.id, portId: 'source' },
         },
         {
-          id: 'edge-transform-generate-square-output-square',
-          source: { nodeId: campaignTransform.id, portId: 'result' },
+          id: 'edge-transform-generate-square-review-campaign-direction',
+          source: { nodeId: campaignNodes.concept.id, portId: 'result' },
+          target: { nodeId: campaignNodes.review.id, portId: 'candidates' },
+        },
+        {
+          id: 'edge-review-campaign-direction-output-square',
+          source: { nodeId: campaignNodes.review.id, portId: 'selected' },
           target: { nodeId: 'output-square', portId: 'source' },
         },
-        ...outputs.filter((output) => output.id !== 'output-square').map((output) => ({
-          id: `edge-composition-${output.id}`,
-          source: { nodeId: 'composition', portId: 'layout' },
-          target: { nodeId: output.id, portId: 'source' },
-        })),
+        {
+          id: 'edge-review-campaign-direction-transform-generate-portrait',
+          source: { nodeId: campaignNodes.review.id, portId: 'selected' },
+          target: { nodeId: campaignNodes.portrait.id, portId: 'source' },
+        },
+        {
+          id: 'edge-transform-generate-portrait-output-portrait',
+          source: { nodeId: campaignNodes.portrait.id, portId: 'result' },
+          target: { nodeId: 'output-portrait', portId: 'source' },
+        },
+        {
+          id: 'edge-review-campaign-direction-transform-generate-landscape',
+          source: { nodeId: campaignNodes.review.id, portId: 'selected' },
+          target: { nodeId: campaignNodes.landscape.id, portId: 'source' },
+        },
+        {
+          id: 'edge-transform-generate-landscape-output-landscape',
+          source: { nodeId: campaignNodes.landscape.id, portId: 'result' },
+          target: { nodeId: 'output-landscape', portId: 'source' },
+        },
       ] : outputs.map((output) => ({
         id: `edge-composition-${output.id}`,
         source: { nodeId: 'composition', portId: 'layout' },
