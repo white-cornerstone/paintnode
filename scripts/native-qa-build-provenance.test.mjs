@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
   captureCleanSourceState,
+  qaBuildIdentitySha256,
   qaBuildProvenancePath,
   writeQaBuildProvenance,
 } from './native-qa-build-provenance.mjs';
@@ -68,4 +69,32 @@ test('native QA build writes provenance before launching the built executable', 
   assert.match(source, /resolveProviderFreeStudySession\([\s\S]*buildOnly,/);
   assert.ok(source.indexOf('if (buildOnly)') < source.indexOf('markStudySessionLaunchAttempted(studySessionPath)'));
   assert.match(source, /spawnSync\(executable, \['-ApplePersistenceIgnoreState', 'YES'\]/);
+});
+
+test('study-capable build provenance is static and the build defers its main window', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-study-build-bundle-'));
+  const appBundle = join(root, 'Provider Free.app');
+  const executable = join(appBundle, 'Contents/MacOS/PaintNode');
+  mkdirSync(join(appBundle, 'Contents/MacOS'), { recursive: true });
+  writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+  chmodSync(executable, 0o755);
+  const provenance = writeQaBuildProvenance({
+    appBundle,
+    mode: 'provider-free',
+    bundleId: 'com.paintnode.editor.blueprintqa.provider.free',
+    studyCapable: true,
+    sourceState: {
+      gitSha: 'a'.repeat(40), sourceTreeSha: 'b'.repeat(40), sourceDirty: false,
+      sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    },
+  });
+  assert.equal(provenance.studyCapable, true);
+  assert.equal('studySession' in provenance, false);
+  assert.match(qaBuildIdentitySha256(provenance), /^[a-f0-9]{64}$/);
+
+  const source = readFileSync(new URL('./native-qa-app.mjs', import.meta.url), 'utf8');
+  assert.match(source, /args\.includes\('--study-capable'\)/);
+  assert.match(source, /studyCapable[\s\S]*applyStudySessionWindowIsolation/);
+  assert.match(source, /studyCapable[\s\S]*buildOnly/);
+  assert.match(source, /live study sessions must launch the existing approved bundle/i);
 });

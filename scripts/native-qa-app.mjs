@@ -41,6 +41,13 @@ if (!['provider-free', 'provider-e2e'].includes(mode)) {
 const freshStudySession = args.includes('--fresh-study-session');
 const resumeStudySession = args.includes('--resume-study-session');
 const buildOnly = args.includes('--build-only');
+const studyCapable = args.includes('--study-capable');
+if ((freshStudySession || resumeStudySession) && !buildOnly) {
+  throw new Error('Live study sessions must launch the existing approved bundle through qa:creator-study:launch.');
+}
+if (studyCapable && (mode !== 'provider-free' || !buildOnly || freshStudySession || resumeStudySession)) {
+  throw new Error('--study-capable requires Provider Free --build-only without a live study session.');
+}
 const studySessionPath = join(root, 'src-tauri', '.provider-free-study-session.json');
 const studySessionLaunch = resolveProviderFreeStudySession({
   mode,
@@ -101,7 +108,9 @@ writeFileSync(
       identifier: `com.paintnode.editor.blueprintqa.${slug}`,
       app: {
         windows: [
-          studySession ? applyStudySessionWindowIsolation(windowConfig, studySession) : windowConfig,
+          (studyCapable || studySession)
+            ? applyStudySessionWindowIsolation(windowConfig, studySession ?? undefined)
+            : windowConfig,
         ],
       },
       bundle: { createUpdaterArtifacts: false },
@@ -144,6 +153,7 @@ writeQaBuildProvenance({
   mode,
   bundleId: `com.paintnode.editor.blueprintqa.${slug}`,
   sourceState: finalSourceState,
+  studyCapable,
   studySession: studySessionEvidence,
 });
 

@@ -21,6 +21,7 @@ const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
 const PROVIDER_FREE_STUDY_PROFILE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_PROFILE";
 const PROVIDER_FREE_STUDY_BOOT_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE";
 const PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE";
+const PROVIDER_FREE_STUDY_BUILD_IDENTITY_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY";
 const PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV: &str =
     "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_PROFILE";
 const PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_NONCE";
@@ -1421,6 +1422,7 @@ pub(crate) fn provider_free_study_profile() -> Result<Option<[u8; 16]>, String> 
 pub(crate) struct StudyEvidenceRequest {
     pub profile: [u8; 16],
     nonce: [u8; 32],
+    build_identity: Option<[u8; 32]>,
     path: std::path::PathBuf,
 }
 
@@ -1450,15 +1452,24 @@ fn study_evidence_request_in_mode(
     raw_profile: Option<&std::ffi::OsStr>,
     raw_nonce: Option<&std::ffi::OsStr>,
     raw_path: Option<&std::ffi::OsStr>,
+    raw_build_identity: Option<&std::ffi::OsStr>,
     profile_only_is_resume: bool,
 ) -> Result<Option<StudyEvidenceRequest>, String> {
     // The study profile is also present for same-session resume launches. Only
     // the dedicated nonce/path pair opts a launch into one-shot lifecycle
     // evidence creation.
-    if raw_profile.is_none() && raw_nonce.is_none() && raw_path.is_none() {
+    if raw_profile.is_none()
+        && raw_nonce.is_none()
+        && raw_path.is_none()
+        && raw_build_identity.is_none()
+    {
         return Ok(None);
     }
-    if profile_only_is_resume && raw_profile.is_some() && raw_nonce.is_none() && raw_path.is_none()
+    if profile_only_is_resume
+        && raw_profile.is_some()
+        && raw_nonce.is_none()
+        && raw_path.is_none()
+        && raw_build_identity.is_none()
     {
         return Ok(None);
     }
@@ -1475,9 +1486,22 @@ fn study_evidence_request_in_mode(
         .ok_or_else(|| {
             "Provider Free study lifecycle evidence path must be absolute.".to_string()
         })?;
+    let build_identity = if profile_only_is_resume {
+        Some(parse_study_hex::<32>(
+            raw_build_identity.ok_or_else(|| {
+                "Provider Free study build identity is missing from boot evidence.".to_string()
+            })?,
+            "Provider Free study build identity",
+        )?)
+    } else if raw_build_identity.is_some() {
+        return Err("Provider Free cleanup must not carry fresh boot build identity.".into());
+    } else {
+        None
+    };
     Ok(Some(StudyEvidenceRequest {
         profile: parse_study_hex::<16>(raw_profile, "Provider Free study profile")?,
         nonce: parse_study_hex::<32>(raw_nonce, "Provider Free study lifecycle nonce")?,
+        build_identity,
         path,
     }))
 }
@@ -1486,16 +1510,19 @@ fn study_evidence_request(
     profile_env: &str,
     nonce_env: &str,
     path_env: &str,
+    build_identity_env: Option<&str>,
     profile_only_is_resume: bool,
 ) -> Result<Option<StudyEvidenceRequest>, String> {
     let raw_profile = std::env::var_os(profile_env);
     let raw_nonce = std::env::var_os(nonce_env);
     let raw_path = std::env::var_os(path_env);
+    let raw_build_identity = build_identity_env.and_then(std::env::var_os);
     study_evidence_request_in_mode(
         &std::env::var(QA_MODE_ENV).unwrap_or_default(),
         raw_profile.as_deref(),
         raw_nonce.as_deref(),
         raw_path.as_deref(),
+        raw_build_identity.as_deref(),
         profile_only_is_resume,
     )
 }
@@ -1505,6 +1532,7 @@ pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidence
         PROVIDER_FREE_STUDY_PROFILE_ENV,
         PROVIDER_FREE_STUDY_BOOT_NONCE_ENV,
         PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV,
+        Some(PROVIDER_FREE_STUDY_BUILD_IDENTITY_ENV),
         true,
     )
 }
@@ -1514,6 +1542,7 @@ pub(crate) fn provider_free_study_cleanup() -> Result<Option<StudyEvidenceReques
         PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV,
         PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV,
         PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV,
+        None,
         false,
     )
 }
@@ -1536,6 +1565,16 @@ pub(crate) fn write_study_lifecycle_evidence(
         ("profileSha256".into(), serde_json::json!(profile_sha256)),
     ]);
     payload.insert(nonce_key.into(), serde_json::json!(nonce_sha256));
+    if let Some(build_identity) = request.build_identity {
+        let build_identity = build_identity
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        payload.insert(
+            "buildIdentitySha256".into(),
+            serde_json::json!(build_identity),
+        );
+    }
     let payload = serde_json::Value::Object(payload);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -1638,11 +1677,16 @@ mod tests {
     #[test]
     fn study_lifecycle_evidence_is_optional_for_same_session_resume() {
         let profile = std::ffi::OsStr::new("00112233445566778899aabbccddeeff");
-        assert!(
-            study_evidence_request_in_mode("provider-free", Some(profile), None, None, true)
-                .expect("resume launch does not request new boot evidence")
-                .is_none()
-        );
+        assert!(study_evidence_request_in_mode(
+            "provider-free",
+            Some(profile),
+            None,
+            None,
+            None,
+            true
+        )
+        .expect("resume launch does not request new boot evidence")
+        .is_none());
 
         let nonce_text = "11".repeat(32);
         let nonce = std::ffi::OsStr::new(&nonce_text);
@@ -1650,6 +1694,7 @@ mod tests {
             "provider-free",
             Some(profile),
             Some(nonce),
+            None,
             None,
             true,
         ) {
@@ -1659,21 +1704,29 @@ mod tests {
         assert!(partial_error.contains("path must be absolute"));
 
         let path = std::ffi::OsStr::new("/tmp/paintnode-study-boot-evidence.json");
+        let build_identity_text = "22".repeat(32);
+        let build_identity = std::ffi::OsStr::new(&build_identity_text);
         let request = study_evidence_request_in_mode(
             "provider-free",
             Some(profile),
             Some(nonce),
             Some(path),
+            Some(build_identity),
             true,
         )
         .expect("fresh launch lifecycle request")
         .expect("fresh launch has lifecycle evidence");
         assert_eq!(request.path, std::path::PathBuf::from(path));
 
-        assert!(
-            study_evidence_request_in_mode("provider-free", Some(profile), None, None, false,)
-                .is_err()
-        );
+        assert!(study_evidence_request_in_mode(
+            "provider-free",
+            Some(profile),
+            None,
+            None,
+            None,
+            false,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1688,6 +1741,7 @@ mod tests {
         let request = StudyEvidenceRequest {
             profile: [1; 16],
             nonce: [2; 32],
+            build_identity: Some([3; 32]),
             path: root.join("boot.json"),
         };
         write_study_lifecycle_evidence(&request, "app-boot").expect("write boot evidence");
@@ -1702,6 +1756,7 @@ mod tests {
         assert!(evidence["bootNonceSha256"]
             .as_str()
             .is_some_and(|value| value.len() == 64));
+        assert_eq!(evidence["buildIdentitySha256"], "03".repeat(32));
         assert!(!evidence.to_string().contains(&"01".repeat(16)));
         assert!(write_study_lifecycle_evidence(&request, "app-boot")
             .expect_err("evidence must be create-once")

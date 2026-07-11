@@ -175,6 +175,10 @@ test('operations require a fresh isolated profile and preserve only same-session
   const operations = readFileSync(join(study, 'README.md'), 'utf8');
   assert.match(operations, /--fresh-study-session/);
   assert.match(operations, /--resume-study-session/);
+  assert.match(operations, /--study-capable --build-only/);
+  assert.match(operations, /qa:creator-study:launch[\s\S]*--app-bundle/);
+  assert.match(operations, /performs no Tauri, Vite, Quick Look, or other[\s\n]*build/i);
+  assert.match(operations, /static provenance[\s\S]*neither is rewritten/i);
   assert.match(operations, /--visible-empty-state-attested/);
   assert.match(operations, /must never start a new participant/i);
   assert.match(operations, /qa:creator-study:finalize-session/);

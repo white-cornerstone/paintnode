@@ -15,11 +15,12 @@
 - [ ] Editor return, save/reopen, and Place rehearsed.
 - [ ] Rehearsal folder deleted.
 - [ ] Participant project folder exists, is genuinely empty, and is outside repo.
-- [ ] A new profile was generated with `--fresh-study-session`; its receipt fingerprint differs from the prior participant.
+- [ ] The preserved study-capable bundle and adjacent static provenance sidecar match the approved executable/build identity and remain byte-unchanged.
+- [ ] A new profile was launched from that preserved bundle with `qa:creator-study:launch -- --app-bundle ... --fresh-study-session`; its receipt fingerprint differs from the prior participant.
 - [ ] Before opening a folder, Project visibly shows no open project/imported assets and Workflow shows no open workflow.
 - [ ] Setup verifier passes with `--visible-empty-state-attested`; receipt copied to private session log.
 - [ ] Setup receipt reports native app boot observed, one-time setup evidence consumed, and monotonic Keychain anchor recorded.
-- [ ] `--resume-study-session` is reserved only for quit/reopen inside this participant session.
+- [ ] `qa:creator-study:launch -- --resume-study-session` is reserved only for quit/reopen inside this participant session and uses the same preserved bundle.
 - [ ] Recording is off.
 - [ ] Product B remains hidden until Task 6.
 

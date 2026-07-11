@@ -5,6 +5,75 @@ import { spawnSync } from 'node:child_process';
 
 export const BUILD_PROVENANCE_SUFFIX = '.paintnode-qa-build.json';
 
+export function parseJsonWithoutDuplicateKeys(serialized, label = 'JSON document') {
+  let index = 0;
+  const skipWhitespace = () => {
+    while (/\s/.test(serialized[index] ?? '')) index += 1;
+  };
+  const parseString = () => {
+    const start = index;
+    if (serialized[index] !== '"') throw new Error(`${label} must contain valid JSON.`);
+    index += 1;
+    while (index < serialized.length) {
+      if (serialized[index] === '\\') index += 2;
+      else if (serialized[index] === '"') {
+        index += 1;
+        return JSON.parse(serialized.slice(start, index));
+      } else index += 1;
+    }
+    throw new Error(`${label} must contain valid JSON.`);
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    if (serialized[index] === '{') {
+      index += 1;
+      const keys = new Set();
+      skipWhitespace();
+      if (serialized[index] === '}') { index += 1; return; }
+      while (index < serialized.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) throw new Error(`${label} contains duplicate field ${key}.`);
+        keys.add(key);
+        skipWhitespace();
+        if (serialized[index] !== ':') throw new Error(`${label} must contain valid JSON.`);
+        index += 1;
+        parseValue();
+        skipWhitespace();
+        if (serialized[index] === '}') { index += 1; return; }
+        if (serialized[index] !== ',') throw new Error(`${label} must contain valid JSON.`);
+        index += 1;
+      }
+      throw new Error(`${label} must contain valid JSON.`);
+    }
+    if (serialized[index] === '[') {
+      index += 1;
+      skipWhitespace();
+      if (serialized[index] === ']') { index += 1; return; }
+      while (index < serialized.length) {
+        parseValue();
+        skipWhitespace();
+        if (serialized[index] === ']') { index += 1; return; }
+        if (serialized[index] !== ',') throw new Error(`${label} must contain valid JSON.`);
+        index += 1;
+      }
+      throw new Error(`${label} must contain valid JSON.`);
+    }
+    if (serialized[index] === '"') { parseString(); return; }
+    const start = index;
+    while (index < serialized.length && !/[\s,\]}]/.test(serialized[index])) index += 1;
+    if (start === index) throw new Error(`${label} must contain valid JSON.`);
+  };
+  parseValue();
+  skipWhitespace();
+  if (index !== serialized.length) throw new Error(`${label} must contain valid JSON.`);
+  try {
+    return JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(`${label} must contain valid JSON: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
 export function qaBuildProvenancePath(appBundle) {
   return `${realpathSync(appBundle)}${BUILD_PROVENANCE_SUFFIX}`;
 }
@@ -17,6 +86,34 @@ function git(root, args) {
 
 export function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+export function qaBuildIdentity(provenance) {
+  if (!provenance || provenance.version !== 1
+    || !['provider-free', 'provider-e2e'].includes(provenance.mode)
+    || typeof provenance.bundleId !== 'string'
+    || !/^[a-f0-9]{40}$/.test(provenance.gitSha ?? '')
+    || !/^[a-f0-9]{40}$/.test(provenance.sourceTreeSha ?? '')
+    || typeof provenance.sourceDirty !== 'boolean'
+    || !/^[a-f0-9]{64}$/.test(provenance.sourceStatusSha256 ?? '')
+    || !/^[a-f0-9]{64}$/.test(provenance.executableSha256 ?? '')) {
+    throw new Error('QA build provenance does not contain a valid static identity.');
+  }
+  return Object.freeze({
+    version: provenance.version,
+    mode: provenance.mode,
+    bundleId: provenance.bundleId,
+    gitSha: provenance.gitSha,
+    sourceTreeSha: provenance.sourceTreeSha,
+    sourceDirty: provenance.sourceDirty,
+    sourceStatusSha256: provenance.sourceStatusSha256,
+    executableSha256: provenance.executableSha256,
+    studyCapable: provenance.studyCapable === true,
+  });
+}
+
+export function qaBuildIdentitySha256(provenance) {
+  return createHash('sha256').update(JSON.stringify(qaBuildIdentity(provenance))).digest('hex');
 }
 
 export function captureSourceState(root) {
@@ -35,7 +132,9 @@ export function captureCleanSourceState(root) {
   return state;
 }
 
-export function writeQaBuildProvenance({ appBundle, mode, bundleId, sourceState, studySession = null }) {
+export function writeQaBuildProvenance({
+  appBundle, mode, bundleId, sourceState, studyCapable = false, studySession = null,
+}) {
   const bundle = realpathSync(appBundle);
   const executable = join(bundle, 'Contents/MacOS/PaintNode');
   accessSync(executable, constants.X_OK);
@@ -48,6 +147,7 @@ export function writeQaBuildProvenance({ appBundle, mode, bundleId, sourceState,
     sourceDirty: sourceState.sourceDirty,
     sourceStatusSha256: sourceState.sourceStatusSha256,
     executableSha256: sha256File(executable),
+    ...(studyCapable ? { studyCapable: true } : {}),
     ...(studySession ? { studySession: Object.freeze({ ...studySession }) } : {}),
   });
   const output = qaBuildProvenancePath(bundle);
@@ -56,5 +156,8 @@ export function writeQaBuildProvenance({ appBundle, mode, bundleId, sourceState,
 }
 
 export function readQaBuildProvenance(appBundle) {
-  return JSON.parse(readFileSync(qaBuildProvenancePath(appBundle), 'utf8'));
+  return parseJsonWithoutDuplicateKeys(
+    readFileSync(qaBuildProvenancePath(appBundle), 'utf8'),
+    'QA build provenance',
+  );
 }

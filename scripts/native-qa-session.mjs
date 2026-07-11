@@ -74,6 +74,10 @@ export function studySessionCleanupEvidencePath(statePath) {
   return `${statePath}.cleanup.json`;
 }
 
+export function studySessionLaunchEvidencePath(statePath) {
+  return `${statePath}.launch.json`;
+}
+
 export function studySessionConsumeLockPath(statePath) {
   return `${statePath}.consume.lock`;
 }
@@ -109,9 +113,12 @@ export function createFreshProviderFreeStudySession(options = {}) {
   });
 }
 
-export function writeProviderFreeStudySession(path, session) {
+export function writeProviderFreeStudySession(path, session, options = {}) {
   const valid = validateSession(session);
-  writeFileSync(path, `${JSON.stringify(valid, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(path, `${JSON.stringify(valid, null, 2)}\n`, {
+    mode: 0o600,
+    ...(options.createOnly ? { flag: 'wx' } : {}),
+  });
 }
 
 export function readProviderFreeStudySession(path) {
@@ -165,12 +172,20 @@ export function resolveProviderFreeStudySession({
     }
     rmSync(studySessionBootEvidencePath(statePath), { force: true });
     rmSync(studySessionCleanupEvidencePath(statePath), { force: true });
+    rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
     removeInactiveConsumeLock(statePath);
     const session = createFreshProviderFreeStudySession({
       randomUUID: randomUUIDOverride,
       randomBytes: randomBytesOverride,
     });
-    writeProviderFreeStudySession(statePath, session);
+    try {
+      writeProviderFreeStudySession(statePath, session, { createOnly: true });
+    } catch (error) {
+      if (error?.code === 'EEXIST') {
+        throw new Error('The prior Provider Free study session must be finalized before a fresh session can start.');
+      }
+      throw error;
+    }
     return Object.freeze({ session, launchIntent: 'fresh' });
   }
   const session = readProviderFreeStudySession(statePath);
@@ -200,7 +215,10 @@ export function providerFreeStudyBootEnvironment(session, statePath) {
   });
 }
 
-export function verifyAndConsumeStudySessionBoot({ statePath, profileSha256, consumptionAnchor }) {
+export function verifyAndConsumeStudySessionBoot({
+  statePath, profileSha256, buildIdentitySha256, provenanceSha256,
+  executableSha256, consumptionAnchor,
+}) {
   if (!consumptionAnchor?.hasConsumed || !consumptionAnchor?.consume) {
     throw new Error('Provider Free setup requires a separately protected single-Mac consumption anchor.');
   }
@@ -228,8 +246,22 @@ export function verifyAndConsumeStudySessionBoot({ statePath, profileSha256, con
     }
     if (evidence?.version !== SESSION_VERSION || evidence?.event !== 'app-boot'
       || evidence.profileSha256 !== session.profileSha256
-      || evidence.bootNonceSha256 !== session.bootNonceSha256) {
+      || evidence.bootNonceSha256 !== session.bootNonceSha256
+      || evidence.buildIdentitySha256 !== buildIdentitySha256) {
       throw new Error('Provider Free app boot evidence is stale or mismatched.');
+    }
+    let launch;
+    try {
+      launch = JSON.parse(readFileSync(studySessionLaunchEvidencePath(statePath), 'utf8'));
+    } catch {
+      throw new Error('Provider Free create-only launch evidence is missing.');
+    }
+    if (launch?.version !== 1 || launch?.event !== 'study-launch'
+      || launch.launchIntent !== 'fresh' || launch.profileSha256 !== session.profileSha256
+      || launch.buildIdentitySha256 !== buildIdentitySha256
+      || launch.provenanceSha256 !== provenanceSha256
+      || launch.executableSha256 !== executableSha256) {
+      throw new Error('Provider Free launch evidence is stale or mismatched.');
     }
     consumptionAnchor.consume(session.profileSha256, session.bootNonceSha256);
     writeProviderFreeStudySession(statePath, { ...session, setupConsumed: true });
@@ -270,6 +302,7 @@ function removeStudySessionLifecycleFiles(statePath, evidencePath) {
   rmSync(statePath, { force: true });
   rmSync(studySessionBootEvidencePath(statePath), { force: true });
   rmSync(evidencePath, { force: true });
+  rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
   removeInactiveConsumeLock(statePath);
 }
 
@@ -318,6 +351,6 @@ export function verifyAndFinalizeStudySessionCleanup(statePath, prepared) {
 }
 
 export function applyStudySessionWindowIsolation(windowConfig, session) {
-  validateSession(session);
+  if (session !== undefined) validateSession(session);
   return { ...windowConfig, create: false };
 }
