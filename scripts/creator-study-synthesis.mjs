@@ -101,6 +101,9 @@ function validate(input) {
         || (task.outcome === 'assisted success' && task.directAssists < 1)) {
         throw new Error(`${participant.id} Task ${task.task} outcome conflicts with its direct-assist count.`);
       }
+      if (task.acceptedWorkPreserved !== null && typeof task.acceptedWorkPreserved !== 'boolean') {
+        throw new Error(`${participant.id} Task ${task.task} acceptedWorkPreserved must be boolean or null.`);
+      }
       if (task.task !== 8 && task.acceptedWorkPreserved !== null) {
         throw new Error(`${participant.id} may record accepted-work preservation only for Task 8.`);
       }

@@ -116,6 +116,31 @@ test('not attempted remains in the denominator and missing values produce warnin
   assert.equal(result.recommendation, 'insufficient evidence');
 });
 
+test('accepted-work preservation is boolean or null and remains Task 8 only', () => {
+  for (const invalid of ['true', 1, { observed: true }]) {
+    const input = passingInput();
+    input.participants[0].tasks[7].acceptedWorkPreserved = invalid;
+    assert.throws(
+      () => calculateStudySynthesis(input),
+      /acceptedWorkPreserved.*boolean or null/i,
+    );
+  }
+
+  const invalidEarlierTaskType = passingInput();
+  invalidEarlierTaskType.participants[0].tasks[0].acceptedWorkPreserved = 'false';
+  assert.throws(
+    () => calculateStudySynthesis(invalidEarlierTaskType),
+    /acceptedWorkPreserved.*boolean or null/i,
+  );
+
+  const booleanOnEarlierTask = passingInput();
+  booleanOnEarlierTask.participants[0].tasks[0].acceptedWorkPreserved = false;
+  assert.throws(
+    () => calculateStudySynthesis(booleanOnEarlierTask),
+    /only for Task 8/i,
+  );
+});
+
 test('insufficient evidence, blocker, conditional, and severity mappings are deterministic', () => {
   const insufficient = passingInput();
   insufficient.participants = insufficient.participants.slice(0, 5);
