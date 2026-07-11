@@ -1,0 +1,155 @@
+# Creative Blueprint virtual creator evaluation
+
+## Purpose
+
+This lane runs eight isolated AI-operated interaction probes against the exact
+approved Provider Free native PaintNode bundle. It is designed to expose
+navigation, copy, state, recovery, keyboard, provenance, and persistence
+friction before or alongside real creator research.
+
+Every record is explicitly synthetic and requires live owner observation plus
+an accept/reject decision. Owner review increases the trustworthiness of the
+recorded run; it does not turn an AI agent into an independent qualifying
+creator.
+
+## Validity boundary
+
+Virtual creator results:
+
+- may create product hypotheses, regression cases, and backlog candidates;
+- may be compared across predefined behavioral lenses;
+- may be accepted or rejected by the product owner after live observation;
+- must never be copied into real participant rows or human-study metrics;
+- do not satisfy recruitment, participation consent, recording consent,
+  accessibility representation, facilitator sign-off, or the #85 requirement
+  for 6–8 qualifying creators;
+- cannot close #85, Milestone 2, or PR #65 under the current acceptance
+  contract.
+
+If the milestone contract is intentionally changed later, preserve these
+records as synthetic evidence and document the governance decision separately.
+Never relabel old virtual sessions as human sessions.
+
+## Study design
+
+The fixed profile matrix lives in
+`creator-study/virtual-creators/profiles.json`. Profiles are behavioral lenses,
+not demographic personas and not claims of lived experience. They vary visible
+interaction constraints and likely mental models without directing the agent to
+find a predetermined problem.
+
+Each profile receives:
+
+1. a newly allocated virtual session ID;
+2. a new AI task with no forked conversation or prior-session context;
+3. a unique empty project folder outside the repository;
+4. a cryptographically fresh isolated PaintNode profile;
+5. only its own participant-start prompt and the current task prompt;
+6. standardized hints only when the committed timing ladder allows them;
+7. final owner observation and acceptance or rejection;
+8. verified native profile cleanup before the next profile begins.
+
+Sessions are strictly sequential because the approved lifecycle deliberately
+allows only one active study profile at a time.
+
+## Operator and creator separation
+
+The generated `operator-deck.md` contains hidden checkpoint setup, timing,
+hints, lifecycle commands, and owner-review steps. Never paste that file into
+the virtual creator task.
+
+The generated `participant-start.md` contains only one behavioral lens, the
+session-specific empty project, supplied Product paths, and the interaction
+rules. The operator then sends exactly one task prompt at a time from the
+operator deck.
+
+The creator task must use Computer Use against the native repo-built app. It
+must not use Terminal, a browser PaintNode build, source code, tests, GitHub,
+logs, prior results, operator files, or any other session.
+
+## Prepare one session
+
+Create two owner-only roots outside the repository. Keep control records away
+from the empty PaintNode projects:
+
+```sh
+mkdir -p "$HOME/Library/Application Support/PaintNode/virtual-creators/control"
+mkdir -p "$HOME/Library/Application Support/PaintNode/virtual-creators/projects"
+chmod 700 "$HOME/Library/Application Support/PaintNode/virtual-creators/control"
+chmod 700 "$HOME/Library/Application Support/PaintNode/virtual-creators/projects"
+```
+
+List the eight profiles:
+
+```sh
+npm run qa:virtual-creators:prepare -- --list-profiles
+```
+
+Prepare V01, substituting the real build-control pack when needed:
+
+```sh
+npm run qa:virtual-creators:prepare -- \
+  --profile V01 \
+  --control-root "$HOME/Library/Application Support/PaintNode/virtual-creators/control" \
+  --project-root "$HOME/Library/Application Support/PaintNode/virtual-creators/projects" \
+  --build-control-root "$HOME/Library/Application Support/PaintNode/creator-study-ops/2026-07-12-preauth" \
+  --approved-checkout "/absolute/clean/detached/checkout/at/the-approved-git-sha"
+```
+
+The command creates one owner-only control directory and one separate, empty,
+owner-only project. It fails when roots are inside the repository, nested,
+symlinked, or when the preserved study-capable bundle/records are absent.
+It also rejects an approved checkout whose HEAD differs from the frozen build
+or whose tracked source is dirty. Keep that detached checkout unchanged for all
+eight sessions even if `feature/creative-blueprint` advances.
+
+## Run one session
+
+1. Open the generated `operator-deck.md` in the coordinating task only.
+2. Launch and verify the exact preserved bundle using the generated commands.
+3. Confirm through Computer Use that no document, project, workflow, or imported
+   asset is visible. Do not open the project before setup verification.
+4. Start a brand-new AI task with no inherited conversation.
+5. Paste only `participant-start.md` into that task.
+6. Send Task 1, observe the live native run, and record visible evidence.
+7. Continue one task at a time. Perform Task 2 and Task 7 checkpoint changes
+   from the operator lane, and Task 8 resume from the same native profile.
+8. Apply standardized interventions only at the committed timing thresholds.
+9. Complete `observation.blank.json` with synthetic task outcomes and findings.
+10. Close PaintNode and require successful `qa:creator-study:finalize-session`
+    cleanup before starting the next profile.
+11. Complete `ownerReview`: observed live, evidence reviewed, accepted/rejected,
+    written standard, notes, and UTC review timestamp.
+
+An accepted virtual run requires traceable visible evidence, all required tasks
+or an honestly recorded failure, verified cleanup, and the owner’s explicit
+decision. Rejecting a run does not erase it; retain the reason so automation
+failures are not mistaken for product findings.
+
+## Synthesis
+
+Use `virtual-aggregate-template.md`. Keep three layers separate:
+
+1. **Observed UI evidence** — labels, states, dimensions, actions, errors, and
+   persisted results actually visible in the native app.
+2. **Agent interpretation** — what the assigned behavioral lens inferred.
+3. **Human-validation hypothesis** — what should be checked with real creators.
+
+Do not use human-study severity S0–S4, SEQ, participant percentages, cohort
+exceptions, or milestone recommendations. Virtual findings use hypothesis
+impact and always set `requiresHumanValidation: true`.
+
+## Eight-session completion checklist
+
+- [ ] V01 First-time workflow explorer
+- [ ] V02 Keyboard-only workflow explorer
+- [ ] V03 Accessibility-tree navigation probe
+- [ ] V04 High-volume commerce creator lens
+- [ ] V05 Traditional layer-editor lens
+- [ ] V06 Prompt-first AI creator lens
+- [ ] V07 Multi-format social creator lens
+- [ ] V08 Provenance and recovery skeptic lens
+- [ ] Every session used a distinct AI task, profile, project, and session ID
+- [ ] Every profile was finalized before the next allocation
+- [ ] Every record has an owner accept/reject decision
+- [ ] Aggregate report keeps synthetic findings outside real study evidence

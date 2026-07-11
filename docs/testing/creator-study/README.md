@@ -4,6 +4,11 @@ This directory turns the moderated protocol into a repeatable study kit. It
 does not contain participant evidence. Real sessions remain required before
 issue #85 or the MVP milestone can close.
 
+An additional [virtual creator evaluation](../creative-blueprint-virtual-creator-evaluation.md)
+supports isolated AI-operated interaction probes with live owner review. Its
+records remain explicitly synthetic and cannot populate this real-study kit or
+replace the 6–8 qualifying-creator exit gate.
+
 ## Privacy boundary
 
 Never complete private templates inside the repository. Copy them to the

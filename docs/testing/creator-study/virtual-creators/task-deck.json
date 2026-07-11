@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "recordType": "paintnode-virtual-creator-task-deck",
+  "syntheticOnly": true,
+  "tasks": [
+    {
+      "task": 1,
+      "title": "Start and supply the Product",
+      "prompt": "Start a new PaintNode project in this empty folder. Bring this supplied Product image into the project, then start a Campaign Composer workflow for a multi-format launch. Use only the Product; you do not have Subject or Style references for this job.",
+      "stopCondition": "Stop when the Product is assigned to an open Campaign Composer, or when blocked."
+    },
+    {
+      "task": 2,
+      "title": "Create alternatives and recover one",
+      "prompt": "Create three different campaign directions. If one does not complete, keep the useful alternatives and recover the incomplete one.",
+      "stopCondition": "Stop immediately when the planned branch failure is visible; continue only after the operator confirms the checkpoint reset."
+    },
+    {
+      "task": 3,
+      "title": "Compare and choose a direction",
+      "prompt": "Compare the available directions, inspect enough context to make a choice, and continue with the direction you prefer.",
+      "stopCondition": "Stop when one direction is visibly accepted for downstream work, or when blocked."
+    },
+    {
+      "task": 4,
+      "title": "Refine in the editor",
+      "prompt": "Make a small visible edit to the direction you chose, then return that edit to the campaign so future formats use the edited version.",
+      "stopCondition": "Rename the active layer to Virtual Accepted Direction and set opacity to 96 percent; stop after the edit is returned, or when blocked."
+    },
+    {
+      "task": 5,
+      "title": "Produce the output family",
+      "prompt": "Finish the campaign as square, portrait, and landscape outputs based on your accepted edited direction. Check that you received all three formats.",
+      "stopCondition": "Stop when all three format states are inspected, or when blocked."
+    },
+    {
+      "task": 6,
+      "title": "Understand reuse and an upstream change",
+      "prompt": "First run the campaign again without changing anything. Then replace the Product with this updated version and bring the campaign up to date while keeping work that does not need to change.",
+      "stopCondition": "Stop after reuse and selective stale-work behavior have both been inspected, or when blocked."
+    },
+    {
+      "task": 7,
+      "title": "Recover one format",
+      "prompt": "Complete the campaign after this output problem. Preserve any formats that already completed successfully.",
+      "stopCondition": "Stop immediately when the planned Landscape failure is visible; continue only after the operator confirms the checkpoint reset."
+    },
+    {
+      "task": 8,
+      "title": "Resume after restart and use a result",
+      "prompt": "Save your work, quit PaintNode, reopen the same project and campaign, and confirm you can understand where you left off. Then place the edited campaign result into an image document.",
+      "stopCondition": "Stop after PaintNode quits so the operator can resume the same profile; continue only after the operator confirms relaunch."
+    }
+  ]
+}
