@@ -45,7 +45,7 @@ const PROVIDER_OPTION_VALIDATORS: Record<string, OptionValidator> = {
   safetyHateSpeech: enumValue(...SAFETY_THRESHOLDS),
   safetySexuallyExplicit: enumValue(...SAFETY_THRESHOLDS),
   safetyDangerousContent: enumValue(...SAFETY_THRESHOLDS),
-  fixture: enumValue('square'),
+  fixture: enumValue('square', 'portrait', 'landscape'),
 };
 
 export function safeWorkflowProviderOptions(value: unknown): Record<string, SafeProviderOption> {

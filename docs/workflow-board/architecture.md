@@ -461,11 +461,15 @@ Browser tests should then cover the Campaign Composer happy path, keyboard
 graph operations, node editing, branch comparison, and reopening a saved
 workflow.
 
-Before browser automation is added, the Campaign Composer thin slice is covered
-through a pure fake-executor integration test that proves readiness, exact
-dependency planning, source materialization, execution, project-asset binding,
-serialization, and reopen without provider, authentication, picker, network,
-filesystem, editor, or Svelte side effects.
+Before browser automation is added, Campaign Composer is covered through
+provider-free integration tests for the full flagship topology: Art Direction
+to Generate Concepts to Review; Review directly supplies the accepted Square
+and fans out to Portrait and Landscape Generate transforms. Format transforms
+must materialize the exact effective Review result first, including an
+editor-returned revision, and include its asset identity and content hash in
+the material key. Tests also prove serialization, reopen, migration, selective
+planning, failure recovery, and keyboard candidate navigation without provider
+authentication or network access.
 
 ## Decisions to validate during Foundation
 

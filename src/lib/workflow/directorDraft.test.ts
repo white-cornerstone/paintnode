@@ -71,10 +71,16 @@ function campaignDraft(): WorkflowDirectorGraphDraft {
       {
         id: 'generate-square',
         type: 'transform',
-        title: 'Generate Square',
+        title: 'Generate Concepts',
         capability: 'generate',
-        instructions: 'Generate the square campaign result.',
+        instructions: 'Generate square campaign concepts.',
       },
+      {
+        id: 'review-direction', type: 'review', title: 'Choose Campaign Direction', mode: 'human',
+        instructions: 'Choose the strongest campaign direction before adapting it to every format.',
+      },
+      { id: 'generate-portrait', type: 'transform', title: 'Generate Portrait', capability: 'generate', instructions: 'Adapt the accepted direction to Portrait 4:5.' },
+      { id: 'generate-landscape', type: 'transform', title: 'Generate Landscape', capability: 'generate', instructions: 'Adapt the accepted direction to Landscape 16:9.' },
       { id: 'square', type: 'output', title: 'Square 1:1', width: 1024, height: 1024 },
       { id: 'portrait', type: 'output', title: 'Portrait 4:5', width: 1024, height: 1280 },
       { id: 'landscape', type: 'output', title: 'Landscape 16:9', width: 1280, height: 720 },
@@ -85,9 +91,12 @@ function campaignDraft(): WorkflowDirectorGraphDraft {
       { id: 'style-composition', source: { nodeId: 'style', portId: 'asset' }, target: { nodeId: 'composition', portId: 'assets' } },
       { id: 'brief-composition', source: { nodeId: 'brief', portId: 'prompt' }, target: { nodeId: 'composition', portId: 'brief' } },
       { id: 'composition-generate', source: { nodeId: 'composition', portId: 'layout' }, target: { nodeId: 'generate-square', portId: 'source' } },
-      { id: 'generate-square-output', source: { nodeId: 'generate-square', portId: 'result' }, target: { nodeId: 'square', portId: 'source' } },
-      { id: 'composition-portrait', source: { nodeId: 'composition', portId: 'layout' }, target: { nodeId: 'portrait', portId: 'source' } },
-      { id: 'composition-landscape', source: { nodeId: 'composition', portId: 'layout' }, target: { nodeId: 'landscape', portId: 'source' } },
+      { id: 'generate-square-review', source: { nodeId: 'generate-square', portId: 'result' }, target: { nodeId: 'review-direction', portId: 'candidates' } },
+      { id: 'review-square', source: { nodeId: 'review-direction', portId: 'selected' }, target: { nodeId: 'square', portId: 'source' } },
+      { id: 'review-portrait', source: { nodeId: 'review-direction', portId: 'selected' }, target: { nodeId: 'generate-portrait', portId: 'source' } },
+      { id: 'generate-portrait-output', source: { nodeId: 'generate-portrait', portId: 'result' }, target: { nodeId: 'portrait', portId: 'source' } },
+      { id: 'review-landscape', source: { nodeId: 'review-direction', portId: 'selected' }, target: { nodeId: 'generate-landscape', portId: 'source' } },
+      { id: 'generate-landscape-output', source: { nodeId: 'generate-landscape', portId: 'result' }, target: { nodeId: 'landscape', portId: 'source' } },
     ],
   };
 }
@@ -241,7 +250,7 @@ describe('GraphDraft v1 schema and validation', () => {
     expect(result.proposal?.graph.nodes.find((node) => node.id === 'review')?.config.mode).toBe('ai');
 
     const human = structuredClone(draft);
-    const humanReview = human.nodes.find((node) => node.type === 'review')!;
+    const humanReview = human.nodes.find((node) => node.id === 'review')!;
     if (humanReview.type === 'review') humanReview.mode = 'human';
     expect(createWorkflowDirectorProposal(human, context()).proposal?.unsupportedCapabilities).toEqual([]);
   });
@@ -290,7 +299,7 @@ describe('Workflow Director orchestration', () => {
 });
 
 describe('Campaign requirements equivalence', () => {
-  it('treats a strict nine-node Director Campaign with only Product assigned as ready and template-equivalent', () => {
+  it('treats a strict reviewed Director Campaign with only Product assigned as ready and template-equivalent', () => {
     const proposal = createWorkflowDirectorProposal(campaignDraft(), context(), { graphId: 'campaign-ready' }).proposal!;
     const template = instantiateWorkflowTemplate('campaign-composer', { graphId: 'campaign-template' });
     const readiness = workflowReadiness(proposal.graph, {
@@ -300,6 +309,7 @@ describe('Campaign requirements equivalence', () => {
       provider: 'fake',
       supportedProviders: ['fake'],
       targetNodeId: 'square',
+      allowUnpromotedReview: true,
     });
 
     expect(proposal.graph.nodes.filter((node) => node.type === 'input').map((node) => [

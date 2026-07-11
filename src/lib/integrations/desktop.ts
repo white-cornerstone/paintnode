@@ -530,9 +530,13 @@ export async function providerQaMode(): Promise<ProviderQaMode> {
   return invoke<ProviderQaMode>('provider_qa_mode');
 }
 
-export async function providerFreeQaSquarePng(): Promise<Uint8Array> {
+export async function providerFreeQaPng(width: number, height: number): Promise<Uint8Array> {
   if (!isDesktop()) throw new Error('Provider-free QA output is available only in the desktop QA app.');
-  return new Uint8Array(await invoke<number[]>('provider_free_qa_square_png'));
+  return new Uint8Array(await invoke<number[]>('provider_free_qa_png', { width, height }));
+}
+
+export async function providerFreeQaSquarePng(): Promise<Uint8Array> {
+  return providerFreeQaPng(1024, 1024);
 }
 
 export async function discoverCodexCapabilities(bin?: string): Promise<AiProviderCapabilitiesResult> {

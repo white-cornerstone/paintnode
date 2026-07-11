@@ -30,13 +30,15 @@ describe('Creative Blueprint Foundation exit gate', () => {
       const first = planWorkflowExecution(graph, outputId, { maxConcurrency: 4 });
       const second = planWorkflowExecution(graph, outputId, { maxConcurrency: 4 });
       expect(first).toEqual(second);
-      const squareTransform = outputId === 'output-square' ? ['transform-generate-square'] : [];
+      const format = outputId.replace('output-', '');
+      const formatTransform = format === 'square' ? [] : [`transform-generate-${format}`];
+      const path = ['transform-generate-square', 'review-campaign-direction', ...formatTransform];
       expect(first).toEqual({
         targetNodeId: outputId,
-        requiredNodeIds: [...roots, 'composition', ...squareTransform, outputId],
+        requiredNodeIds: [...roots, 'composition', ...path, outputId],
         cachedNodeIds: [],
-        executionOrder: [...roots, 'composition', ...squareTransform, outputId],
-        batches: [roots, ['composition'], ...squareTransform.map((nodeId) => [nodeId]), [outputId]],
+        executionOrder: [...roots, 'composition', ...path, outputId],
+        batches: [roots, ['composition'], ...path.map((nodeId) => [nodeId]), [outputId]],
         blocked: [],
       });
       plans.set(outputId, first);
@@ -50,8 +52,15 @@ describe('Creative Blueprint Foundation exit gate', () => {
         })(),
         runIdGenerator: (nodeId, attempt) => `run-${nodeId}-${attempt}`,
       });
-      const sharedBatches = plans.get('output-square')!.batches.slice(0, -1);
-      for (const batch of [...sharedBatches, outputIds]) {
+      const fullCampaignBatches = [
+        roots,
+        ['composition'],
+        ['transform-generate-square'],
+        ['review-campaign-direction'],
+        ['output-square', 'transform-generate-portrait', 'transform-generate-landscape'],
+        ['output-portrait', 'output-landscape'],
+      ];
+      for (const batch of fullCampaignBatches) {
         for (const nodeId of batch) {
           expect(runtime.node(nodeId).state).toBe('ready');
           runtime.start(nodeId);
@@ -72,6 +81,9 @@ describe('Creative Blueprint Foundation exit gate', () => {
       'slot-product',
       'composition',
       'transform-generate-square',
+      'review-campaign-direction',
+      'transform-generate-portrait',
+      'transform-generate-landscape',
       'output-square',
       'output-portrait',
       'output-landscape',

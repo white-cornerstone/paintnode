@@ -12,10 +12,36 @@ import {
 
 const SOURCE_REVISION = Object.freeze({ graphId: 'campaign-revision-source', revision: 7 });
 
-function campaignWithAcceptedHistory(): WorkflowGraphV2 {
+function legacyCampaignGraph(): WorkflowGraphV2 {
   const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
     graphId: 'campaign-revision-source',
   }));
+  graph.nodes = graph.nodes.filter((node) => ![
+    'review-campaign-direction', 'transform-generate-portrait', 'transform-generate-landscape',
+  ].includes(node.id));
+  graph.edges = graph.edges.filter((edge) => (
+    graph.nodes.some((node) => node.id === edge.source.nodeId)
+    && graph.nodes.some((node) => node.id === edge.target.nodeId)
+  ));
+  graph.edges.push(
+    {
+      id: 'edge-transform-generate-square-output-square',
+      source: { nodeId: 'transform-generate-square', portId: 'result' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    },
+    ...['portrait', 'landscape'].map((format) => ({
+      id: `edge-composition-output-${format}`,
+      source: { nodeId: 'composition', portId: 'layout' },
+      target: { nodeId: `output-${format}`, portId: 'source' },
+    })),
+  );
+  graph.nodes.find((node) => node.id === 'transform-generate-square')!.config.instructions =
+    'Generate the configured Square 1:1 campaign result from the Product, Brief, and Art Direction.';
+  return graph;
+}
+
+function campaignWithAcceptedHistory(): WorkflowGraphV2 {
+  const graph = legacyCampaignGraph();
   const transform = graph.nodes.find((node) => node.id === 'transform-generate-square')!;
   const square = graph.nodes.find((node) => node.id === 'output-square')!;
   transform.runRecordIds = ['run-generate-square'];
@@ -42,9 +68,7 @@ function campaignWithAcceptedHistory(): WorkflowGraphV2 {
 }
 
 function campaignWithPromotedReview(): WorkflowGraphV2 {
-  const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
-    graphId: 'campaign-revision-source',
-  }));
+  const graph = legacyCampaignGraph();
   graph.nodes.push(createCreatorNode('review', { id: 'review-concepts' }));
   graph.edges = graph.edges.filter((edge) => edge.id !== 'edge-transform-generate-square-output-square');
   graph.edges.push(
@@ -556,7 +580,7 @@ describe('Workflow Director patch proposal', () => {
     };
     const before = JSON.stringify(graph);
     const result = createWorkflowDirectorPatchProposal(
-      patch([{ op: 'remove-edge', edgeId: 'edge-composition-output-landscape' }]),
+      patch([{ op: 'remove-edge', edgeId: 'edge-transform-generate-landscape-output-landscape' }]),
       graph,
       SOURCE_REVISION,
     );

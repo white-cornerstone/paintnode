@@ -77,6 +77,7 @@ describe('workflow async observer orchestration', () => {
             };
           },
           storeAsset: async () => { throw new Error('unused'); },
+          allowUnpromotedReview: true,
         }),
       });
       void operation.catch(() => undefined);

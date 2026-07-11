@@ -86,6 +86,11 @@ A new user can complete the flagship workflow without manually constructing a
 technical model graph, and changing an upstream input reruns only affected
 downstream work.
 
+Issue #85 supplies the provider-free automated draft evidence and the manual
+native scenario for this gate. The gate remains open until both a configured
+provider run and a moderated walkthrough with 6–8 target creators are recorded;
+passing unit, Rust, or build checks alone must not be reported as milestone exit.
+
 ## Milestone 3 — Recipes & Portability
 
 ### Outcome
@@ -148,14 +153,9 @@ integration, and migration risk.
 
 ## First MVP vertical slice
 
-After the Foundation contracts, the first executable MVP proof is Campaign
-Composer Product-to-Square. It adds one configured Generate Transform between
-Art Direction and Square Output, runs through the framework-independent
-executor interface, and binds the generated project asset back to both nodes.
-The proof must be runnable with a pure fake executor before real provider
-adapters are exercised.
-
-This slice intentionally excludes Director drafting, Review, branching,
-Portrait and Landscape execution, full provenance, and editor round-trip. Those
-remain separate MVP issues so the first execution path establishes one small,
-testable contract instead of another output-only special case.
+The original Product-to-Square thin slice remains a supported saved-graph
+shape. New Campaign Composer and equivalent Director drafts now instantiate the
+flagship topology: Generate Concepts, human Review, accepted Square, and
+Portrait/Landscape adaptations from the exact effective Review result. The
+provider-free executor covers all three configured shapes before configured
+provider evidence is attempted.

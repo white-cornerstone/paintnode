@@ -18,8 +18,8 @@ disabled. Use this exact bundle identity for routine workflow-board interaction
 and Computer Use validation.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
-Fake** Generate path after native QA mode detection completes. It creates a
-deterministic 1024 x 1024 PNG in memory and stores it through the normal project
+Fake** Generate path after native QA mode detection completes. It creates
+deterministic 1024 x 1024, 1024 x 1280, and 1280 x 720 PNGs in memory and stores them through the normal project
 asset store. It never invokes Codex, Antigravity, provider authentication,
 pickers, network requests, or visual-input file reads. The command that creates
 the PNG rejects normal and provider-E2E modes.
@@ -29,12 +29,21 @@ Manual Creative Blueprint checkpoint:
 1. Open a project folder that already contains a Product asset.
 2. Create Campaign Composer and assign Product; leave optional Subject and
    Style empty.
-3. Confirm the green QA Fake notice, run Square, and observe Running then
-   Generated on the Transform card.
-4. Confirm Square preview and asset binding, save the workflow, reopen it, and
-   confirm the binding remains.
-5. Open or create an image document and use Place; success is valid only when a
+3. Generate concept branches, use arrow/Home/End keys to compare them, simulate
+   and retry one candidate failure, then promote one direction.
+4. Return an editor revision of the promoted direction, run downstream, and
+   confirm Square, Portrait 4:5, and Landscape 16:9 use that accepted direction.
+5. Run unchanged downstream again and confirm selective preflight schedules no
+   provider work. Change Product and confirm only affected descendants stale.
+6. Simulate one format failure, retry it, and confirm completed siblings remain.
+7. Save the workflow, quit the QA app, reopen the project and workflow, and
+   confirm promotion, editor revision, outputs, and retry history remain.
+8. Open or create an image document and use Place; success is valid only when a
    real layer is inserted.
+
+This provider-free scenario is automated draft evidence only. Issue #85 remains
+open for exit purposes until a configured-provider native invocation and a
+moderated 6–8 creator walkthrough are recorded separately.
 
 Editor round-trip checkpoint:
 

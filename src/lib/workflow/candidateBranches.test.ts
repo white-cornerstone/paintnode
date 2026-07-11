@@ -120,7 +120,9 @@ describe('workflow candidate branches', () => {
 
   it('preserves accepted history while bounded concurrent siblings partially fail and reopen', async () => {
     const run = harness();
-    const seeded = await executeCampaignGenerateTransform(campaign(), 'output-square', run.options());
+    const seeded = await executeCampaignGenerateTransform(campaign(), 'output-square', {
+      ...run.options(), allowUnpromotedReview: true,
+    });
     const acceptedBefore = structuredClone(seeded.graph.runRecords);
     const outputBefore = structuredClone(
       seeded.graph.nodes.find((node) => node.id === 'output-square')!.config,
@@ -234,6 +236,7 @@ describe('workflow candidate branches', () => {
       runIdGenerator: () => `normal-run-${++runSequence}`,
       idGenerator: () => `normal-reference-${runSequence}`,
       clock: (() => { let now = 500; return () => ++now; })(),
+      allowUnpromotedReview: true,
     };
     let failedGraph;
     try {
