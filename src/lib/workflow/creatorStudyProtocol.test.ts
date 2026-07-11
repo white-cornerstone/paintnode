@@ -5,6 +5,8 @@ import privacyFields from '../../../docs/testing/creator-study/privacy-fields.js
 import materialManifest from '../../../docs/testing/creator-study/materials/manifest.json';
 import privateSession from '../../../docs/testing/creator-study/templates/private-session-observation.md?raw';
 import privateRecruitment from '../../../docs/testing/creator-study/templates/private-screener-and-recruitment-log.md?raw';
+import approvedBuildTemplate from '../../../docs/testing/creator-study/templates/private-approved-build-record.json';
+import activeBuildDecisionsTemplate from '../../../docs/testing/creator-study/templates/private-active-build-decisions.json';
 import privateIntervention from '../../../docs/testing/creator-study/templates/private-intervention-log.md?raw';
 import privateAuthorization from '../../../docs/testing/creator-study/templates/private-study-authorization-log.md?raw';
 import facilitatorHints from '../../../docs/testing/creator-study/facilitator-hints.json';
@@ -41,6 +43,32 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(protocol).toContain('npm run qa:creator-study:synthesize');
     expect(protocol).toContain('Product A');
     expect(protocol).toContain('Product B');
+    expect(protocol).toContain('--approved-build-record');
+    expect(protocol).toContain('--active-build-decisions');
+    expect(protocol).not.toContain('--expected-sha');
+    expect(protocol).not.toContain('$(git rev-parse HEAD)');
+  });
+
+  it('freezes a literal approved build and requires explicit mid-study comparability decisions', () => {
+    expect(approvedBuildTemplate.recordType).toBe('paintnode-creator-study-approved-build');
+    expect(approvedBuildTemplate.approvedBuild.gitSha).toBe('');
+    expect(approvedBuildTemplate.approvedBuild.sourceTreeSha).toBe('');
+    expect(approvedBuildTemplate.approvedBuild.executableSha256).toBe('');
+    expect(approvedBuildTemplate.approval.approvalId).toBe('');
+    expect(activeBuildDecisionsTemplate.recordType).toBe('paintnode-creator-study-active-build-decisions');
+    expect(activeBuildDecisionsTemplate.schemaVersion).toBe(2);
+    expect(activeBuildDecisionsTemplate.activeGeneration).toBe(0);
+    expect(activeBuildDecisionsTemplate.decisions).toEqual([]);
+    expect(protocol).toMatch(/mid-study build change/i);
+    expect(protocol).toMatch(/owner approval/i);
+    expect(protocol).toMatch(/new rehearsal/i);
+    expect(protocol).toMatch(/comparability decision/i);
+    expect(protocol).toMatch(/old\s+record\s+and matching old build/i);
+    expect(protocol).toMatch(/active build generation and random non-derived approval ID/i);
+    expect(protocol).toMatch(/separate macOS Keychain anchor/i);
+    expect(protocol).toMatch(/prior protected head\s+and chain prefix to match the preceding ledger entry exactly/i);
+    expect(protocol).toContain('Approved-build decision reference:');
+    expect(protocol).toContain('Setup receipt approved identity match: yes / no');
   });
 
   it('protects both visible recovery interventions and the exact task order', () => {

@@ -13,6 +13,9 @@
 - Accommodation setup confirmation:
 - Actual start/end time:
 - Build Git SHA and QA bundle identity:
+- Approved-build decision reference:
+- Active build generation and approval ID:
+- Setup receipt approved identity match: yes / no
 - OS/display scale/window size/input method:
 - Eligibility/cohort bucket:
 - Participation consent: yes / withdrawn

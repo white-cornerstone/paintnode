@@ -13,6 +13,16 @@ study storage.
 
 - `templates/private-*` are blank copy-outside-repository forms. Completed
   copies are private-only.
+- `templates/private-approved-build-record.json` freezes the one literal QA
+  build identity approved for sessions. Copy and complete it privately; never
+  point setup verification at the blank repository template.
+- `templates/private-active-build-decisions.json` is the privately controlled,
+  append-only active-decision ledger. Setup also pins its complete current head
+  (generation, approval ID, decision reference, approval timestamp, and complete
+  canonical approved-build decision commitment) in a separate macOS Keychain
+  anchor together with a private commitment to the full decision chain, so
+  rolling back or rewriting the private files cannot reactivate or falsify an
+  older record/build decision.
 - `templates/de-identified-recruitment-matrix.csv` may be used for aggregate
   cohort control only after direct identifiers and sensitive detail are
   removed.
@@ -43,14 +53,59 @@ study storage.
    requires a new committed hash, approved Git change reference, and renewed
    sign-off even if the integer version is unchanged.
 
+## Approve the study build before the first session
+
+1. From a committed, clean `feature/creative-blueprint` checkout, build the
+   repo-native Provider Free app with `npm run qa:native:provider-free`.
+2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
+   Place in a separate project. Delete that rehearsal project.
+3. Copy `templates/private-approved-build-record.json` and
+   `templates/private-active-build-decisions.json` to approved restricted
+   storage. Copy the literal `gitSha`, `sourceTreeSha`, `sourceStatusSha256`,
+   and `executableSha256` values from the app's provenance sidecar. Record the
+   fixed Provider Free bundle ID, rehearsal completion time, owner approval
+   time, a non-identifying decision reference, and a new random lowercase UUIDv4
+   `approvalId` unrelated to any private record field.
+4. Use strict UTC timestamps with millisecond precision. Rehearsal completion
+   must be earlier than owner approval, and approval cannot be in the future.
+5. Set initial change control to `kind: "initial"`, null replacement/reason,
+   and `comparabilityDecision: "baseline"`. Append generation 1 to the
+   active-decision ledger with the same `approvalId`, decision reference, and
+   approval timestamp and the SHA-256 commitment of the complete canonical
+   approved-build decision record. Setup creates the version-3 protected
+   Keychain anchor only at generation 1 and pins that complete private head plus
+   the decision-chain commitment. Keep the approved app and its sidecar together
+   and reuse that exact bundle.
+
+The private active-decision ledger uses schema version 2. Each entry is a closed
+object with exactly `generation`, `approvalId`, `decisionReference`, `approvedAt`,
+and `decisionRecordSha256`. The commitment covers the canonical record type,
+approved build identity, owner decision, and complete change-control object.
+Generate each approval ID independently; never derive it from that commitment or
+from the private record, reason, timestamp, or reference.
+
+Generate the canonical commitment only from the completed private record:
+
+```sh
+npm run qa:creator-study:decision-commitment -- \
+  --approved-build-record /absolute/private/approved-build.json
+```
+
+Copy the returned `decisionRecordSha256` into the matching private ledger entry.
+The command prints no record fields, paths, timestamps, references, or reasons.
+
+The current HEAD does not approve itself. Do not regenerate this record from
+`git rev-parse HEAD`, and do not rebuild between sessions: a rebuild has a new
+executable identity even when source files appear unchanged.
+
 ## Before every session
 
-1. From a committed, clean checkout, build the repo-native provider-free app
-   with `npm run qa:native:provider-free`. Close it after rehearsal. The build
-   writes a provenance sidecar beside the app containing the source SHA/tree
-   and actual executable fingerprint; keep the app and sidecar together.
+1. Use a committed, clean checkout at the literal SHA in the current private
+   approved-build record. Use the exact preserved app bundle and provenance
+   sidecar named by that record; do not build or approve the current HEAD.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
-   Place in a separate folder. Delete that rehearsal folder.
+   Place with the approved bundle in a separate folder. Delete that rehearsal
+   folder. Record this session-preparation rehearsal privately.
 3. Verify the assigned facilitator's private calibration sign-off matches the
    current hint instrument version, SHA-256, and approved Git change reference.
 4. Create a different, genuinely empty participant project folder outside the
@@ -72,7 +127,8 @@ study storage.
 
    ```sh
    npm run qa:creator-study:setup -- \
-     --expected-sha "$(git rev-parse HEAD)" \
+     --approved-build-record "ABSOLUTE_PRIVATE_APPROVED_BUILD_RECORD.json" \
+     --active-build-decisions "ABSOLUTE_PRIVATE_ACTIVE_BUILD_DECISIONS.json" \
      --app-bundle "ABSOLUTE_PATH_TO_PROVIDER_FREE_APP" \
      --project-dir "ABSOLUTE_EMPTY_PARTICIPANT_PROJECT" \
      --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT" \
@@ -89,16 +145,31 @@ study storage.
    `--resume-study-session` must never start a new participant. The next
    participant always begins again at step 5 with `--fresh-study-session`.
 
-The verifier checks a clean source tree, the exact SHA/tree recorded by the
-actual build, bundle identity, executable fingerprint, canonicalized paths,
-empty project, deleted and separate rehearsal path, a freshly generated
-isolated study profile, Product hashes/dimensions, all three QA scenario
-controls, and the operator's visible-empty-state attestation. Generic Provider
-Free bundles, resumed profiles, stale bundles, modified executables, dirty
-source, broken symlinks, and symlink aliases into the repository fail closed.
-Its receipt records only the one-way profile fingerprint and deliberately omits
-the raw data-store identifier and local paths. It does not replace the visible
-rehearsal or the private authorization gate.
+The verifier reads approval from the private approved-build record and
+active-decision ledger. It checks the clean checkout, app provenance and actual
+executable, approved literal SHA/tree/status/executable fingerprints,
+canonicalized paths, empty project, deleted rehearsal path, a freshly generated
+isolated study profile, Product hashes/dimensions, all three QA controls, and the
+operator's visible-empty-state attestation. Generic or resumed profiles and
+missing, malformed, duplicate-key, in-repository, stale, superseded,
+future-dated, or mismatched approval records fail closed.
+
+The ledger must contain contiguous unique generations with strictly increasing
+approval timestamps, and its latest canonical decision commitment must match
+the supplied record. The separate approved-build Keychain anchor must match the
+complete current head or advance by exactly one generation from an exact
+protected previous-head and chain-prefix match. Advancement is serialized under
+an exclusive process lock and re-read after writing. Legacy version-1 or
+version-2 anchor payloads fail closed. Use the same approved study Mac for the
+whole study; do not delete, reset, export, or restore the
+`com.paintnode.creator-study.active-build` item. The lifecycle-consumption
+Keychain marker is separate and create-once.
+
+The receipt reports the matched approved identity, active generation, random
+non-derived approval ID, one-way profile fingerprint, native boot consumption,
+and visible-empty attestation. It omits raw profile identifiers, private anchor
+commitments, approval dates/references, paths, change reasons, ledger history,
+and storage data. It does not replace rehearsal or private authorization.
 
 The setup receipt is single-use. It reports `appBootObserved: true` only after
 the Provider Free executable has actually created the isolated window, and
@@ -143,6 +214,25 @@ An abort before any launch attempt releases the unused handle without claiming
 a data store existed. Once launch was attempted, abort uses the same native
 WebKit removal and verified cleanup evidence as finalization. Failure retains
 the raw handle and blocks the next fresh session; manual deletion is unsupported.
+
+## Mid-study build changes
+
+Pause scheduling before changing the approved app. Build the proposed change
+from committed clean source, complete a **new rehearsal**, and copy a new
+private approved-build record. `kind` must be `mid-study`; record the prior
+decision reference, change reason, owner approval, rehearsal completion time,
+and a comparability decision of `comparable` or `restart-required`. Create a new
+random `approvalId`, preserve the prior record, and append the next contiguous
+generation with its canonical decision commitment to the active-decision
+ledger. The approval time must increase, the new rehearsal must follow the
+preceding approval, and the replacement reference must identify the immediately
+preceding decision. Never overwrite the earlier private approval record.
+
+The approved-build Keychain anchor must advance atomically to that exact head.
+If comparability is `restart-required`, do not combine earlier sessions with the
+new build; record which sessions are replaced and recruit replacements under the
+new baseline. The Provider Free lifecycle remains per participant: abort or
+finalize the current isolated profile before starting another fresh session.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either

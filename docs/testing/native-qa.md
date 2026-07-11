@@ -25,8 +25,14 @@ The build also writes a `.paintnode-qa-build.json` provenance sidecar beside the
 app. It binds the bundle to the source Git SHA/tree, clean-or-dirty build state,
 bundle ID, and actual executable SHA-256 without modifying the signed app.
 Creator-study readiness requires a clean checkout and keeps the sidecar beside
-the app; `qa:creator-study:setup` rejects missing/stale provenance, dirty source,
-or executable fingerprint drift.
+the app; `qa:creator-study:setup` reads a private literal approved-build record
+plus its monotonic active-decision ledger and protected study-Mac Keychain
+anchor. The anchor privately pins the accepted generation, approval ID, decision
+reference, approval timestamp, complete canonical approved-build decision
+commitment, and full decision-chain commitment. An exclusive process lock
+serializes the final Keychain transition and verifies it after writing; setup
+rejects missing/stale/superseded or rewritten decision history, invalid
+provenance, dirty source, or executable fingerprint drift.
 
 ### Creator-study session isolation
 
