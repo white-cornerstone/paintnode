@@ -112,9 +112,6 @@ pub fn run() {
                 .find(|config| config.label == "main" && !config.create);
             match (study_profile, deferred_main) {
                 (Some(profile), Some(config)) => {
-                    tauri::WebviewWindowBuilder::from_config(app.handle(), config)?
-                        .data_store_identifier(profile)
-                        .build()?;
                     if let Some(evidence) = boot_evidence.as_ref() {
                         if evidence.profile != profile {
                             return Err(std::io::Error::other(
@@ -122,6 +119,14 @@ pub fn run() {
                             )
                             .into());
                         }
+                        evidence
+                            .wait_for_parent_release()
+                            .map_err(std::io::Error::other)?;
+                    }
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), config)?
+                        .data_store_identifier(profile)
+                        .build()?;
+                    if let Some(evidence) = boot_evidence.as_ref() {
                         provider_executable::write_study_lifecycle_evidence(
                             evidence,
                             "app-boot",
@@ -242,6 +247,7 @@ pub fn run() {
                     });
                     tauri::async_runtime::spawn(async move {
                         let result = async {
+                            cleanup.wait_for_parent_release()?;
                             let identifiers = handle
                                 .fetch_data_store_identifiers()
                                 .await

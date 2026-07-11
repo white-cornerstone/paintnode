@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { qaBuildIdentitySha256 } from './native-qa-build-provenance.mjs';
+
 import {
   approvedBuildDecisionCommitment,
   createMacosActiveBuildAnchor,
@@ -15,6 +17,7 @@ import {
   createFreshProviderFreeStudySession,
   markStudySessionLaunchAttempted,
   studySessionBootEvidencePath,
+  studySessionLaunchEvidencePath,
   writeProviderFreeStudySession,
 } from './native-qa-session.mjs';
 import { createMemoryStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
@@ -28,6 +31,7 @@ const sourceState = {
   actualGitSha: '405524d393f07ecd588d7476e83adc38e00a90cc',
   actualSourceTreeSha: 'b'.repeat(40),
   actualSourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  actualProvenanceSha256: 'c'.repeat(64),
   sourceDirty: false,
 };
 const sessionFixture = createFreshProviderFreeStudySession({
@@ -46,12 +50,8 @@ const approvedBuildIdentity = {
 };
 const appBuild = {
   ...approvedBuildIdentity,
-  studySession: {
-    version: 3,
-    isolatedProfile: true,
-    launchIntent: 'fresh',
-    profileSha256: sessionFixture.profileSha256,
-  },
+  studyCapable: true,
+  codeIdentity: { cdHash: 'd'.repeat(40) },
 };
 const lifecycleFixturesByProject = new Map();
 
@@ -197,6 +197,16 @@ function setupDirectories() {
     event: 'app-boot',
     profileSha256: sessionFixture.profileSha256,
     bootNonceSha256: sessionFixture.bootNonceSha256,
+    buildIdentitySha256: qaBuildIdentitySha256(appBuild),
+  }));
+  writeFileSync(studySessionLaunchEvidencePath(studySessionStatePath), JSON.stringify({
+    version: 1,
+    event: 'study-launch',
+    launchIntent: 'fresh',
+    profileSha256: sessionFixture.profileSha256,
+    buildIdentitySha256: qaBuildIdentitySha256(appBuild),
+    provenanceSha256: sourceState.actualProvenanceSha256,
+    executableSha256: appBuild.executableSha256,
   }));
   const studySessionConsumptionAnchor = createMemoryStudySessionConsumptionAnchor();
   lifecycleFixturesByProject.set(projectDir, {
@@ -306,7 +316,7 @@ test('the committed Product materials are deterministic, distinct, and assigned 
   });
   assert.deepEqual(receipt.sessionReset, {
     isolatedProfile: true,
-    profileSha256: appBuild.studySession.profileSha256,
+    profileSha256: sessionFixture.profileSha256,
     macosMajorVersion: 14,
     appBootObserved: true,
     setupEvidenceConsumed: true,
@@ -351,7 +361,7 @@ test('protected decision commitment rejects build A to build B rewrite under the
     sourceTreeSha: 'c'.repeat(40),
     executableSha256: 'd'.repeat(64),
   };
-  const buildB = { ...buildBIdentity, studySession: { ...appBuild.studySession } };
+  const buildB = { ...buildBIdentity, studyCapable: true };
   const rewrittenRecord = approvedBuildRecord({ approvedBuild: buildBIdentity });
   options.approvedBuildRecordPath = writeApprovedBuildRecord(root, rewrittenRecord);
   options.activeBuildDecisionsPath = writeActiveBuildDecisions(root, [rewrittenRecord]);
@@ -435,6 +445,7 @@ test('setup requires actual app boot evidence and consumes it exactly once', () 
   writeFileSync(studySessionBootEvidencePath(studySessionStatePath), JSON.stringify({
     version: 3, event: 'app-boot', profileSha256: sessionFixture.profileSha256,
     bootNonceSha256: sessionFixture.bootNonceSha256,
+    buildIdentitySha256: qaBuildIdentitySha256(appBuild),
   }));
   assert.equal(verifyStudySetup(options).technicalSetupReady, true);
   const secondProject = join(root, 'participant-project-2');
@@ -527,13 +538,15 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
   assert.throws(() => verifyStudySetup(options), /executable fingerprint/i);
   options.actualExecutableSha256 = appBuild.executableSha256;
 
-  options.appBuild.studySession.launchIntent = 'resume';
-  assert.throws(() => verifyStudySetup(options), /fresh study session/i);
-  options.appBuild.studySession.launchIntent = 'fresh';
+  const launchPath = studySessionLaunchEvidencePath(studySessionStatePath);
+  const freshLaunch = JSON.parse(readFileSync(launchPath, 'utf8'));
+  writeFileSync(launchPath, JSON.stringify({ ...freshLaunch, launchIntent: 'resume' }));
+  assert.throws(() => verifyStudySetup(options), /launch evidence is stale or mismatched/i);
+  writeFileSync(launchPath, JSON.stringify(freshLaunch));
 
-  options.appBuild.studySession.isolatedProfile = false;
-  assert.throws(() => verifyStudySetup(options), /isolated study profile/i);
-  options.appBuild.studySession.isolatedProfile = true;
+  options.appBuild.studyCapable = false;
+  assert.throws(() => verifyStudySetup(options), /study-capable/i);
+  options.appBuild.studyCapable = true;
 
   options.visibleEmptyStateAttested = false;
   assert.throws(() => verifyStudySetup(options), /visible empty Project and Workflow/i);
@@ -955,14 +968,17 @@ test('active decision ledger rejects adversarial old to new to old record replay
     event: 'app-boot',
     profileSha256: replacementSession.profileSha256,
     bootNonceSha256: replacementSession.bootNonceSha256,
+    buildIdentitySha256: qaBuildIdentitySha256(appBuild),
   }));
-  baseOptions.appBuild = {
-    ...appBuild,
-    studySession: {
-      ...appBuild.studySession,
-      profileSha256: replacementSession.profileSha256,
-    },
-  };
+  writeFileSync(studySessionLaunchEvidencePath(replacementSessionPath), JSON.stringify({
+    version: 1,
+    event: 'study-launch',
+    launchIntent: 'fresh',
+    profileSha256: replacementSession.profileSha256,
+    buildIdentitySha256: qaBuildIdentitySha256(appBuild),
+    provenanceSha256: sourceState.actualProvenanceSha256,
+    executableSha256: appBuild.executableSha256,
+  }));
   baseOptions.studySessionStatePath = replacementSessionPath;
   baseOptions.studySessionConsumptionAnchor = createMemoryStudySessionConsumptionAnchor();
   activeBuildDecisionsPath = writeActiveBuildDecisions(root, [initial, replacement]);

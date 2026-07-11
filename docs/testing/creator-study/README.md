@@ -59,7 +59,16 @@ study storage.
 ## Approve the study build before the first session
 
 1. From a committed, clean `feature/creative-blueprint` checkout, build the
-   repo-native Provider Free app with `npm run qa:native:provider-free`.
+   deferred-window, study-capable Provider Free app exactly once:
+
+   ```sh
+   npm run qa:native:provider-free -- --study-capable --build-only
+   ```
+
+   This allocates no profile or lifecycle state. Preserve the resulting app and
+   adjacent static provenance sidecar together; neither is rewritten by study
+   launch, setup, resume, abort, or finalization. Static provenance also pins the
+   signed executable's macOS CDHash.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate project. Delete that rehearsal project.
 3. Copy `templates/private-approved-build-record.json` and
@@ -113,14 +122,25 @@ executable identity even when source files appear unchanged.
    current hint instrument version, SHA-256, and approved Git change reference.
 4. Create a different, genuinely empty participant project folder outside the
    repository.
-5. Start a new isolated study profile. This generates a cryptographically random
+5. Start the exact preserved app with a new isolated study profile. This
+   generates a cryptographically random
    WebKit data-store identifier that has no access to the generic QA profile,
    rehearsal, or any prior participant profile. The study mechanism requires
    macOS 14 or newer and fails closed on older systems:
 
    ```sh
-   npm run qa:native:provider-free -- --fresh-study-session
+   npm run qa:creator-study:launch -- \
+     --app-bundle "ABSOLUTE_PATH_TO_PRESERVED_PROVIDER_FREE_APP" \
+     --fresh-study-session
    ```
+
+   The launch-existing command performs no Tauri, Vite, Quick Look, or other
+   build/configuration step. It returns to this terminal only after current-nonce
+   native boot evidence and the kernel-backed running-process CDHash are verified
+   while PaintNode remains open. A restored on-disk executable cannot make a
+   swapped interpreter or script satisfy that dynamic code identity. Native
+   startup waits behind a parent release barrier; pre-attestation boot evidence
+   is removed, and the same PID is re-attested after new create-only evidence.
 
 6. Before opening any folder, visibly confirm the Project panel has no open
    project or imported assets and no workflow is open. Close the app if either
@@ -142,7 +162,9 @@ executable identity even when source files appear unchanged.
    same isolated profile:
 
    ```sh
-   npm run qa:native:provider-free -- --resume-study-session
+   npm run qa:creator-study:launch -- \
+     --app-bundle "ABSOLUTE_PATH_TO_PRESERVED_PROVIDER_FREE_APP" \
+     --resume-study-session
    ```
 
    `--resume-study-session` must never start a new participant. The next
@@ -178,6 +200,18 @@ does not authorize recruitment, participation, recording, facilitator
 calibration, or accessibility-support assignment/handoff and does not replace
 rehearsal or the private authorization log.
 
+Static build provenance never contains participant/session state. A separate
+create-only private launch binding records the canonical preserved bundle,
+static-sidecar hash, executable hash, build-identity hash, and one-way profile
+fingerprint. Native boot evidence repeats the build-identity and current nonce
+fingerprints. Setup requires all three identities to match and rechecks the
+executable; resume and cleanup resolve the same preserved executable through that
+binding. Fresh allocation claims its create-only state before clearing stale
+evidence, so a losing concurrent caller cannot delete the winning launch. Fresh
+startup and cleanup both wait behind trusted release barriers until their running
+PIDs pass dynamic validity and exact CDHash comparison. Strict static verification
+targets the canonical signed app bundle, including its sealed resources.
+
 The technical setup receipt is single-use. It reports `appBootObserved: true`
 only after the Provider Free executable has actually created the isolated window, and
 `setupEvidenceConsumed: true` when that boot generation is consumed. A
@@ -189,9 +223,24 @@ monotonic single-Mac anchor. Restoring the ignored state and boot-evidence files
 cannot restore that marker or make the same profile consumable again. Do not
 delete those Keychain markers during the study.
 
-`--fresh-study-session --build-only` writes non-live `build-only` provenance but
-does not allocate a profile, nonce, state file, or Keychain marker. It is safe
-for build validation, but the resulting bundle cannot pass participant setup.
+`--study-capable --build-only` creates the one deferred-window bundle and static
+provenance without allocating a profile, nonce, state file, launch binding, or
+Keychain marker. In other words, build-only does not allocate live session
+state. The bundle becomes session-capable only when started through
+`qa:creator-study:launch`; build-only by itself cannot pass participant setup.
+
+For exact native lifecycle engineering QA only, consume boot evidence without
+private approvals or production Keychain anchors:
+
+```sh
+npm run qa:creator-study:consume-qa-only -- \
+  --app-bundle "ABSOLUTE_PATH_TO_PRESERVED_PROVIDER_FREE_APP"
+```
+
+Its receipt is loudly marked `qaOnly: true` and
+`studyAuthorizationEvaluated: false`. It exists only to exercise fresh, resume,
+and finalize on disposable QA profiles; it is never participant setup,
+recruitment authorization, consent, or study evidence.
 
 ## After every session
 
@@ -201,7 +250,8 @@ After Task 8 save/reopen is complete, close PaintNode and run:
 npm run qa:creator-study:finalize-session
 ```
 
-This launches the repo-built Provider Free executable in cleanup-only mode,
+This launches the same preserved and re-verified Provider Free executable from
+the create-only launch binding in cleanup-only mode,
 removes the session's persistent macOS WebKit data store, verifies one-time
 native cleanup evidence, deletes the local raw profile handle, and prints a
 path-free receipt containing only its fingerprint and `dataStoreRemoved: true`.

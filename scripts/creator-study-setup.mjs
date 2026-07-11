@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  accessSync, closeSync, constants, existsSync, lstatSync, openSync, readFileSync,
+  closeSync, existsSync, lstatSync, openSync, readFileSync,
   readdirSync, realpathSync, rmSync, statSync, writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,8 +8,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-import { captureSourceState, readQaBuildProvenance, sha256File } from './native-qa-build-provenance.mjs';
-import { verifyAndConsumeStudySessionBoot } from './native-qa-session.mjs';
+import {
+  captureSourceState, qaBuildIdentitySha256,
+} from './native-qa-build-provenance.mjs';
+import { readStaticQaApp } from './native-qa-static-app.mjs';
+import {
+  readProviderFreeStudySession, verifyAndConsumeStudySessionBoot,
+} from './native-qa-session.mjs';
 import { createMacKeychainStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
 
 export const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.free';
@@ -676,6 +681,7 @@ export function verifyStudySetup({
   bundleId,
   appBuild,
   actualExecutableSha256,
+  actualProvenanceSha256,
   now = new Date(),
   activeBuildAnchor,
   visibleEmptyStateAttested,
@@ -704,8 +710,10 @@ export function verifyStudySetup({
   if (bundleId !== EXPECTED_BUNDLE_ID) {
     throw new Error(`Wrong bundle identity: expected ${EXPECTED_BUNDLE_ID}.`);
   }
-  if (!appBuild || appBuild.version !== 1 || appBuild.mode !== 'provider-free' || appBuild.bundleId !== EXPECTED_BUNDLE_ID) {
-    throw new Error('Provider Free app build provenance is missing or invalid.');
+  if (!appBuild || appBuild.version !== 1 || appBuild.mode !== 'provider-free'
+    || appBuild.bundleId !== EXPECTED_BUNDLE_ID || appBuild.studyCapable !== true
+    || Object.hasOwn(appBuild, 'studySession')) {
+    throw new Error('Provider Free app build provenance must be static and study-capable.');
   }
   if (appBuild.sourceDirty) throw new Error('Provider Free app was built from dirty source.');
   if (appBuild.gitSha !== actualGitSha || appBuild.gitSha !== approved.gitSha) {
@@ -733,14 +741,10 @@ export function verifyStudySetup({
     || approved.executableSha256 !== appBuild.executableSha256) {
     throw new Error('Approved executable fingerprint does not match the app executable and provenance.');
   }
-  const studySession = appBuild.studySession;
-  if (!studySession || studySession.version !== 3 || studySession.isolatedProfile !== true
-    || !/^[a-f0-9]{64}$/.test(studySession.profileSha256 || '')) {
-    throw new Error('Provider Free app does not use a valid isolated study profile. Start it with --fresh-study-session.');
+  if (!studySessionStatePath || !isAbsolute(studySessionStatePath)) {
+    throw new Error('Provider Free study session state path must be absolute.');
   }
-  if (studySession.launchIntent !== 'fresh') {
-    throw new Error('Creator-study setup requires a fresh study session launch, not a resumed session.');
-  }
+  const studySession = readProviderFreeStudySession(studySessionStatePath);
   if (visibleEmptyStateAttested !== true) {
     throw new Error('The operator must attest the visible empty Project and Workflow state.');
   }
@@ -761,13 +765,14 @@ export function verifyStudySetup({
   assertEmptyProject(canonicalProject);
   verifyScenarioControls(canonicalRepo);
   const materials = verifyMaterials(canonicalManifest);
-  if (!studySessionStatePath || !isAbsolute(studySessionStatePath)) {
-    throw new Error('Provider Free study session state path must be absolute.');
-  }
   protectedAnchor.commit();
+  const buildIdentitySha256 = qaBuildIdentitySha256(appBuild);
   const launchEvidence = verifyAndConsumeStudySessionBoot({
     statePath: studySessionStatePath,
     profileSha256: studySession.profileSha256,
+    buildIdentitySha256,
+    provenanceSha256: actualProvenanceSha256,
+    executableSha256: actualExecutableSha256,
     consumptionAnchor: studySessionConsumptionAnchor,
   });
 
@@ -817,16 +822,16 @@ function valueAfter(args, flag) {
 }
 
 function readAppBundle(appBundle) {
-  if (!isAbsolute(appBundle)) throw new Error('--app-bundle must be an absolute path.');
-  const bundle = realpathSync(appBundle);
-  accessSync(join(bundle, 'Contents/MacOS/PaintNode'), constants.X_OK);
-  const plist = join(bundle, 'Contents/Info.plist');
-  const result = spawnSync('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plist], { encoding: 'utf8' });
-  if (result.status !== 0) throw new Error(`Could not read QA app bundle identity: ${result.stderr || result.error}`);
+  const app = readStaticQaApp({
+    appBundle,
+    expectedBundleId: EXPECTED_BUNDLE_ID,
+    requireStudyCapable: true,
+  });
   return {
-    bundleId: result.stdout.trim(),
-    appBuild: readQaBuildProvenance(bundle),
-    actualExecutableSha256: sha256File(join(bundle, 'Contents/MacOS/PaintNode')),
+    bundleId: app.provenance.bundleId,
+    appBuild: app.provenance,
+    actualProvenanceSha256: app.provenanceSha256,
+    actualExecutableSha256: app.executableSha256,
   };
 }
 

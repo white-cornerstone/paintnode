@@ -173,10 +173,12 @@ For every session record:
   project, workflow, attempt/scenario state, or prior participant artifact
   restored.
 
-Use `npm run qa:native:provider-free -- --fresh-study-session` for every new
-participant and the bundle identity documented in [Native PaintNode
-QA](native-qa.md). Use `--resume-study-session` only for Task 8's quit/reopen
-within that same participant session. Provider-free mode must not invoke Codex,
+Build one preserved study-capable bundle as documented in [Native PaintNode
+QA](native-qa.md). For every new participant, launch that exact bundle with
+`npm run qa:creator-study:launch -- --app-bundle ABSOLUTE_APP --fresh-study-session`.
+Use the same command with `--resume-study-session` only for Task 8's quit/reopen
+within that same participant session. Launch-existing must not rebuild or rewrite
+the app or static provenance. Provider-free mode must not invoke Codex,
 Antigravity, provider discovery, authentication, or network generation. If a
 provider is invoked or a security prompt appears, stop and mark the session
 invalid plus a severity-0 safety finding.
@@ -204,7 +206,11 @@ active generation/random approval ID, isolated profile fingerprint, boot
 consumption, and visible-empty attestation; it omits raw identifiers, private
 commitments, dates, references, history, reasons, and paths.
 Restoring local lifecycle-file snapshots cannot replay the Keychain marker.
-Build-only allocates no live session state; unlaunched, stale, and replayed
+The build-only bundle has a deferred main window and immutable static provenance;
+it allocates no live session state. A separate create-only launch binding and
+native boot record cross-bind each fresh profile to that static build identity.
+Fresh launch returns after verified boot while the app remains open, so setup and
+visible attestation use a one-terminal sequence. Unlaunched, stale, and replayed
 generations fail closed. The verifier does not replace the visible rehearsal.
 
 After Task 8 and after PaintNode is closed, run

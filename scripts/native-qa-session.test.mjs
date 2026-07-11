@@ -16,6 +16,7 @@ import {
   prepareStudySessionCleanup,
   studySessionBootEvidencePath,
   studySessionConsumeLockPath,
+  studySessionLaunchEvidencePath,
   verifyAndConsumeStudySessionBoot,
   verifyAndFinalizeStudySessionCleanup,
   studySessionBuildEvidence,
@@ -26,6 +27,9 @@ import { createMemoryStudySessionConsumptionAnchor } from './native-qa-session-a
 
 const FIRST_UUID = '00112233-4455-4677-8899-aabbccddeeff';
 const SECOND_UUID = 'ffeeddcc-bbaa-4988-8776-554433221100';
+const BUILD_IDENTITY = 'a'.repeat(64);
+const PROVENANCE_IDENTITY = 'b'.repeat(64);
+const EXECUTABLE_IDENTITY = 'c'.repeat(64);
 
 function boot(session, statePath) {
   writeFileSync(studySessionBootEvidencePath(statePath), JSON.stringify({
@@ -33,6 +37,16 @@ function boot(session, statePath) {
     event: 'app-boot',
     profileSha256: session.profileSha256,
     bootNonceSha256: session.bootNonceSha256,
+    buildIdentitySha256: BUILD_IDENTITY,
+  }));
+  writeFileSync(studySessionLaunchEvidencePath(statePath), JSON.stringify({
+    version: 1,
+    event: 'study-launch',
+    launchIntent: 'fresh',
+    profileSha256: session.profileSha256,
+    buildIdentitySha256: BUILD_IDENTITY,
+    provenanceSha256: PROVENANCE_IDENTITY,
+    executableSha256: EXECUTABLE_IDENTITY,
   }));
 }
 
@@ -129,6 +143,9 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   boot(fresh.session, statePath);
   assert.deepEqual(verifyAndConsumeStudySessionBoot({
     statePath, profileSha256: fresh.session.profileSha256,
+    buildIdentitySha256: BUILD_IDENTITY,
+    provenanceSha256: PROVENANCE_IDENTITY,
+    executableSha256: EXECUTABLE_IDENTITY,
     consumptionAnchor: createMemoryStudySessionConsumptionAnchor(),
   }), {
     appBootObserved: true,
@@ -139,6 +156,9 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
     () => verifyAndConsumeStudySessionBoot({
       statePath,
       profileSha256: fresh.session.profileSha256,
+      buildIdentitySha256: BUILD_IDENTITY,
+      provenanceSha256: PROVENANCE_IDENTITY,
+      executableSha256: EXECUTABLE_IDENTITY,
       consumptionAnchor: createMemoryStudySessionConsumptionAnchor([fresh.session.profileSha256]),
     }),
     /already been consumed/i,
@@ -148,6 +168,27 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   assert.equal(resume.launchIntent, 'resume');
   assert.equal(resume.session.profileSha256, fresh.session.profileSha256);
   assert.equal(resume.session.setupConsumed, true);
+});
+
+test('losing concurrent fresh claim cannot delete winner lifecycle evidence', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-claim-race-'));
+  const statePath = join(root, 'session.json');
+  let winner;
+  assert.throws(() => resolveProviderFreeStudySession({
+    mode: 'provider-free',
+    fresh: true,
+    statePath,
+    randomUUID: () => SECOND_UUID,
+    beforeFreshStateClaim() {
+      winner = resolveProviderFreeStudySession({
+        mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
+      });
+      boot(winner.session, statePath);
+    },
+  }), /prior.*finalized/i);
+  assert.equal(readProviderFreeStudySession(statePath).profileSha256, winner.session.profileSha256);
+  assert.equal(existsSync(studySessionBootEvidencePath(statePath)), true);
+  assert.equal(existsSync(studySessionLaunchEvidencePath(statePath)), true);
 });
 
 test('snapshot rollback cannot replay consumption outside the monotonic single-Mac anchor', () => {
@@ -162,12 +203,16 @@ test('snapshot rollback cannot replay consumption outside the monotonic single-M
   const stateSnapshot = readFileSync(statePath);
   const bootSnapshot = readFileSync(studySessionBootEvidencePath(statePath));
   verifyAndConsumeStudySessionBoot({
-    statePath, profileSha256: fresh.session.profileSha256, consumptionAnchor: anchor,
+    statePath, profileSha256: fresh.session.profileSha256,
+    buildIdentitySha256: BUILD_IDENTITY, consumptionAnchor: anchor,
+    provenanceSha256: PROVENANCE_IDENTITY, executableSha256: EXECUTABLE_IDENTITY,
   });
   writeFileSync(statePath, stateSnapshot);
   writeFileSync(studySessionBootEvidencePath(statePath), bootSnapshot);
   assert.throws(() => verifyAndConsumeStudySessionBoot({
-    statePath, profileSha256: fresh.session.profileSha256, consumptionAnchor: anchor,
+    statePath, profileSha256: fresh.session.profileSha256,
+    buildIdentitySha256: BUILD_IDENTITY, consumptionAnchor: anchor,
+    provenanceSha256: PROVENANCE_IDENTITY, executableSha256: EXECUTABLE_IDENTITY,
   }), /monotonic single-Mac anchor.*already consumed/i);
 });
 
@@ -245,6 +290,9 @@ test('consumed same-session resume ends through normal verified finalization', (
   verifyAndConsumeStudySessionBoot({
     statePath,
     profileSha256: fresh.session.profileSha256,
+    buildIdentitySha256: BUILD_IDENTITY,
+    provenanceSha256: PROVENANCE_IDENTITY,
+    executableSha256: EXECUTABLE_IDENTITY,
     consumptionAnchor: createMemoryStudySessionConsumptionAnchor(),
   });
   assert.equal(resolveProviderFreeStudySession({

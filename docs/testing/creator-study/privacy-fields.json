@@ -3,6 +3,7 @@
   "repositoryAllowed": [
     "approved build Git SHA and QA bundle identity",
     "approved build identity match including source provenance and executable fingerprints",
+    "approved static macOS CDHash and successful dynamic running-code identity match",
     "approved build active generation and random non-derived approval ID",
     "path-free Provider Free profile fingerprint and native cleanup completion status",
     "Product fixture labels, dimensions, licenses, and hashes",
@@ -26,6 +27,7 @@
     "approved storage path or internal storage reference",
     "private approved-build record and active-ledger paths, approval date, decision references, ledger history, protected Keychain anchor payload, and mid-study change reason",
     "raw Provider Free WebKit data-store identifier, boot nonce, cleanup nonce, lifecycle evidence paths, and macOS Keychain consumption markers",
+    "canonical preserved app path and private per-session launch binding",
     "consent answers tied to a person",
     "raw screener answers",
     "accommodation or medical details",
