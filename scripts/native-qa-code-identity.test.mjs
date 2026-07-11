@@ -36,12 +36,18 @@ test('static and dynamic macOS code identity use the exact approved CDHash', () 
   ]);
   assert.equal(calls.some(({ args }) => args.includes(executable) && args.includes('--display')), true);
   assert.equal(calls.some(({ args }) => args.includes('+4242')), true);
-  assert.equal(calls.some(({ args }) => args.includes(`-R=cdhash H"${cdHash}"`)), true);
+  assert.equal(calls.some(({ args }) => args[0] === '--verify' && args.at(-1) === '+4242'), true);
+  assert.equal(calls.some(({ args }) => args.includes('--display') && args.at(-1) === '+4242'), true);
 });
 
 test('dynamic macOS code identity rejects a swapped interpreter process', () => {
   const cdHash = 'a'.repeat(40);
-  assert.throws(() => verifyMacosRunningCodeIdentity(666, { cdHash }, () => ({
-    status: 1, stdout: '', stderr: 'code failed to satisfy specified code requirement',
+  assert.throws(() => verifyMacosRunningCodeIdentity(666, { cdHash }, (command, args) => (
+    args.includes('--display')
+      ? { status: 0, stdout: '', stderr: `CDHash=${'b'.repeat(40)}\n` }
+      : { status: 0, stdout: '', stderr: '' }
+  )), /running code identity/i);
+  assert.throws(() => verifyMacosRunningCodeIdentity(667, { cdHash }, () => ({
+    status: 1, stdout: '', stderr: 'dynamically invalid',
   })), /running code identity/i);
 });
