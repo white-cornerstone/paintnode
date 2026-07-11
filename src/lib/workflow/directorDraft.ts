@@ -564,6 +564,71 @@ function materializeDraft(
   };
 }
 
+function firstPlainDataDifference(actual: unknown, expected: unknown, path: string): string | null {
+  if (Object.is(actual, expected)) return null;
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return path;
+    const actualKeys = Reflect.ownKeys(actual).filter((key) => key !== 'length').map(String).sort();
+    const expectedKeys = Reflect.ownKeys(expected).filter((key) => key !== 'length').map(String).sort();
+    if (actualKeys.join('\u0000') !== expectedKeys.join('\u0000')) return path;
+    for (let index = 0; index < expected.length; index += 1) {
+      const actualDescriptor = Object.getOwnPropertyDescriptor(actual, String(index));
+      const expectedDescriptor = Object.getOwnPropertyDescriptor(expected, String(index));
+      if (!actualDescriptor?.enumerable || !('value' in actualDescriptor)
+        || !expectedDescriptor?.enumerable || !('value' in expectedDescriptor)) return `${path}[${index}]`;
+      const difference = firstPlainDataDifference(
+        actualDescriptor.value,
+        expectedDescriptor.value,
+        `${path}[${index}]`,
+      );
+      if (difference) return difference;
+    }
+    return null;
+  }
+  if (!isRecord(expected) || !isRecord(actual)) return path;
+  const actualPrototype = Object.getPrototypeOf(actual);
+  if (actualPrototype !== Object.prototype && actualPrototype !== null) return path;
+  const actualKeys = Reflect.ownKeys(actual);
+  const expectedKeys = Reflect.ownKeys(expected);
+  if (actualKeys.some((key) => typeof key !== 'string') || expectedKeys.some((key) => typeof key !== 'string')) return path;
+  const sortedActualKeys = (actualKeys as string[]).sort();
+  const sortedExpectedKeys = (expectedKeys as string[]).sort();
+  if (sortedActualKeys.join('\u0000') !== sortedExpectedKeys.join('\u0000')) return path;
+  for (const key of sortedExpectedKeys) {
+    const actualDescriptor = Object.getOwnPropertyDescriptor(actual, key);
+    const expectedDescriptor = Object.getOwnPropertyDescriptor(expected, key);
+    if (!actualDescriptor?.enumerable || !('value' in actualDescriptor)
+      || !expectedDescriptor?.enumerable || !('value' in expectedDescriptor)) return `${path}.${key}`;
+    const difference = firstPlainDataDifference(
+      actualDescriptor.value,
+      expectedDescriptor.value,
+      `${path}.${key}`,
+    );
+    if (difference) return difference;
+  }
+  return null;
+}
+
+/**
+ * Rebuilds the only graph shape a validated Director draft is allowed to
+ * author. Comparing the complete plain-data graph, rather than maintaining a
+ * runtime-field blacklist, also fails closed for future editor/history ledgers.
+ */
+export function assertFreshWorkflowDirectorProposal(proposal: WorkflowDirectorProposal): void {
+  const parsed = parseWorkflowDirectorGraphDraft(proposal.draft);
+  if (!parsed.value) {
+    throw new Error('This AI Director proposal no longer contains a valid fresh Director draft. Draft again before accepting.');
+  }
+  const expected = new WorkflowGraphDomain(materializeDraft(parsed.value, proposal.graph.id)).graph;
+  const difference = firstPlainDataDifference(proposal.graph, expected, 'graph');
+  if (difference) {
+    throw new Error(
+      `This AI Director proposal does not match its fresh Director draft at ${difference}. `
+      + 'Persisted project, result, editor, and history state cannot be imported by a Director proposal.',
+    );
+  }
+}
+
 function missingRequiredInputIssues(graph: WorkflowGraphV2): WorkflowDirectorProposalIssue[] {
   const issues: WorkflowDirectorProposalIssue[] = [];
   for (const node of graph.nodes) {

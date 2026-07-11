@@ -102,6 +102,34 @@ function directorProposal() {
   return createWorkflowDirectorProposal(draft, context, { graphId: 'director-square' }).proposal!;
 }
 
+function reviewedDirectorProposal() {
+  const base = directorProposal();
+  const draft = structuredClone(base.draft);
+  draft.nodes.push({
+    id: 'review', type: 'review', title: 'Review Candidates', mode: 'human', instructions: 'Choose the strongest direction.',
+  });
+  draft.edges = draft.edges.filter((edge) => edge.id !== 'generate-square');
+  draft.edges.push(
+    {
+      id: 'generate-review',
+      source: { nodeId: 'generate', portId: 'result' },
+      target: { nodeId: 'review', portId: 'candidates' },
+    },
+    {
+      id: 'review-square',
+      source: { nodeId: 'review', portId: 'selected' },
+      target: { nodeId: 'square', portId: 'source' },
+    },
+  );
+  const context = buildWorkflowDirectorContext({
+    brief: 'Create a square product launch.',
+    assets: [campaignProduct],
+    requestedOutputs: [{ id: 'square', name: 'Square 1:1', width: 1024, height: 1024 }],
+    capabilities: [{ id: 'generate', available: true, reason: null }],
+  });
+  return createWorkflowDirectorProposal(draft, context, { graphId: 'director-reviewed-square' }).proposal!;
+}
+
 describe('WorkflowStore graph adapter', () => {
   it('accepts a validated Director proposal as one fresh dirty workflow session', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
@@ -164,7 +192,60 @@ describe('WorkflowStore graph adapter', () => {
       promotedAt: 1,
     }];
 
-    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh creator workflow/i);
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh Director draft/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it.each([
+    ['Input project binding', directorProposal, 'product', {
+      assetId: 'asset-from-another-project', relativePath: 'assets/private-product.png',
+    }],
+    ['Brief history', directorProposal, 'brief', { lastAcceptedPrompt: 'Persisted prior prompt' }],
+    ['Art Direction editor state', directorProposal, 'composition', {
+      storyboardDataUrl: 'data:image/png;base64,cHJpdmF0ZQ==',
+      storyboardOraPath: 'documents/private-storyboard.ora',
+      storyboardAnnotations: ['Persisted annotation'],
+      storyboardAnnotationItems: [{ id: 'persisted-mark' }],
+    }],
+    ['Transform result binding', directorProposal, 'generate', {
+      resultAssetReferenceId: 'prior-result-reference',
+      resultAssetId: 'prior-result-asset',
+      resultRelativePath: 'assets/prior-result.png',
+    }],
+    ['Review selection state', reviewedDirectorProposal, 'review', {
+      promotedCandidateId: 'prior-candidate', promotionId: 'prior-promotion',
+    }],
+    ['Output result binding', directorProposal, 'square', {
+      outputAssetId: 'prior-output-asset',
+      outputRelativePath: 'assets/prior-output.png',
+      assetReferenceId: 'prior-output-reference',
+    }],
+  ] as const)('rejects forged %s config atomically', (_name, proposalFactory, nodeId, forgedConfig) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = proposalFactory();
+    const graph = structuredClone(proposal.graph);
+    const node = graph.nodes.find((candidate) => candidate.id === nodeId)!;
+    node.config = { ...node.config, ...forgedConfig };
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh Director draft/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it('rejects future editor and round-trip ledgers not authored by the Director draft', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposal();
+    const graph = structuredClone(proposal.graph) as WorkflowGraphV2 & {
+      editorRevisions: unknown[];
+      workflowRoundTrips: unknown[];
+    };
+    graph.editorRevisions = [{ id: 'private-editor-revision' }];
+    graph.workflowRoundTrips = [{ id: 'private-round-trip' }];
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh Director draft/i);
     expect(store.toBytes()).toEqual(before);
   });
 

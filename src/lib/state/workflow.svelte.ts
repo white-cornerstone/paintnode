@@ -24,6 +24,7 @@ import {
   type WorkflowTransformExecutionOutcome,
   type WorkflowDirectorProposal,
   type WorkflowDirectorSessionToken,
+  assertFreshWorkflowDirectorProposal,
   WorkflowTransformExecutionError,
   createWorkflowRevision,
   deriveWorkflowNodeRunState,
@@ -454,13 +455,7 @@ export class WorkflowStore {
     if (!proposal.canAccept || proposal.issues.length > 0) {
       throw new Error('This AI Director proposal cannot be accepted until every validation issue is resolved.');
     }
-    if (proposal.graph.nodes.some((node) => node.type === 'unsupported')
-      || proposal.graph.assetReferences.length > 0
-      || proposal.graph.runRecords.length > 0
-      || (proposal.graph.reviewPromotions?.length ?? 0) > 0
-      || proposal.graph.nodes.some((node) => node.runRecordIds.length > 0)) {
-      throw new Error('This AI Director proposal cannot be accepted because it is not a fresh creator workflow.');
-    }
+    assertFreshWorkflowDirectorProposal(proposal);
     // Build and validate the complete replacement before touching session or
     // reactive state. A failure therefore leaves the current workflow intact.
     const nextDomain = new WorkflowGraphDomain(proposal.graph, { idGenerator: this.graphIdGenerator });
