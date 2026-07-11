@@ -5,9 +5,10 @@
 ## Before participant arrival
 
 - [ ] Study authorization gate is complete in approved private storage.
+- [ ] Facilitator calibration sign-off matches the current instrument version, SHA-256, and approved Git change reference.
 - [ ] Private schedule, roles, delivery mode, and accommodation setup match the recruitment record.
 - [ ] Correct SHA, Provider Free bundle identity, and approved-build decision reference recorded.
-- [ ] Current active generation and record fingerprint match the private ledger.
+- [ ] Current active generation and approval ID match the private ledger and protected study-Mac anchor.
 - [ ] Setup receipt reports the literal approved identity match.
 - [ ] Product A and Product B hashes match the committed manifest.
 - [ ] Separate rehearsal completed for both failure checkpoints.

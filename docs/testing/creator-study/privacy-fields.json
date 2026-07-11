@@ -3,7 +3,7 @@
   "repositoryAllowed": [
     "approved build Git SHA and QA bundle identity",
     "approved build identity match including source provenance and executable fingerprints",
-    "approved build active generation and non-sensitive record fingerprint",
+    "approved build active generation and random non-derived approval ID",
     "Product fixture labels, dimensions, licenses, and hashes",
     "participant codes without an identity mapping",
     "eligibility and cohort buckets without raw answers",
@@ -11,6 +11,7 @@
     "de-identified finding IDs and paraphrased evidence",
     "severity counts and blocker decisions",
     "separate de-identified recruitment exception approvals and decision references",
+    "versioned facilitator instrument, including approved hint and takeover text",
     "role-based sign-offs without personal names",
     "retention completion status without storage metadata"
   ],
@@ -28,6 +29,7 @@
     "recordings, screens, audio, and raw notes",
     "raw or potentially identifying quotes",
     "intervention and session logs with identifying timestamps or paths",
+    "participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs",
     "retention and deletion ledger",
     "access-control evidence and exceptions"
   ]

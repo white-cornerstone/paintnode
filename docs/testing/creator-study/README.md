@@ -17,8 +17,9 @@ study storage.
   build identity approved for sessions. Copy and complete it privately; never
   point setup verification at the blank repository template.
 - `templates/private-active-build-decisions.json` is the privately controlled,
-  append-only active-decision ledger. Its contiguous history makes a superseded
-  record fail even with its matching old app and checkout.
+  append-only active-decision ledger. Setup also pins its current generation in
+  a separate macOS Keychain anchor, so rolling back both private files cannot
+  reactivate an older record/build pair.
 - `templates/de-identified-recruitment-matrix.csv` may be used for aggregate
   cohort control only after direct identifiers and sensitive detail are
   removed.
@@ -26,6 +27,10 @@ study storage.
   decision template. It contains aggregate counts, de-identified finding IDs,
   and role sign-offs, not names or raw evidence locations.
 - `privacy-fields.json` is the allow/deny contract.
+- `facilitator-hints.json` is the versioned, participant-hidden hint, takeover,
+  assist, and deviation instrument; its approved text is repository-safe.
+  `facilitator-hints.sha256` pins its exact bytes. Participant-linked delivered
+  intervention records remain private-only.
 
 ## Before recruitment
 
@@ -38,6 +43,12 @@ study storage.
 5. Privately assign each scheduled date/start/time zone, delivery mode,
    facilitator, observers, technical operator, and accommodation setup. None of
    these assignments belong in repository-safe evidence.
+6. Verify `facilitator-hints.json` against `facilitator-hints.sha256`. Record its
+   version, SHA-256, and approved Git SHA/change reference in the private sign-off.
+7. Calibrate and rehearse every facilitator against that exact instrument before
+   participant 1 and after every approved instrument change. Any instrument edit
+   requires a new committed hash, approved Git change reference, and renewed
+   sign-off even if the integer version is unchanged.
 
 ## Approve the study build before the first session
 
@@ -50,14 +61,20 @@ study storage.
    storage. Copy the literal `gitSha`, `sourceTreeSha`, `sourceStatusSha256`,
    and `executableSha256` values from the app's provenance sidecar. Record the
    fixed Provider Free bundle ID, rehearsal completion time, owner approval
-   time, and a non-identifying decision reference.
+   time, a non-identifying decision reference, and a new random lowercase UUIDv4
+   `approvalId` unrelated to any private record field.
 4. Use strict UTC timestamps with millisecond precision. Rehearsal completion
    must be earlier than owner approval, and approval cannot be in the future.
 5. Set initial change control to `kind: "initial"`, null replacement/reason,
-   and `comparabilityDecision: "baseline"`. Hash the exact completed record
-   bytes with SHA-256, then append generation 1 to the active-decision ledger
-   with that fingerprint and the same private decision reference. Keep the
-   approved app and its sidecar together and reuse that exact bundle.
+   and `comparabilityDecision: "baseline"`. Append generation 1 to the
+   active-decision ledger with the same `approvalId`, decision reference, and
+   approval timestamp. Setup creates the protected Keychain anchor only at
+   generation 1. Keep the approved app and its sidecar together and reuse that
+   exact bundle.
+
+Each ledger entry is a closed object with exactly `generation`, `approvalId`,
+`decisionReference`, and `approvedAt`. Generate each approval ID independently;
+never derive it by hashing the private record, reason, timestamp, or reference.
 
 The current HEAD does not approve itself. Do not regenerate this record from
 `git rev-parse HEAD`, and do not rebuild between sessions: a rebuild has a new
@@ -71,10 +88,12 @@ executable identity even when source files appear unchanged.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place with the approved bundle in a separate folder. Delete that rehearsal
    folder. Record this session-preparation rehearsal privately.
-3. Create a different, genuinely empty participant project folder outside the
+3. Verify the assigned facilitator's private calibration sign-off matches the
+   current hint instrument version, SHA-256, and approved Git change reference.
+4. Create a different, genuinely empty participant project folder outside the
    repository.
-4. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
-5. Run:
+5. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
+6. Run:
 
    ```sh
    npm run qa:creator-study:setup -- \
@@ -90,13 +109,21 @@ controlled active-decision ledger. It checks the clean
 checkout, app provenance, actual executable, bundle identity, approved literal
 SHA/tree/status/executable fingerprints, canonicalized paths, empty project,
 deleted rehearsal path, Product hashes/dimensions, and all three QA controls.
-Missing, malformed, in-repository, stale, superseded, future-dated, or
+Missing, malformed, duplicate-key, in-repository, stale, superseded,
+future-dated, or
 mismatched approval records fail closed. The ledger must contain contiguous,
-unique generations and its latest fingerprint/reference must match the supplied
-record. Its receipt reports the matched identity, active generation, and
-non-sensitive record fingerprint, but omits private paths, approval date,
+unique generations with strictly increasing approval timestamps; its latest
+approval ID/reference/time must match the supplied record. The separate Keychain
+anchor must match or advance by exactly one generation. Its receipt reports the
+matched identity, active generation, and random non-derived approval ID, but
+omits private paths, approval date,
 decision references, change reason, ledger history, storage data, and participant
 paths. It does not replace rehearsal or authorization.
+
+Use the same approved study Mac for the whole study. Do not delete, reset,
+export, or restore the `com.paintnode.creator-study.active-build` Keychain item.
+If that protected anchor is unavailable or conflicts with private files, pause
+the study and resolve it as an owner-controlled integrity incident.
 
 ## Mid-study build changes
 
@@ -104,9 +131,11 @@ Pause scheduling before changing the approved app. Build the proposed change
 from committed clean source, complete a **new rehearsal**, and copy a new
 private approved-build record. `kind` must be `mid-study`; record the prior
 decision reference, change reason, owner approval, rehearsal completion time,
-and a comparability decision of `comparable` or `restart-required`. Preserve the
-prior record, hash the exact new record bytes, and append the next contiguous
-generation to the active-decision ledger. The replacement reference must equal
+and a comparability decision of `comparable` or `restart-required`. Create a new
+random `approvalId`, preserve the prior record, and append the next contiguous
+generation with the new ID/reference/time to the active-decision ledger. Its
+approval time must be later than every prior generation, the new rehearsal must
+occur after the preceding approval, and the replacement reference must equal
 the immediately preceding ledger decision. The setup verifier rejects an
 incomplete, non-current, or replayed change decision. If the decision is
 `restart-required`, do not combine earlier sessions with the new build; record

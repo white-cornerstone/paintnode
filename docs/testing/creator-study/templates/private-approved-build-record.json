@@ -16,7 +16,8 @@
   "approval": {
     "ownerApproved": false,
     "approvedAt": "",
-    "decisionReference": ""
+    "decisionReference": "",
+    "approvalId": ""
   },
   "changeControl": {
     "kind": "initial",
