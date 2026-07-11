@@ -24,3 +24,12 @@ export const INTEGRITY_BLOCKING_FINDING_CATEGORIES = new Set(
 export function isIntegrityBlockingFindingCategory(category) {
   return INTEGRITY_BLOCKING_FINDING_CATEGORIES.has(category);
 }
+
+export const RECRUITMENT_EXCEPTION_DEFINITIONS = Object.freeze([
+  { id: 'cohortMix', requirement: 'Required multi-format and AI-experience cohort mix' },
+  { id: 'keyboardOrAccessibilityCoverage', requirement: 'Keyboard/accessibility cohort coverage' },
+]);
+
+export const RECRUITMENT_EXCEPTION_IDS = Object.freeze(
+  RECRUITMENT_EXCEPTION_DEFINITIONS.map(({ id }) => id),
+);

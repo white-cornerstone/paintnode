@@ -32,6 +32,18 @@ approved-build record. A clean checkout or current branch head is not approval.
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | | | |
 
+## Separate recruitment exception approvals
+
+Do not combine these decisions. Each approved exception needs its own private
+rationale and de-identified `CB-DEC-N` reference for the repository-safe study
+decision. An approval for one requirement never waives the other, and two
+approved rows use distinct references.
+
+| Exception ID | Requirement currently met | Approved | Private rationale recorded | De-identified decision reference | Approver role/date |
+| --- | --- | --- | --- | --- | --- |
+| `cohortMix` | yes / no | yes / no | yes / no | null / `CB-DEC-N` | |
+| `keyboardOrAccessibilityCoverage` | yes / no | yes / no | yes / no | null / `CB-DEC-N` | |
+
 ## Retention and deletion ledger
 
 | Evidence group | Decision date | Due date | Consent withdrawal/earlier requirement | Actual deletion date | Verified by |

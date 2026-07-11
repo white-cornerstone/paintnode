@@ -92,6 +92,17 @@ describe('Creative Blueprint creator study protocol', () => {
     }
   });
 
+  it('keeps cohort and keyboard/accessibility recruitment exceptions independent', () => {
+    for (const id of ['cohortMix', 'keyboardOrAccessibilityCoverage']) {
+      expect(protocol).toContain(id);
+      expect(decisionTemplate).toContain(id);
+    }
+    for (const field of ['approved', 'rationaleRecorded', 'decisionReference', 'applied']) {
+      expect(decisionTemplate).toContain(field);
+    }
+    expect(protocol).not.toContain('recruitmentDecisionDocumented');
+  });
+
   it('keeps concrete scheduling assignments in the private recruitment record', () => {
     for (const label of [
       'Scheduled date', 'Scheduled start time', 'Time zone', 'Delivery mode',

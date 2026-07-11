@@ -30,5 +30,7 @@ cohort. A declined recording is not an exclusion.
 Before scheduling the final cohort, confirm 6–8 eligible participants, at least
 four multi-format regulars, at least two weekly AI users, and at least two
 occasional or non-users. Seek keyboard/accessibility coverage; if recruitment
-does not permit it, record the decision privately and report the aggregate
-coverage limitation in the de-identified decision record.
+does not permit it, record a separate `keyboardOrAccessibilityCoverage`
+exception decision privately and report only its de-identified `CB-DEC-N`
+reference and rationale-recorded state. A cohort-mix shortfall requires its own
+independent `cohortMix` exception. Neither decision can waive the other.

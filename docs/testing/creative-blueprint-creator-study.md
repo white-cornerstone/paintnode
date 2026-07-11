@@ -54,6 +54,18 @@ an unusable build requires the study to pause.
 - Exclude PaintNode contributors, anyone who implemented or previously tested
   Creative Blueprint, and anyone who has already seen the facilitator script.
 
+Treat cohort-mix and keyboard/accessibility recruitment shortfalls as separate
+decisions. A `cohortMix` exception cannot waive
+`keyboardOrAccessibilityCoverage`, or vice versa. Each approved exception must
+have its own private rationale and a de-identified `CB-DEC-N` decision
+reference recorded in schema-v2 synthesis input. Without all three closed
+approval fields, that requirement remains unmet. If both exceptions are
+approved, use distinct decision references for their separate decision rows.
+
+No participant data exists under schema version 1. Do not migrate or reinterpret
+its generic recruitment flag; start real study synthesis from the version-2
+blank template.
+
 ### Screener questions
 
 Ask before scheduling:
@@ -429,8 +441,12 @@ The issue #85/MVP exit is blocked when any of these is true:
 - full-journey or critical-task thresholds above are missed;
 - any participant cannot complete a critical task using their required input or
   accessibility method;
-- the cohort has fewer than six valid sessions or misses the required AI
-  experience mix without a documented recruitment decision;
+- the cohort has fewer than six valid sessions;
+- the required multi-format/AI-experience mix is missing without a complete
+  approved `cohortMix` exception and its own de-identified decision reference;
+- keyboard/accessibility coverage is missing without a complete approved
+  `keyboardOrAccessibilityCoverage` exception and its own de-identified
+  decision reference;
 - evidence is incomplete, contradictory, fabricated, or cannot be traced to
   actual de-identified session notes.
 
@@ -443,16 +459,18 @@ tasks before declaring the gate met.
 ### Recommendation mapping
 
 - `insufficient evidence`: fewer than six valid sessions, incomplete or
-  untraceable evidence, missing required cohort coverage without a documented
-  recruitment decision, missing values needed for a threshold, missing required
-  role sign-offs, or missing configured-provider evidence;
+  untraceable evidence, a missing recruitment requirement without its own
+  complete approved exception and de-identified decision reference, missing
+  values needed for a threshold, missing required role sign-offs, or missing
+  configured-provider evidence;
 - `block`: evidence is sufficient to decide, but any threshold or blocker rule
   fails;
 - `conditional`: no exit blocker remains, but named non-blocking actions or
   re-tests remain. A conditional result never closes issue #85;
-- `pass`: 6–8 valid real sessions, complete traceability, cohort coverage or an
-  approved recruitment decision, every threshold, no unresolved blocker,
-  configured-provider evidence, and all required role sign-offs are complete.
+- `pass`: 6–8 valid real sessions, complete traceability, each recruitment
+  requirement or its own complete approved exception, every threshold, no
+  unresolved blocker, configured-provider evidence, and all required role
+  sign-offs are complete.
 
 Generate calculations from a de-identified schema-valid input with
 `npm run qa:creator-study:synthesize -- --input PATH`. Review the output against
@@ -562,6 +580,8 @@ excludes the private fields below.
 - Facilitators/observers:
 - Recruited / valid / invalid / replacement counts:
 - Cohort mix, including AI experience and accessibility coverage:
+- `cohortMix` requirement / approval / rationale-recorded / `CB-DEC-N` reference / applied effect:
+- `keyboardOrAccessibilityCoverage` requirement / approval / rationale-recorded / `CB-DEC-N` reference / applied effect:
 - Evidence location and recording deletion date:
 - Study owner / named observers / approved private storage reference:
 - Milestone decision date / default deletion due date / actual deletion date:
