@@ -9,6 +9,7 @@
     "de-identified finding IDs and paraphrased evidence",
     "severity counts and blocker decisions",
     "separate de-identified recruitment exception approvals and decision references",
+    "versioned facilitator instrument, including approved hint and takeover text",
     "role-based sign-offs without personal names",
     "retention completion status without storage metadata"
   ],
@@ -25,7 +26,7 @@
     "recordings, screens, audio, and raw notes",
     "raw or potentially identifying quotes",
     "intervention and session logs with identifying timestamps or paths",
-    "exact facilitator hint text, hint IDs, assist ordinals, and deviation logs",
+    "participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs",
     "retention and deletion ledger",
     "access-control evidence and exceptions"
   ]

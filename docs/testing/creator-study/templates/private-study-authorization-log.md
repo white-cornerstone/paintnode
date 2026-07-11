@@ -20,11 +20,13 @@
 
 Complete this before participant 1 and after every approved instrument change.
 A facilitator may not run a session unless their sign-off matches the current
-`facilitator-hints.json` instrument version.
+instrument version, committed SHA-256, and approved Git change reference. Every
+instrument edit requires a new hash and renewed sign-off even if `version` does
+not change.
 
-| Facilitator | Instrument version | Calibration/rehearsal completed | Scope: before participant 1 / after approved change | Approved by | Date/time |
-| --- | ---: | --- | --- | --- | --- |
-| | | yes / no | | | |
+| Facilitator | Instrument version | Instrument SHA-256 | Approved Git SHA/change reference | Calibration/rehearsal completed | Scope: before participant 1 / after approved change | Approved by | Date/time |
+| --- | ---: | --- | --- | --- | --- | --- | --- |
+| | | | | yes / no | | | |
 
 ## Separate recruitment exception approvals
 

@@ -7,6 +7,12 @@
     "secondHintAfterAdditionalSeconds": 90,
     "takeoverAfterAdditionalSeconds": 90
   },
+  "progression": {
+    "checkpointSelection": "earliest-incomplete",
+    "checkpointProgressResetsIntervalSeconds": 90,
+    "changedCheckpointHintLevel": "first",
+    "unchangedCheckpointHintSequence": ["first", "second", "takeover"]
+  },
   "assistEvents": [
     { "id": "neutral-probe", "assistIncrement": 0, "forcesTaskFailure": false },
     { "id": "standard-hint", "assistIncrement": 1, "forcesTaskFailure": false },
@@ -26,7 +32,34 @@
     { "id": "silent-app-state-change", "sessionValidity": "invalid" },
     { "id": "unauthorized-takeover", "sessionValidity": "invalid" },
     { "id": "calibration-missing", "sessionValidity": "invalid" },
-    { "id": "instrument-version-mismatch", "sessionValidity": "invalid" }
+    { "id": "instrument-version-mismatch", "sessionValidity": "invalid" },
+    { "id": "instrument-hash-mismatch", "sessionValidity": "invalid" },
+    { "id": "instrument-change-unapproved", "sessionValidity": "invalid" }
+  ],
+  "takeoverActions": [
+    { "checkpointId": "T1-C1", "id": "T1-C1-TO", "exactAction": "Select Open Project Folder and choose the supplied empty folder." },
+    { "checkpointId": "T1-C2", "id": "T1-C2-TO", "exactAction": "Select Import images and choose the supplied Product image." },
+    { "checkpointId": "T1-C3", "id": "T1-C3-TO", "exactAction": "Create a new Campaign Composer workflow." },
+    { "checkpointId": "T1-C4", "id": "T1-C4-TO", "exactAction": "Assign the imported image to the Product input." },
+    { "checkpointId": "T2-C1", "id": "T2-C1-TO", "exactAction": "Set the direction count to three and start creating the directions." },
+    { "checkpointId": "T2-C2", "id": "T2-C2-TO", "exactAction": "Select Retry on only the incomplete direction." },
+    { "checkpointId": "T3-C1", "id": "T3-C1-TO", "exactAction": "Select each available direction once so it can be inspected." },
+    { "checkpointId": "T3-C2", "id": "T3-C2-TO", "exactAction": "Select the preferred direction and activate Promote this candidate." },
+    { "checkpointId": "T4-C1", "id": "T4-C1-TO", "exactAction": "Activate Open in Editor on the accepted direction." },
+    { "checkpointId": "T4-C2", "id": "T4-C2-TO", "exactAction": "Apply the specified layer-name and opacity edit." },
+    { "checkpointId": "T4-C3", "id": "T4-C3-TO", "exactAction": "Activate Return to Workflow." },
+    { "checkpointId": "T5-C1", "id": "T5-C1-TO", "exactAction": "Open the downstream run preview." },
+    { "checkpointId": "T5-C2", "id": "T5-C2-TO", "exactAction": "Confirm the preview and start the campaign run." },
+    { "checkpointId": "T5-C3", "id": "T5-C3-TO", "exactAction": "Inspect and identify the completed Square, Portrait, and Landscape results." },
+    { "checkpointId": "T6-C1", "id": "T6-C1-TO", "exactAction": "Activate Run again without changing an input, then open the reuse status." },
+    { "checkpointId": "T6-C2", "id": "T6-C2-TO", "exactAction": "Replace the Product input with the newly supplied Product image." },
+    { "checkpointId": "T6-C3", "id": "T6-C3-TO", "exactAction": "Update only the work marked stale and leave reusable work unchanged." },
+    { "checkpointId": "T7-C1", "id": "T7-C1-TO", "exactAction": "Locate Retry on the failed Landscape output." },
+    { "checkpointId": "T7-C2", "id": "T7-C2-TO", "exactAction": "Retry only Landscape and verify that Square and Portrait remain complete." },
+    { "checkpointId": "T8-C1", "id": "T8-C1-TO", "exactAction": "Save the project and quit PaintNode." },
+    { "checkpointId": "T8-C2", "id": "T8-C2-TO", "exactAction": "Open the saved project folder and reopen its Campaign Composer workflow." },
+    { "checkpointId": "T8-C3", "id": "T8-C3-TO", "exactAction": "Inspect the accepted direction and output statuses to verify preserved state." },
+    { "checkpointId": "T8-C4", "id": "T8-C4-TO", "exactAction": "Activate Place on the edited result and confirm that it appears as a document layer." }
   ],
   "tasks": [
     {

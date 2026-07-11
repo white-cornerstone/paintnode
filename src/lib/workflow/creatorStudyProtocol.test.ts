@@ -108,18 +108,23 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(facilitatorHints.tasks.map(({ task }) => task)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(protocol).toContain('facilitator-hints.json');
     expect(protocol).toContain('earliest incomplete checkpoint');
+    expect(protocol).toContain('recompute the earliest incomplete checkpoint');
+    expect(protocol).toContain('90-second interval restarts');
     expect(protocol).toContain('verbatim-repeat');
     expect(protocol).toContain('forces the task outcome to `failure`');
     expect(protocol).toContain('after every approved instrument change');
     for (const field of [
       'Hint ID', 'Exact hint used', 'Assist ordinal', 'Assist event type',
-      'Deviation ID', 'Session validity effect',
+      'Takeover action ID', 'Exact takeover action', 'Deviation ID', 'Session validity effect',
     ]) {
       expect(privateIntervention).toContain(field);
       expect(privateSession).toContain(field);
     }
     expect(privateAuthorization).toContain('Facilitator calibration and rehearsal sign-off');
+    expect(privateAuthorization).toContain('Instrument SHA-256');
+    expect(privateAuthorization).toContain('Approved Git SHA/change reference');
     expect(decisionTemplate).not.toContain('Exact hint used');
-    expect(privacyFields.privateOnly).toContain('exact facilitator hint text, hint IDs, assist ordinals, and deviation logs');
+    expect(privacyFields.repositoryAllowed).toContain('versioned facilitator instrument, including approved hint and takeover text');
+    expect(privacyFields.privateOnly).toContain('participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs');
   });
 });

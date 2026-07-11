@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  assertFacilitatorCalibration,
   FACILITATOR_ASSIST_EVENT_DEFINITIONS,
   FACILITATOR_ASSIST_EVENT_IDS,
   FACILITATOR_DEVIATION_DEFINITIONS,
   FINDING_CATEGORIES,
+  nextFacilitatorIntervention,
   RECRUITMENT_EXCEPTION_IDS,
 } from './creator-study-contract.mjs';
 
@@ -55,6 +58,8 @@ test('privacy contract keeps identifiable and raw evidence out of repository-saf
   assert.ok(fields.privateOnly.some((field) => /session date.*time zone.*delivery mode/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /facilitator.*observer.*technical operator/i.test(field)));
   assert.ok(fields.repositoryAllowed.every((field) => !/participant name|contact details|raw or potentially identifying quotes|approved storage path/i.test(field)));
+  assert.ok(fields.repositoryAllowed.includes('versioned facilitator instrument, including approved hint and takeover text'));
+  assert.ok(fields.privateOnly.includes('participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs'));
 });
 
 test('Product materials include repository-owned provenance and a public-domain dedication', () => {
@@ -153,6 +158,12 @@ test('facilitator hint instrument covers Tasks 1-8 with exact closed assist sema
     secondHintAfterAdditionalSeconds: 90,
     takeoverAfterAdditionalSeconds: 90,
   });
+  assert.deepEqual(instrument.progression, {
+    checkpointSelection: 'earliest-incomplete',
+    checkpointProgressResetsIntervalSeconds: 90,
+    changedCheckpointHintLevel: 'first',
+    unchangedCheckpointHintSequence: ['first', 'second', 'takeover'],
+  });
   assert.deepEqual(instrument.tasks.map(({ task }) => task), [1, 2, 3, 4, 5, 6, 7, 8]);
   const checkpoints = instrument.tasks.flatMap(({ checkpoints }) => checkpoints);
   assert.ok(instrument.tasks.every(({ checkpoints: taskCheckpoints }) => taskCheckpoints.length > 0));
@@ -182,6 +193,99 @@ test('facilitator hint instrument covers Tasks 1-8 with exact closed assist sema
   assert.deepEqual(instrument.deviations, FACILITATOR_DEVIATION_DEFINITIONS);
   assert.equal(new Set(instrument.deviations.map(({ id }) => id)).size, instrument.deviations.length);
   assert.ok(instrument.deviations.every(({ sessionValidity }) => ['valid', 'invalid'].includes(sessionValidity)));
+
+  assert.equal(instrument.takeoverActions.length, checkpoints.length);
+  assert.deepEqual(
+    instrument.takeoverActions.map(({ checkpointId }) => checkpointId),
+    checkpoints.map(({ id }) => id),
+  );
+  for (const action of instrument.takeoverActions) {
+    assert.match(action.id, /^T[1-8]-C[1-9][0-9]*-TO$/);
+    assert.ok(action.exactAction.trim());
+  }
+});
+
+test('checkpoint progress recomputes the hint ladder instead of delivering a stale second hint', () => {
+  const instrument = JSON.parse(readFileSync(join(study, 'facilitator-hints.json'), 'utf8'));
+  const first = nextFacilitatorIntervention({
+    instrument, taskNumber: 1, completedCheckpointIds: [], previousIntervention: null,
+  });
+  assert.deepEqual(first, {
+    type: 'standard-hint', checkpointId: 'T1-C1', interventionId: 'T1-C1-H1',
+    hintLevel: 'first', exactText: instrument.tasks[0].checkpoints[0].firstHint,
+  });
+
+  const afterProgress = nextFacilitatorIntervention({
+    instrument, taskNumber: 1, completedCheckpointIds: ['T1-C1'], previousIntervention: first,
+  });
+  assert.deepEqual(afterProgress, {
+    type: 'standard-hint', checkpointId: 'T1-C2', interventionId: 'T1-C2-H1',
+    hintLevel: 'first', exactText: instrument.tasks[0].checkpoints[1].firstHint,
+  });
+
+  const withoutProgress = nextFacilitatorIntervention({
+    instrument, taskNumber: 1, completedCheckpointIds: [], previousIntervention: first,
+  });
+  assert.deepEqual(withoutProgress, {
+    type: 'standard-hint', checkpointId: 'T1-C1', interventionId: 'T1-C1-H2',
+    hintLevel: 'second', exactText: instrument.tasks[0].checkpoints[0].secondHint,
+  });
+  const takeover = nextFacilitatorIntervention({
+    instrument, taskNumber: 1, completedCheckpointIds: [], previousIntervention: withoutProgress,
+  });
+  assert.deepEqual(takeover, {
+    type: 'takeover', checkpointId: 'T1-C1', interventionId: 'T1-C1-TO',
+    hintLevel: null, exactText: instrument.takeoverActions[0].exactAction,
+  });
+  const afterSecondHintProgress = nextFacilitatorIntervention({
+    instrument, taskNumber: 1, completedCheckpointIds: ['T1-C1'],
+    previousIntervention: withoutProgress,
+  });
+  assert.deepEqual(afterSecondHintProgress, afterProgress);
+});
+
+test('calibration pins exact instrument bytes and detects arbitrary version-preserving mutation', () => {
+  const bytes = readFileSync(join(study, 'facilitator-hints.json'));
+  const pinned = readFileSync(join(study, 'facilitator-hints.sha256'), 'utf8').trim();
+  assert.match(pinned, /^[a-f0-9]{64}$/);
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), pinned);
+
+  const approvedGitChangeReference = 'fc2d2306f2ce466c0c0d7f941bccc9d7447aeadc';
+  const signoff = {
+    instrumentVersion: 1,
+    instrumentSha256: pinned,
+    approvedGitChangeReference,
+    calibrationCompleted: true,
+  };
+  assert.deepEqual(assertFacilitatorCalibration({
+    instrumentBytes: bytes,
+    pinnedSha256: pinned,
+    instrumentVersion: 1,
+    approvedGitChangeReference,
+    signoff,
+  }), signoff);
+
+  const mutated = JSON.parse(bytes);
+  mutated.tasks[0].checkpoints[0].firstHint = 'Click anything until the task works.';
+  assert.equal(mutated.version, 1);
+  const mutatedBytes = `${JSON.stringify(mutated, null, 2)}\n`;
+  assert.throws(
+    () => assertFacilitatorCalibration({
+      instrumentBytes: mutatedBytes,
+      pinnedSha256: pinned,
+      instrumentVersion: 1,
+      approvedGitChangeReference,
+      signoff,
+    }),
+    /SHA-256/i,
+  );
+  assert.throws(() => assertFacilitatorCalibration({
+    instrumentBytes: bytes,
+    pinnedSha256: pinned,
+    instrumentVersion: 1,
+    approvedGitChangeReference: 'different-approved-change',
+    signoff,
+  }), /Git change reference/i);
 });
 
 test('private templates close hint logging, deviation validity, and calibration sign-off', () => {
@@ -192,11 +296,14 @@ test('private templates close hint logging, deviation validity, and calibration 
   for (const template of [intervention, session]) {
     for (const field of [
       'Hint ID', 'Exact hint used', 'Assist ordinal', 'Assist event type',
-      'Deviation ID', 'Session validity effect',
+      'Takeover action ID', 'Exact takeover action', 'Deviation ID', 'Session validity effect',
     ]) assert.match(template, new RegExp(field));
   }
+  assert.match(intervention, /For a takeover[\s\S]*N\/A[\s\S]*Takeover action ID/);
   assert.match(authorization, /Facilitator calibration and rehearsal sign-off/);
   assert.match(authorization, /before participant 1/i);
   assert.match(authorization, /after every approved instrument change/i);
-  assert.match(reset, /calibration sign-off.*current instrument version/i);
+  assert.match(authorization, /Instrument SHA-256/);
+  assert.match(authorization, /Approved Git SHA\/change reference/);
+  assert.match(reset, /calibration sign-off.*current instrument version, SHA-256, and approved Git change reference/i);
 });
