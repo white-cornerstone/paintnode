@@ -10,7 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use base64::Engine;
@@ -37,7 +37,10 @@ const PROJECT_MATERIAL_ENVELOPE_MAGIC: &[u8; 8] = b"PNMATRAW";
 const PROJECT_MATERIAL_ENVELOPE_VERSION: u16 = 1;
 const PROJECT_MATERIAL_METADATA_MAX_BYTES: usize = 4 * 1024;
 
-static PROJECT_TRANSACTIONS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+// Strong ownership is intentional: transaction poison must remain durable after
+// the last active operation drops its Arc. The registry grows by one small mutex
+// per canonical project opened during the process lifetime.
+static PROJECT_TRANSACTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -194,12 +197,11 @@ fn project_transaction(project_path: &Path) -> Result<Arc<Mutex<()>>, String> {
     let mut transactions = transactions
         .lock()
         .map_err(|_| "Project transaction registry is unavailable.".to_string())?;
-    transactions.retain(|_, transaction| transaction.strong_count() > 0);
-    if let Some(transaction) = transactions.get(&canonical_path).and_then(Weak::upgrade) {
-        return Ok(transaction);
+    if let Some(transaction) = transactions.get(&canonical_path) {
+        return Ok(Arc::clone(transaction));
     }
     let transaction = Arc::new(Mutex::new(()));
-    transactions.insert(canonical_path, Arc::downgrade(&transaction));
+    transactions.insert(canonical_path, Arc::clone(&transaction));
     Ok(transaction)
 }
 
@@ -279,18 +281,38 @@ fn new_manifest(project_path: &Path) -> ProjectManifest {
 }
 
 fn load_manifest(project_path: &Path) -> Result<ProjectManifest, String> {
+    load_manifest_observed(project_path, || {})
+}
+
+fn load_manifest_observed(
+    project_path: &Path,
+    before_initialize: impl FnOnce(),
+) -> Result<ProjectManifest, String> {
+    ensure_project_dirs(project_path)?;
+    let path = project_manifest_path(project_path);
+    if path.exists() {
+        return read_manifest(&path);
+    }
+    before_initialize();
+    with_project_transaction(project_path, || load_manifest_unlocked(project_path))
+}
+
+fn load_manifest_unlocked(project_path: &Path) -> Result<ProjectManifest, String> {
     ensure_project_dirs(project_path)?;
     let path = project_manifest_path(project_path);
     if !path.exists() {
-        let manifest = new_manifest(project_path);
-        save_manifest(project_path, &manifest)?;
-        return Ok(manifest);
+        save_manifest_atomic(project_path, &new_manifest(project_path))?;
     }
-    let text = fs::read_to_string(&path)
+    read_manifest(&path)
+}
+
+fn read_manifest(path: &Path) -> Result<ProjectManifest, String> {
+    let text = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read project manifest at {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("Project manifest is invalid JSON: {e}"))
 }
 
+#[cfg(test)]
 fn save_manifest(project_path: &Path, manifest: &ProjectManifest) -> Result<(), String> {
     ensure_project_dirs(project_path)?;
     let mut next = manifest.clone();
@@ -1064,10 +1086,10 @@ fn add_asset_with_transaction_observer(
     on_contention: impl FnOnce(),
 ) -> Result<ProjectAssetView, String> {
     with_project_transaction_observed(project_path, on_contention, || {
-        let mut manifest = load_manifest(project_path)?;
+        let mut manifest = load_manifest_unlocked(project_path)?;
         manifest.assets.retain(|existing| existing.id != asset.id);
         manifest.assets.push(asset.clone());
-        save_manifest(project_path, &manifest)
+        save_manifest_atomic(project_path, &manifest)
     })?;
     Ok(asset_view(project_path, asset))
 }
@@ -1185,7 +1207,7 @@ fn rollback_workflow_editor_return_unlocked(
     let output_relative = safe_project_relative_path(&receipt.output_relative_path)?;
     let document_path = project_dir.join(document_relative);
     let output_path = project_dir.join(output_relative);
-    let mut manifest = load_manifest(project_dir)?;
+    let mut manifest = load_manifest_unlocked(project_dir)?;
     let matching_assets = manifest
         .assets
         .iter()
@@ -1388,7 +1410,7 @@ fn commit_workflow_editor_return_unlocked(
         height,
     } = input;
     ensure_project_dirs(project_dir)?;
-    let mut manifest = load_manifest(project_dir)?;
+    let mut manifest = load_manifest_unlocked(project_dir)?;
     let nonce = now_id();
     let cleanup_token = workflow_editor_cleanup_token()?;
     let asset_id = format!("asset-{nonce}");
@@ -1772,7 +1794,7 @@ pub(crate) async fn project_delete_asset(
     tauri::async_runtime::spawn_blocking(move || -> Result<ProjectState, String> {
         let project_dir = PathBuf::from(project_path.trim());
         with_project_transaction(&project_dir, || {
-            let mut manifest = load_manifest(&project_dir)?;
+            let mut manifest = load_manifest_unlocked(&project_dir)?;
             let Some(index) = manifest
                 .assets
                 .iter()
@@ -1787,7 +1809,7 @@ pub(crate) async fn project_delete_asset(
                     .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
             }
             manifest.assets.remove(index);
-            save_manifest(&project_dir, &manifest)?;
+            save_manifest_atomic(&project_dir, &manifest)?;
             project_state(&project_dir)
         })
     })
@@ -1951,6 +1973,78 @@ mod tests {
             height: Some(1),
             mime: Some("image/png".into()),
         }
+    }
+
+    #[test]
+    fn manifest_initialization_cannot_overwrite_concurrent_asset_addition() {
+        let project =
+            TempJobDir::new("paintnode-project-concurrent-initialize").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        assert!(!project_manifest_path(project.path()).exists());
+        let relative = "assets/imported/concurrent-initialize.bin";
+        fs::write(project.path().join(relative), b"concurrent material")
+            .expect("candidate asset file");
+        let mut asset = material_asset("concurrent-initialize", relative);
+        asset.mime = None;
+
+        std::thread::scope(|scope| {
+            let project_path = project.path();
+            let (initialization_observed_tx, initialization_observed_rx) =
+                std::sync::mpsc::channel();
+            let (release_initialization_tx, release_initialization_rx) = std::sync::mpsc::channel();
+            let initialize = scope.spawn(move || {
+                load_manifest_observed(project_path, || {
+                    initialization_observed_tx
+                        .send(())
+                        .expect("signal missing manifest observation");
+                    release_initialization_rx
+                        .recv()
+                        .expect("release manifest initialization");
+                })
+            });
+            initialization_observed_rx
+                .recv()
+                .expect("read-oriented initialization observed missing manifest");
+
+            add_asset(project.path(), asset).expect("concurrent asset addition");
+            release_initialization_tx
+                .send(())
+                .expect("release read-oriented initialization");
+            let initialized = initialize
+                .join()
+                .expect("initialization thread")
+                .expect("initialization result");
+            assert_eq!(initialized.assets.len(), 1);
+            assert_eq!(initialized.assets[0].id, "concurrent-initialize");
+        });
+
+        let manifest = load_manifest(project.path()).expect("final manifest");
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].id, "concurrent-initialize");
+    }
+
+    #[test]
+    fn project_transaction_poison_survives_idle_and_fails_closed() {
+        let project = TempJobDir::new("paintnode-project-transaction-poison").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_project_transaction(project.path(), || -> Result<(), String> {
+                panic!("adversarial interruption while project transaction is held")
+            });
+        }));
+        assert!(panic.is_err(), "adversarial transaction must panic");
+
+        let relative = "assets/imported/after-poison.bin";
+        fs::write(project.path().join(relative), b"must not be committed")
+            .expect("candidate asset file");
+        let mut asset = material_asset("after-poison", relative);
+        asset.mime = None;
+        let error = add_asset(project.path(), asset)
+            .expect_err("poisoned project transaction must remain fail closed while idle");
+
+        assert!(error.contains("interrupted"));
+        assert!(!project_manifest_path(project.path()).exists());
     }
 
     #[test]
