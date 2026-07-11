@@ -167,7 +167,7 @@ test('timed-out provider checks kill the whole Unix process group', async () => 
   );
 
   await assert.rejects(
-    runProviderCommand('codex', provider, ['--version'], 1_000, { platform: 'darwin' }),
+    runProviderCommand('codex', provider, ['--version'], 3_000, { platform: 'darwin' }),
     /timed out/i,
   );
 
