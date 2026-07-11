@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  approvedBuildDecisionCommitment,
   createMacosActiveBuildAnchor,
   EXPECTED_BUNDLE_ID,
   verifyStudySetup,
@@ -63,6 +64,37 @@ function writeApprovedBuildRecord(root, record = approvedBuildRecord(), fileName
   return path;
 }
 
+function canonicalDecisionRecordSha256(record) {
+  const canonical = {
+    schemaVersion: record.schemaVersion,
+    recordType: record.recordType,
+    approvedBuild: {
+      version: record.approvedBuild.version,
+      mode: record.approvedBuild.mode,
+      bundleId: record.approvedBuild.bundleId,
+      gitSha: record.approvedBuild.gitSha,
+      sourceTreeSha: record.approvedBuild.sourceTreeSha,
+      sourceDirty: record.approvedBuild.sourceDirty,
+      sourceStatusSha256: record.approvedBuild.sourceStatusSha256,
+      executableSha256: record.approvedBuild.executableSha256,
+    },
+    approval: {
+      ownerApproved: record.approval.ownerApproved,
+      approvedAt: record.approval.approvedAt,
+      decisionReference: record.approval.decisionReference,
+      approvalId: record.approval.approvalId,
+    },
+    changeControl: {
+      kind: record.changeControl.kind,
+      replacesDecisionReference: record.changeControl.replacesDecisionReference,
+      reason: record.changeControl.reason,
+      rehearsalCompletedAt: record.changeControl.rehearsalCompletedAt,
+      comparabilityDecision: record.changeControl.comparabilityDecision,
+    },
+  };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
 function writeActiveBuildDecisions(root, records) {
   const path = join(root, 'active-build-decisions.private.json');
   const decisions = records.map((record, index) => ({
@@ -70,11 +102,12 @@ function writeActiveBuildDecisions(root, records) {
     approvalId: record.approval.approvalId,
     decisionReference: record.approval.decisionReference,
     approvedAt: record.approval.approvedAt,
+    decisionRecordSha256: canonicalDecisionRecordSha256(record),
   }));
   writeFileSync(path, `${JSON.stringify({
     _copyWarning: 'COPY OUTSIDE REPOSITORY — complete only in approved restricted research storage.',
     _privacyWarning: 'PRIVATE ONLY. Never complete this ledger in GitHub, a checkout, worktree, chat, or participant project.',
-    schemaVersion: 1,
+    schemaVersion: 2,
     recordType: 'paintnode-creator-study-active-build-decisions',
     activeGeneration: decisions.length,
     decisions,
@@ -87,6 +120,7 @@ function memoryActiveBuildAnchor(initial = null) {
   return {
     read: () => value === null ? null : structuredClone(value),
     write: (next) => { value = structuredClone(next); },
+    runExclusive: (callback) => callback(),
     snapshot: () => value === null ? null : structuredClone(value),
     restore: (next) => { value = next === null ? null : structuredClone(next); },
   };
@@ -98,17 +132,19 @@ function decisionChainSha256(records) {
     approvalId: record.approval.approvalId,
     decisionReference: record.approval.decisionReference,
     approvedAt: record.approval.approvedAt,
+    decisionRecordSha256: canonicalDecisionRecordSha256(record),
   }));
   return createHash('sha256').update(JSON.stringify(entries)).digest('hex');
 }
 
 function protectedHead(record, activeGeneration, records = [record]) {
   return {
-    version: 2,
+    version: 3,
     activeGeneration,
     approvalId: record.approval.approvalId,
     decisionReference: record.approval.decisionReference,
     approvedAt: record.approval.approvedAt,
+    decisionRecordSha256: canonicalDecisionRecordSha256(record),
     decisionChainSha256: decisionChainSha256(records),
   };
 }
@@ -128,11 +164,12 @@ function setupDirectories() {
 test('protected active-build anchor pins the complete private decision head in the study Mac keychain', () => {
   const calls = [];
   const stored = {
-    version: 2,
+    version: 3,
     activeGeneration: 2,
     approvalId: CHANGE_APPROVAL_ID,
     decisionReference: 'CB-M2-BUILD-CHANGE-02',
     approvedAt: '2026-07-12T09:30:00.000Z',
+    decisionRecordSha256: 'b'.repeat(64),
     decisionChainSha256: 'c'.repeat(64),
   };
   const anchor = createMacosActiveBuildAnchor((command, args) => {
@@ -141,25 +178,36 @@ test('protected active-build anchor pins the complete private decision head in t
     return { status: 0, stdout: '', stderr: '' };
   }, 'darwin');
   assert.deepEqual(anchor.read(), stored);
-  anchor.write(stored);
+  assert.throws(() => anchor.write(stored), /exclusive process lock/i);
+  anchor.runExclusive(() => anchor.write(stored));
   assert.equal(calls.every(({ command }) => command === 'security'), true);
   assert.equal(calls[0].args.includes('find-generic-password'), true);
   assert.equal(calls[1].args.includes('add-generic-password'), true);
   assert.equal(JSON.stringify(calls).includes('decisionReference'), true);
   assert.equal(JSON.stringify(calls).includes('approvedAt'), true);
+  assert.equal(JSON.stringify(calls).includes('decisionRecordSha256'), true);
   assert.equal(JSON.stringify(calls).includes('decisionChainSha256'), true);
   assert.equal(JSON.stringify(calls).includes('reason'), false);
   assert.equal(JSON.stringify(calls).includes('executableSha256'), false);
   assert.throws(() => createMacosActiveBuildAnchor(() => ({ status: 0 }), 'linux').read(), /study Mac keychain/i);
   assert.throws(() => createMacosActiveBuildAnchor(() => ({
     status: 0,
-    stdout: JSON.stringify({ version: 1, activeGeneration: 2, approvalId: CHANGE_APPROVAL_ID }),
+    stdout: JSON.stringify({ version: 2, activeGeneration: 2, approvalId: CHANGE_APPROVAL_ID }),
     stderr: '',
   }), 'darwin').read(), /missing required field|version or generation is invalid/i);
 });
 
 test('the committed Product materials are deterministic, distinct, and assigned to Tasks 1 and 6', () => {
-  const { projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor } = setupDirectories();
+  const {
+    projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor,
+  } = setupDirectories();
+  assert.deepEqual(approvedBuildDecisionCommitment({
+    repoRoot,
+    approvedBuildRecordPath,
+  }), {
+    ledgerSchemaVersion: 2,
+    decisionRecordSha256: canonicalDecisionRecordSha256(approvedBuildRecord()),
+  });
   const receipt = verifyStudySetup({
     repoRoot,
     projectDir,
@@ -193,6 +241,96 @@ test('the committed Product materials are deterministic, distinct, and assigned 
   assert.equal(JSON.stringify(receipt).includes(activeBuildDecisionsPath), false, 'receipt must not leak private ledger paths');
   assert.equal(JSON.stringify(receipt).includes('CB-M2-BUILD-BASELINE-01'), false, 'receipt must not leak private decision references');
   assert.equal(JSON.stringify(receipt).includes('2026-07-11T09:30:00.000Z'), false, 'receipt must not leak private approval dates');
+  assert.equal(
+    JSON.stringify(receipt).includes(canonicalDecisionRecordSha256(approvedBuildRecord())),
+    false,
+    'receipt must not leak the private canonical decision commitment',
+  );
+  assert.equal('decisionChainSha256' in receipt.approvalRecord, false);
+});
+
+test('protected decision commitment rejects build A to build B rewrite under the same approval labels', () => {
+  const {
+    root, projectDir, rehearsalDir, approvedBuildRecordPath,
+    activeBuildDecisionsPath, activeBuildAnchor,
+  } = setupDirectories();
+  const options = {
+    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath,
+    activeBuildDecisionsPath, activeBuildAnchor, fixtureManifest,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
+  };
+  assert.equal(verifyStudySetup(options).ready, true);
+  const acceptedAnchor = activeBuildAnchor.snapshot();
+
+  const buildB = {
+    ...appBuild,
+    gitSha: '5'.repeat(40),
+    sourceTreeSha: 'c'.repeat(40),
+    executableSha256: 'd'.repeat(64),
+  };
+  const rewrittenRecord = approvedBuildRecord({ approvedBuild: buildB });
+  options.approvedBuildRecordPath = writeApprovedBuildRecord(root, rewrittenRecord);
+  options.activeBuildDecisionsPath = writeActiveBuildDecisions(root, [rewrittenRecord]);
+  options.actualGitSha = buildB.gitSha;
+  options.actualSourceTreeSha = buildB.sourceTreeSha;
+  options.appBuild = buildB;
+  options.actualExecutableSha256 = buildB.executableSha256;
+  assert.throws(
+    () => verifyStudySetup(options),
+    /conflicts with this generation private decision head/i,
+  );
+  assert.deepEqual(activeBuildAnchor.snapshot(), acceptedAnchor);
+});
+
+test('stale generation-1 verifier cannot overwrite a concurrent generation-2 anchor', () => {
+  const {
+    projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath,
+  } = setupDirectories();
+  const initial = approvedBuildRecord();
+  const replacement = approvedBuildRecord({
+    approval: {
+      ownerApproved: true,
+      approvedAt: '2026-07-12T09:30:00.000Z',
+      decisionReference: 'CB-M2-BUILD-CONCURRENT-02',
+      approvalId: CHANGE_APPROVAL_ID,
+    },
+    changeControl: {
+      kind: 'mid-study',
+      replacesDecisionReference: initial.approval.decisionReference,
+      reason: 'Concurrent advancement proof.',
+      rehearsalCompletedAt: '2026-07-12T09:00:00.000Z',
+      comparabilityDecision: 'comparable',
+    },
+  });
+  const concurrentGenerationTwo = protectedHead(replacement, 2, [initial, replacement]);
+  let anchorValue = null;
+  let writeCount = 0;
+  let exclusiveCount = 0;
+  const staleAnchorStore = {
+    read: () => anchorValue === null ? null : structuredClone(anchorValue),
+    write: (next) => { writeCount += 1; anchorValue = structuredClone(next); },
+    runExclusive(callback) {
+      exclusiveCount += 1;
+      anchorValue = structuredClone(concurrentGenerationTwo);
+      return callback();
+    },
+  };
+  assert.throws(() => verifyStudySetup({
+    repoRoot, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath,
+    activeBuildAnchor: staleAnchorStore, fixtureManifest,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
+  }), /rejects rolled-back private decision files/i);
+  assert.equal(exclusiveCount, 1);
+  assert.equal(writeCount, 0, 'stale writer must re-read and reject before Keychain update');
+  assert.deepEqual(anchorValue, concurrentGenerationTwo);
 });
 
 test('setup verification fails closed for dirty projects, retained rehearsal data, wrong build, or wrong bundle', () => {

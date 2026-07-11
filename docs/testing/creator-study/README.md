@@ -18,10 +18,11 @@ study storage.
   point setup verification at the blank repository template.
 - `templates/private-active-build-decisions.json` is the privately controlled,
   append-only active-decision ledger. Setup also pins its complete current head
-  (generation, approval ID, decision reference, and approval timestamp) in a
-  separate macOS Keychain anchor together with a private commitment to the full
-  decision chain, so rolling back or rewriting the private files cannot
-  reactivate or falsify an older record/build decision.
+  (generation, approval ID, decision reference, approval timestamp, and complete
+  canonical approved-build decision commitment) in a separate macOS Keychain
+  anchor together with a private commitment to the full decision chain, so
+  rolling back or rewriting the private files cannot reactivate or falsify an
+  older record/build decision.
 - `templates/de-identified-recruitment-matrix.csv` may be used for aggregate
   cohort control only after direct identifiers and sensitive detail are
   removed.
@@ -70,14 +71,28 @@ study storage.
 5. Set initial change control to `kind: "initial"`, null replacement/reason,
    and `comparabilityDecision: "baseline"`. Append generation 1 to the
    active-decision ledger with the same `approvalId`, decision reference, and
-   approval timestamp. Setup creates the version-2 protected Keychain anchor
-   only at generation 1 and pins all three private head fields plus the decision
-   chain commitment. Keep the approved app and its sidecar together and reuse
-   that exact bundle.
+   approval timestamp and the SHA-256 commitment of the complete canonical
+   approved-build decision record. Setup creates the version-3 protected
+   Keychain anchor only at generation 1 and pins that complete private head plus
+   the decision-chain commitment. Keep the approved app and its sidecar together
+   and reuse that exact bundle.
 
-Each ledger entry is a closed object with exactly `generation`, `approvalId`,
-`decisionReference`, and `approvedAt`. Generate each approval ID independently;
-never derive it by hashing the private record, reason, timestamp, or reference.
+The private active-decision ledger uses schema version 2. Each entry is a closed
+object with exactly `generation`, `approvalId`, `decisionReference`, `approvedAt`,
+and `decisionRecordSha256`. The commitment covers the canonical record type,
+approved build identity, owner decision, and complete change-control object.
+Generate each approval ID independently; never derive it from that commitment or
+from the private record, reason, timestamp, or reference.
+
+Generate the canonical commitment only from the completed private record:
+
+```sh
+npm run qa:creator-study:decision-commitment -- \
+  --approved-build-record /absolute/private/approved-build.json
+```
+
+Copy the returned `decisionRecordSha256` into the matching private ledger entry.
+The command prints no record fields, paths, timestamps, references, or reasons.
 
 The current HEAD does not approve itself. Do not regenerate this record from
 `git rev-parse HEAD`, and do not rebuild between sessions: a rebuild has a new
@@ -118,16 +133,18 @@ mismatched approval records fail closed. The ledger must contain contiguous,
 unique generations with strictly increasing approval timestamps; its latest
 approval ID/reference/time must match the supplied record. The separate Keychain
 anchor must match the complete current head or advance by exactly one generation
-from an exact protected previous-head and chain-prefix match. Its receipt reports
-the matched identity, active generation, and random non-derived approval ID, but
-omits the anchor's private approval date and decision reference along with private paths,
-change reason, ledger history, storage data, and participant paths. It does not
-replace rehearsal or authorization.
+from an exact protected previous-head and chain-prefix match. Advancement is
+serialized under an exclusive process lock, then re-reads, validates, writes, and
+re-reads the Keychain item before setup can return ready. Its receipt reports the
+matched identity, active generation, and random non-derived approval ID, but
+omits the anchor's private commitments, approval date, and decision reference
+along with private paths, change reason, ledger history, storage data, and
+participant paths. It does not replace rehearsal or authorization.
 
 Use the same approved study Mac for the whole study. Do not delete, reset,
 export, or restore the `com.paintnode.creator-study.active-build` Keychain item.
-Legacy version-1 anchor payloads fail closed rather than being migrated without
-authenticated time/reference history.
+Legacy version-1 or version-2 anchor payloads fail closed rather than being
+migrated without authenticated build and change-control history.
 If that protected anchor is unavailable or conflicts with private files, pause
 the study and resolve it as an owner-controlled integrity incident.
 

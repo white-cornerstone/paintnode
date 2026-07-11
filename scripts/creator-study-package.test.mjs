@@ -39,10 +39,12 @@ test('every private operational form is blank and warns to copy outside the repo
 
 test('private active-build ledger starts blank and requires monotonic generations', () => {
   const ledger = JSON.parse(readFileSync(join(study, 'templates/private-active-build-decisions.json'), 'utf8'));
-  assert.equal(ledger.schemaVersion, 1);
+  const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert.equal(ledger.schemaVersion, 2);
   assert.equal(ledger.recordType, 'paintnode-creator-study-active-build-decisions');
   assert.equal(ledger.activeGeneration, 0);
   assert.deepEqual(ledger.decisions, []);
+  assert.match(packageJson.scripts['qa:creator-study:decision-commitment'], /print-decision-commitment/);
 });
 
 test('private approved-build template freezes literal identity and change-control fields', () => {

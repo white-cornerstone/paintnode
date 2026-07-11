@@ -183,10 +183,12 @@ future-dated approvals, superseded records, executable drift, and symlink
 aliases into the repository. A separate macOS Keychain anchor prevents whole-file
 rollback or historical ledger rewriting from reactivating or falsifying an older
 generation. The private anchor pins the current generation, approval ID, decision
-reference, approval timestamp, and a commitment to the full accepted decision
-chain. Advancement requires the prior protected head and chain prefix to match
-the preceding ledger entry exactly; same-generation checks authenticate the
-entire retained history. Its receipt exposes only the
+reference, approval timestamp, complete canonical approved-build decision
+commitment, and a commitment to the full accepted decision chain. Advancement
+requires the prior protected head and chain prefix to match the preceding ledger
+entry exactly; an exclusive process lock encloses the final re-read, validation,
+write, and verification re-read. Same-generation checks authenticate the entire
+retained history and active approved-build/change-control record. Its receipt exposes only the
 active generation and random non-derived approval ID in addition to the approved
 identity; it omits private paths,
 approval dates, decision references, ledger history, and change reasons. The
@@ -198,7 +200,8 @@ new immutable private approval record, and an explicit comparability decision.
 Append each replacement to the private monotonic active-decision ledger; the
 protected study-Mac anchor advances by exactly one generation from an exact
 previous-head and chain-prefix match, so an old record and matching old build—or
-rewritten prior time/reference—must not become current again.
+rewritten build, change control, prior time, or prior reference—must not become
+current again.
 When comparability is `restart-required`, earlier sessions cannot be pooled
 with sessions on the new baseline and replacements must be recorded.
 

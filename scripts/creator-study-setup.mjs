@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import {
+  accessSync, closeSync, constants, existsSync, lstatSync, openSync, readFileSync,
+  readdirSync, realpathSync, rmSync, statSync, writeSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -20,6 +24,7 @@ const APPROVAL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f
 const UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ACTIVE_ANCHOR_SERVICE = 'com.paintnode.creator-study.active-build';
 const ACTIVE_ANCHOR_ACCOUNT = 'creative-blueprint-mvp';
+const ACTIVE_ANCHOR_LOCK_PATH = join(tmpdir(), 'paintnode-creator-study-active-build.lock');
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -163,6 +168,36 @@ function validApprovalId(value, label) {
   return value;
 }
 
+function canonicalApprovedBuildDecision(record) {
+  return {
+    schemaVersion: record.schemaVersion,
+    recordType: record.recordType,
+    approvedBuild: {
+      version: record.approvedBuild.version,
+      mode: record.approvedBuild.mode,
+      bundleId: record.approvedBuild.bundleId,
+      gitSha: record.approvedBuild.gitSha,
+      sourceTreeSha: record.approvedBuild.sourceTreeSha,
+      sourceDirty: record.approvedBuild.sourceDirty,
+      sourceStatusSha256: record.approvedBuild.sourceStatusSha256,
+      executableSha256: record.approvedBuild.executableSha256,
+    },
+    approval: {
+      ownerApproved: record.approval.ownerApproved,
+      approvedAt: record.approval.approvedAt,
+      decisionReference: record.approval.decisionReference,
+      approvalId: record.approval.approvalId,
+    },
+    changeControl: {
+      kind: record.changeControl.kind,
+      replacesDecisionReference: record.changeControl.replacesDecisionReference,
+      reason: record.changeControl.reason,
+      rehearsalCompletedAt: record.changeControl.rehearsalCompletedAt,
+      comparabilityDecision: record.changeControl.comparabilityDecision,
+    },
+  };
+}
+
 function readApprovedBuildRecord(recordPath, canonicalRepo) {
   if (!recordPath) throw new Error('An absolute private approved-build record path is required.');
   if (!isAbsolute(recordPath)) throw new Error('The approved-build record path must be absolute.');
@@ -241,6 +276,7 @@ function readApprovedBuildRecord(recordPath, canonicalRepo) {
   } else {
     throw new Error('Approved-build change kind must be initial or mid-study.');
   }
+  const decisionRecordSha256 = sha256(JSON.stringify(canonicalApprovedBuildDecision(record)));
   return Object.freeze({
     schemaVersion: record.schemaVersion,
     approvedBuild: Object.freeze({ ...approvedBuild }),
@@ -250,6 +286,19 @@ function readApprovedBuildRecord(recordPath, canonicalRepo) {
     decisionReference: approval.decisionReference,
     approvalId: approval.approvalId,
     replacesDecisionReference: change.replacesDecisionReference,
+    decisionRecordSha256,
+  });
+}
+
+export function approvedBuildDecisionCommitment({
+  repoRoot = scriptRoot,
+  approvedBuildRecordPath,
+}) {
+  const canonicalRepo = canonicalExisting(repoRoot, 'Git repository');
+  const approval = readApprovedBuildRecord(approvedBuildRecordPath, canonicalRepo);
+  return Object.freeze({
+    ledgerSchemaVersion: 2,
+    decisionRecordSha256: approval.decisionRecordSha256,
   });
 }
 
@@ -278,7 +327,7 @@ function readActiveBuildDecisions(decisionsPath, canonicalRepo, approval) {
     || typeof ledger._privacyWarning !== 'string' || !ledger._privacyWarning.includes('PRIVATE ONLY')) {
     throw new Error('Active-build decisions must retain their copy-outside-repository and private-only warnings.');
   }
-  if (ledger.schemaVersion !== 1 || ledger.recordType !== ACTIVE_BUILD_DECISIONS_TYPE) {
+  if (ledger.schemaVersion !== 2 || ledger.recordType !== ACTIVE_BUILD_DECISIONS_TYPE) {
     throw new Error('Active-build decisions schema or record type is unsupported.');
   }
   if (!Number.isSafeInteger(ledger.activeGeneration) || ledger.activeGeneration < 1
@@ -287,32 +336,39 @@ function readActiveBuildDecisions(decisionsPath, canonicalRepo, approval) {
   }
   const approvalIds = new Set();
   const references = new Set();
+  const decisionCommitments = new Set();
   let previousApprovedAt = Number.NEGATIVE_INFINITY;
   const decisions = ledger.decisions.map((entry, index) => {
     const decision = exactObject(
       entry,
-      ['generation', 'approvalId', 'decisionReference', 'approvedAt'],
+      ['generation', 'approvalId', 'decisionReference', 'approvedAt', 'decisionRecordSha256'],
       `Active-build decision generation ${index + 1}`,
     );
     if (decision.generation !== index + 1) throw new Error('Active-build decision generations must be contiguous and ordered.');
     validApprovalId(decision.approvalId, 'Active-build approval ID');
     validDecisionReference(decision.decisionReference, 'Active-build decision reference');
     const approvedAt = validTimestamp(decision.approvedAt, 'Active-build decision approval date');
+    if (!SHA256_PATTERN.test(decision.decisionRecordSha256 || '')) {
+      throw new Error('Active-build canonical decision commitment must be a SHA-256 value.');
+    }
     if (approvedAt <= previousApprovedAt) {
       throw new Error('Active-build decision approval dates must increase strictly across generations.');
     }
     previousApprovedAt = approvedAt;
-    if (approvalIds.has(decision.approvalId) || references.has(decision.decisionReference)) {
-      throw new Error('Active-build approval IDs and decision references must be unique across generations.');
+    if (approvalIds.has(decision.approvalId) || references.has(decision.decisionReference)
+      || decisionCommitments.has(decision.decisionRecordSha256)) {
+      throw new Error('Active-build approval IDs, decision references, and canonical commitments must be unique across generations.');
     }
     approvalIds.add(decision.approvalId);
     references.add(decision.decisionReference);
+    decisionCommitments.add(decision.decisionRecordSha256);
     return Object.freeze({ ...decision, approvedAtMilliseconds: approvedAt });
   });
   const active = decisions.at(-1);
   if (active.approvalId !== approval.approvalId
     || active.decisionReference !== approval.decisionReference
-    || active.approvedAtMilliseconds !== approval.approvedAt) {
+    || active.approvedAtMilliseconds !== approval.approvedAt
+    || active.decisionRecordSha256 !== approval.decisionRecordSha256) {
     throw new Error('Approved-build record is not the current active private decision.');
   }
   if (ledger.activeGeneration === 1) {
@@ -327,8 +383,10 @@ function readActiveBuildDecisions(decisionsPath, canonicalRepo, approval) {
       throw new Error('Mid-study rehearsal must occur after the preceding build approval.');
     }
   }
-  const chainEntries = decisions.map(({ generation, approvalId, decisionReference, approvedAt }) => ({
-    generation, approvalId, decisionReference, approvedAt,
+  const chainEntries = decisions.map(({
+    generation, approvalId, decisionReference, approvedAt, decisionRecordSha256,
+  }) => ({
+    generation, approvalId, decisionReference, approvedAt, decisionRecordSha256,
   }));
   const decisionChainSha256 = sha256(JSON.stringify(chainEntries));
   const previousDecisionChainSha256 = chainEntries.length > 1
@@ -341,12 +399,14 @@ function readActiveBuildDecisions(decisionsPath, canonicalRepo, approval) {
       approvalId: active.approvalId,
       decisionReference: active.decisionReference,
       approvedAt: active.approvedAt,
+      decisionRecordSha256: active.decisionRecordSha256,
       decisionChainSha256,
     }),
     previousHead: decisions.length > 1 ? Object.freeze({
       approvalId: decisions.at(-2).approvalId,
       decisionReference: decisions.at(-2).decisionReference,
       approvedAt: decisions.at(-2).approvedAt,
+      decisionRecordSha256: decisions.at(-2).decisionRecordSha256,
       decisionChainSha256: previousDecisionChainSha256,
     }) : null,
   });
@@ -357,17 +417,20 @@ function validateActiveBuildAnchor(value) {
     value,
     [
       'version', 'activeGeneration', 'approvalId', 'decisionReference', 'approvedAt',
-      'decisionChainSha256',
+      'decisionRecordSha256', 'decisionChainSha256',
     ],
     'Protected active-build anchor',
   );
-  if (anchor.version !== 2 || !Number.isSafeInteger(anchor.activeGeneration)
+  if (anchor.version !== 3 || !Number.isSafeInteger(anchor.activeGeneration)
     || anchor.activeGeneration < 1) {
     throw new Error('Protected active-build anchor version or generation is invalid.');
   }
   validApprovalId(anchor.approvalId, 'Protected active-build approval ID');
   validDecisionReference(anchor.decisionReference, 'Protected active-build decision reference');
   validTimestamp(anchor.approvedAt, 'Protected active-build approval date');
+  if (!SHA256_PATTERN.test(anchor.decisionRecordSha256 || '')) {
+    throw new Error('Protected active-build canonical decision commitment must be a SHA-256 value.');
+  }
   if (!SHA256_PATTERN.test(anchor.decisionChainSha256 || '')) {
     throw new Error('Protected active-build decision-chain commitment must be a SHA-256 value.');
   }
@@ -378,11 +441,82 @@ function sameActiveBuildHead(anchor, head) {
   return anchor.approvalId === head.approvalId
     && anchor.decisionReference === head.decisionReference
     && anchor.approvedAt === head.approvedAt
+    && anchor.decisionRecordSha256 === head.decisionRecordSha256
     && anchor.decisionChainSha256 === head.decisionChainSha256;
 }
 
-export function createMacosActiveBuildAnchor(run = spawnSync, platform = process.platform) {
+function processIsActive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+function runWithActiveBuildLock(lockPath, callback) {
+  let lock;
+  const createLock = () => {
+    const descriptor = openSync(lockPath, 'wx', 0o600);
+    try {
+      writeSync(descriptor, `${process.pid}\n`);
+      return descriptor;
+    } catch (error) {
+      closeSync(descriptor);
+      rmSync(lockPath, { force: true });
+      throw error;
+    }
+  };
+  const acquire = () => {
+    try {
+      lock = createLock();
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let ownerPid = Number.NaN;
+      try { ownerPid = Number.parseInt(readFileSync(lockPath, 'utf8').trim(), 10); } catch { /* stale */ }
+      let lockAgeMilliseconds = 0;
+      try { lockAgeMilliseconds = Date.now() - statSync(lockPath).mtimeMs; } catch { /* stale */ }
+      const ownerMayStillBeWriting = !Number.isSafeInteger(ownerPid)
+        && lockAgeMilliseconds >= 0
+        && lockAgeMilliseconds < 60_000;
+      if (processIsActive(ownerPid) || ownerMayStillBeWriting) {
+        throw new Error('Protected active-build anchor is currently being advanced by another setup process.');
+      }
+      rmSync(lockPath, { force: true });
+      lock = createLock();
+    }
+  };
+  acquire();
+  try {
+    return callback();
+  } finally {
+    if (lock !== undefined) closeSync(lock);
+    rmSync(lockPath, { force: true });
+  }
+}
+
+export function createMacosActiveBuildAnchor(
+  run = spawnSync,
+  platform = process.platform,
+  lockPath = ACTIVE_ANCHOR_LOCK_PATH,
+) {
+  let exclusive = false;
   return Object.freeze({
+    runExclusive(callback) {
+      if (platform !== 'darwin') {
+        throw new Error('The protected active-build anchor requires the study Mac keychain.');
+      }
+      return runWithActiveBuildLock(lockPath, () => {
+        exclusive = true;
+        try {
+          return callback();
+        } finally {
+          exclusive = false;
+        }
+      });
+    },
     read() {
       if (platform !== 'darwin') {
         throw new Error('The protected active-build anchor requires the study Mac keychain.');
@@ -401,6 +535,9 @@ export function createMacosActiveBuildAnchor(run = spawnSync, platform = process
       throw new Error(`Could not read protected active-build anchor: ${result.stderr || result.error || `status ${result.status}`}`);
     },
     write(anchor) {
+      if (!exclusive) {
+        throw new Error('Protected active-build anchor writes require the exclusive process lock.');
+      }
       const valid = validateActiveBuildAnchor(anchor);
       const result = run('security', [
         'add-generic-password', '-U', '-a', ACTIVE_ANCHOR_ACCOUNT,
@@ -413,42 +550,59 @@ export function createMacosActiveBuildAnchor(run = spawnSync, platform = process
   });
 }
 
+function activeBuildTransition(activeDecision, current, stored) {
+  if (stored === null) {
+    if (current.activeGeneration !== 1) {
+      throw new Error('Protected active-build anchor cannot start after generation 1.');
+    }
+    return true;
+  }
+  if (stored.activeGeneration > current.activeGeneration) {
+    throw new Error('Protected active-build anchor rejects rolled-back private decision files.');
+  }
+  if (stored.activeGeneration === current.activeGeneration) {
+    if (!sameActiveBuildHead(stored, current)) {
+      throw new Error('Protected active-build anchor conflicts with this generation private decision head.');
+    }
+    return false;
+  }
+  if (stored.activeGeneration === current.activeGeneration - 1) {
+    if (!activeDecision.previousHead || !sameActiveBuildHead(stored, activeDecision.previousHead)) {
+      throw new Error('Protected active-build anchor does not match the immediately preceding private decision head.');
+    }
+    return true;
+  }
+  throw new Error('Protected active-build anchor cannot skip decision generations.');
+}
+
 function prepareActiveBuildAnchor(activeDecision, anchorStore) {
-  if (!anchorStore || typeof anchorStore.read !== 'function' || typeof anchorStore.write !== 'function') {
+  if (!anchorStore || typeof anchorStore.read !== 'function' || typeof anchorStore.write !== 'function'
+    || typeof anchorStore.runExclusive !== 'function') {
     throw new Error('A protected active-build anchor store is required.');
   }
   const storedValue = anchorStore.read();
   const stored = storedValue === null ? null : validateActiveBuildAnchor(storedValue);
   const current = Object.freeze({
-    version: 2,
+    version: 3,
     activeGeneration: activeDecision.activeGeneration,
     ...activeDecision.activeHead,
   });
-  let mustAdvance = false;
-  if (stored === null) {
-    if (current.activeGeneration !== 1) {
-      throw new Error('Protected active-build anchor cannot start after generation 1.');
-    }
-    mustAdvance = true;
-  } else if (stored.activeGeneration > current.activeGeneration) {
-    throw new Error('Protected active-build anchor rejects rolled-back private decision files.');
-  } else if (stored.activeGeneration === current.activeGeneration) {
-    if (!sameActiveBuildHead(stored, current)) {
-      throw new Error('Protected active-build anchor conflicts with this generation private decision head.');
-    }
-  } else if (stored.activeGeneration === current.activeGeneration - 1) {
-    if (!activeDecision.previousHead || !sameActiveBuildHead(stored, activeDecision.previousHead)) {
-      throw new Error('Protected active-build anchor does not match the immediately preceding private decision head.');
-    }
-    mustAdvance = true;
-  } else {
-    throw new Error('Protected active-build anchor cannot skip decision generations.');
-  }
+  activeBuildTransition(activeDecision, current, stored);
   return Object.freeze({
     activeGeneration: current.activeGeneration,
     approvalId: current.approvalId,
     commit() {
-      if (mustAdvance) anchorStore.write(current);
+      anchorStore.runExclusive(() => {
+        const latestValue = anchorStore.read();
+        const latest = latestValue === null ? null : validateActiveBuildAnchor(latestValue);
+        if (activeBuildTransition(activeDecision, current, latest)) anchorStore.write(current);
+        const verifiedValue = anchorStore.read();
+        const verified = verifiedValue === null ? null : validateActiveBuildAnchor(verifiedValue);
+        if (!verified || verified.activeGeneration !== current.activeGeneration
+          || !sameActiveBuildHead(verified, current)) {
+          throw new Error('Protected active-build anchor update could not be verified after writing.');
+        }
+      });
     },
   });
 }
@@ -639,22 +793,29 @@ function readAppBundle(appBundle) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2);
-    const sourceState = captureSourceState(scriptRoot);
-    const app = readAppBundle(valueAfter(args, '--app-bundle'));
-    const receipt = verifyStudySetup({
-      repoRoot: scriptRoot,
-      projectDir: valueAfter(args, '--project-dir'),
-      rehearsalDir: valueAfter(args, '--rehearsal-dir'),
-      approvedBuildRecordPath: valueAfter(args, '--approved-build-record'),
-      activeBuildDecisionsPath: valueAfter(args, '--active-build-decisions'),
-      actualGitSha: sourceState.gitSha,
-      actualSourceTreeSha: sourceState.sourceTreeSha,
-      actualSourceStatusSha256: sourceState.sourceStatusSha256,
-      sourceDirty: sourceState.sourceDirty,
-      activeBuildAnchor: createMacosActiveBuildAnchor(),
-      ...app,
-    });
-    process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
+    if (args.includes('--print-decision-commitment')) {
+      process.stdout.write(`${JSON.stringify(approvedBuildDecisionCommitment({
+        repoRoot: scriptRoot,
+        approvedBuildRecordPath: valueAfter(args, '--approved-build-record'),
+      }), null, 2)}\n`);
+    } else {
+      const sourceState = captureSourceState(scriptRoot);
+      const app = readAppBundle(valueAfter(args, '--app-bundle'));
+      const receipt = verifyStudySetup({
+        repoRoot: scriptRoot,
+        projectDir: valueAfter(args, '--project-dir'),
+        rehearsalDir: valueAfter(args, '--rehearsal-dir'),
+        approvedBuildRecordPath: valueAfter(args, '--approved-build-record'),
+        activeBuildDecisionsPath: valueAfter(args, '--active-build-decisions'),
+        actualGitSha: sourceState.gitSha,
+        actualSourceTreeSha: sourceState.sourceTreeSha,
+        actualSourceStatusSha256: sourceState.sourceStatusSha256,
+        sourceDirty: sourceState.sourceDirty,
+        activeBuildAnchor: createMacosActiveBuildAnchor(),
+        ...app,
+      });
+      process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
+    }
   } catch (error) {
     console.error(`[creator-study-setup] ${error instanceof Error ? error.message : error}`);
     process.exitCode = 1;

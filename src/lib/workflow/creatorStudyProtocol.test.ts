@@ -56,6 +56,7 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(approvedBuildTemplate.approvedBuild.executableSha256).toBe('');
     expect(approvedBuildTemplate.approval.approvalId).toBe('');
     expect(activeBuildDecisionsTemplate.recordType).toBe('paintnode-creator-study-active-build-decisions');
+    expect(activeBuildDecisionsTemplate.schemaVersion).toBe(2);
     expect(activeBuildDecisionsTemplate.activeGeneration).toBe(0);
     expect(activeBuildDecisionsTemplate.decisions).toEqual([]);
     expect(protocol).toMatch(/mid-study build change/i);
@@ -65,7 +66,7 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(protocol).toMatch(/old\s+record\s+and matching old build/i);
     expect(protocol).toMatch(/active build generation and random non-derived approval ID/i);
     expect(protocol).toMatch(/separate macOS Keychain anchor/i);
-    expect(protocol).toMatch(/prior protected head and chain prefix to match\s+the preceding ledger entry exactly/i);
+    expect(protocol).toMatch(/prior protected head and chain prefix to match\s+the preceding ledger\s+entry exactly/i);
     expect(protocol).toContain('Approved-build decision reference:');
     expect(protocol).toContain('Setup receipt approved identity match: yes / no');
   });
