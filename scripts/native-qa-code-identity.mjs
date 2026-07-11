@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { dirname } from 'node:path';
 
 const CDHASH_PATTERN = /^[a-f0-9]{40,64}$/;
 
@@ -10,7 +11,8 @@ function validCodeIdentity(value) {
 }
 
 export function readMacosStaticCodeIdentity(executable, run = spawnSync) {
-  const verify = run('codesign', ['--verify', '--strict', '--verbose=2', executable], {
+  const appBundle = dirname(dirname(dirname(executable)));
+  const verify = run('codesign', ['--verify', '--strict', '--verbose=2', appBundle], {
     encoding: 'utf8',
   });
   if (verify.status !== 0) {

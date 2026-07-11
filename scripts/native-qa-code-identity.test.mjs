@@ -14,8 +14,13 @@ test('static and dynamic macOS code identity use the exact approved CDHash', () 
     if (args.includes('--display')) return { status: 0, stdout: '', stderr: `CDHash=${cdHash}\n` };
     return { status: 0, stdout: '', stderr: '' };
   };
-  assert.deepEqual(readMacosStaticCodeIdentity('/approved/PaintNode', run), { cdHash });
+  const executable = '/approved/PaintNode QA.app/Contents/MacOS/PaintNode';
+  assert.deepEqual(readMacosStaticCodeIdentity(executable, run), { cdHash });
   assert.deepEqual(verifyMacosRunningCodeIdentity(4242, { cdHash }, run), { cdHash, pid: 4242 });
+  assert.deepEqual(calls[0].args, [
+    '--verify', '--strict', '--verbose=2', '/approved/PaintNode QA.app',
+  ]);
+  assert.equal(calls.some(({ args }) => args.includes(executable) && args.includes('--display')), true);
   assert.equal(calls.some(({ args }) => args.includes('+4242')), true);
   assert.equal(calls.some(({ args }) => args.includes(`-R=cdhash H"${cdHash}"`)), true);
 });
