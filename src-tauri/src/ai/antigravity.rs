@@ -78,7 +78,9 @@ use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_byte
 use crate::project::{
     add_asset, safe_stem, store_generated_png_asset, write_asset_file, ProjectAsset,
 };
-use crate::provider_executable::{resolve_provider_executable, Provider};
+use crate::provider_executable::{
+    resolve_provider_executable, Provider, ResolvedProviderExecutable,
+};
 
 #[derive(Debug, Default)]
 struct AntigravityCommandOptions {
@@ -260,8 +262,9 @@ fn antigravity_version_from_output(text: &str) -> Option<String> {
     })
 }
 
-fn antigravity_cli_version(antigravity_bin: &str) -> String {
-    let mut command = Command::new(antigravity_bin);
+fn antigravity_cli_version(antigravity_bin: &ResolvedProviderExecutable) -> Result<String, String> {
+    let path = antigravity_bin.revalidate_for_launch()?;
+    let mut command = Command::new(path);
     apply_ai_cli_environment(&mut command).arg("--version");
     let text = command
         .output()
@@ -272,21 +275,27 @@ fn antigravity_cli_version(antigravity_bin: &str) -> String {
             format!("{stdout}\n{stderr}")
         })
         .unwrap_or_default();
-    antigravity_version_from_output(&text).unwrap_or_else(|| "1.0.16".into())
+    Ok(antigravity_version_from_output(&text).unwrap_or_else(|| "1.0.16".into()))
 }
 
-fn antigravity_image_user_agent(antigravity_bin: &str) -> String {
-    format!("antigravity/{}", antigravity_cli_version(antigravity_bin))
+fn antigravity_image_user_agent(
+    antigravity_bin: &ResolvedProviderExecutable,
+) -> Result<String, String> {
+    Ok(format!(
+        "antigravity/{}",
+        antigravity_cli_version(antigravity_bin)?
+    ))
 }
 
 fn wake_antigravity_auth(
-    antigravity_bin: &str,
+    antigravity_bin: &ResolvedProviderExecutable,
     job_path: &Path,
     keep_debug_artifacts: bool,
 ) -> Result<(), String> {
     fs::create_dir_all(job_path)
         .map_err(|e| format!("Failed to create Antigravity auth job folder: {e}"))?;
-    let mut command = Command::new(antigravity_bin);
+    let path = antigravity_bin.revalidate_for_launch()?;
+    let mut command = Command::new(path);
     apply_ai_cli_environment(&mut command);
     if keep_debug_artifacts {
         command
@@ -1063,7 +1072,7 @@ fn post_antigravity_image_request(
 fn run_antigravity_direct_image(
     app: &AppHandle,
     run_id: &str,
-    antigravity_bin: &str,
+    antigravity_bin: &ResolvedProviderExecutable,
     job_path: &Path,
     spec: AntigravityImageRequestSpec,
     options: &AntigravityCommandOptions,
@@ -1095,7 +1104,7 @@ fn run_antigravity_direct_image(
     if ai_run_cancelled(run_id) {
         return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
-    let user_agent = antigravity_image_user_agent(antigravity_bin);
+    let user_agent = antigravity_image_user_agent(antigravity_bin)?;
     let client = antigravity_image_http_client(&user_agent)?;
     emit_codex_progress(app, run_id, "Calling Antigravity image backend");
     let (mut status, mut text) = post_antigravity_image_request(&client, &token, &request_body)?;
@@ -1575,8 +1584,10 @@ fn run_antigravity_with_progress(
     })
 }
 
-fn configured_or_default_antigravity_bin(bin: Option<String>) -> Result<String, String> {
-    resolve_provider_executable(Provider::Antigravity, bin, None).map(|resolved| resolved.path)
+fn configured_or_default_antigravity_bin(
+    bin: Option<String>,
+) -> Result<ResolvedProviderExecutable, String> {
+    resolve_provider_executable(Provider::Antigravity, bin, None)
 }
 
 fn antigravity_command_options(
@@ -2456,23 +2467,21 @@ pub(crate) async fn detect_antigravity(
                 };
             }
         };
-        let antigravity_bin = resolved.path;
-
         let job_path =
             std::env::temp_dir().join(format!("paintnode-antigravity-detect-{}", now_id()));
-        let result = wake_antigravity_auth(&antigravity_bin, &job_path, false);
+        let result = wake_antigravity_auth(&resolved, &job_path, false);
         let _ = fs::remove_dir_all(&job_path);
 
         match result {
             Ok(()) => CodexDetectionResult {
                 found: true,
-                path: Some(antigravity_bin.clone()),
+                path: Some(resolved.path.clone()),
                 version: Some(format!("Antigravity {}", resolved.version)),
                 error: None,
             },
             Err(error) => CodexDetectionResult {
                 found: false,
-                path: Some(antigravity_bin),
+                path: Some(resolved.path),
                 version: None,
                 error: Some(error),
             },
@@ -2555,7 +2564,11 @@ pub(crate) async fn discover_antigravity_capabilities(
             Ok(bin) => bin,
             Err(error) => return fallback_antigravity_capabilities(Some(error)),
         };
-        let mut command = Command::new(&antigravity_bin);
+        let path = match antigravity_bin.revalidate_for_launch() {
+            Ok(path) => path,
+            Err(error) => return fallback_antigravity_capabilities(Some(error)),
+        };
+        let mut command = Command::new(path);
         apply_ai_cli_environment(&mut command).arg("models");
         match command.output() {
             Ok(output) if output.status.success() => {
@@ -2577,7 +2590,7 @@ pub(crate) async fn discover_antigravity_capabilities(
 
 #[allow(clippy::too_many_arguments)]
 fn run_antigravity(
-    antigravity_bin: &str,
+    antigravity_bin: &ResolvedProviderExecutable,
     workspace_path: &Path,
     job_path: &Path,
     prompt: &str,
@@ -2588,6 +2601,7 @@ fn run_antigravity(
     required_output: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
+    antigravity_bin.revalidate_for_launch()?;
     let mut command = build_antigravity_command(
         antigravity_bin,
         workspace_path,
@@ -2832,7 +2846,7 @@ Final response should be one short sentence confirming the image was created."#
 fn antigravity_restore_image_details(
     app: &AppHandle,
     run_id: &str,
-    antigravity_bin: &str,
+    antigravity_bin: &ResolvedProviderExecutable,
     options: &AntigravityCommandOptions,
     autonomy: AiAutonomyLevel,
     workspace_path: &Path,
@@ -3121,7 +3135,7 @@ pub(crate) async fn generate_antigravity_image(
                         "effort": claude_effort
                     },
                     "antigravity": {
-                        "bin": antigravity_bin,
+                        "bin": &antigravity_bin.path,
                         "model": options.model,
                         "approvalMode": options.approval_mode
                     }
@@ -5373,8 +5387,8 @@ mod tests {
             configured_or_default_antigravity_bin(None).expect("Antigravity CLI auth helper");
         wake_antigravity_auth(&antigravity_bin, job.path(), true).expect("auth wake");
         let token = load_antigravity_keychain_token().expect("keychain token");
-        let client = antigravity_image_http_client(&antigravity_image_user_agent(&antigravity_bin))
-            .expect("client");
+        let user_agent = antigravity_image_user_agent(&antigravity_bin).expect("user agent");
+        let client = antigravity_image_http_client(&user_agent).expect("client");
         let request = antigravity_image_request_json(
             &AntigravityImageRequestSpec {
                 prompt: "Generate a simple centered red square icon on a plain white background."

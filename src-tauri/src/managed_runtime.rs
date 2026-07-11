@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ai::apply_ai_cli_environment;
-use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
+use crate::provider_executable::{resolve_exact_provider_executable, Provider};
 
 const RUNTIME_PROTOCOL_VERSION: u32 = 3;
 const DIRECTOR_ACTION_SCHEMA_FILE: &str = "bridge/director-action-schema.mjs";
@@ -361,12 +361,13 @@ fn check_auth(provider: &str, package: &RuntimePackageManifest) -> Result<bool, 
     }
     let executable = managed_executable(provider)
         .ok_or_else(|| format!("Managed {provider} executable is missing."))?;
-    ensure_provider_launch_allowed(match provider {
+    let provider_kind = match provider {
         "codex" => Provider::Codex,
         "claude" => Provider::Claude,
         _ => return Err(format!("Unsupported managed AI provider: {provider}")),
-    })?;
-    let mut command = Command::new(executable);
+    };
+    let resolved = resolve_exact_provider_executable(provider_kind, executable)?;
+    let mut command = Command::new(resolved.revalidate_for_launch()?);
     apply_ai_cli_environment(&mut command);
     command
         .args(&package.auth_check_args)
@@ -645,11 +646,12 @@ pub(crate) async fn login_managed_runtime(
             .ok_or_else(|| format!("Install {provider} support before signing in."))?;
         let executable = managed_executable(&provider)
             .ok_or_else(|| format!("Managed {provider} executable is missing."))?;
-        ensure_provider_launch_allowed(match provider.as_str() {
+        let provider_kind = match provider.as_str() {
             "codex" => Provider::Codex,
             "claude" => Provider::Claude,
             _ => return Err(format!("Unsupported managed AI provider: {provider}")),
-        })?;
+        };
+        let resolved = resolve_exact_provider_executable(provider_kind, executable)?;
         emit_progress(
             &app,
             &provider,
@@ -658,7 +660,7 @@ pub(crate) async fn login_managed_runtime(
             None,
             "Continue sign-in in your browser…",
         );
-        let mut command = Command::new(executable);
+        let mut command = Command::new(resolved.revalidate_for_launch()?);
         apply_ai_cli_environment(&mut command);
         command.args(&package.login_args);
         let status = command

@@ -82,6 +82,7 @@ use crate::project::{
 };
 use crate::provider_executable::{
     ensure_provider_launch_allowed, resolve_provider_executable, Provider,
+    ResolvedProviderExecutable,
 };
 
 /// Appended to the prompt when a candidate fails the protected-region drift
@@ -439,10 +440,11 @@ pub(crate) fn final_codex_agent_message(output: &Output) -> Option<String> {
 
 fn run_codex_with_progress(
     command: &mut Command,
+    codex_bin: &ResolvedProviderExecutable,
     app: AppHandle,
     run_id: String,
 ) -> Result<AgentRunResult, String> {
-    ensure_provider_launch_allowed(Provider::Codex)?;
+    codex_bin.revalidate_for_launch()?;
     let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
@@ -548,7 +550,7 @@ pub(crate) fn run_codex_director_request(
     image_paths: &[PathBuf],
     session_id: Option<&str>,
 ) -> Result<AgentRunResult, String> {
-    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
     let mut options = codex_command_options(model, reasoning_effort, service_tier, None, None);
     options.keep_debug_artifacts = keep_debug_artifacts;
     let mut command = build_codex_sdk_command_with_session(
@@ -561,8 +563,8 @@ pub(crate) fn run_codex_director_request(
         Some(PAINTNODE_DIRECTOR_ACTION_FILE),
         None,
     );
-    let run =
-        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+    let run = run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.to_string())
+        .map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
                 codex_command_label(&codex_bin)
@@ -589,7 +591,7 @@ pub(crate) fn run_codex_workflow_draft_request(
     prompt_text: &str,
     output_file: &str,
 ) -> Result<AgentRunResult, String> {
-    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
     let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
     let mut command = build_codex_sdk_command_with_session(
         &codex_bin,
@@ -601,8 +603,8 @@ pub(crate) fn run_codex_workflow_draft_request(
         Some(output_file),
         Some("workflow-draft"),
     );
-    let run =
-        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+    let run = run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.to_string())
+        .map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
                 codex_command_label(&codex_bin)
@@ -629,7 +631,7 @@ pub(crate) fn run_codex_workflow_revision_request(
     prompt_text: &str,
     output_file: &str,
 ) -> Result<AgentRunResult, String> {
-    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
     let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
     let mut command = build_codex_sdk_command_with_session(
         &codex_bin,
@@ -641,14 +643,13 @@ pub(crate) fn run_codex_workflow_revision_request(
         Some(output_file),
         Some("workflow-revision"),
     );
-    let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
-        |error| {
+    let run = run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.to_string())
+        .map_err(|error| {
             format!(
                 "Failed to run Codex at '{}': {error}",
                 codex_command_label(&codex_bin)
             )
-        },
-    )?;
+        })?;
     if run.output.status.success() {
         Ok(run)
     } else if let Some(message) = final_codex_agent_message(&run.output) {
@@ -662,8 +663,14 @@ fn configured_codex_bin(bin: Option<String>) -> Option<String> {
     bin.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-fn configured_codex_bin_or_sdk_default(bin: Option<String>) -> String {
-    configured_codex_bin(bin).unwrap_or_default()
+fn configured_codex_bin_or_sdk_default(
+    bin: Option<String>,
+) -> Result<ResolvedProviderExecutable, String> {
+    resolve_provider_executable(
+        Provider::Codex,
+        configured_codex_bin(bin),
+        crate::managed_runtime::managed_executable("codex"),
+    )
 }
 
 fn codex_command_label(codex_bin: &str) -> &str {
@@ -2063,9 +2070,13 @@ pub(crate) async fn discover_codex_capabilities(
             Ok(resolved) => resolved,
             Err(error) => return fallback_codex_capabilities(Some(error)),
         };
+        let codex_path = match resolved.revalidate_for_launch() {
+            Ok(path) => path,
+            Err(error) => return fallback_codex_capabilities(Some(error)),
+        };
         let mut command = Command::new(codex_sdk_node());
         apply_ai_cli_environment(&mut command).arg(codex_capabilities_runner_script());
-        command.arg("--codex-path").arg(resolved.path);
+        command.arg("--codex-path").arg(codex_path);
         command
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY");
@@ -2124,7 +2135,7 @@ pub(crate) async fn generate_codex_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
+        let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
         let _ = autonomy_level;
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
@@ -2335,7 +2346,7 @@ fn normalize_storyboard_draft_result(
 fn run_codex_fill_storyboard(
     app: &AppHandle,
     run_id: &str,
-    codex_bin: &str,
+    codex_bin: &ResolvedProviderExecutable,
     options: &CodexCommandOptions,
     job_path: &Path,
     prompt_text: &str,
@@ -2352,8 +2363,8 @@ fn run_codex_fill_storyboard(
         options,
         true,
     );
-    let mut run =
-        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+    let mut run = run_codex_with_progress(&mut command, codex_bin, app.clone(), run_id.to_string())
+        .map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
                 codex_command_label(codex_bin)
@@ -2375,14 +2386,13 @@ fn run_codex_fill_storyboard(
             options,
             false,
         );
-        run = run_codex_with_progress(&mut fallback, app.clone(), run_id.to_string()).map_err(
-            |e| {
+        run = run_codex_with_progress(&mut fallback, codex_bin, app.clone(), run_id.to_string())
+            .map_err(|e| {
                 format!(
                     "Failed to run Codex at '{}': {e}",
                     codex_command_label(codex_bin)
                 )
-            },
-        )?;
+            })?;
     }
 
     if !run.output.status.success() && !job_path.join(FILL_STORYBOARD_FILE).exists() {
@@ -2410,7 +2420,7 @@ fn run_codex_fill_storyboard(
 fn prepare_codex_fill_storyboard(
     app: &AppHandle,
     run_id: &str,
-    codex_bin: &str,
+    codex_bin: &ResolvedProviderExecutable,
     options: &CodexCommandOptions,
     job_path: &Path,
     placement: &crate::ai::placement::AiEditPlacement,
@@ -2663,7 +2673,7 @@ fn run_director_provider_action_turn(
     app: &AppHandle,
     run_id: &str,
     director_provider: &PaintNodeDirectorProvider,
-    codex_bin: &str,
+    codex_bin: &ResolvedProviderExecutable,
     claude_options: &ClaudeCommandOptions,
     codex_options: &CodexCommandOptions,
     image_options: &PaintNodeImageProviderOptions,
@@ -2684,8 +2694,9 @@ fn run_director_provider_action_turn(
                 Some(PAINTNODE_DIRECTOR_ACTION_FILE),
                 None,
             );
-            let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
-                .map_err(|e| {
+            let run =
+                run_codex_with_progress(&mut command, codex_bin, app.clone(), run_id.to_string())
+                    .map_err(|e| {
                     format!(
                         "Failed to run Codex at '{}': {e}",
                         codex_command_label(codex_bin)
@@ -2744,7 +2755,7 @@ fn run_agentic_fill_director_part(
     app: &AppHandle,
     run_id: &str,
     director_provider: &PaintNodeDirectorProvider,
-    codex_bin: &str,
+    codex_bin: &ResolvedProviderExecutable,
     claude_options: &ClaudeCommandOptions,
     codex_options: &CodexCommandOptions,
     image_options: &PaintNodeImageProviderOptions,
@@ -2826,7 +2837,7 @@ fn run_agentic_fill_director_part(
 fn run_codex_fill_part(
     app: &AppHandle,
     run_id: &str,
-    codex_bin: &str,
+    codex_bin: &ResolvedProviderExecutable,
     options: &CodexCommandOptions,
     image_options: &PaintNodeImageProviderOptions,
     part_path: &Path,
@@ -2847,8 +2858,8 @@ fn run_codex_fill_part(
         options,
         true,
     );
-    let mut run =
-        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+    let mut run = run_codex_with_progress(&mut command, codex_bin, app.clone(), run_id.to_string())
+        .map_err(|e| {
             format!(
                 "Failed to run Codex at '{}': {e}",
                 codex_command_label(codex_bin)
@@ -2871,14 +2882,13 @@ fn run_codex_fill_part(
             options,
             false,
         );
-        run = run_codex_with_progress(&mut fallback, app.clone(), run_id.to_string()).map_err(
-            |e| {
+        run = run_codex_with_progress(&mut fallback, codex_bin, app.clone(), run_id.to_string())
+            .map_err(|e| {
                 format!(
                     "Failed to run Codex at '{}': {e}",
                     codex_command_label(codex_bin)
                 )
-            },
-        )?;
+            })?;
     }
 
     if !run.output.status.success() {
@@ -3172,7 +3182,7 @@ Output requirements:
 fn codex_restore_image_details(
     app: &AppHandle,
     run_id: &str,
-    codex_bin: &str,
+    codex_bin: &ResolvedProviderExecutable,
     options: &CodexCommandOptions,
     restore_root: &Path,
     enlarged_png: &[u8],
@@ -3510,7 +3520,7 @@ pub(crate) async fn generate_codex_fill_image(
             antigravity_safety_sexually_explicit,
             antigravity_safety_dangerous_content,
         };
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
+        let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
         let autonomy = ai_autonomy_level(autonomy_level);
         let _checks_level = ai_edit_checks_level(edit_checks_level);
         let fill_aspect_ratio = fill_aspect_ratio
@@ -4099,7 +4109,7 @@ pub(crate) async fn generate_codex_retouch_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
+        let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
         let _ = autonomy_level;
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
@@ -4499,7 +4509,7 @@ pub(crate) async fn upscale_codex_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
+        let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
         let _ = autonomy_level;
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
@@ -4634,7 +4644,7 @@ pub(crate) async fn decouple_codex_image(
             image_moderation,
         );
         codex_options.keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
-        let codex_bin = configured_codex_bin_or_sdk_default(bin);
+        let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
         let _autonomy = ai_autonomy_level(autonomy_level);
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
@@ -4693,12 +4703,13 @@ pub(crate) async fn decouple_codex_image(
             true,
         );
         let mut run =
-            run_codex_with_progress(&mut command, app.clone(), run_id.clone()).map_err(|e| {
-                format!(
-                    "Failed to run Codex at '{}': {e}",
-                    codex_command_label(&codex_bin)
-                )
-            })?;
+            run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.clone())
+                .map_err(|e| {
+                    format!(
+                        "Failed to run Codex at '{}': {e}",
+                        codex_command_label(&codex_bin)
+                    )
+                })?;
 
         if !run.output.status.success() && output_mentions_unsupported_json(&run.output) {
             emit_codex_progress(
@@ -4716,14 +4727,13 @@ pub(crate) async fn decouple_codex_image(
                 director_involvement,
                 false,
             );
-            run = run_codex_with_progress(&mut fallback, app.clone(), run_id.clone()).map_err(
-                |e| {
-                    format!(
-                        "Failed to run Codex at '{}': {e}",
-                        codex_command_label(&codex_bin)
-                    )
-                },
-            )?;
+            run = run_codex_with_progress(&mut fallback, &codex_bin, app.clone(), run_id.clone())
+                .map_err(|e| {
+                format!(
+                    "Failed to run Codex at '{}': {e}",
+                    codex_command_label(&codex_bin)
+                )
+            })?;
         }
 
         let manifest_path = job_path.join("manifest.json");
@@ -5430,13 +5440,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_without_user_bin_uses_sdk_bundled_codex() {
+    fn codex_sdk_runner_receives_the_preverified_native_path() {
         let job = TempJobDir::new("paintnode-codex-sdk-bundled-test").expect("temp dir");
-        let codex_bin = configured_codex_bin_or_sdk_default(None);
-        assert_eq!(codex_bin, "");
+        let codex_bin = "/trusted/native/codex";
 
         let command = build_decouple_codex_command(
-            &codex_bin,
+            codex_bin,
             job.path(),
             "separate objects",
             &CodexCommandOptions::default(),
@@ -5445,10 +5454,11 @@ mod tests {
         let args = command_args(&command);
 
         assert_eq!(command.get_program().to_string_lossy(), "node");
-        assert!(
-            !args.iter().any(|arg| arg == "--codex-path"),
-            "Codex should use the SDK package's paired CLI unless the user explicitly chooses a binary"
-        );
+        let path_index = args
+            .iter()
+            .position(|arg| arg == "--codex-path")
+            .expect("path flag");
+        assert_eq!(args[path_index + 1], codex_bin);
         assert!(
             args.iter()
                 .any(|arg| arg.ends_with("scripts/codex-sdk-runner.mjs")),
