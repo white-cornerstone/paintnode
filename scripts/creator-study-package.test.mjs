@@ -160,7 +160,7 @@ test('private handoff templates capture schema fields and concrete scheduling as
   assert.match(session, /Active build generation and approval ID/);
   assert.match(session, /Setup receipt approved identity match/);
   assert.match(reset, /approved-build decision reference/i);
-  assert.match(reset, /active generation and approval ID.*protected study-Mac anchor/i);
+  assert.match(reset, /active generation and complete private ledger head.*protected study-Mac anchor/i);
   assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
   for (const id of RECRUITMENT_EXCEPTION_IDS) assert.match(authorization, new RegExp(`\\b${id}\\b`));
   assert.match(authorization, /one requirement never waives the other/i);

@@ -327,26 +327,58 @@ function readActiveBuildDecisions(decisionsPath, canonicalRepo, approval) {
       throw new Error('Mid-study rehearsal must occur after the preceding build approval.');
     }
   }
+  const chainEntries = decisions.map(({ generation, approvalId, decisionReference, approvedAt }) => ({
+    generation, approvalId, decisionReference, approvedAt,
+  }));
+  const decisionChainSha256 = sha256(JSON.stringify(chainEntries));
+  const previousDecisionChainSha256 = chainEntries.length > 1
+    ? sha256(JSON.stringify(chainEntries.slice(0, -1)))
+    : null;
   return Object.freeze({
     schemaVersion: ledger.schemaVersion,
     activeGeneration: ledger.activeGeneration,
-    approvalId: active.approvalId,
-    previousApprovalId: decisions.at(-2)?.approvalId ?? null,
+    activeHead: Object.freeze({
+      approvalId: active.approvalId,
+      decisionReference: active.decisionReference,
+      approvedAt: active.approvedAt,
+      decisionChainSha256,
+    }),
+    previousHead: decisions.length > 1 ? Object.freeze({
+      approvalId: decisions.at(-2).approvalId,
+      decisionReference: decisions.at(-2).decisionReference,
+      approvedAt: decisions.at(-2).approvedAt,
+      decisionChainSha256: previousDecisionChainSha256,
+    }) : null,
   });
 }
 
 function validateActiveBuildAnchor(value) {
   const anchor = exactObject(
     value,
-    ['version', 'activeGeneration', 'approvalId'],
+    [
+      'version', 'activeGeneration', 'approvalId', 'decisionReference', 'approvedAt',
+      'decisionChainSha256',
+    ],
     'Protected active-build anchor',
   );
-  if (anchor.version !== 1 || !Number.isSafeInteger(anchor.activeGeneration)
+  if (anchor.version !== 2 || !Number.isSafeInteger(anchor.activeGeneration)
     || anchor.activeGeneration < 1) {
     throw new Error('Protected active-build anchor version or generation is invalid.');
   }
   validApprovalId(anchor.approvalId, 'Protected active-build approval ID');
+  validDecisionReference(anchor.decisionReference, 'Protected active-build decision reference');
+  validTimestamp(anchor.approvedAt, 'Protected active-build approval date');
+  if (!SHA256_PATTERN.test(anchor.decisionChainSha256 || '')) {
+    throw new Error('Protected active-build decision-chain commitment must be a SHA-256 value.');
+  }
   return Object.freeze({ ...anchor });
+}
+
+function sameActiveBuildHead(anchor, head) {
+  return anchor.approvalId === head.approvalId
+    && anchor.decisionReference === head.decisionReference
+    && anchor.approvedAt === head.approvedAt
+    && anchor.decisionChainSha256 === head.decisionChainSha256;
 }
 
 export function createMacosActiveBuildAnchor(run = spawnSync, platform = process.platform) {
@@ -388,9 +420,9 @@ function prepareActiveBuildAnchor(activeDecision, anchorStore) {
   const storedValue = anchorStore.read();
   const stored = storedValue === null ? null : validateActiveBuildAnchor(storedValue);
   const current = Object.freeze({
-    version: 1,
+    version: 2,
     activeGeneration: activeDecision.activeGeneration,
-    approvalId: activeDecision.approvalId,
+    ...activeDecision.activeHead,
   });
   let mustAdvance = false;
   if (stored === null) {
@@ -401,12 +433,12 @@ function prepareActiveBuildAnchor(activeDecision, anchorStore) {
   } else if (stored.activeGeneration > current.activeGeneration) {
     throw new Error('Protected active-build anchor rejects rolled-back private decision files.');
   } else if (stored.activeGeneration === current.activeGeneration) {
-    if (stored.approvalId !== current.approvalId) {
-      throw new Error('Protected active-build anchor conflicts with this generation approval ID.');
+    if (!sameActiveBuildHead(stored, current)) {
+      throw new Error('Protected active-build anchor conflicts with this generation private decision head.');
     }
   } else if (stored.activeGeneration === current.activeGeneration - 1) {
-    if (stored.approvalId !== activeDecision.previousApprovalId) {
-      throw new Error('Protected active-build anchor does not match the immediately preceding approval.');
+    if (!activeDecision.previousHead || !sameActiveBuildHead(stored, activeDecision.previousHead)) {
+      throw new Error('Protected active-build anchor does not match the immediately preceding private decision head.');
     }
     mustAdvance = true;
   } else {

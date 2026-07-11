@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -91,6 +92,27 @@ function memoryActiveBuildAnchor(initial = null) {
   };
 }
 
+function decisionChainSha256(records) {
+  const entries = records.map((record, index) => ({
+    generation: index + 1,
+    approvalId: record.approval.approvalId,
+    decisionReference: record.approval.decisionReference,
+    approvedAt: record.approval.approvedAt,
+  }));
+  return createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+}
+
+function protectedHead(record, activeGeneration, records = [record]) {
+  return {
+    version: 2,
+    activeGeneration,
+    approvalId: record.approval.approvalId,
+    decisionReference: record.approval.decisionReference,
+    approvedAt: record.approval.approvedAt,
+    decisionChainSha256: decisionChainSha256(records),
+  };
+}
+
 function setupDirectories() {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-creator-study-'));
   const projectDir = join(root, 'participant-project');
@@ -103,9 +125,16 @@ function setupDirectories() {
   return { root, projectDir, rehearsalDir, approvedBuildRecordPath, activeBuildDecisionsPath, activeBuildAnchor };
 }
 
-test('protected active-build anchor uses the study Mac keychain without private record fields', () => {
+test('protected active-build anchor pins the complete private decision head in the study Mac keychain', () => {
   const calls = [];
-  const stored = { version: 1, activeGeneration: 2, approvalId: CHANGE_APPROVAL_ID };
+  const stored = {
+    version: 2,
+    activeGeneration: 2,
+    approvalId: CHANGE_APPROVAL_ID,
+    decisionReference: 'CB-M2-BUILD-CHANGE-02',
+    approvedAt: '2026-07-12T09:30:00.000Z',
+    decisionChainSha256: 'c'.repeat(64),
+  };
   const anchor = createMacosActiveBuildAnchor((command, args) => {
     calls.push({ command, args });
     if (args[0] === 'find-generic-password') return { status: 0, stdout: JSON.stringify(stored), stderr: '' };
@@ -116,9 +145,17 @@ test('protected active-build anchor uses the study Mac keychain without private 
   assert.equal(calls.every(({ command }) => command === 'security'), true);
   assert.equal(calls[0].args.includes('find-generic-password'), true);
   assert.equal(calls[1].args.includes('add-generic-password'), true);
-  assert.equal(JSON.stringify(calls).includes('decisionReference'), false);
-  assert.equal(JSON.stringify(calls).includes('approvedAt'), false);
+  assert.equal(JSON.stringify(calls).includes('decisionReference'), true);
+  assert.equal(JSON.stringify(calls).includes('approvedAt'), true);
+  assert.equal(JSON.stringify(calls).includes('decisionChainSha256'), true);
+  assert.equal(JSON.stringify(calls).includes('reason'), false);
+  assert.equal(JSON.stringify(calls).includes('executableSha256'), false);
   assert.throws(() => createMacosActiveBuildAnchor(() => ({ status: 0 }), 'linux').read(), /study Mac keychain/i);
+  assert.throws(() => createMacosActiveBuildAnchor(() => ({
+    status: 0,
+    stdout: JSON.stringify({ version: 1, activeGeneration: 2, approvalId: CHANGE_APPROVAL_ID }),
+    stderr: '',
+  }), 'darwin').read(), /missing required field|version or generation is invalid/i);
 });
 
 test('the committed Product materials are deterministic, distinct, and assigned to Tasks 1 and 6', () => {
@@ -342,9 +379,7 @@ test('mid-study build changes require owner approval, reason, rehearsal, replace
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
     now: verificationNow,
-    activeBuildAnchor: memoryActiveBuildAnchor({
-      version: 1, activeGeneration: 1, approvalId: INITIAL_APPROVAL_ID,
-    }),
+    activeBuildAnchor: memoryActiveBuildAnchor(protectedHead(approvedBuildRecord(), 1)),
   };
   const validChange = approvedBuildRecord({
     approval: {
@@ -441,6 +476,145 @@ test('approval timing is strict, ordered, completed by now, and deterministicall
   const approvedBuildRecordPath = writeApprovedBuildRecord(root, boundary);
   const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [boundary]);
   assert.equal(verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }).ready, true);
+});
+
+test('protected anchor rejects rewritten prior approval time or reference with the same approval ID', () => {
+  const { root, projectDir, rehearsalDir } = setupDirectories();
+  const acceptedInitial = approvedBuildRecord();
+  const activeBuildAnchor = memoryActiveBuildAnchor(protectedHead(acceptedInitial, 1));
+  const options = {
+    repoRoot, projectDir, rehearsalDir, fixtureManifest,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    now: verificationNow,
+    activeBuildAnchor,
+  };
+
+  const rewrittenTimeBeforeAdvance = approvedBuildRecord({
+    approval: {
+      ...acceptedInitial.approval,
+      approvedAt: '2026-07-09T09:30:00.000Z',
+    },
+    changeControl: {
+      ...acceptedInitial.changeControl,
+      rehearsalCompletedAt: '2026-07-09T09:00:00.000Z',
+    },
+  });
+  const backwardReplacement = approvedBuildRecord({
+    approval: {
+      ownerApproved: true,
+      approvedAt: '2026-07-10T09:30:00.000Z',
+      decisionReference: 'CB-M2-BUILD-BACKWARD-02',
+      approvalId: CHANGE_APPROVAL_ID,
+    },
+    changeControl: {
+      kind: 'mid-study',
+      replacesDecisionReference: rewrittenTimeBeforeAdvance.approval.decisionReference,
+      reason: 'Adversarial backward approval probe.',
+      rehearsalCompletedAt: '2026-07-10T09:00:00.000Z',
+      comparabilityDecision: 'comparable',
+    },
+  });
+  let approvedBuildRecordPath = writeApprovedBuildRecord(root, backwardReplacement);
+  let activeBuildDecisionsPath = writeActiveBuildDecisions(
+    root,
+    [rewrittenTimeBeforeAdvance, backwardReplacement],
+  );
+  assert.throws(() => verifyStudySetup({
+    ...options, approvedBuildRecordPath, activeBuildDecisionsPath,
+  }), /does not match the immediately preceding private decision head/i);
+  assert.deepEqual(activeBuildAnchor.snapshot(), protectedHead(acceptedInitial, 1));
+
+  const acceptedReplacement = approvedBuildRecord({
+    approval: {
+      ownerApproved: true,
+      approvedAt: '2026-07-12T09:30:00.000Z',
+      decisionReference: 'CB-M2-BUILD-CHANGE-02',
+      approvalId: CHANGE_APPROVAL_ID,
+    },
+    changeControl: {
+      kind: 'mid-study',
+      replacesDecisionReference: acceptedInitial.approval.decisionReference,
+      reason: 'Accepted integrity correction.',
+      rehearsalCompletedAt: '2026-07-12T09:00:00.000Z',
+      comparabilityDecision: 'comparable',
+    },
+  });
+  const forgedPreviousHead = approvedBuildRecord({
+    approval: {
+      ...acceptedInitial.approval,
+      decisionReference: 'CB-FORGED-BASELINE-01',
+    },
+  });
+  const forgedPreviousReplacement = approvedBuildRecord({
+    approval: { ...acceptedReplacement.approval },
+    changeControl: {
+      ...acceptedReplacement.changeControl,
+      replacesDecisionReference: forgedPreviousHead.approval.decisionReference,
+    },
+  });
+  approvedBuildRecordPath = writeApprovedBuildRecord(root, forgedPreviousReplacement);
+  activeBuildDecisionsPath = writeActiveBuildDecisions(
+    root,
+    [forgedPreviousHead, forgedPreviousReplacement],
+  );
+  assert.throws(() => verifyStudySetup({
+    ...options, approvedBuildRecordPath, activeBuildDecisionsPath,
+  }), /does not match the immediately preceding private decision head/i);
+  assert.deepEqual(activeBuildAnchor.snapshot(), protectedHead(acceptedInitial, 1));
+
+  approvedBuildRecordPath = writeApprovedBuildRecord(root, acceptedReplacement);
+  activeBuildDecisionsPath = writeActiveBuildDecisions(root, [acceptedInitial, acceptedReplacement]);
+  assert.equal(verifyStudySetup({
+    ...options, approvedBuildRecordPath, activeBuildDecisionsPath,
+  }).approvalRecord.activeGeneration, 2);
+  const acceptedProtectedHead = protectedHead(
+    acceptedReplacement,
+    2,
+    [acceptedInitial, acceptedReplacement],
+  );
+  assert.deepEqual(activeBuildAnchor.snapshot(), acceptedProtectedHead);
+
+  const rewrittenTimeInitial = approvedBuildRecord({
+    approval: {
+      ...acceptedInitial.approval,
+      approvedAt: '2026-07-09T09:30:00.000Z',
+    },
+    changeControl: {
+      ...acceptedInitial.changeControl,
+      rehearsalCompletedAt: '2026-07-09T09:00:00.000Z',
+    },
+  });
+  activeBuildDecisionsPath = writeActiveBuildDecisions(root, [rewrittenTimeInitial, acceptedReplacement]);
+  assert.throws(() => verifyStudySetup({
+    ...options, approvedBuildRecordPath, activeBuildDecisionsPath,
+  }), /conflicts with this generation private decision head/i);
+  assert.deepEqual(activeBuildAnchor.snapshot(), acceptedProtectedHead);
+
+  const rewrittenReferenceInitial = approvedBuildRecord({
+    approval: {
+      ...acceptedInitial.approval,
+      decisionReference: 'CB-FORGED-BASELINE-01',
+    },
+  });
+  const rewrittenReferenceReplacement = approvedBuildRecord({
+    approval: { ...acceptedReplacement.approval },
+    changeControl: {
+      ...acceptedReplacement.changeControl,
+      replacesDecisionReference: rewrittenReferenceInitial.approval.decisionReference,
+    },
+  });
+  approvedBuildRecordPath = writeApprovedBuildRecord(root, rewrittenReferenceReplacement);
+  activeBuildDecisionsPath = writeActiveBuildDecisions(
+    root,
+    [rewrittenReferenceInitial, rewrittenReferenceReplacement],
+  );
+  assert.throws(() => verifyStudySetup({
+    ...options, approvedBuildRecordPath, activeBuildDecisionsPath,
+  }), /conflicts with this generation private decision head/i);
+  assert.deepEqual(activeBuildAnchor.snapshot(), acceptedProtectedHead);
 });
 
 test('active decision ledger rejects adversarial old to new to old record replay', () => {

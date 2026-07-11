@@ -22,7 +22,7 @@
     "facilitator, observer, technical operator, and accommodation setup assignments",
     "study owner and observer names",
     "approved storage path or internal storage reference",
-    "private approved-build record and active-ledger paths, approval date, decision references, ledger history, and mid-study change reason",
+    "private approved-build record and active-ledger paths, approval date, decision references, ledger history, protected Keychain anchor payload, and mid-study change reason",
     "consent answers tied to a person",
     "raw screener answers",
     "accommodation or medical details",

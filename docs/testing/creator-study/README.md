@@ -17,9 +17,11 @@ study storage.
   build identity approved for sessions. Copy and complete it privately; never
   point setup verification at the blank repository template.
 - `templates/private-active-build-decisions.json` is the privately controlled,
-  append-only active-decision ledger. Setup also pins its current generation in
-  a separate macOS Keychain anchor, so rolling back both private files cannot
-  reactivate an older record/build pair.
+  append-only active-decision ledger. Setup also pins its complete current head
+  (generation, approval ID, decision reference, and approval timestamp) in a
+  separate macOS Keychain anchor together with a private commitment to the full
+  decision chain, so rolling back or rewriting the private files cannot
+  reactivate or falsify an older record/build decision.
 - `templates/de-identified-recruitment-matrix.csv` may be used for aggregate
   cohort control only after direct identifiers and sensitive detail are
   removed.
@@ -68,9 +70,10 @@ study storage.
 5. Set initial change control to `kind: "initial"`, null replacement/reason,
    and `comparabilityDecision: "baseline"`. Append generation 1 to the
    active-decision ledger with the same `approvalId`, decision reference, and
-   approval timestamp. Setup creates the protected Keychain anchor only at
-   generation 1. Keep the approved app and its sidecar together and reuse that
-   exact bundle.
+   approval timestamp. Setup creates the version-2 protected Keychain anchor
+   only at generation 1 and pins all three private head fields plus the decision
+   chain commitment. Keep the approved app and its sidecar together and reuse
+   that exact bundle.
 
 Each ledger entry is a closed object with exactly `generation`, `approvalId`,
 `decisionReference`, and `approvedAt`. Generate each approval ID independently;
@@ -114,14 +117,17 @@ future-dated, or
 mismatched approval records fail closed. The ledger must contain contiguous,
 unique generations with strictly increasing approval timestamps; its latest
 approval ID/reference/time must match the supplied record. The separate Keychain
-anchor must match or advance by exactly one generation. Its receipt reports the
-matched identity, active generation, and random non-derived approval ID, but
-omits private paths, approval date,
-decision references, change reason, ledger history, storage data, and participant
-paths. It does not replace rehearsal or authorization.
+anchor must match the complete current head or advance by exactly one generation
+from an exact protected previous-head and chain-prefix match. Its receipt reports
+the matched identity, active generation, and random non-derived approval ID, but
+omits the anchor's private approval date and decision reference along with private paths,
+change reason, ledger history, storage data, and participant paths. It does not
+replace rehearsal or authorization.
 
 Use the same approved study Mac for the whole study. Do not delete, reset,
 export, or restore the `com.paintnode.creator-study.active-build` Keychain item.
+Legacy version-1 anchor payloads fail closed rather than being migrated without
+authenticated time/reference history.
 If that protected anchor is unavailable or conflicts with private files, pause
 the study and resolve it as an owner-controlled integrity incident.
 

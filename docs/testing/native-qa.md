@@ -23,8 +23,10 @@ bundle ID, and actual executable SHA-256 without modifying the signed app.
 Creator-study readiness requires a clean checkout and keeps the sidecar beside
 the app; `qa:creator-study:setup` reads a private literal approved-build record
 plus its monotonic active-decision ledger and protected study-Mac Keychain
-anchor, and rejects missing/stale/superseded approval or provenance, dirty source,
-or executable fingerprint drift.
+anchor. The anchor privately pins the accepted generation, approval ID, decision
+reference, approval timestamp, and full decision-chain commitment; setup rejects
+missing/stale/superseded or rewritten decision history, invalid provenance,
+dirty source, or executable fingerprint drift.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates

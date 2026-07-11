@@ -65,6 +65,7 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(protocol).toMatch(/old\s+record\s+and matching old build/i);
     expect(protocol).toMatch(/active build generation and random non-derived approval ID/i);
     expect(protocol).toMatch(/separate macOS Keychain anchor/i);
+    expect(protocol).toMatch(/prior protected head and chain prefix to match\s+the preceding ledger entry exactly/i);
     expect(protocol).toContain('Approved-build decision reference:');
     expect(protocol).toContain('Setup receipt approved identity match: yes / no');
   });
