@@ -1537,8 +1537,8 @@ describe('WorkflowStore graph adapter', () => {
       ...request,
       assetReferenceId: 'missing-source-ref',
     }, [], project.identity)).toThrow(/accepted workflow result|output is unavailable/i);
-    const activeSession = {};
-    const duplicateSession = {};
+    const activeSession = { doc: {} };
+    const duplicateSession = { doc: {} };
     bindWorkflowRoundTripAuthority(activeSession, descriptor.authority);
     bindWorkflowRoundTripAuthority(duplicateSession, descriptor.authority);
 
@@ -1570,7 +1570,7 @@ describe('WorkflowStore graph adapter', () => {
       editorRevisionId: 'store-edit-2',
       output: { assetReferenceId: 'store-edit-ref-2' },
     });
-    const driftSession = {};
+    const driftSession = { doc: {} };
     bindWorkflowRoundTripAuthority(driftSession, driftDescriptor.authority);
     store.setBriefObjective('brief', 'Changed after editor open');
     expect(() => store.commitWorkflowEditorReturn(driftSession, {
