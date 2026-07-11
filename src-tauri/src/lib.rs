@@ -28,6 +28,34 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            let study_profile = provider_executable::provider_free_study_profile()
+                .map_err(std::io::Error::other)?;
+            let deferred_main = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|config| config.label == "main" && !config.create);
+            match (study_profile, deferred_main) {
+                (Some(profile), Some(config)) => {
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), config)?
+                        .data_store_identifier(profile)
+                        .build()?;
+                }
+                (Some(_), None) => {
+                    return Err(std::io::Error::other(
+                        "Provider Free study profile requires a deferred main window.",
+                    )
+                    .into());
+                }
+                (None, Some(_)) => {
+                    return Err(std::io::Error::other(
+                        "Provider Free study bundle must be launched through the repository QA command.",
+                    )
+                    .into());
+                }
+                (None, None) => {}
+            }
             managed_runtime::initialize(app.handle()).map_err(std::io::Error::other)?;
             #[cfg(desktop)]
             app.handle()

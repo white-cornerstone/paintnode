@@ -26,6 +26,12 @@ const appBuild = {
   sourceDirty: false,
   sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
   executableSha256: 'a'.repeat(64),
+  studySession: {
+    version: 1,
+    isolatedProfile: true,
+    launchIntent: 'fresh',
+    profileSha256: 'b'.repeat(64),
+  },
 };
 
 function setupDirectories() {
@@ -48,6 +54,8 @@ test('the committed Product materials are deterministic, distinct, and assigned 
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
   });
 
   assert.equal(receipt.ready, true);
@@ -56,6 +64,15 @@ test('the committed Product materials are deterministic, distinct, and assigned 
   assert.equal(receipt.projectState, 'empty');
   assert.equal(receipt.rehearsalState, 'deleted');
   assert.deepEqual(receipt.appBuild, appBuild);
+  assert.deepEqual(receipt.sessionReset, {
+    isolatedProfile: true,
+    freshLaunch: true,
+    profileSha256: appBuild.studySession.profileSha256,
+    macosMajorVersion: 14,
+  });
+  assert.deepEqual(receipt.manualAttestations, {
+    visibleEmptyProjectAndWorkflow: true,
+  });
   assert.equal(JSON.stringify(receipt).includes(projectDir), false, 'receipt must not leak local paths');
 });
 
@@ -74,6 +91,8 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
     bundleId: 'com.paintnode.editor',
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
   };
   assert.throws(() => verifyStudySetup(options), /Git SHA/i);
 
@@ -106,6 +125,8 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild: { ...appBuild },
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
   };
 
   options.sourceDirty = true;
@@ -122,6 +143,22 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
 
   options.actualExecutableSha256 = 'b'.repeat(64);
   assert.throws(() => verifyStudySetup(options), /executable fingerprint/i);
+  options.actualExecutableSha256 = appBuild.executableSha256;
+
+  options.appBuild.studySession.launchIntent = 'resume';
+  assert.throws(() => verifyStudySetup(options), /fresh study session/i);
+  options.appBuild.studySession.launchIntent = 'fresh';
+
+  options.appBuild.studySession.isolatedProfile = false;
+  assert.throws(() => verifyStudySetup(options), /isolated study profile/i);
+  options.appBuild.studySession.isolatedProfile = true;
+
+  options.visibleEmptyStateAttested = false;
+  assert.throws(() => verifyStudySetup(options), /visible empty Project and Workflow/i);
+  options.visibleEmptyStateAttested = true;
+
+  options.macosMajorVersion = 13;
+  assert.throws(() => verifyStudySetup(options), /macOS 14/i);
 });
 
 test('project and deleted rehearsal paths are canonicalized through symlinks', () => {
@@ -135,6 +172,8 @@ test('project and deleted rehearsal paths are canonicalized through symlinks', (
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
   };
   assert.equal(verifyStudySetup(options).ready, true);
 

@@ -43,23 +43,49 @@ study storage.
    Place in a separate folder. Delete that rehearsal folder.
 3. Create a different, genuinely empty participant project folder outside the
    repository.
-4. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
-5. Run:
+4. Start a new isolated study profile. This generates a cryptographically random
+   WebKit data-store identifier that has no access to the generic QA profile,
+   rehearsal, or any prior participant profile. The study mechanism requires
+   macOS 14 or newer and fails closed on older systems:
+
+   ```sh
+   npm run qa:native:provider-free -- --fresh-study-session
+   ```
+
+5. Before opening any folder, visibly confirm the Project panel has no open
+   project or imported assets and no workflow is open. Close the app if either
+   is present; do not continue the session.
+6. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle and
+   run the setup verifier only after making that visible check:
 
    ```sh
    npm run qa:creator-study:setup -- \
      --expected-sha "$(git rev-parse HEAD)" \
      --app-bundle "ABSOLUTE_PATH_TO_PROVIDER_FREE_APP" \
      --project-dir "ABSOLUTE_EMPTY_PARTICIPANT_PROJECT" \
-     --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT"
+     --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT" \
+     --visible-empty-state-attested
    ```
+
+7. To test quit/reopen within this same participant session, relaunch with the
+   same isolated profile:
+
+   ```sh
+   npm run qa:native:provider-free -- --resume-study-session
+   ```
+
+   `--resume-study-session` must never start a new participant. The next
+   participant always begins again at step 4 with `--fresh-study-session`.
 
 The verifier checks a clean source tree, the exact SHA/tree recorded by the
 actual build, bundle identity, executable fingerprint, canonicalized paths,
-empty project, deleted and separate rehearsal path, Product hashes/dimensions,
-and all three QA scenario controls. Stale bundles, modified executables, dirty
+empty project, deleted and separate rehearsal path, a freshly generated
+isolated study profile, Product hashes/dimensions, all three QA scenario
+controls, and the operator's visible-empty-state attestation. Generic Provider
+Free bundles, resumed profiles, stale bundles, modified executables, dirty
 source, broken symlinks, and symlink aliases into the repository fail closed.
-Its receipt deliberately omits local paths. It does not replace the visible
+Its receipt records only the one-way profile fingerprint and deliberately omits
+the raw data-store identifier and local paths. It does not replace the visible
 rehearsal or the private authorization gate.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep

@@ -24,6 +24,35 @@ Creator-study readiness requires a clean checkout and keeps the sidecar beside
 the app; `qa:creator-study:setup` rejects missing/stale provenance, dirty source,
 or executable fingerprint drift.
 
+### Creator-study session isolation
+
+Generic Provider Free QA keeps its existing profile for ordinary smoke testing.
+For every new moderated participant on macOS 14 or newer, start a new isolated
+macOS WebKit data store instead:
+
+```sh
+npm run qa:native:provider-free -- --fresh-study-session
+```
+
+The generated raw 16-byte profile identifier remains in an ignored local state
+file. Build provenance and the setup receipt contain only its SHA-256
+fingerprint. A fresh profile cannot restore the generic QA project, rehearsal,
+workflow, local task/attempt data, scenario component state, or any earlier
+participant profile. Before opening a project, visibly confirm both Project and
+Workflow are empty and record that check through the creator-study setup
+command.
+
+Quit/reopen inside the same participant session uses the same profile so Task 8
+can verify real persistence:
+
+```sh
+npm run qa:native:provider-free -- --resume-study-session
+```
+
+Never use `--resume-study-session` for the next participant. Start another
+`--fresh-study-session`; the setup verifier rejects a resumed or generic build.
+Neither flag is accepted by Provider E2E, and normal PaintNode is unchanged.
+
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates
 deterministic 1024 x 1024, 1024 x 1280, and 1280 x 720 PNGs in memory and stores them through the normal project

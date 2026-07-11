@@ -12,8 +12,10 @@
 - [ ] Editor return, save/reopen, and Place rehearsed.
 - [ ] Rehearsal folder deleted.
 - [ ] Participant project folder exists, is genuinely empty, and is outside repo.
-- [ ] Setup verifier passes; receipt copied to private session log.
-- [ ] App has fresh state and no prior participant workflow open.
+- [ ] A new profile was generated with `--fresh-study-session`; its receipt fingerprint differs from the prior participant.
+- [ ] Before opening a folder, Project visibly shows no open project/imported assets and Workflow shows no open workflow.
+- [ ] Setup verifier passes with `--visible-empty-state-attested`; receipt copied to private session log.
+- [ ] `--resume-study-session` is reserved only for quit/reopen inside this participant session.
 - [ ] Recording is off.
 - [ ] Product B remains hidden until Task 6.
 
@@ -21,7 +23,7 @@
 
 - [ ] Recording stopped.
 - [ ] Consent withdrawal/deletion action recorded if applicable.
-- [ ] Participant project and app state isolated from the next participant.
+- [ ] Participant project retained/deleted only under the approved evidence rule; app profile is not reused for the next participant.
 - [ ] Private notes stored only in approved location.
 - [ ] De-identification work item assigned.
 - [ ] No private evidence exists in repository, worktree, issue, PR, or chat.

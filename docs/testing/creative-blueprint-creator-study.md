@@ -144,11 +144,14 @@ For every session record:
 - whether recording was permitted;
 - a genuinely empty participant-specific project folder;
 - the same supplied, non-confidential Product PNG;
-- a fresh provider-free QA app state with no saved workflow from another
-  participant.
+- a fresh Provider Free study profile fingerprint and setup receipt, with no
+  project, workflow, attempt/scenario state, or prior participant artifact
+  restored.
 
-Use `npm run qa:native:provider-free` and the bundle identity documented in
-[Native PaintNode QA](native-qa.md). Provider-free mode must not invoke Codex,
+Use `npm run qa:native:provider-free -- --fresh-study-session` for every new
+participant and the bundle identity documented in [Native PaintNode
+QA](native-qa.md). Use `--resume-study-session` only for Task 8's quit/reopen
+within that same participant session. Provider-free mode must not invoke Codex,
 Antigravity, provider discovery, authentication, or network generation. If a
 provider is invoked or a security prompt appears, stop and mark the session
 invalid plus a severity-0 safety finding.
@@ -156,11 +159,15 @@ invalid plus a severity-0 safety finding.
 Before the participant arrives, verify the build and failure controls in a
 separate rehearsal folder. Delete the rehearsal project. Do not pre-import the
 Product, pre-create Campaign Composer, or leave a workflow open in the session
-folder. Run `npm run qa:creator-study:setup` with the approved SHA, built app
-bundle, empty participant project, and deleted rehearsal path as documented in
-the operations runbook. The verifier rejects dirty source, stale bundles,
-executable fingerprint drift, and symlink aliases into the repository. The
-verifier does not replace the visible rehearsal.
+folder. Start the fresh study profile and, before opening any folder, visibly
+confirm both Project and Workflow are empty. Run
+`npm run qa:creator-study:setup` with the approved SHA, built app bundle, empty
+participant project, deleted rehearsal path, and
+`--visible-empty-state-attested` as documented in the operations runbook. The
+verifier rejects generic or resumed profiles, dirty source, stale bundles,
+executable fingerprint drift, and symlink aliases into the repository. Its
+receipt carries only the isolated profile's one-way fingerprint, never its raw
+identifier. The verifier does not replace the visible rehearsal.
 
 Use committed **Product A** for Task 1. Keep **Product B** hidden until Task 6.
 Their task assignments, dimensions, provenance, and hashes are pinned in

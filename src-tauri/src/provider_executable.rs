@@ -15,6 +15,7 @@ use crate::ai::{
 };
 
 const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
+const PROVIDER_FREE_STUDY_PROFILE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_PROFILE";
 const QA_PREFLIGHT_ENV: &str = "PAINTNODE_PROVIDER_QA_PREFLIGHT";
 const QA_PREFLIGHT_MARKER: &str = "provider-doctor-v1";
 /// Keep native discovery aligned with the provider doctor: a version probe may
@@ -669,6 +670,39 @@ pub(crate) fn provider_qa_mode() -> Option<String> {
     }
 }
 
+fn provider_free_study_profile_in_mode(
+    qa_mode: &str,
+    raw_profile: Option<&std::ffi::OsStr>,
+) -> Result<Option<[u8; 16]>, String> {
+    let Some(raw_profile) = raw_profile else {
+        return Ok(None);
+    };
+    if qa_mode != "provider-free" {
+        return Err("Study profile isolation is available only in Provider Free mode.".into());
+    }
+    let raw_profile = raw_profile.to_str().ok_or_else(|| {
+        "Provider Free study profile must contain exactly 32 hexadecimal characters.".to_string()
+    })?;
+    if raw_profile.len() != 32 || !raw_profile.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(
+            "Provider Free study profile must contain exactly 32 hexadecimal characters.".into(),
+        );
+    }
+    let mut profile = [0_u8; 16];
+    for (index, byte) in profile.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw_profile[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "Provider Free study profile contains invalid hexadecimal data.")?;
+    }
+    Ok(Some(profile))
+}
+
+pub(crate) fn provider_free_study_profile() -> Result<Option<[u8; 16]>, String> {
+    provider_free_study_profile_in_mode(
+        &std::env::var(QA_MODE_ENV).unwrap_or_default(),
+        std::env::var_os(PROVIDER_FREE_STUDY_PROFILE_ENV).as_deref(),
+    )
+}
+
 fn provider_free_qa_png_in_mode(
     qa_mode: &str,
     width: u32,
@@ -728,6 +762,35 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn provider_free_study_profile_is_exact_and_mode_gated() {
+        let raw = std::ffi::OsStr::new("00112233445566778899aabbccddeeff");
+        assert_eq!(
+            provider_free_study_profile_in_mode("provider-free", Some(raw))
+                .expect("valid Provider Free study profile"),
+            Some([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ])
+        );
+        assert_eq!(
+            provider_free_study_profile_in_mode("provider-free", None)
+                .expect("ordinary Provider Free has no study profile"),
+            None
+        );
+        assert!(
+            provider_free_study_profile_in_mode("provider-e2e", Some(raw))
+                .expect_err("Provider E2E cannot use study isolation")
+                .contains("Provider Free")
+        );
+        assert!(provider_free_study_profile_in_mode(
+            "provider-free",
+            Some(std::ffi::OsStr::new("not-a-profile"))
+        )
+        .expect_err("malformed study profile must fail closed")
+        .contains("32 hexadecimal"));
+    }
 
     #[test]
     fn provider_free_qa_campaign_shapes_are_exact_deterministic_pngs_and_mode_gated() {
