@@ -25,3 +25,12 @@ export function nativePathDocumentSourceKey(path: string): DocumentSourceKey | n
   const normalized = normalizePath(path);
   return normalized ? `native:${normalized}` : null;
 }
+
+export function workflowResultDocumentSourceKey(
+  workflowId: string,
+  nodeId: string,
+  rootRunId: string,
+  promotionId?: string,
+): DocumentSourceKey {
+  return `workflow:${workflowId}:${nodeId}:${rootRunId}:${promotionId ?? 'accepted'}`;
+}

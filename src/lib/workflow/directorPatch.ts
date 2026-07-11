@@ -122,7 +122,7 @@ export interface WorkflowDirectorPatchProposalResult {
 const trustedWorkflowDirectorPatchProposals = new WeakSet<WorkflowDirectorPatchProposal>();
 const supportedWorkflowGraphKeys = new Set([
   'version', 'id', 'metadata', 'viewport', 'nodes', 'edges', 'assetReferences', 'runRecords',
-  'reviewPromotions',
+  'reviewPromotions', 'editorRevisions', 'workflowRoundTrips',
 ]);
 
 const creatorTypes = new Set<CreatorNodeType>([
@@ -807,6 +807,8 @@ function immutableHistorySnapshot(graph: WorkflowGraphV2): string {
     assetReferences: graph.assetReferences,
     runRecords: graph.runRecords,
     reviewPromotions: graph.reviewPromotions,
+    editorRevisions: graph.editorRevisions,
+    workflowRoundTrips: graph.workflowRoundTrips,
     survivingRunLinks: graph.nodes
       .filter((node) => node.runRecordIds.length > 0)
       .map((node) => [node.id, node.runRecordIds]),

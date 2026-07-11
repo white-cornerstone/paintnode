@@ -1,4 +1,4 @@
-import type { ProjectAsset } from '../integrations/desktop';
+import type { ProjectAsset, WorkflowEditorReturnResult } from '../integrations/desktop';
 import { project } from './project.svelte';
 import { ui } from './ui.svelte';
 import { coerceAnnotations, type AnnotationItem } from '../engine/annotations';
@@ -50,6 +50,7 @@ import {
   type WorkflowSelectiveExecutionOutcome,
   type WorkflowNodePreflight,
   type WorkflowRunRecordV1,
+  type WorkflowRunOutput,
   executeWorkflowCandidateBranches,
   retryWorkflowCandidateBranch,
   deriveWorkflowCandidateBranchGroups,
@@ -63,7 +64,17 @@ import {
   type WorkflowProjectAsset,
   resolveWorkflowCampaignPath,
   resolveWorkflowReviewTopology,
+  appendWorkflowEditorRevision,
+  resolveWorkflowEffectiveResult,
+  type WorkflowEditableResultIdentity,
+  type WorkflowEditorRevisionV1,
+  type WorkflowRoundTripBindingV1,
 } from '../workflow';
+import {
+  bindWorkflowRoundTripAuthority,
+  workflowRoundTripAuthority,
+  type WorkflowRoundTripAuthorityInput,
+} from './workflowEditorSession';
 
 export interface WorkflowTransformExecutionState {
   state: 'idle' | 'queued' | 'running' | 'cancelling' | 'cancelled' | 'succeeded' | 'failed' | 'stale';
@@ -104,6 +115,14 @@ export interface WorkflowSelectivePreflightProjection {
 export interface WorkflowSelectiveStoreExecutionOptions {
   maxConcurrency?: number;
   providerConcurrency?: Readonly<Record<string, number>>;
+}
+
+export interface WorkflowEditorOpenDescriptor {
+  authority: WorkflowRoundTripAuthorityInput;
+  output: { assetReferenceId: string; assetId: string; relativePath: string; contentHash: string };
+  documentRelativePath: string | null;
+  documentContentHash: string | null;
+  editorRevisionId: string | null;
 }
 
 interface WorkflowSelectivePreflightSnapshot {
@@ -314,10 +333,26 @@ function immutableWorkflowHistoryBytes(graph: WorkflowGraphV2): string {
     assetReferences: graph.assetReferences,
     runRecords: graph.runRecords,
     reviewPromotions: graph.reviewPromotions,
+    editorRevisions: graph.editorRevisions,
+    workflowRoundTrips: graph.workflowRoundTrips,
     runRecordLinks: graph.nodes
       .filter((node) => node.runRecordIds.length > 0)
       .map((node) => [node.id, node.runRecordIds]),
   });
+}
+
+function currentRoundTripBinding(
+  graph: WorkflowGraphV2,
+  identity: WorkflowEditableResultIdentity,
+): WorkflowRoundTripBindingV1 | null {
+  const matching = (graph.workflowRoundTrips ?? []).filter((binding) => (
+    binding.target.nodeId === identity.nodeId
+    && binding.target.rootRunId === identity.rootRunId
+    && binding.target.promotionId === identity.promotionId
+  ));
+  const superseded = new Set(matching.map((binding) => binding.supersedesRoundTripId).filter(Boolean));
+  const heads = matching.filter((binding) => !superseded.has(binding.id));
+  return heads.length === 1 ? heads[0] : null;
 }
 
 export class WorkflowStore {
@@ -1253,6 +1288,206 @@ export class WorkflowStore {
     return this.requireGraphDomain().graph;
   }
 
+  acceptedEditorResult(nodeId: string): {
+    nodeId: string;
+    rootRunId: string;
+    assetReferenceId: string;
+  } | null {
+    const candidates = this.serialize().runRecords.flatMap((record) => {
+      if (!isFullWorkflowRunRecord(record) || record.nodeId !== nodeId || record.status !== 'succeeded' || record.candidate) {
+        return [];
+      }
+      return record.outputs
+        .filter((output) => output.acceptedAt !== undefined)
+        .map((output) => ({
+          nodeId,
+          rootRunId: record.id,
+          assetReferenceId: output.assetReferenceId,
+          acceptedAt: output.acceptedAt!,
+        }));
+    }).sort((left, right) => right.acceptedAt - left.acceptedAt || right.rootRunId.localeCompare(left.rootRunId));
+    const result = candidates[0];
+    return result ? {
+      nodeId: result.nodeId,
+      rootRunId: result.rootRunId,
+      assetReferenceId: result.assetReferenceId,
+    } : null;
+  }
+
+  prepareWorkflowEditorRoundTrip(
+    request: Readonly<{ nodeId: string; rootRunId: string; assetReferenceId: string; promotionId?: string }>,
+    assets: readonly WorkflowProjectAsset[],
+    projectIdentity: string,
+  ): WorkflowEditorOpenDescriptor {
+    const graph = this.serialize();
+    const run = graph.runRecords.find((candidate) => candidate.id === request.rootRunId);
+    if (!run || !isFullWorkflowRunRecord(run) || run.status !== 'succeeded' || run.nodeId !== request.nodeId) {
+      throw new Error('The workflow result is no longer available.');
+    }
+    let promotion: WorkflowEditorRevisionV1['promotion'];
+    if (request.promotionId) {
+      const decision = (graph.reviewPromotions ?? []).find((candidate) => candidate.id === request.promotionId);
+      const latest = decision
+        ? (graph.reviewPromotions ?? []).filter((candidate) => candidate.reviewNodeId === decision.reviewNodeId).at(-1)
+        : null;
+      const resolution = decision ? this.reviewResolution(decision.reviewNodeId, assets, true, projectIdentity) : null;
+      if (!decision || latest?.id !== decision.id || decision.candidateRunId !== run.id
+        || resolution?.state !== 'ready' || resolution.promotion.id !== decision.id) {
+        throw new Error('Only the currently promoted, verified result can open in the editor.');
+      }
+      promotion = { reviewNodeId: decision.reviewNodeId, promotionId: decision.id };
+    } else if (run.candidate || !run.outputs.some((output) => (
+      output.assetReferenceId === request.assetReferenceId && output.acceptedAt !== undefined
+    ))) {
+      throw new Error('Only an accepted workflow result can open in the editor.');
+    }
+    const identity: WorkflowEditableResultIdentity = {
+      nodeId: run.nodeId,
+      rootRunId: run.id,
+      ...(run.candidate ? { candidateId: run.candidate.candidateId } : {}),
+      ...(request.promotionId ? { promotionId: request.promotionId } : {}),
+    };
+    const effective = resolveWorkflowEffectiveResult(graph, identity);
+    if (!effective) throw new Error('The workflow result lineage is unavailable.');
+    const original = run.outputs.find((output) => output.assetReferenceId === request.assetReferenceId);
+    if (!effective.editorRevision && !original) throw new Error('The workflow result output is unavailable.');
+    const sourceOutput = effective.editorRevision?.output ?? original!;
+    const source = {
+      kind: effective.editorRevision ? 'editor-revision' as const : 'run-output' as const,
+      id: effective.editorRevision?.id ?? run.id,
+      assetReferenceId: sourceOutput.assetReferenceId,
+      assetId: sourceOutput.assetId,
+      relativePath: sourceOutput.relativePath,
+      contentHash: sourceOutput.contentHash,
+    };
+    const authority: WorkflowRoundTripAuthorityInput = {
+      id: `editor-session-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
+      workflowId: graph.id,
+      workflowSavedPath: this.savedPath,
+      projectIdentity,
+      sessionIdentity: this.workflowSessionIdentity,
+      mutationIdentity: this.workflowMutationIdentity,
+      storeRevision: this.rev,
+      graphRevision: this.graphRevision,
+      materialKey: effective.materialKey,
+      identity,
+      source,
+      ...(run.candidate ? { candidate: {
+        branchGroupId: run.candidate.branchGroupId,
+        candidateId: run.candidate.candidateId,
+      } } : {}),
+      ...(promotion ? { promotion } : {}),
+    };
+    return {
+      authority,
+      output: structuredClone(sourceOutput),
+      documentRelativePath: effective.editorRevision?.document.relativePath ?? null,
+      documentContentHash: effective.editorRevision?.document.contentHash ?? null,
+      editorRevisionId: effective.editorRevision?.id ?? null,
+    };
+  }
+
+  commitWorkflowEditorReturn(
+    documentSession: object,
+    request: Readonly<{
+      revisionId: string;
+      bindingId: string;
+      outputAssetReferenceId: string;
+      artifacts: WorkflowEditorReturnResult;
+      width: number;
+      height: number;
+      createdAt: number;
+    }>,
+  ): WorkflowEditorRevisionV1 {
+    const authority = workflowRoundTripAuthority(documentSession);
+    if (!authority) throw new Error('This document is not linked to a workflow result.');
+    if (authority.workflowId !== this.serialize().id
+      || authority.projectIdentity !== project.identity
+      || authority.sessionIdentity !== this.workflowSessionIdentity
+      || authority.mutationIdentity !== this.workflowMutationIdentity
+      || authority.storeRevision !== this.rev
+      || authority.graphRevision !== this.graphRevision) {
+      throw new Error('The workflow or project changed while this result was being edited. The stored artifacts were not linked.');
+    }
+    const graph = this.serialize();
+    const effective = resolveWorkflowEffectiveResult(graph, authority.identity);
+    if (!effective || effective.materialKey !== authority.materialKey
+      || effective.output.assetReferenceId !== authority.source.assetReferenceId
+      || effective.output.assetId !== authority.source.assetId
+      || effective.output.relativePath !== authority.source.relativePath
+      || effective.output.contentHash !== authority.source.contentHash) {
+      throw new Error('The source result changed while this document was open. The stored artifacts were not linked.');
+    }
+    if (authority.promotion) {
+      const latest = (graph.reviewPromotions ?? [])
+        .filter((candidate) => candidate.reviewNodeId === authority.promotion!.reviewNodeId).at(-1);
+      if (latest?.id !== authority.promotion.promotionId) {
+        throw new Error('A newer Review promotion replaced this editor session. The stored artifacts were not linked.');
+      }
+    }
+    const revision: WorkflowEditorRevisionV1 = {
+      version: 1,
+      id: request.revisionId,
+      nodeId: authority.identity.nodeId,
+      rootRunId: authority.identity.rootRunId,
+      source: structuredClone(authority.source),
+      ...(authority.candidate ? { candidate: structuredClone(authority.candidate) } : {}),
+      ...(authority.promotion ? { promotion: structuredClone(authority.promotion) } : {}),
+      document: structuredClone(request.artifacts.document),
+      output: {
+        assetReferenceId: request.outputAssetReferenceId,
+        assetId: request.artifacts.output.id,
+        relativePath: request.artifacts.output.relativePath,
+        contentHash: request.artifacts.outputContentHash,
+        width: request.width,
+        height: request.height,
+        mime: 'image/png',
+      },
+      createdAt: request.createdAt,
+    };
+    const priorBinding = currentRoundTripBinding(graph, authority.identity);
+    const binding: WorkflowRoundTripBindingV1 = {
+      version: 1,
+      id: request.bindingId,
+      target: {
+        nodeId: authority.identity.nodeId,
+        rootRunId: authority.identity.rootRunId,
+        ...(authority.identity.promotionId ? { promotionId: authority.identity.promotionId } : {}),
+      },
+      editorRevisionId: revision.id,
+      boundAt: request.createdAt,
+      ...(priorBinding ? { supersedesRoundTripId: priorBinding.id } : {}),
+    };
+    const next = appendWorkflowEditorRevision(graph, revision, binding);
+    const domain = new WorkflowGraphDomain(next, {
+      idGenerator: this.graphIdGenerator,
+      initialRevision: this.graphRevision + 1,
+    });
+    this.graphDomain = domain;
+    this.projectedGraphRevision = domain.revision;
+    this.syncReactiveGraph(domain);
+    this.pendingDirectorPatchReview = null;
+    this.reviewVerifications = {};
+    this.bump();
+    const nextEffective = resolveWorkflowEffectiveResult(next, authority.identity)!;
+    bindWorkflowRoundTripAuthority(documentSession, {
+      ...authority,
+      mutationIdentity: this.workflowMutationIdentity,
+      storeRevision: this.rev,
+      graphRevision: this.graphRevision,
+      materialKey: nextEffective.materialKey,
+      source: {
+        kind: 'editor-revision',
+        id: revision.id,
+        assetReferenceId: revision.output.assetReferenceId,
+        assetId: revision.output.assetId,
+        relativePath: revision.output.relativePath,
+        contentHash: revision.output.contentHash,
+      },
+    });
+    return structuredClone(revision);
+  }
+
   planExecution(targetNodeId: string, options: WorkflowExecutionPlanOptions): WorkflowExecutionPlan {
     return planWorkflowExecution(this.serialize(), targetNodeId, options);
   }
@@ -1494,7 +1729,7 @@ export class WorkflowStore {
     const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
     const verification = this.currentReviewVerification(reviewNodeId, availableAssets, projectIdentity);
     const verified = new Set(verification?.verifiedOutputIds ?? []);
-    return resolveWorkflowReviewTopology(graph, {
+    const resolution = resolveWorkflowReviewTopology(graph, {
       reviewNodeId,
       ...(topology.transformNodeId
         ? { currentMaterialKeys: { [topology.transformNodeId]: verification?.materialKey ?? (requireVerified ? 'unverified' : '') } }
@@ -1508,6 +1743,34 @@ export class WorkflowStore {
           )),
       } : {}),
     });
+    if (resolution.state !== 'ready') return resolution;
+    const effective = resolveWorkflowEffectiveResult(graph, {
+      nodeId: resolution.promotion.sourceNodeId,
+      rootRunId: resolution.promotion.candidateRunId,
+      candidateId: resolution.promotion.candidateId,
+      promotionId: resolution.promotion.id,
+    });
+    if (!effective?.editorRevision) return resolution;
+    const available = verification
+      ? verified.has(effective.output.assetReferenceId)
+      : !requireVerified && (!availableAssets || availableAssets.some((asset) => (
+        asset.id === effective.output.assetId && asset.relativePath === effective.output.relativePath
+        && (!('exists' in asset) || asset.exists !== false)
+      )));
+    if (!available) {
+      return {
+        state: 'blocked' as const,
+        reviewNodeId,
+        transformNodeId: resolution.transformNodeId,
+        outputNodeId: resolution.outputNodeId,
+        reason: {
+          code: 'PROMOTED_OUTPUT_UNAVAILABLE' as const,
+          message: 'The edited promoted result is unavailable.',
+          action: 'Restore it or return the edit again',
+        },
+      };
+    }
+    return { ...resolution, output: structuredClone(effective.output) };
   }
 
   async refreshReviewState(
@@ -1551,6 +1814,35 @@ export class WorkflowStore {
         }
       } catch {
         // Missing or unreadable candidate outputs remain recoverably unavailable.
+      }
+    }
+    const promoted = resolveWorkflowReviewTopology(graph, { reviewNodeId });
+    if (promoted.state === 'ready') {
+      const effective = resolveWorkflowEffectiveResult(graph, {
+        nodeId: promoted.promotion.sourceNodeId,
+        rootRunId: promoted.promotion.candidateRunId,
+        candidateId: promoted.promotion.candidateId,
+        promotionId: promoted.promotion.id,
+      });
+      if (effective?.editorRevision) {
+        const asset = options.assets.find((item) => (
+          item.id === effective.output.assetId && item.relativePath === effective.output.relativePath
+        ));
+        if (asset) {
+          try {
+            const material = await options.resolveAsset(asset);
+            const bytes = material.bytes instanceof Uint8Array && material.bytes.length > 0 ? material.bytes : null;
+            if (bytes
+              && material.assetId === effective.output.assetId
+              && material.relativePath === effective.output.relativePath
+              && material.contentHash === effective.output.contentHash
+              && workflowSha256Bytes(bytes) === effective.output.contentHash) {
+              verifiedOutputIds.push(effective.output.assetReferenceId);
+            }
+          } catch {
+            // An unreadable edited promotion stays recoverably unavailable.
+          }
+        }
       }
     }
     if (this.reviewVerificationSequences.get(reviewNodeId) !== sequence) {
@@ -2040,6 +2332,7 @@ export class WorkflowStore {
     });
     const materialKeys: Record<string, string> = {};
     const reviewMaterialKeys: Record<string, string> = {};
+    const reviewEffectiveOutputs: Record<string, WorkflowRunOutput> = {};
     const verifiedReviewOutputIds = new Set<string>();
     for (const review of graph.nodes.filter((candidate) => (
       candidate.type === 'review' && draft.requiredNodeIds.includes(candidate.id)
@@ -2052,6 +2345,15 @@ export class WorkflowStore {
           reviewMaterialKeys[topology.transformNodeId] = verification.materialKey;
           materialKeys[topology.transformNodeId] = verification.materialKey;
           verification.verifiedOutputIds.forEach((id) => verifiedReviewOutputIds.add(id));
+          const effectiveResolution = this.reviewResolution(
+            review.id,
+            options.assets,
+            true,
+            options.currentProjectIdentity?.() ?? options.projectPath,
+          );
+          if (effectiveResolution.state === 'ready') {
+            reviewEffectiveOutputs[review.id] = effectiveResolution.output;
+          }
         }
       } catch (error) {
         if (operation.controller.signal.aborted) throw error;
@@ -2138,6 +2440,7 @@ export class WorkflowStore {
       nodeId,
       materialKeys,
       reviewMaterialKeys,
+      reviewEffectiveOutputs,
       isReviewOutputAvailable: (output) => verifiedReviewOutputIds.has(output.assetReferenceId),
       ...(restrictions.length > 0
         ? { executionRestrictions: createWorkflowExecutionRestrictions(restrictions) }

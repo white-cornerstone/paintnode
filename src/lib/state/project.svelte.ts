@@ -1,4 +1,5 @@
 import {
+  commitWorkflowEditorReturn,
   deleteProjectAsset,
   isDesktop,
   openProjectFolderAt,
@@ -122,6 +123,14 @@ class ProjectStore {
     });
     await this.refresh(path);
     return result.asset;
+  }
+
+  async commitWorkflowEditorReturn(args: Omit<Parameters<typeof commitWorkflowEditorReturn>[0], 'projectPath'>) {
+    const path = this.path;
+    if (!path) throw new Error('No project is open.');
+    const result = await commitWorkflowEditorReturn({ ...args, projectPath: path });
+    await this.refresh(path);
+    return result;
   }
 
   async readAsset(asset: ProjectAsset) {

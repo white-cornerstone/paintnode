@@ -343,6 +343,12 @@ export interface StoredAssetResult {
   asset: ProjectAsset;
 }
 
+export interface WorkflowEditorReturnResult {
+  document: { relativePath: string; contentHash: string; mime: 'image/openraster' };
+  output: ProjectAsset;
+  outputContentHash: string;
+}
+
 export interface ProjectAssetMaterial {
   assetId: string;
   relativePath: string;
@@ -983,6 +989,23 @@ export async function storeProjectAssetBytes(args: {
   return invoke<StoredAssetResult>('project_store_asset_bytes', {
     ...args,
     bytes: Array.from(args.bytes),
+  });
+}
+
+export async function commitWorkflowEditorReturn(args: {
+  projectPath: string;
+  revisionId: string;
+  name: string;
+  documentBytes: Uint8Array;
+  outputBytes: Uint8Array;
+  width: number;
+  height: number;
+}): Promise<WorkflowEditorReturnResult> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  return invoke<WorkflowEditorReturnResult>('project_commit_workflow_editor_return', {
+    ...args,
+    documentBytes: Array.from(args.documentBytes),
+    outputBytes: Array.from(args.outputBytes),
   });
 }
 

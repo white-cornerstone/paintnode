@@ -85,6 +85,7 @@ pub fn run() {
             project::project_open_folder,
             project::project_refresh,
             project::project_store_asset_bytes,
+            project::project_commit_workflow_editor_return,
             project::project_read_asset,
             project::project_resolve_asset_material,
             project::project_reveal,

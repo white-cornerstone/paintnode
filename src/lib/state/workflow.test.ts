@@ -15,11 +15,14 @@ import {
   workflowSha256Bytes,
   type WorkflowGraphV2,
   type WorkflowIdGenerator,
+  type WorkflowRunRecordV1,
 } from '../workflow';
-import { WORKFLOW_TEMPLATES } from '../workflow/templates';
+import { WORKFLOW_TEMPLATES, instantiateWorkflowTemplate } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
+import { bindWorkflowRoundTripAuthority } from './workflowEditorSession';
+import { project } from './project.svelte';
 import {
   WorkflowTransformExecutionError,
   createWorkflowCompositionExecutor,
@@ -47,6 +50,51 @@ function campaignStore(): WorkflowStore {
   store.newFromTemplate('campaign-composer');
   store.assignAsset('slot-product', campaignProduct);
   return store;
+}
+
+function editorRoundTripStore(): WorkflowStore {
+  const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', { graphId: 'store-editor-return' }));
+  const node = graph.nodes.find((candidate) => candidate.id === 'transform-generate-square')!;
+  const outputHash = `sha256:${'4'.repeat(64)}`;
+  const run: WorkflowRunRecordV1 = {
+    recordVersion: 1, id: 'store-run', nodeId: node.id, status: 'succeeded', attempt: 1,
+    workflowRevision: `sha256:${'1'.repeat(64)}`, nodeRevision: `sha256:${'2'.repeat(64)}`,
+    materialKey: 'store-material', sourceAssets: [],
+    prompt: { brief: 'Brief', artDirection: 'Direction', instructions: 'Generate', constraints: [], effectivePromptHash: `sha256:${'3'.repeat(64)}` },
+    provider: { id: 'qa-fake', model: null, effectiveOptions: {} },
+    executor: { id: 'campaign-generate', version: '1', requestSchemaVersion: '1' },
+    target: { nodeId: 'output-square', title: 'Square', width: 64, height: 64 },
+    startedAt: 1, finishedAt: 2,
+    outputs: [{
+      assetReferenceId: 'store-source-ref', assetId: 'store-source-asset',
+      relativePath: 'assets/generated/store-source.png', contentHash: outputHash, acceptedAt: 2,
+    }],
+  };
+  node.runRecordIds = [run.id];
+  graph.runRecords = [run];
+  graph.assetReferences = [{
+    id: 'store-source-ref', role: 'output', assetId: 'store-source-asset',
+    relativePath: 'assets/generated/store-source.png',
+  }];
+  const store = new WorkflowStore({ idGenerator: ids() });
+  store.openFromBytes(new TextEncoder().encode(serializeWorkflowGraphV2(graph)), null, graph.metadata.name);
+  return store;
+}
+
+function editorArtifacts(id: string, digit: string) {
+  return {
+    document: {
+      relativePath: `documents/workflow-edits/${id}.ora`,
+      contentHash: `sha256:${digit.repeat(64)}`,
+      mime: 'image/openraster' as const,
+    },
+    output: {
+      id: `asset-${id}`, kind: 'edited', name: `${id}.png`,
+      relativePath: `assets/generated/${id}.png`, createdAt: Number(digit), exists: true,
+      width: 64, height: 64, mime: 'image/png', previewDataUrl: null,
+    },
+    outputContentHash: `sha256:${digit.repeat(64)}`,
+  };
 }
 
 function deferredCampaignRun(store: WorkflowStore, currentProjectIdentity?: () => string | null) {
@@ -249,8 +297,8 @@ describe('WorkflowStore graph adapter', () => {
       editorRevisions: unknown[];
       workflowRoundTrips: unknown[];
     };
-    graph.editorRevisions = [{ id: 'private-editor-revision' }];
-    graph.workflowRoundTrips = [{ id: 'private-round-trip' }];
+    graph.editorRevisions = [{ id: 'private-editor-revision' }] as never;
+    graph.workflowRoundTrips = [{ id: 'private-round-trip' }] as never;
 
     expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
     expect(store.toBytes()).toEqual(before);
@@ -1470,5 +1518,61 @@ describe('WorkflowStore graph adapter', () => {
       targetNodeId: 'output',
       executionOrder: ['composition', 'output'],
     });
+  });
+
+  it('rotates return authority for repeated edits and rejects stale duplicate or workflow-drift commits', () => {
+    const store = editorRoundTripStore();
+    const request = {
+      nodeId: 'transform-generate-square', rootRunId: 'store-run', assetReferenceId: 'store-source-ref',
+    };
+    const descriptor = store.prepareWorkflowEditorRoundTrip(request, [], project.identity);
+    expect(descriptor).toMatchObject({
+      documentRelativePath: null,
+      documentContentHash: null,
+      editorRevisionId: null,
+      output: { assetReferenceId: 'store-source-ref' },
+    });
+    expect(() => store.prepareWorkflowEditorRoundTrip({
+      ...request,
+      assetReferenceId: 'missing-source-ref',
+    }, [], project.identity)).toThrow(/accepted workflow result|output is unavailable/i);
+    const activeSession = {};
+    const duplicateSession = {};
+    bindWorkflowRoundTripAuthority(activeSession, descriptor.authority);
+    bindWorkflowRoundTripAuthority(duplicateSession, descriptor.authority);
+
+    store.commitWorkflowEditorReturn(activeSession, {
+      revisionId: 'store-edit-1', bindingId: 'store-binding-1', outputAssetReferenceId: 'store-edit-ref-1',
+      artifacts: editorArtifacts('store-edit-1', '5'), width: 64, height: 64, createdAt: 5,
+    });
+    expect(() => store.commitWorkflowEditorReturn(duplicateSession, {
+      revisionId: 'store-edit-duplicate', bindingId: 'store-binding-duplicate',
+      outputAssetReferenceId: 'store-edit-ref-duplicate', artifacts: editorArtifacts('store-edit-duplicate', '6'),
+      width: 64, height: 64, createdAt: 6,
+    })).toThrow(/workflow or project changed|not linked/i);
+
+    store.commitWorkflowEditorReturn(activeSession, {
+      revisionId: 'store-edit-2', bindingId: 'store-binding-2', outputAssetReferenceId: 'store-edit-ref-2',
+      artifacts: editorArtifacts('store-edit-2', '7'), width: 64, height: 64, createdAt: 7,
+    });
+    expect(store.serialize().editorRevisions?.map((revision) => revision.id))
+      .toEqual(['store-edit-1', 'store-edit-2']);
+    expect(store.serialize().workflowRoundTrips?.[1].supersedesRoundTripId).toBe('store-binding-1');
+
+    const driftDescriptor = store.prepareWorkflowEditorRoundTrip(request, [], project.identity);
+    expect(driftDescriptor).toMatchObject({
+      documentRelativePath: 'documents/workflow-edits/store-edit-2.ora',
+      documentContentHash: `sha256:${'7'.repeat(64)}`,
+      editorRevisionId: 'store-edit-2',
+      output: { assetReferenceId: 'store-edit-ref-2' },
+    });
+    const driftSession = {};
+    bindWorkflowRoundTripAuthority(driftSession, driftDescriptor.authority);
+    store.setBriefObjective('brief', 'Changed after editor open');
+    expect(() => store.commitWorkflowEditorReturn(driftSession, {
+      revisionId: 'store-edit-drift', bindingId: 'store-binding-drift', outputAssetReferenceId: 'store-edit-ref-drift',
+      artifacts: editorArtifacts('store-edit-drift', '8'), width: 64, height: 64, createdAt: 8,
+    })).toThrow(/workflow or project changed/i);
+    expect(store.serialize().editorRevisions).toHaveLength(2);
   });
 });

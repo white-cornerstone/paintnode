@@ -129,6 +129,22 @@ pub(crate) struct StoredAssetResult {
     asset: ProjectAssetView,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowEditorDocumentResult {
+    relative_path: String,
+    content_hash: String,
+    mime: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowEditorReturnResult {
+    document: WorkflowEditorDocumentResult,
+    output: ProjectAssetView,
+    output_content_hash: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectAssetMaterialResult {
     asset_id: String,
@@ -219,6 +235,24 @@ fn save_manifest(project_path: &Path, manifest: &ProjectManifest) -> Result<(), 
             path.display()
         )
     })
+}
+
+fn save_manifest_atomic(project_path: &Path, manifest: &ProjectManifest) -> Result<(), String> {
+    ensure_project_dirs(project_path)?;
+    let mut next = manifest.clone();
+    next.updated_at = now_id();
+    let json = serde_json::to_vec_pretty(&next)
+        .map_err(|e| format!("Failed to serialize project manifest: {e}"))?;
+    let path = project_manifest_path(project_path);
+    let temporary = path.with_extension(format!("json.{}.tmp", now_id()));
+    write_new_synced(&temporary, &json)?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Failed to commit project manifest atomically: {error}"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn safe_stem(name: &str) -> String {
@@ -973,6 +1007,214 @@ pub(crate) fn store_generated_png_asset(
     )
 }
 
+fn valid_editor_revision_id(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 160
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(path).map_err(|error| {
+        format!(
+            "Workflow editor return could not create {}: {error}",
+            path.display()
+        )
+    })?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "Workflow editor return could not write {}: {error}",
+                path.display()
+            )
+        })
+}
+
+fn promote_new_file(staged: &Path, destination: &Path) -> Result<(), String> {
+    fs::hard_link(staged, destination).map_err(|error| {
+        format!(
+            "Workflow editor return could not commit new file {}: {error}",
+            destination.display()
+        )
+    })?;
+    fs::remove_file(staged).map_err(|error| {
+        let _ = fs::remove_file(destination);
+        format!(
+            "Workflow editor return could not finish committing {}: {error}",
+            destination.display()
+        )
+    })
+}
+
+struct WorkflowEditorReturnCommit<'a> {
+    revision_id: &'a str,
+    name: &'a str,
+    document_bytes: &'a [u8],
+    output_bytes: &'a [u8],
+    width: u32,
+    height: u32,
+}
+
+fn commit_workflow_editor_return_with(
+    project_dir: &Path,
+    input: WorkflowEditorReturnCommit<'_>,
+    persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
+) -> Result<WorkflowEditorReturnResult, String> {
+    let WorkflowEditorReturnCommit {
+        revision_id,
+        name,
+        document_bytes,
+        output_bytes,
+        width,
+        height,
+    } = input;
+    if !valid_editor_revision_id(revision_id) {
+        return Err("Workflow editor revision ID is invalid.".into());
+    }
+    if document_bytes.is_empty() || !is_png(output_bytes) || width == 0 || height == 0 {
+        return Err(
+            "Workflow editor return requires a valid OpenRaster document and PNG output.".into(),
+        );
+    }
+    ensure_project_dirs(project_dir)?;
+    let mut manifest = load_manifest(project_dir)?;
+    let nonce = now_id();
+    let asset_id = format!("asset-{nonce}");
+    if manifest
+        .assets
+        .iter()
+        .any(|existing| existing.id == asset_id)
+    {
+        return Err("Workflow editor output asset identity already exists.".into());
+    }
+    let stage_dir = project_dir
+        .join(PAINTNODE_WORK_DIR)
+        .join("workflow-editor-returns")
+        .join(format!("{}-{nonce}", safe_stem(revision_id)));
+    fs::create_dir_all(&stage_dir)
+        .map_err(|error| format!("Workflow editor return staging failed: {error}"))?;
+    let staged_document = stage_dir.join("document.ora");
+    let staged_output = stage_dir.join("output.png");
+    let cleanup_stage = || {
+        let _ = fs::remove_dir_all(&stage_dir);
+    };
+    if let Err(error) = write_new_synced(&staged_document, document_bytes)
+        .and_then(|_| write_new_synced(&staged_output, output_bytes))
+    {
+        cleanup_stage();
+        return Err(error);
+    }
+    if ora_thumbnail_data_url(&staged_document).is_none()
+        || fs::read(&staged_document).ok().as_deref() != Some(document_bytes)
+        || fs::read(&staged_output).ok().as_deref() != Some(output_bytes)
+    {
+        cleanup_stage();
+        return Err("Workflow editor return staging verification failed.".into());
+    }
+    let safe_revision = safe_stem(revision_id);
+    let document_relative = PathBuf::from("documents")
+        .join("workflow-edits")
+        .join(format!("{safe_revision}-{nonce}.ora"));
+    let output_relative = PathBuf::from("assets")
+        .join("generated")
+        .join(format!("{safe_revision}-{nonce}.png"));
+    let document_path = project_dir.join(&document_relative);
+    let output_path = project_dir.join(&output_relative);
+    if let Some(parent) = document_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            cleanup_stage();
+            return Err(format!("Workflow editor document folder failed: {error}"));
+        }
+    }
+    if let Some(parent) = output_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            cleanup_stage();
+            return Err(format!("Workflow editor output folder failed: {error}"));
+        }
+    }
+    if let Err(error) = promote_new_file(&staged_document, &document_path) {
+        cleanup_stage();
+        return Err(error);
+    }
+    if let Err(error) = promote_new_file(&staged_output, &output_path) {
+        let _ = fs::remove_file(&document_path);
+        cleanup_stage();
+        return Err(error);
+    }
+    cleanup_stage();
+    let document_hash = format!("sha256:{:x}", Sha256::digest(document_bytes));
+    let output_hash = format!("sha256:{:x}", Sha256::digest(output_bytes));
+    let asset = ProjectAsset {
+        id: asset_id,
+        kind: "edited".into(),
+        name: if name.trim().is_empty() {
+            "Workflow edit".into()
+        } else {
+            name.trim().to_string()
+        },
+        relative_path: output_relative.to_string_lossy().replace('\\', "/"),
+        created_at: nonce,
+        prompt: None,
+        source_file_name: Some(document_relative.to_string_lossy().replace('\\', "/")),
+        width: Some(width),
+        height: Some(height),
+        mime: Some("image/png".into()),
+    };
+    manifest.assets.push(asset.clone());
+    if let Err(error) = persist_manifest(project_dir, &manifest) {
+        let _ = fs::remove_file(&document_path);
+        let _ = fs::remove_file(&output_path);
+        return Err(error);
+    }
+    Ok(WorkflowEditorReturnResult {
+        document: WorkflowEditorDocumentResult {
+            relative_path: document_relative.to_string_lossy().replace('\\', "/"),
+            content_hash: document_hash,
+            mime: "image/openraster".into(),
+        },
+        output: ProjectAssetView {
+            asset,
+            preview_data_url: png_data_url_from_bytes(output_bytes),
+            exists: true,
+        },
+        output_content_hash: output_hash,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn project_commit_workflow_editor_return(
+    project_path: String,
+    revision_id: String,
+    name: String,
+    document_bytes: Vec<u8>,
+    output_bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<WorkflowEditorReturnResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        commit_workflow_editor_return_with(
+            Path::new(project_path.trim()),
+            WorkflowEditorReturnCommit {
+                revision_id: &revision_id,
+                name: &name,
+                document_bytes: &document_bytes,
+                output_bytes: &output_bytes,
+                width,
+                height,
+            },
+            &save_manifest_atomic,
+        )
+    })
+    .await
+    .map_err(|error| format!("Task error: {error}"))?
+}
+
 #[tauri::command]
 pub(crate) async fn project_open_folder(project_path: String) -> Result<ProjectState, String> {
     let path = PathBuf::from(project_path.trim());
@@ -1307,6 +1549,22 @@ mod tests {
     use crate::png::file_has_png_signature;
     use crate::test_util::{png_dimensions_from_data_url, ONE_PIXEL_PNG};
 
+    fn workflow_editor_ora_bytes() -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        archive.start_file("mimetype", options).expect("mimetype");
+        archive
+            .write_all(b"image/openraster")
+            .expect("mimetype bytes");
+        archive
+            .start_file("Thumbnails/thumbnail.png", options)
+            .expect("thumbnail");
+        archive.write_all(ONE_PIXEL_PNG).expect("thumbnail bytes");
+        archive.finish().expect("finish archive").into_inner()
+    }
+
     fn material_asset(id: &str, relative_path: &str) -> ProjectAsset {
         ProjectAsset {
             id: id.into(),
@@ -1320,6 +1578,101 @@ mod tests {
             height: Some(1),
             mime: Some("image/png".into()),
         }
+    }
+
+    #[test]
+    fn workflow_editor_return_commits_unique_document_png_and_edited_manifest_asset() {
+        let project = TempJobDir::new("paintnode-workflow-editor-return").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-one",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest,
+        )
+        .expect("editor return");
+
+        assert!(project.path().join(&result.document.relative_path).exists());
+        assert!(project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
+        assert_eq!(result.output.asset.kind, "edited");
+        assert_eq!(
+            result.document.content_hash,
+            format!("sha256:{:x}", Sha256::digest(&ora))
+        );
+        assert_eq!(
+            result.output_content_hash,
+            format!("sha256:{:x}", Sha256::digest(ONE_PIXEL_PNG))
+        );
+        let manifest = load_manifest(project.path()).expect("manifest");
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].id, result.output.asset.id);
+    }
+
+    #[test]
+    fn workflow_editor_return_rolls_back_files_when_manifest_commit_fails() {
+        let project = TempJobDir::new("paintnode-workflow-editor-rollback").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let error = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-rollback",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &|_, _| Err("manifest write failed".into()),
+        )
+        .expect_err("manifest failure");
+
+        assert!(error.contains("manifest write failed"));
+        assert!(
+            fs::read_dir(project.path().join("documents/workflow-edits"))
+                .expect("documents dir")
+                .next()
+                .is_none()
+        );
+        assert!(fs::read_dir(project.path().join("assets/generated"))
+            .expect("generated dir")
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn workflow_editor_return_rejects_invalid_artifacts_without_manifest_or_files() {
+        let project = TempJobDir::new("paintnode-workflow-editor-invalid").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        load_manifest(project.path()).expect("initialize manifest");
+        let before = fs::read(project_manifest_path(project.path())).expect("manifest");
+        assert!(commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-invalid",
+                name: "Edited concept",
+                document_bytes: b"not ora",
+                output_bytes: b"not png",
+                width: 1,
+                height: 1,
+            },
+            &save_manifest,
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(project_manifest_path(project.path())).expect("manifest"),
+            before
+        );
     }
 
     #[test]

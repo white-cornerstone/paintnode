@@ -13,6 +13,7 @@ import type {
   WorkflowGraphV2,
   WorkflowNodeV2,
   WorkflowRunRecordV1,
+  WorkflowRunOutput,
 } from './schema';
 
 export type WorkflowSelectiveRunMode = 'run-node' | 'run-from-here';
@@ -66,6 +67,7 @@ export interface WorkflowSelectiveExecutionRequest {
   isRunRecordReusable?: (record: Readonly<WorkflowRunRecordV1>) => boolean;
   reviewMaterialKeys?: Readonly<Record<string, string>>;
   isReviewOutputAvailable?: (output: Readonly<WorkflowRunRecordV1['outputs'][number]>) => boolean;
+  reviewEffectiveOutputs?: Readonly<Record<string, WorkflowRunOutput>>;
 }
 
 export interface WorkflowSelectiveExecutionPlan {
@@ -433,11 +435,18 @@ export function planSelectiveWorkflowExecution(
         isOutputAvailable: request.isReviewOutputAvailable,
       });
       if (resolution.state === 'ready') {
+        const effectiveOutput = request.reviewEffectiveOutputs?.[node.id] ?? resolution.output;
+        const effectiveAvailable = !request.isReviewOutputAvailable || request.isReviewOutputAvailable(effectiveOutput);
+        if (!effectiveAvailable) {
+          registryDisposition = { kind: 'unavailable', reason: 'The edited promoted result is unavailable.' };
+          dispositions.set(node.id, registryDisposition);
+          continue;
+        }
         registryDisposition = { kind: 'available' };
         promotedReviewResults.set(node.id, {
           nodeId: node.id,
-          cacheKey: workflowReviewPromotionMaterialKey(resolution),
-          outputIds: [resolution.output.assetReferenceId],
+          cacheKey: workflowReviewPromotionMaterialKey({ ...resolution, output: effectiveOutput }),
+          outputIds: [effectiveOutput.assetReferenceId],
         });
       } else {
         registryDisposition = { kind: 'unavailable', reason: resolution.reason.message };

@@ -567,10 +567,10 @@ describe('Workflow Director patch proposal', () => {
   });
 
   it.each(['editorRevisions', 'workflowRoundTrips'] as const)(
-    'fails closed instead of dropping the future %s ledger',
+    'fails closed instead of dropping an invalid %s ledger',
     (ledger) => {
       const graph = campaignWithAcceptedHistory() as WorkflowGraphV2 & Record<typeof ledger, unknown[]>;
-      graph[ledger] = [{ id: `protected-${ledger}` }];
+      graph[ledger] = [{ id: `protected-${ledger}` }] as never;
       const result = createWorkflowDirectorPatchProposal(
         patch([{ op: 'move-node', nodeId: 'output-portrait', position: { x: 1600, y: 240 } }]),
         graph,
@@ -579,8 +579,8 @@ describe('Workflow Director patch proposal', () => {
 
       expect(result.proposal).toBeNull();
       expect(result.issues).toEqual([expect.objectContaining({
-        path: ledger,
-        code: 'UNSUPPORTED_GRAPH_LEDGER',
+        path: 'graph',
+        code: 'INVALID_GRAPH',
       })]);
     },
   );
