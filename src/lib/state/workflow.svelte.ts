@@ -26,6 +26,7 @@ import {
   type WorkflowDirectorSessionToken,
   createWorkflowDirectorPatchProposal,
   assertFreshWorkflowDirectorPatchProposal,
+  workflowDirectorProtectedReviewHistoryBytes,
   type WorkflowDirectorPatchProposal,
   type WorkflowDirectorPatchProposalResult,
   assertFreshWorkflowDirectorProposal,
@@ -477,6 +478,11 @@ export class WorkflowStore {
     if (immutableWorkflowHistoryBytes(currentGraph) !== immutableWorkflowHistoryBytes(validatedGraph)) {
       this.pendingDirectorPatchReview = null;
       throw new Error('AI Director patches cannot modify accepted candidates or workflow run history.');
+    }
+    if (workflowDirectorProtectedReviewHistoryBytes(currentGraph)
+      !== workflowDirectorProtectedReviewHistoryBytes(validatedGraph)) {
+      this.pendingDirectorPatchReview = null;
+      throw new Error('AI Director patches cannot remove or reconnect an accepted Review path.');
     }
 
     const before = this.captureDirectorPatchSnapshot();

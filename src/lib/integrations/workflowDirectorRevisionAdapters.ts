@@ -19,6 +19,9 @@ const authoringKeys: Record<string, readonly string[]> = {
 };
 
 export function constrainedWorkflowRevisionGraph(graph: WorkflowGraphV2) {
+  const supportedNodeIds = new Set(
+    graph.nodes.filter((node) => node.type !== 'unsupported').map((node) => node.id),
+  );
   return {
     id: graph.id,
     nodes: graph.nodes.filter((node) => node.type !== 'unsupported').map((node) => ({
@@ -31,7 +34,11 @@ export function constrainedWorkflowRevisionGraph(graph: WorkflowGraphV2) {
         .filter((key) => Object.hasOwn(node.config, key))
         .map((key) => [key, node.config[key]])),
     })),
-    edges: graph.edges.map((edge) => ({ id: edge.id, source: edge.source, target: edge.target })),
+    edges: graph.edges
+      .filter((edge) => (
+        supportedNodeIds.has(edge.source.nodeId) && supportedNodeIds.has(edge.target.nodeId)
+      ))
+      .map((edge) => ({ id: edge.id, source: edge.source, target: edge.target })),
   };
 }
 

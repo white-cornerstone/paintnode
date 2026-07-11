@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { instantiateWorkflowTemplate } from './templates';
+import { createCreatorNode } from './registry';
 import type { WorkflowGraphV2 } from './schema';
 import {
   createWorkflowDirectorPatchProposal,
@@ -36,6 +37,43 @@ function campaignWithAcceptedHistory(): WorkflowGraphV2 {
     role: 'output',
     assetId: 'accepted-square-asset',
     relativePath: 'assets/generated/accepted-square.png',
+  }];
+  return graph;
+}
+
+function campaignWithPromotedReview(): WorkflowGraphV2 {
+  const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
+    graphId: 'campaign-revision-source',
+  }));
+  graph.nodes.push(createCreatorNode('review', { id: 'review-concepts' }));
+  graph.edges = graph.edges.filter((edge) => edge.id !== 'edge-transform-generate-square-output-square');
+  graph.edges.push(
+    {
+      id: 'edge-transform-review',
+      source: { nodeId: 'transform-generate-square', portId: 'result' },
+      target: { nodeId: 'review-concepts', portId: 'candidates' },
+    },
+    {
+      id: 'edge-review-output',
+      source: { nodeId: 'review-concepts', portId: 'selected' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    },
+  );
+  graph.reviewPromotions = [{
+    version: 1,
+    id: 'promotion-accepted',
+    reviewNodeId: 'review-concepts',
+    sourceNodeId: 'transform-generate-square',
+    branchGroupId: 'branch-accepted',
+    candidateId: 'candidate-accepted',
+    candidateRunId: 'candidate-run-accepted',
+    assetReferenceId: 'candidate-reference-accepted',
+    assetId: 'candidate-asset-accepted',
+    relativePath: 'assets/generated/candidate-accepted.png',
+    contentHash: `sha256:${'a'.repeat(64)}`,
+    materialKey: 'workflow-cache-v1:accepted',
+    reviewNodeRevision: `sha256:${'b'.repeat(64)}`,
+    promotedAt: 100,
   }];
   return graph;
 }
@@ -412,6 +450,74 @@ describe('Workflow Director patch proposal', () => {
     expect(result.issues).toEqual([]);
     expect(result.proposal?.graph).toHaveProperty('reviewPromotions');
     expect(JSON.stringify(result.proposal?.graph.reviewPromotions)).toBe(JSON.stringify(graph.reviewPromotions));
+  });
+
+  it.each([
+    ['promoted Review node', [{ op: 'remove-node', nodeId: 'review-concepts' }]],
+    ['promotion source Transform', [{ op: 'remove-node', nodeId: 'transform-generate-square' }]],
+    ['promoted path Output', [{ op: 'remove-node', nodeId: 'output-square' }]],
+    ['source-to-Review connection', [{ op: 'remove-edge', edgeId: 'edge-transform-review' }]],
+    ['Review-to-Output connection', [{ op: 'remove-edge', edgeId: 'edge-review-output' }]],
+    ['reconnected Review source', [
+      { op: 'remove-edge', edgeId: 'edge-transform-review' },
+      {
+        op: 'add-edge',
+        edge: {
+          id: 'edge-composition-review',
+          source: { nodeId: 'composition', portId: 'layout' },
+          target: { nodeId: 'review-concepts', portId: 'candidates' },
+        },
+      },
+    ]],
+  ] as const)('rejects removal of the %s without changing accepted Review history', (_name, operations) => {
+    const graph = campaignWithPromotedReview();
+    const before = JSON.stringify(graph);
+    const result = createWorkflowDirectorPatchProposal(
+      patch([...structuredClone(operations)] as WorkflowDirectorPatchV1['operations']),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.proposal).toBeNull();
+    expect(result.issues).toEqual([expect.objectContaining({ code: 'PROTECTED_REVIEW_HISTORY' })]);
+    expect(JSON.stringify(graph)).toBe(before);
+  });
+
+  it('still permits removing an unrelated node beside immutable Review history', () => {
+    const graph = campaignWithPromotedReview();
+    const promotions = JSON.stringify(graph.reviewPromotions);
+    const result = createWorkflowDirectorPatchProposal(
+      patch([{ op: 'remove-node', nodeId: 'output-landscape' }]),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.issues).toEqual([]);
+    expect(result.proposal?.graph.nodes.some((node) => node.id === 'output-landscape')).toBe(false);
+    expect(JSON.stringify(result.proposal?.graph.reviewPromotions)).toBe(promotions);
+  });
+
+  it('rejects removal of a dormant edge owned by an unsupported future node', () => {
+    const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
+      graphId: 'campaign-revision-source',
+    }));
+    const future = graph.nodes.find((node) => node.id === 'output-landscape')!;
+    future.type = 'unsupported';
+    future.config = {
+      unsupportedType: 'future-output',
+      rawConfig: structuredClone(future.config),
+      rawPorts: structuredClone(future.ports),
+    };
+    const before = JSON.stringify(graph);
+    const result = createWorkflowDirectorPatchProposal(
+      patch([{ op: 'remove-edge', edgeId: 'edge-composition-output-landscape' }]),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.proposal).toBeNull();
+    expect(result.issues.map((issue) => issue.message).join(' ')).toMatch(/connections.*unsupported/i);
+    expect(JSON.stringify(graph)).toBe(before);
   });
 
   it.each(['editorRevisions', 'workflowRoundTrips'] as const)(

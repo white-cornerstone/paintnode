@@ -813,6 +813,33 @@ function immutableHistorySnapshot(graph: WorkflowGraphV2): string {
   });
 }
 
+export function workflowDirectorProtectedReviewHistoryBytes(graph: WorkflowGraphV2): string {
+  const promotionPaths = (graph.reviewPromotions ?? []).map((promotion) => {
+    const source = graph.nodes.find((node) => node.id === promotion.sourceNodeId);
+    const review = graph.nodes.find((node) => node.id === promotion.reviewNodeId);
+    const sourceToReview = graph.edges.filter((edge) => (
+      edge.source.nodeId === promotion.sourceNodeId
+      && edge.target.nodeId === promotion.reviewNodeId
+    ));
+    const reviewOutputs = graph.edges
+      .filter((edge) => edge.source.nodeId === promotion.reviewNodeId)
+      .map((edge) => ({
+        edge,
+        target: graph.nodes.find((node) => node.id === edge.target.nodeId)
+          ? { id: edge.target.nodeId, type: graph.nodes.find((node) => node.id === edge.target.nodeId)!.type }
+          : null,
+      }));
+    return {
+      promotionId: promotion.id,
+      source: source ? { id: source.id, type: source.type } : null,
+      review: review ? { id: review.id, type: review.type } : null,
+      sourceToReview,
+      reviewOutputs,
+    };
+  });
+  return JSON.stringify(promotionPaths);
+}
+
 function unsupportedGraphLedgerIssue(graph: WorkflowGraphV2): WorkflowDirectorPatchIssue | null {
   try {
     for (const key of Reflect.ownKeys(graph)) {
@@ -879,6 +906,7 @@ export function createWorkflowDirectorPatchProposal(
   }
   const immutableIdentities = immutableCandidateIdentities(before);
   const historyBefore = immutableHistorySnapshot(before);
+  const reviewHistoryBefore = workflowDirectorProtectedReviewHistoryBytes(before);
   const working = new WorkflowGraphDomain(before);
 
   try {
@@ -930,6 +958,15 @@ export function createWorkflowDirectorPatchProposal(
       } else if (operation.op === 'remove-edge') {
         const edge = working.edge(operation.edgeId);
         if (!edge) throw new WorkflowDomainError('EDGE_NOT_FOUND', `Edge "${operation.edgeId}" does not exist.`, { edgeId: operation.edgeId });
+        const source = working.node(edge.source.nodeId);
+        const target = working.node(edge.target.nodeId);
+        if (source?.type === 'unsupported' || target?.type === 'unsupported') {
+          throw new WorkflowDomainError(
+            'INVALID_GRAPH',
+            `Connections attached to unsupported future nodes cannot be revised by an AI Director patch.`,
+            { edgeId: edge.id },
+          );
+        }
         working.removeEdge(edge.id);
       }
     });
@@ -950,6 +987,16 @@ export function createWorkflowDirectorPatchProposal(
         path: 'operations',
         code: 'PROTECTED_HISTORY_MUTATION',
         message: 'Director patches cannot modify accepted candidates, asset references, run records, or surviving run-record links.',
+      }],
+    });
+  }
+  if (workflowDirectorProtectedReviewHistoryBytes(after) !== reviewHistoryBefore) {
+    return detachedFrozen({
+      proposal: null,
+      issues: [{
+        path: 'operations',
+        code: 'PROTECTED_REVIEW_HISTORY',
+        message: 'Director patches cannot remove or reconnect nodes and connections that preserve an accepted Review decision.',
       }],
     });
   }

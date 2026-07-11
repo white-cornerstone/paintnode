@@ -1,9 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
 import { defaultAiRunOptions } from '../state/settings';
 import { WorkflowStore } from '../state/workflow.svelte';
-import { createConfiguredWorkflowRevisionRequester } from './workflowDirectorRevisionAdapters';
+import {
+  constrainedWorkflowRevisionGraph,
+  createConfiguredWorkflowRevisionRequester,
+} from './workflowDirectorRevisionAdapters';
 
 describe('configured workflow Director revision adapter', () => {
+  it('omits unsupported future nodes and their dormant edges from provider context', () => {
+    const store = new WorkflowStore();
+    store.newFromTemplate('campaign-composer');
+    const graph = structuredClone(store.graphSnapshot());
+    const future = graph.nodes.find((node) => node.id === 'output-landscape')!;
+    future.type = 'unsupported';
+    future.config = { unsupportedType: 'future-output', rawConfig: {}, rawPorts: future.ports };
+
+    const constrained = constrainedWorkflowRevisionGraph(graph);
+
+    expect(constrained.nodes.some((node) => node.id === future.id)).toBe(false);
+    expect(constrained.edges.some((edge) => (
+      edge.source.nodeId === future.id || edge.target.nodeId === future.id
+    ))).toBe(false);
+  });
+
   it.each(['codex', 'claude', 'antigravity'] as const)('invokes only configured %s with constrained graph state', async (provider) => {
     const store = new WorkflowStore();
     store.newFromTemplate('campaign-composer');
