@@ -1,16 +1,26 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
-use crate::ai::apply_ai_cli_environment;
+use crate::ai::{
+    apply_ai_cli_environment, cleanup_ai_process_tree_after_bridge_exit,
+    configure_ai_process_group, join_output_readers_bounded, terminate_ai_process_tree,
+    track_ai_process_tree, OUTPUT_READER_JOIN_TIMEOUT,
+};
 
 const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
 const QA_PREFLIGHT_ENV: &str = "PAINTNODE_PROVIDER_QA_PREFLIGHT";
 const QA_PREFLIGHT_MARKER: &str = "provider-doctor-v1";
+/// Keep native discovery aligned with the provider doctor: a version probe may
+/// occupy one resolver slot for at most 15 seconds before failing closed.
+const PROVIDER_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const VERSION_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Provider {
@@ -86,8 +96,28 @@ struct FileFingerprint {
 
 #[derive(Default)]
 struct RejectionCache {
-    fingerprints: HashMap<PathBuf, Option<FileFingerprint>>,
-    in_flight: HashSet<PathBuf>,
+    rejections: HashMap<PathBuf, CachedRejection>,
+    in_flight: HashMap<PathBuf, u64>,
+    waiters: HashMap<(PathBuf, u64), usize>,
+    completed: HashMap<(PathBuf, u64), CompletedProbe>,
+    next_generation: u64,
+}
+
+#[derive(Clone)]
+struct CachedRejection {
+    fingerprint: Option<FileFingerprint>,
+    reason: String,
+}
+
+enum ProbeClaim {
+    Owner(u64),
+    Rejected(String),
+}
+
+#[derive(Clone)]
+enum CompletedProbe {
+    Accepted,
+    Rejected(String),
 }
 
 impl RejectionCache {
@@ -99,21 +129,53 @@ impl RejectionCache {
         })
     }
 
-    fn is_unchanged_rejection(&self, path: &Path) -> bool {
-        self.fingerprints
+    fn unchanged_rejection(&self, path: &Path) -> Option<&CachedRejection> {
+        self.rejections
             .get(path)
-            .is_some_and(|fingerprint| *fingerprint == Self::fingerprint(path))
+            .filter(|rejection| rejection.fingerprint == Self::fingerprint(path))
     }
 
-    fn reject(&mut self, path: PathBuf) {
-        self.fingerprints
-            .insert(path.clone(), Self::fingerprint(&path));
-        self.in_flight.remove(&path);
-    }
-
-    fn accept(&mut self, path: &Path) {
+    fn finish(&mut self, path: &Path, generation: u64, outcome: CompletedProbe) {
+        if self.in_flight.get(path) != Some(&generation) {
+            return;
+        }
         self.in_flight.remove(path);
-        self.fingerprints.remove(path);
+        let key = (path.to_path_buf(), generation);
+        if self.waiters.get(&key).copied().unwrap_or_default() > 0 {
+            self.completed.insert(key, outcome);
+        }
+    }
+
+    fn reject(&mut self, path: PathBuf, generation: u64, reason: String) {
+        self.rejections.insert(
+            path.clone(),
+            CachedRejection {
+                fingerprint: Self::fingerprint(&path),
+                reason: reason.clone(),
+            },
+        );
+        self.finish(&path, generation, CompletedProbe::Rejected(reason));
+    }
+
+    fn reject_transient(&mut self, path: &Path, generation: u64, reason: String) {
+        self.finish(path, generation, CompletedProbe::Rejected(reason));
+    }
+
+    fn accept(&mut self, path: &Path, generation: u64) {
+        self.rejections.remove(path);
+        self.finish(path, generation, CompletedProbe::Accepted);
+    }
+
+    fn consume_completed(&mut self, key: &(PathBuf, u64)) -> Option<CompletedProbe> {
+        let completed = self.completed.get(key)?.clone();
+        if let Some(waiters) = self.waiters.get_mut(key) {
+            *waiters -= 1;
+            if *waiters == 0 {
+                self.waiters.remove(key);
+                self.completed.remove(key);
+            }
+        }
+        Some(completed)
     }
 }
 
@@ -124,39 +186,62 @@ struct ResolutionCache {
 }
 
 impl ResolutionCache {
-    fn begin_probe(&self, path: &Path) -> Result<bool, String> {
+    fn begin_probe(&self, path: &Path) -> Result<ProbeClaim, String> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| "Provider executable rejection cache is unavailable.".to_string())?;
         loop {
-            if state.is_unchanged_rejection(path) {
-                return Ok(false);
+            if let Some(rejection) = state.unchanged_rejection(path) {
+                return Ok(ProbeClaim::Rejected(rejection.reason.clone()));
             }
-            if state.in_flight.insert(path.to_path_buf()) {
-                return Ok(true);
+            let Some(generation) = state.in_flight.get(path).copied() else {
+                let generation = state.next_generation;
+                state.next_generation = state.next_generation.wrapping_add(1);
+                state.in_flight.insert(path.to_path_buf(), generation);
+                return Ok(ProbeClaim::Owner(generation));
+            };
+            let key = (path.to_path_buf(), generation);
+            *state.waiters.entry(key.clone()).or_default() += 1;
+            loop {
+                state = self.probe_finished.wait(state).map_err(|_| {
+                    "Provider executable rejection cache is unavailable.".to_string()
+                })?;
+                if let Some(completed) = state.consume_completed(&key) {
+                    match completed {
+                        CompletedProbe::Rejected(reason) => {
+                            return Ok(ProbeClaim::Rejected(reason));
+                        }
+                        CompletedProbe::Accepted => break,
+                    }
+                }
             }
-            state = self
-                .probe_finished
-                .wait(state)
-                .map_err(|_| "Provider executable rejection cache is unavailable.".to_string())?;
         }
     }
 
-    fn accept(&self, path: &Path) -> Result<(), String> {
+    fn accept(&self, path: &Path, generation: u64) -> Result<(), String> {
         self.state
             .lock()
             .map_err(|_| "Provider executable rejection cache is unavailable.".to_string())?
-            .accept(path);
+            .accept(path, generation);
         self.probe_finished.notify_all();
         Ok(())
     }
 
-    fn reject(&self, path: PathBuf) -> Result<(), String> {
+    fn reject(&self, path: PathBuf, generation: u64, reason: String) -> Result<(), String> {
         self.state
             .lock()
             .map_err(|_| "Provider executable rejection cache is unavailable.".to_string())?
-            .reject(path);
+            .reject(path, generation, reason);
+        self.probe_finished.notify_all();
+        Ok(())
+    }
+
+    fn reject_transient(&self, path: &Path, generation: u64, reason: String) -> Result<(), String> {
+        self.state
+            .lock()
+            .map_err(|_| "Provider executable rejection cache is unavailable.".to_string())?
+            .reject_transient(path, generation, reason);
         self.probe_finished.notify_all();
         Ok(())
     }
@@ -231,11 +316,152 @@ fn version_line(output: &std::process::Output) -> Option<String> {
         .find(|line| !line.is_empty())
 }
 
+fn capture_probe_stream<R: Read + Send + 'static>(
+    mut stream: R,
+    sink: Arc<Mutex<Vec<u8>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if stream.read_to_end(&mut bytes).is_ok() {
+            if let Ok(mut output) = sink.lock() {
+                *output = bytes;
+            }
+        }
+    })
+}
+
+enum VersionProbeError {
+    TimedOut(String),
+    Other(String),
+}
+
+impl VersionProbeError {
+    fn message(&self) -> &str {
+        match self {
+            Self::TimedOut(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+fn version_probe_output(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Output, VersionProbeError> {
+    let launch_gate = configure_ai_process_group(command).map_err(VersionProbeError::Other)?;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            VersionProbeError::Other(format!("Provider version check could not launch: {error}"))
+        })?;
+    let mut process_tree =
+        track_ai_process_tree(&mut child, launch_gate).map_err(VersionProbeError::Other)?;
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let mut readers = Vec::new();
+    if let Some(stream) = child.stdout.take() {
+        readers.push(capture_probe_stream(stream, Arc::clone(&stdout)));
+    }
+    if let Some(stream) = child.stderr.take() {
+        readers.push(capture_probe_stream(stream, Arc::clone(&stderr)));
+    }
+
+    enum ProbeOutcome {
+        Completed(std::process::ExitStatus, Result<(), String>),
+        TimedOut(Result<std::process::ExitStatus, String>),
+        PollFailed(std::io::Error, Result<std::process::ExitStatus, String>),
+    }
+
+    let deadline = Instant::now() + timeout;
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break ProbeOutcome::Completed(
+                    status,
+                    cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
+                );
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(VERSION_PROBE_POLL_INTERVAL),
+            Ok(None) => {
+                break ProbeOutcome::TimedOut(terminate_ai_process_tree(
+                    &mut process_tree,
+                    &mut child,
+                ));
+            }
+            Err(error) => {
+                break ProbeOutcome::PollFailed(
+                    error,
+                    terminate_ai_process_tree(&mut process_tree, &mut child),
+                );
+            }
+        }
+    };
+
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    let status = match outcome {
+        ProbeOutcome::Completed(status, cleanup) => {
+            cleanup.map_err(VersionProbeError::Other)?;
+            reader_cleanup.map_err(VersionProbeError::Other)?;
+            status
+        }
+        ProbeOutcome::TimedOut(cleanup) => {
+            let mut message = format!("version check timed out after {} ms", timeout.as_millis());
+            if let Err(error) = cleanup {
+                message.push_str(&format!(". Process-tree cleanup failed: {error}"));
+            }
+            if let Err(error) = reader_cleanup {
+                message.push_str(&format!(". Output cleanup failed: {error}"));
+            }
+            return Err(VersionProbeError::TimedOut(message));
+        }
+        ProbeOutcome::PollFailed(error, cleanup) => {
+            let mut message = match cleanup {
+                Ok(_) => format!("Provider version check could not be polled: {error}"),
+                Err(cleanup_error) => format!(
+                    "Provider version check could not be polled: {error}. Cleanup also failed: {cleanup_error}"
+                ),
+            };
+            if let Err(error) = reader_cleanup {
+                message.push_str(&format!(". Output cleanup failed: {error}"));
+            }
+            return Err(VersionProbeError::Other(message));
+        }
+    };
+    let stdout = stdout.lock().map(|bytes| bytes.clone()).map_err(|_| {
+        VersionProbeError::Other("Provider version stdout capture is unavailable.".into())
+    })?;
+    let stderr = stderr.lock().map(|bytes| bytes.clone()).map_err(|_| {
+        VersionProbeError::Other("Provider version stderr capture is unavailable.".into())
+    })?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn resolve_candidates(
     provider: Provider,
     candidates: Vec<PathBuf>,
     path_env: Option<&OsStr>,
     rejected: &ResolutionCache,
+) -> Result<ResolvedProviderExecutable, String> {
+    resolve_candidates_with_timeout(
+        provider,
+        candidates,
+        path_env,
+        rejected,
+        PROVIDER_VERSION_PROBE_TIMEOUT,
+    )
+}
+
+fn resolve_candidates_with_timeout(
+    provider: Provider,
+    candidates: Vec<PathBuf>,
+    path_env: Option<&OsStr>,
+    rejected: &ResolutionCache,
+    timeout: Duration,
 ) -> Result<ResolvedProviderExecutable, String> {
     let mut seen = HashSet::new();
     let mut failures = Vec::new();
@@ -248,11 +474,13 @@ fn resolve_candidates(
         if !seen.insert(path.clone()) {
             continue;
         }
-        let should_probe = rejected.begin_probe(&path)?;
-        if !should_probe {
-            failures.push(format!("{} remains rejected", path.display()));
-            continue;
-        }
+        let generation = match rejected.begin_probe(&path)? {
+            ProbeClaim::Owner(generation) => generation,
+            ProbeClaim::Rejected(reason) => {
+                failures.push(reason);
+                continue;
+            }
+        };
 
         let mut command = Command::new(&path);
         apply_ai_cli_environment(&mut command).arg("--version");
@@ -261,25 +489,35 @@ fn resolve_candidates(
                 .env_remove("OPENAI_API_KEY")
                 .env_remove("CODEX_API_KEY");
         }
-        match command.output() {
+        match version_probe_output(&mut command, timeout) {
             Ok(output) if output.status.success() => {
                 if let Some(version) = version_line(&output) {
-                    rejected.accept(&path)?;
+                    rejected.accept(&path, generation)?;
                     return Ok(ResolvedProviderExecutable {
                         path: path.to_string_lossy().into_owned(),
                         version,
                     });
                 }
-                rejected.reject(path.clone())?;
-                failures.push(format!("{} returned no version", path.display()));
+                let reason = format!("{} returned no version", path.display());
+                rejected.reject(path.clone(), generation, reason.clone())?;
+                failures.push(reason);
             }
             Ok(output) => {
-                rejected.reject(path.clone())?;
-                failures.push(format!("{} exited with {}", path.display(), output.status));
+                let reason = format!("{} exited with {}", path.display(), output.status);
+                rejected.reject(path.clone(), generation, reason.clone())?;
+                failures.push(reason);
             }
             Err(error) => {
-                rejected.reject(path.clone())?;
-                failures.push(format!("{} could not launch: {error}", path.display()));
+                let reason = format!("{} {}", path.display(), error.message());
+                match error {
+                    VersionProbeError::TimedOut(_) => {
+                        rejected.reject_transient(&path, generation, reason.clone())?;
+                    }
+                    VersionProbeError::Other(_) => {
+                        rejected.reject(path.clone(), generation, reason.clone())?;
+                    }
+                }
+                failures.push(reason);
             }
         }
     }
@@ -698,6 +936,116 @@ mod tests {
                 .lines()
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hung_version_probe_times_out_reaps_its_process_tree_and_allows_retry() {
+        let dir = TempJobDir::new("paintnode-provider-timeout-test").expect("temp dir");
+        let provider = dir.path().join("codex");
+        let direct_pid = dir.path().join("direct.pid");
+        let descendant_pid = dir.path().join("descendant.pid");
+        let first_attempt = dir.path().join("first-attempt");
+        executable(
+            &provider,
+            &format!(
+                "if [ ! -f '{}' ]; then touch '{}'; echo $$ > '{}'; sleep 30 & echo $! > '{}'; wait; else echo codex-cli 4.0.0; fi",
+                first_attempt.display(),
+                first_attempt.display(),
+                direct_pid.display(),
+                descendant_pid.display()
+            ),
+        );
+        let cache = ResolutionCache::default();
+
+        let error = resolve_candidates_with_timeout(
+            Provider::Codex,
+            vec![provider.clone()],
+            None,
+            &cache,
+            std::time::Duration::from_secs(2),
+        )
+        .expect_err("hung version probe must fail closed");
+
+        assert!(error.contains("timed out after 2000 ms"), "{error}");
+        for pid_file in [&direct_pid, &descendant_pid] {
+            let pid = fs::read_to_string(pid_file)
+                .expect("hung fixture pid")
+                .trim()
+                .parse::<i32>()
+                .expect("numeric hung fixture pid");
+            assert_ne!(
+                unsafe { libc::kill(pid, 0) },
+                0,
+                "timed-out provider process survived: {pid}"
+            );
+        }
+
+        let retried = resolve_candidates_with_timeout(
+            Provider::Codex,
+            vec![provider],
+            None,
+            &cache,
+            std::time::Duration::from_secs(2),
+        )
+        .expect("fixed provider retries after timeout");
+        assert_eq!(retried.version, "codex-cli 4.0.0");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_waiters_share_one_hung_probe_and_receive_the_same_timeout() {
+        let dir = TempJobDir::new("paintnode-provider-timeout-waiters-test").expect("temp dir");
+        let provider = dir.path().join("codex");
+        let probe_count = dir.path().join("probe-count");
+        executable(
+            &provider,
+            &format!("echo probe >> '{}'; sleep 30", probe_count.display()),
+        );
+        let cache = std::sync::Arc::new(ResolutionCache::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+
+        let handles = (0..3)
+            .map(|_| {
+                let provider = provider.clone();
+                let cache = std::sync::Arc::clone(&cache);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    resolve_candidates_with_timeout(
+                        Provider::Codex,
+                        vec![provider],
+                        None,
+                        &cache,
+                        std::time::Duration::from_secs(2),
+                    )
+                    .expect_err("hung provider must fail every waiter")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+
+        let errors = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("resolver waiter"))
+            .collect::<Vec<_>>();
+        assert!(
+            errors.windows(2).all(|pair| pair[0] == pair[1]),
+            "{errors:?}"
+        );
+        assert!(
+            errors[0].contains("timed out after 2000 ms"),
+            "{}",
+            errors[0]
+        );
+        assert_eq!(
+            fs::read_to_string(probe_count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1,
+            "concurrent waiters must not launch duplicate probes"
         );
     }
 

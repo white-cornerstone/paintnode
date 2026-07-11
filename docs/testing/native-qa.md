@@ -129,6 +129,15 @@ execution, and applies bounded timeouts with whole-process-tree cleanup to
 Codex login status and at least one available Antigravity model. These checks
 do not submit a prompt or image request.
 
+Normal native discovery also bounds each Rust-side Codex, Antigravity, or
+Claude `--version` probe to 15 seconds. PaintNode isolates the probe in the same
+owned Unix process group or Windows kill-on-close Job Object used for provider
+runs, terminates and reaps that tree on timeout, and returns one cached
+fail-closed reason to every caller waiting on the same executable. Timeout is a
+transient rejection, so a later resolver call may retry the unchanged path;
+other rejected checks remain cached until the executable's filesystem
+fingerprint changes. A timed-out process never remains registered as in flight.
+
 The full lane then hands the exact preflighted paths and version metadata to
 PaintNode's Rust resolver without re-executing the providers, and launches the
 uniquely identified **PaintNode Blueprint QA — Provider E2E** bundle. A missing
