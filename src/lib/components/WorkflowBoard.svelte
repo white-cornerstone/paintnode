@@ -2867,7 +2867,7 @@
                     <option value="slow-success">Slow / cancellable</option>
                     <option value="failure">Failure / retry</option>
                     <option value="branch-one-failure">Branch recovery checkpoint</option>
-                    <option value="landscape-first-failure">Format recovery checkpoint</option>
+                    <option value="format-recovery-checkpoint">Format recovery checkpoint</option>
                   </select>
                 </label>
               </div>

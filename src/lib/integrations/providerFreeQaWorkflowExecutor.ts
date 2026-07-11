@@ -14,7 +14,7 @@ export type ProviderFreeQaScenario =
   | 'slow-success'
   | 'failure'
   | 'branch-one-failure'
-  | 'landscape-first-failure';
+  | 'format-recovery-checkpoint';
 
 export interface ProviderFreeQaWorkflowExecutorOptions {
   scenario?: ProviderFreeQaScenario;
@@ -32,13 +32,6 @@ function candidateFixtureVariant(runId: string, fixture: string): number {
   const ordinal = /^candidate-(\d+)-[a-f0-9]+-attempt-\d+$/.exec(runId)?.[1];
   if (!ordinal) return 0;
   return boundedInteger(Number(ordinal), 0, 1, 4);
-}
-
-function workflowRunAttempt(runId: string): number | null {
-  const value = /(?:-attempt-|:)(\d+)$/.exec(runId)?.[1];
-  if (!value) return null;
-  const attempt = Number(value);
-  return Number.isSafeInteger(attempt) && attempt > 0 ? attempt : null;
 }
 
 export function createProviderFreeQaWorkflowExecutor(
@@ -76,11 +69,10 @@ export function createProviderFreeQaWorkflowExecutor(
       context.reportProgress({ message: 'QA Fake is failing candidate 2 so its retry can be validated.' });
       throw new Error('QA Fake candidate 2 failed safely. Retry this candidate to preserve its siblings.');
     }
-    if (scenario === 'landscape-first-failure'
-      && request.nodeId === 'transform-generate-landscape'
-      && workflowRunAttempt(context.identity.runId) === 1) {
-      context.reportProgress({ message: 'QA Fake is failing the first Landscape attempt so its retry can be validated.' });
-      throw new Error('QA Fake Landscape failed safely. Retry Landscape to preserve the completed formats.');
+    if (scenario === 'format-recovery-checkpoint'
+      && request.nodeId === 'transform-generate-landscape') {
+      context.reportProgress({ message: 'QA Fake Format recovery checkpoint is active for Landscape.' });
+      throw new Error('QA Fake Landscape recovery checkpoint is active. Reset to Standard checkpoint, then retry Landscape.');
     }
     if (scenario === 'slow-success') {
       for (let step = 1; step <= progressSteps; step += 1) {

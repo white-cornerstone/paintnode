@@ -90,9 +90,15 @@ Read this before recording or screen sharing:
 > at any time without giving a reason. Please do not open confidential client
 > work, personal credentials, or private files. We will use a supplied Product
 > image. With your separate permission, we may record the screen and audio to
-> support note-taking. Findings will be reported using a participant code, not
-> your name. Do you consent to participate? Do you separately consent to
-> recording?
+> support note-taking. Only the study owner and the named study observers may
+> access the recording or identifiable notes. We de-identify research notes
+> under a participant code and report findings without your name or other
+> direct identifiers. By default, we delete recordings and identifiable notes
+> 30 calendar days after the milestone decision. If an approved exception would
+> keep them longer, we will disclose its reason and deletion date to you now,
+> before you choose; today, that exception is: [none / state the approved reason
+> and deletion date]. Do you consent to participate? Do you separately consent
+> to recording?
 
 Recording is off by default. Record `yes` or `no` for participation and
 recording separately, and start recording only after the separate recording
@@ -278,11 +284,15 @@ Facilitator setup, in this exact order:
    remain complete.
 2. Say “I am setting the test checkpoint for this task.”
 3. Select `Format recovery checkpoint` and record the setup in the intervention
-   log. Do not change graph state, output state, or participant inputs.
-4. Read the prompt and start timing.
-5. When the planned first Landscape failure is visible, record the observed
-   trigger, say “I am resetting the test checkpoint,” select
-   `Standard checkpoint`, and record the reset before the participant retries.
+   log before the participant starts the action. Do not change graph state,
+   output state, or participant inputs.
+4. Read the prompt and start timing. While this checkpoint remains selected,
+   Landscape fails regardless of its historical attempt number.
+5. When the planned Landscape checkpoint failure is visible, record the
+   observed trigger, say “I am resetting the test checkpoint,” visibly select
+   `Standard checkpoint`, and record the reset before the participant chooses
+   Retry. Retry succeeds because the visible scenario changed to Standard, not
+   because of hidden attempt state or a silent facilitator change.
 
 Prompt:
 

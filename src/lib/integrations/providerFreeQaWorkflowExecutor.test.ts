@@ -182,13 +182,14 @@ describe('provider-free QA workflow executor', () => {
     ]);
   });
 
-  it('fails only the first Landscape attempt, then succeeds while sibling formats remain available', async () => {
+  it('fails Landscape at any historical attempt only while the format recovery checkpoint is active', async () => {
     const loadPng = vi.fn(async (_width: number, _height: number, variant: number) => (
       new Uint8Array([137, 80, 78, 71, variant])
     ));
-    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
-      scenario: 'landscape-first-failure',
+    const recoveryExecutor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'format-recovery-checkpoint',
     });
+    const standardExecutor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
     const context = (nodeId: string, attempt: number) => ({
       identity: {
         workflowSessionId: 'qa-session', workflowId: 'qa-workflow',
@@ -197,13 +198,15 @@ describe('provider-free QA workflow executor', () => {
       reportProgress: vi.fn(),
     });
 
-    const square = await executor.execute(request(), context('transform-generate-square', 1));
-    const portrait = await executor.execute(request(1024, 1280), context('transform-generate-portrait', 1));
-    await expect(executor.execute(
-      request(1280, 720), context('transform-generate-landscape', 1),
-    )).rejects.toThrow(/Landscape failed safely/i);
-    const retriedLandscape = await executor.execute(
-      request(1280, 720), context('transform-generate-landscape', 2),
+    const square = await recoveryExecutor.execute(request(), context('transform-generate-square', 3));
+    const portrait = await recoveryExecutor.execute(
+      request(1024, 1280), context('transform-generate-portrait', 3),
+    );
+    await expect(recoveryExecutor.execute(
+      request(1280, 720), context('transform-generate-landscape', 3),
+    )).rejects.toThrow(/Landscape recovery checkpoint/i);
+    const retriedLandscape = await standardExecutor.execute(
+      request(1280, 720), context('transform-generate-landscape', 3),
     );
 
     expect(square).toMatchObject({ kind: 'bytes', width: 1024, height: 1024 });
