@@ -63,6 +63,7 @@
     saveWorkflowCommand,
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
+  import { persistWorkflowAfterReturnForClose } from './lib/state/workflowReturnClose';
   import {
     isDesktop,
     providerQaMode,
@@ -370,6 +371,14 @@
         ? await saveDocumentForClose(item.id)
         : await saveWorkflowForClose();
       if (!saved) return false;
+      if (item.kind === 'workflow-return') {
+        const persisted = await persistWorkflowAfterReturnForClose({
+          documentReturnSucceeded: saved,
+          workflowIsDirty: () => workflow.active && workflow.dirty,
+          saveWorkflow: saveWorkflowForClose,
+        });
+        if (!persisted) return false;
+      }
     }
     return true;
   }

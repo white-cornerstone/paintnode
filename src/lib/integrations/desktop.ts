@@ -1015,9 +1015,9 @@ export async function rollbackWorkflowEditorReturn(projectPath: string, cleanupT
   await invoke<void>('project_rollback_workflow_editor_return', { projectPath, cleanupToken });
 }
 
-export async function finalizeWorkflowEditorReturn(projectPath: string, cleanupToken: string): Promise<void> {
+export async function finalizeWorkflowEditorReturn(projectPath: string, cleanupToken: string): Promise<boolean> {
   if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
-  await invoke<void>('project_finalize_workflow_editor_return', { projectPath, cleanupToken });
+  return invoke<boolean>('project_finalize_workflow_editor_return', { projectPath, cleanupToken });
 }
 
 export async function readProjectAsset(projectPath: string, assetId: string): Promise<StoredAssetResult> {

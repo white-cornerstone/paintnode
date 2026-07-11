@@ -98,7 +98,7 @@ export async function openWorkflowResultInEditor(request: OpenWorkflowResultRequ
   return session;
 }
 
-export async function returnActiveDocumentToWorkflow(): Promise<void> {
+export async function returnActiveDocumentToWorkflow(): Promise<string | null> {
   const session = editor.activeDocument;
   if (!session || !workflowRoundTripAuthority(session)) {
     throw new Error('The active document is not linked to a workflow result.');
@@ -140,8 +140,9 @@ export async function returnActiveDocumentToWorkflow(): Promise<void> {
       }),
       rollbackArtifacts: (artifacts) => project.rollbackWorkflowEditorReturn(artifacts.cleanupToken),
     });
-    await project.finalizeWorkflowEditorReturn(committed.cleanupToken).catch(() => undefined);
+    const receiptRemoved = await project.finalizeWorkflowEditorReturn(committed.cleanupToken);
     editor.markWorkflowReturned(session.id, committed.revision.id, returnedDocumentRevision);
+    return receiptRemoved ? null : 'Return committed safely, but its disabled cleanup receipt could not be removed.';
   } finally {
     returningSessions.delete(session);
   }

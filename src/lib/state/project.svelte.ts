@@ -147,10 +147,10 @@ class ProjectStore {
     await this.refresh(path);
   }
 
-  async finalizeWorkflowEditorReturn(cleanupToken: string): Promise<void> {
+  async finalizeWorkflowEditorReturn(cleanupToken: string): Promise<boolean> {
     const path = this.path;
     if (!path) throw new Error('No project is open.');
-    await finalizeWorkflowEditorReturn(path, cleanupToken);
+    return finalizeWorkflowEditorReturn(path, cleanupToken);
   }
 
   async readAsset(asset: ProjectAsset) {

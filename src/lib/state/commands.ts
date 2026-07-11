@@ -422,8 +422,8 @@ export async function saveDocumentCommand(): Promise<void> {
   if (editor.activeDocument?.workflowReturnState) {
     try {
       editor.flash('Returning edit to workflow…');
-      await returnActiveDocumentToWorkflow();
-      editor.flash('Returned edit to workflow');
+      const warning = await returnActiveDocumentToWorkflow();
+      editor.flash(warning ?? 'Returned edit to workflow');
     } catch (error) {
       editor.flash('Return to workflow failed: ' + ((error as Error)?.message ?? String(error)));
     }
