@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { FINDING_CATEGORIES } from './creator-study-contract.mjs';
+import { FINDING_CATEGORIES, RECRUITMENT_EXCEPTION_IDS } from './creator-study-contract.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const study = join(root, 'docs/testing/creator-study');
@@ -34,6 +34,9 @@ test('repository templates contain headers only and no participant results', () 
   const blank = JSON.parse(readFileSync(join(study, 'templates/synthesis-input.blank.json'), 'utf8'));
   assert.deepEqual(blank.participants, []);
   assert.deepEqual(blank.findings, []);
+  assert.equal(blank.schemaVersion, 2);
+  assert.deepEqual(Object.keys(blank.recruitmentExceptions), RECRUITMENT_EXCEPTION_IDS);
+  assert.equal('recruitmentDecisionDocumented' in blank, false);
   assert.equal(blank.configuredProviderEvidenceRecorded, false);
   assert.equal(blank.requiredSignoffsRecorded, false);
 });
@@ -57,6 +60,27 @@ test('Product materials include repository-owned provenance and a public-domain 
 
 test('synthesis schema matches the shared finding categories and supports replacement records', () => {
   const schema = JSON.parse(readFileSync(join(study, 'synthesis-input.schema.json'), 'utf8'));
+  assert.equal(schema.properties.schemaVersion.const, 2);
+  assert.match(schema.$id, /v2\.json$/);
+  assert.deepEqual(Object.keys(schema.properties.recruitmentExceptions.properties), RECRUITMENT_EXCEPTION_IDS);
+  assert.equal(schema.properties.recruitmentExceptions.additionalProperties, false);
+  assert.equal('recruitmentDecisionDocumented' in schema.properties, false);
+  for (const id of RECRUITMENT_EXCEPTION_IDS) {
+    assert.deepEqual(schema.properties.recruitmentExceptions.properties[id].required, [
+      'approved', 'rationaleRecorded', 'decisionReference',
+    ]);
+    assert.equal(schema.properties.recruitmentExceptions.properties[id].additionalProperties, false);
+    assert.equal(
+      schema.properties.recruitmentExceptions.properties[id].allOf[0].then
+        .properties.rationaleRecorded.const,
+      true,
+    );
+    assert.equal(
+      schema.properties.recruitmentExceptions.properties[id].allOf[0].else
+        .properties.decisionReference.const,
+      null,
+    );
+  }
   assert.deepEqual(schema.$defs.finding.properties.category.enum, FINDING_CATEGORIES);
   assert.equal(schema.$defs.finding.properties.participantIds.minItems, 1);
   assert.equal(schema.$defs.finding.properties.participantIds.uniqueItems, true);
@@ -75,6 +99,7 @@ test('synthesis schema matches the shared finding categories and supports replac
 test('private handoff templates capture schema fields and concrete scheduling assignments', () => {
   const session = readFileSync(join(study, 'templates/private-session-observation.md'), 'utf8');
   const recruitment = readFileSync(join(study, 'templates/private-screener-and-recruitment-log.md'), 'utf8');
+  const authorization = readFileSync(join(study, 'templates/private-study-authorization-log.md'), 'utf8');
   const reset = readFileSync(join(study, 'templates/private-session-reset.md'), 'utf8');
   for (const field of [
     'acceptedWorkPreserved', 'participantIds', 'category', 'traceable', 'resolved',
@@ -90,6 +115,8 @@ test('private handoff templates capture schema fields and concrete scheduling as
     assert.match(recruitment, new RegExp(label));
   }
   assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
+  for (const id of RECRUITMENT_EXCEPTION_IDS) assert.match(authorization, new RegExp(`\\b${id}\\b`));
+  assert.match(authorization, /one requirement never waives the other/i);
 });
 
 test('repository-safe decision handoff excludes private scheduling and identity fields', () => {
@@ -97,6 +124,12 @@ test('repository-safe decision handoff excludes private scheduling and identity 
   for (const field of [
     'participantIds', 'category', 'traceable', 'resolved', 'blocksExit',
     'exceptionApproved', 'exceptionRationaleRecorded',
+  ]) {
+    assert.match(decision, new RegExp(`\\b${field}\\b`));
+  }
+  for (const field of [
+    'cohortMix', 'keyboardOrAccessibilityCoverage', 'approved',
+    'rationaleRecorded', 'decisionReference', 'applied',
   ]) {
     assert.match(decision, new RegExp(`\\b${field}\\b`));
   }

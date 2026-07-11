@@ -8,6 +8,7 @@
     "aggregate task metrics with counts and denominators",
     "de-identified finding IDs and paraphrased evidence",
     "severity counts and blocker decisions",
+    "separate de-identified recruitment exception approvals and decision references",
     "role-based sign-offs without personal names",
     "retention completion status without storage metadata"
   ],

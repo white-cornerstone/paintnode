@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   FINDING_CATEGORIES,
+  RECRUITMENT_EXCEPTION_IDS,
   isIntegrityBlockingFindingCategory,
 } from './creator-study-contract.mjs';
 
@@ -14,10 +15,11 @@ const FINDING_CATEGORY_SET = new Set(FINDING_CATEGORIES);
 const AI_EXPERIENCE = new Set(['never', 'occasional', 'monthly', 'weekly', 'daily']);
 const INVALID_REASONS = new Set(['withdrawn-consent', 'wrong-or-unusable-build', 'provider-invocation', 'prior-exposure', 'facilitator-deviation']);
 const FORBIDDEN_KEYS = /(^|_)(name|email|phone|contact|employer|client|medical|credential|storagePath|storageLocation|participantMapping|rawQuote|recordingPath|observerNames?)$/i;
-const TOP_LEVEL_KEYS = new Set(['schemaVersion', 'testOnly', 'participants', 'findings', 'recruitmentDecisionDocumented', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded', 'outstandingNonBlockingActions']);
+const TOP_LEVEL_KEYS = new Set(['schemaVersion', 'testOnly', 'participants', 'findings', 'recruitmentExceptions', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded', 'outstandingNonBlockingActions']);
 const PARTICIPANT_KEYS = new Set(['id', 'testOnly', 'valid', 'invalidReasonCategory', 'multiFormatRegular', 'aiExperience', 'keyboardOrAccessibilityCoverage', 'tasks']);
 const TASK_KEYS = new Set(['task', 'outcome', 'seconds', 'neutralProbes', 'directAssists', 'wrongTurns', 'repeatedActions', 'errorLoops', 'recoveryAttempts', 'seq', 'acceptedWorkPreserved']);
 const FINDING_KEYS = new Set(['id', 'severity', 'participantIds', 'category', 'resolved', 'traceable', 'exceptionApproved', 'exceptionRationaleRecorded', 'blocksExit']);
+const RECRUITMENT_EXCEPTION_KEYS = new Set(['approved', 'rationaleRecorded', 'decisionReference']);
 
 function ratio(count, denominator) {
   return { count, denominator, percent: denominator === 0 ? null : Number(((count / denominator) * 100).toFixed(1)) };
@@ -53,15 +55,55 @@ function requireKeys(value, required, label) {
 function validate(input) {
   assertNoPrivateFields(input);
   assertKeys(input, TOP_LEVEL_KEYS, 'Synthesis input');
-  requireKeys(input, ['schemaVersion', 'participants', 'findings', 'recruitmentDecisionDocumented', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded', 'outstandingNonBlockingActions'], 'Synthesis input');
-  if (input.schemaVersion !== 1 || !Array.isArray(input.participants) || !Array.isArray(input.findings)) {
-    throw new Error('Synthesis input must use schemaVersion 1 with participants and findings arrays.');
+  requireKeys(input, ['schemaVersion', 'participants', 'findings', 'recruitmentExceptions', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded', 'outstandingNonBlockingActions'], 'Synthesis input');
+  if (input.schemaVersion !== 2 || !Array.isArray(input.participants) || !Array.isArray(input.findings)) {
+    throw new Error('Synthesis input must use schemaVersion 2 with participants and findings arrays.');
   }
   if (input.participants.length > 99 || new Set(input.participants.map((participant) => participant.id)).size !== input.participants.length) {
     throw new Error('Synthesis input may contain at most 99 uniquely coded participant records.');
   }
-  for (const flag of ['recruitmentDecisionDocumented', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded']) {
+  for (const flag of ['configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded']) {
     if (typeof input[flag] !== 'boolean') throw new Error(`${flag} must be boolean.`);
+  }
+  if (!input.recruitmentExceptions || typeof input.recruitmentExceptions !== 'object'
+    || Array.isArray(input.recruitmentExceptions)) {
+    throw new Error('recruitmentExceptions must be a closed object.');
+  }
+  assertKeys(input.recruitmentExceptions, new Set(RECRUITMENT_EXCEPTION_IDS), 'recruitmentExceptions');
+  requireKeys(input.recruitmentExceptions, RECRUITMENT_EXCEPTION_IDS, 'recruitmentExceptions');
+  for (const id of RECRUITMENT_EXCEPTION_IDS) {
+    const exception = input.recruitmentExceptions[id];
+    if (!exception || typeof exception !== 'object' || Array.isArray(exception)) {
+      throw new Error(`${id} recruitment exception must be a closed approval record.`);
+    }
+    assertKeys(exception, RECRUITMENT_EXCEPTION_KEYS, `${id} recruitment exception`);
+    requireKeys(
+      exception,
+      ['approved', 'rationaleRecorded', 'decisionReference'],
+      `${id} recruitment exception`,
+    );
+    if (typeof exception.approved !== 'boolean' || typeof exception.rationaleRecorded !== 'boolean') {
+      throw new Error(`${id} recruitment exception approval fields must be boolean.`);
+    }
+    if (exception.approved) {
+      const referencePattern = input.testOnly ? /^TEST-DEC-[1-9][0-9]*$/ : /^CB-DEC-[1-9][0-9]*$/;
+      if (!exception.rationaleRecorded) {
+        throw new Error(`${id} recruitment exception approval requires a recorded rationale.`);
+      }
+      if (typeof exception.decisionReference !== 'string'
+        || !referencePattern.test(exception.decisionReference)) {
+        throw new Error(`${id} recruitment exception decision reference is invalid.`);
+      }
+    } else if (exception.rationaleRecorded || exception.decisionReference !== null) {
+      throw new Error(`${id} recruitment exception cannot record a rationale or decision reference without approval.`);
+    }
+  }
+  const approvedDecisionReferences = RECRUITMENT_EXCEPTION_IDS
+    .map((id) => input.recruitmentExceptions[id])
+    .filter((exception) => exception.approved)
+    .map((exception) => exception.decisionReference);
+  if (new Set(approvedDecisionReferences).size !== approvedDecisionReferences.length) {
+    throw new Error('Approved recruitment exceptions must use distinct de-identified decision references.');
   }
   if (!Array.isArray(input.outstandingNonBlockingActions) || input.outstandingNonBlockingActions.some((action) => typeof action !== 'string' || !action.trim())) {
     throw new Error('outstandingNonBlockingActions must contain non-empty strings.');
@@ -222,13 +264,31 @@ export function calculateStudySynthesis(input) {
       || !finding.exceptionApproved || !finding.exceptionRationaleRecorded;
   });
   const traceabilityComplete = input.findings.every((finding) => finding.traceable);
-  const cohortComplete = cohort.multiFormatRegular >= 4 && cohort.aiWeekly >= 2 && cohort.aiOccasionalOrNonUser >= 2;
-  const accessibilityComplete = cohort.keyboardOrAccessibilityCoverage >= 1 || input.recruitmentDecisionDocumented;
+  const recruitmentRequirementState = {
+    cohortMix: cohort.multiFormatRegular >= 4 && cohort.aiWeekly >= 2 && cohort.aiOccasionalOrNonUser >= 2,
+    keyboardOrAccessibilityCoverage: cohort.keyboardOrAccessibilityCoverage >= 1,
+  };
+  const recruitmentExceptions = Object.fromEntries(RECRUITMENT_EXCEPTION_IDS.map((id) => {
+    const requirementMet = recruitmentRequirementState[id];
+    const exception = input.recruitmentExceptions[id];
+    const approvalComplete = exception.approved
+      && exception.rationaleRecorded
+      && typeof exception.decisionReference === 'string';
+    return [id, {
+      requirementMet,
+      approved: exception.approved,
+      rationaleRecorded: exception.rationaleRecorded,
+      decisionReference: exception.decisionReference,
+      approvalComplete,
+      applied: !requirementMet && approvalComplete,
+      effectiveComplete: requirementMet || approvalComplete,
+    }];
+  }));
   if (valid.length < 6) warnings.push(`Only ${valid.length} valid session(s); at least six real sessions are required.`);
   if (valid.length > 8) warnings.push(`${valid.length} valid sessions exceed the approved cohort maximum of eight.`);
   if (!traceabilityComplete) warnings.push('One or more findings are not traceable to de-identified session evidence.');
-  if (!cohortComplete && !input.recruitmentDecisionDocumented) warnings.push('Required multi-format and AI-experience cohort mix is incomplete without a documented recruitment decision.');
-  if (!accessibilityComplete) warnings.push('Keyboard/accessibility coverage is missing without a documented recruitment decision.');
+  if (!recruitmentExceptions.cohortMix.effectiveComplete) warnings.push('Required multi-format and AI-experience cohort mix is incomplete without its own approved recruitment exception and de-identified decision reference.');
+  if (!recruitmentExceptions.keyboardOrAccessibilityCoverage.effectiveComplete) warnings.push('Keyboard/accessibility coverage is missing without its own approved recruitment exception and de-identified decision reference.');
   if (!input.configuredProviderEvidenceRecorded) warnings.push('Separate configured-provider evidence is not recorded.');
   if (!input.requiredSignoffsRecorded) warnings.push('Required Product, Design, Engineering, and Accessibility sign-offs are not recorded.');
   const evidenceSufficient = warnings.length === 0;
@@ -241,7 +301,7 @@ export function calculateStudySynthesis(input) {
   else recommendation = 'pass';
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     recruitedSessions: input.participants.length,
     validSessions: valid.length,
     invalidSessions: input.participants.length - valid.length,
@@ -249,6 +309,7 @@ export function calculateStudySynthesis(input) {
     tasks,
     participantBurden,
     cohort,
+    recruitmentExceptions,
     preservationAndReopen: ratio(persistencePreserved, valid.length),
     severityCounts: Object.fromEntries([...SEVERITIES].map((severity) => [severity, input.findings.filter((finding) => finding.severity === severity).length])),
     findings: input.findings.map((finding) => ({
