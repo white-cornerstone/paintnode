@@ -79,9 +79,10 @@ a missing PNG recovers from its exact-hash ORA so Return can recreate the
 flattened output. If both are missing, or either present file has the wrong
 hash, opening blocks rather than substituting a different project asset.
 
-Workflow close and project switch/close remain blocked while any editor tab is
-linked to that workflow. Return, discard, or close those tabs first so their
-private return authority cannot outlive the workflow or project it belongs to.
+Workflow close, replacement with a new or opened workflow, and project
+switch/close remain blocked while any editor tab is linked to that workflow.
+Return, discard, or close those tabs first so their private return authority
+cannot outlive the workflow or project it belongs to.
 When quitting, a successful Return must also persist the newly dirty workflow;
 if that workflow save fails or is cancelled, quit must stop.
 

@@ -191,9 +191,14 @@
   }
 
   function createWorkflow(): void {
-    workflow.newFromTemplate(selectedWorkflow.id, workflowName.trim() || selectedWorkflow.name);
-    ui.requestWorkflowFocus();
-    onClose();
+    projectError = '';
+    try {
+      workflow.newFromTemplate(selectedWorkflow.id, workflowName.trim() || selectedWorkflow.name);
+      ui.requestWorkflowFocus();
+      onClose();
+    } catch (error) {
+      projectError = (error as Error)?.message ?? String(error);
+    }
   }
 
   async function chooseWorkflowProject(trigger: HTMLElement): Promise<void> {

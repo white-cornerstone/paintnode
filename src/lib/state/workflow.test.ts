@@ -1588,4 +1588,42 @@ describe('WorkflowStore graph adapter', () => {
     clearWorkflowRoundTripAuthority(driftSession);
     expect(store.close()).toBe(true);
   });
+
+  it.each(['blank board', 'template', 'opened workflow', 'Director proposal'] as const)(
+    'blocks replacement with a %s until the linked editor authority is cleared',
+    (replacement) => {
+      const store = editorRoundTripStore();
+      const descriptor = store.prepareWorkflowEditorRoundTrip({
+        nodeId: 'transform-generate-square', rootRunId: 'store-run', assetReferenceId: 'store-source-ref',
+      }, [], project.identity);
+      const session = { doc: {} };
+      bindWorkflowRoundTripAuthority(session, descriptor.authority);
+      const beforeBytes = store.toBytes();
+      const beforeSession = store.captureDirectorSession();
+      const opened = new WorkflowStore({ idGenerator: ids() });
+      opened.newFromTemplate('asset-composition', 'Opened replacement');
+      const replace = () => {
+        if (replacement === 'blank board') store.newBoard('Blank replacement');
+        else if (replacement === 'template') store.newFromTemplate('asset-composition', 'Template replacement');
+        else if (replacement === 'opened workflow') store.openFromBytes(opened.toBytes(), null, 'Opened replacement');
+        else store.applyDirectorProposal(directorProposal());
+      };
+
+      expect(replace).toThrow(/workflow-linked editor tabs/i);
+      expect(store.toBytes()).toEqual(beforeBytes);
+      expect(store.captureDirectorSession()).toEqual(beforeSession);
+      expect(() => store.assertWorkflowEditorReturnAuthority(session)).not.toThrow();
+
+      clearWorkflowRoundTripAuthority(session);
+      expect(replace).not.toThrow();
+      expect(store.toBytes()).not.toEqual(beforeBytes);
+    },
+  );
+
+  it('allows initial workflow activation when no linked editor session exists', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+
+    expect(() => store.newBoard('Initial workflow')).not.toThrow();
+    expect(store.active).toBe(true);
+  });
 });

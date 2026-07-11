@@ -584,6 +584,7 @@ export class WorkflowStore {
   }
 
   newBoard(name = 'Untitled Workflow'): void {
+    this.assertWorkflowReplacementAllowed();
     this.beginWorkflowSession();
     this.active = true;
     ui.showWorkflow();
@@ -641,6 +642,7 @@ export class WorkflowStore {
   }
 
   newFromTemplate(templateId: WorkflowTemplateId, name?: string): void {
+    this.assertWorkflowReplacementAllowed();
     this.beginWorkflowSession();
     const graph = instantiateWorkflowTemplate(templateId, {
       name,
@@ -687,6 +689,7 @@ export class WorkflowStore {
     const nextDomain = new WorkflowGraphDomain(validatedGraph, { idGenerator: this.graphIdGenerator });
     const primaryArtDirection = nextDomain.graph.nodes.find((node) => node.type === 'art-direction') ?? null;
 
+    this.assertWorkflowReplacementAllowed();
     this.beginWorkflowSession();
     this.active = true;
     ui.showWorkflow();
@@ -2241,6 +2244,7 @@ export class WorkflowStore {
       const details = result.issues.map((issue) => `${issue.path || 'workflow'}: ${issue.message}`).join('; ');
       throw new Error(`Workflow file is not a supported PaintNode workflow. ${details}`);
     }
+    this.assertWorkflowReplacementAllowed();
     this.beginWorkflowSession();
     this.active = true;
     ui.showWorkflow();
@@ -2639,6 +2643,13 @@ export class WorkflowStore {
     if (projectIdentity !== undefined && verification.projectIdentity !== projectIdentity) return null;
     if (assets && verification.assetFingerprint !== this.reviewAssetFingerprint(assets)) return null;
     return verification;
+  }
+
+  private assertWorkflowReplacementAllowed(): void {
+    const workflowId = this.graphDomain?.graph.id;
+    if (workflowId && workflowRoundTripSessionsForWorkflow(workflowId).length > 0) {
+      throw new Error('Close or discard workflow-linked editor tabs before replacing the workflow.');
+    }
   }
 
   private beginWorkflowSession(): void {
