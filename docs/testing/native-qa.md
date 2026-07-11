@@ -194,6 +194,22 @@ transient rejection, so a later resolver call may retry the unchanged path;
 other rejected checks remain cached until the executable's filesystem
 fingerprint changes. A timed-out process never remains registered as in flight.
 
+Normal discovery applies the provider doctor's executable boundary as well.
+Official `@openai/codex` npm launchers are parsed as package metadata and mapped
+to the matching native platform package without executing the JavaScript shim.
+Malformed packages, missing or unsupported native targets, and direct shell
+shims fail closed. On macOS, the native Codex or Antigravity file must pass
+strict code-signature verification, the pinned OpenAI or Google TeamIdentifier,
+and Gatekeeper inspection before its first version probe. PaintNode records the
+canonical file identity and repeats identity and trust validation immediately
+before the SDK runner, capability, authentication, or provider process is
+spawned. Codex runners receive that identity and repeat the check in the Node
+process immediately beside the native spawn. Windows discovery honors
+`PATHEXT`, maps official npm `.cmd`/`.ps1` shims to the platform-native target
+without running the shim, and binds identity to a SHA-256 digest. Unsafe
+control-character paths fail before trust inspection; replacing the file after
+discovery cannot reuse the earlier decision.
+
 The full lane then hands the exact preflighted paths and version metadata to
 PaintNode's Rust resolver without re-executing the providers, and launches the
 uniquely identified **PaintNode Blueprint QA — Provider E2E** bundle. A missing

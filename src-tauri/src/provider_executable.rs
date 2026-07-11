@@ -8,6 +8,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+
 use crate::ai::{
     apply_ai_cli_environment, cleanup_ai_process_tree_after_bridge_exit,
     configure_ai_process_group, join_output_readers_bounded, terminate_ai_process_tree,
@@ -90,17 +93,169 @@ impl HostPlatform {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedProviderExecutable {
-    pub(crate) path: String,
-    pub(crate) version: String,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostTarget {
+    MacOsArm64,
+    MacOsX64,
+    LinuxArm64,
+    LinuxX64,
+    WindowsArm64,
+    WindowsX64,
+    Unsupported,
+}
+
+impl HostTarget {
+    fn current() -> Self {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::MacOsArm64
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            Self::MacOsX64
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            Self::LinuxArm64
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            Self::LinuxX64
+        } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+            Self::WindowsArm64
+        } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            Self::WindowsX64
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    fn is_macos(self) -> bool {
+        matches!(self, Self::MacOsArm64 | Self::MacOsX64)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FileFingerprint {
+struct VerifiedFileIdentity {
     len: u64,
     modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(windows)]
+    sha256: [u8; 32],
 }
+
+impl VerifiedFileIdentity {
+    fn capture(path: &Path) -> Result<Self, String> {
+        let metadata = fs::metadata(path).map_err(|error| {
+            format!("Could not inspect provider at {}: {error}", path.display())
+        })?;
+        if !metadata.is_file() {
+            return Err(format!("Provider path is not a file: {}", path.display()));
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+            #[cfg(windows)]
+            sha256: {
+                let mut file = fs::File::open(path).map_err(|error| {
+                    format!("Could not hash provider at {}: {error}", path.display())
+                })?;
+                let mut hasher = Sha256::new();
+                let mut buffer = [0_u8; 128 * 1024];
+                loop {
+                    let count = file.read(&mut buffer).map_err(|error| {
+                        format!("Could not hash provider at {}: {error}", path.display())
+                    })?;
+                    if count == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..count]);
+                }
+                hasher.finalize().into()
+            },
+        })
+    }
+
+    fn launch_json(&self) -> String {
+        #[cfg(unix)]
+        return serde_json::json!({
+            "version": 1,
+            "length": self.len.to_string(),
+            "unix": {
+                "device": self.device.to_string(),
+                "inode": self.inode.to_string(),
+                "changedSeconds": self.changed_seconds.to_string(),
+                "changedNanoseconds": self.changed_nanoseconds.to_string(),
+            }
+        })
+        .to_string();
+        #[cfg(windows)]
+        return serde_json::json!({
+            "version": 1,
+            "length": self.len.to_string(),
+            "sha256": self.sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        })
+        .to_string();
+        #[cfg(not(any(unix, windows)))]
+        serde_json::json!({
+            "version": 1,
+            "length": self.len.to_string(),
+        })
+        .to_string()
+    }
+}
+
+#[derive(Debug)]
+struct PreparedProviderCandidate {
+    path: PathBuf,
+    identity: VerifiedFileIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedProviderExecutable {
+    provider: Provider,
+    pub(crate) path: String,
+    pub(crate) version: String,
+    identity: VerifiedFileIdentity,
+}
+
+impl ResolvedProviderExecutable {
+    pub(crate) fn revalidate_for_launch(&self) -> Result<&str, String> {
+        revalidate_resolved_provider_with(self, &mut verify_macos_provider_trust)
+    }
+
+    pub(crate) fn launch_identity_json(&self) -> String {
+        self.identity.launch_json()
+    }
+}
+
+impl std::ops::Deref for ResolvedProviderExecutable {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for ResolvedProviderExecutable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.path)
+    }
+}
+
+type FileFingerprint = VerifiedFileIdentity;
 
 #[derive(Default)]
 struct RejectionCache {
@@ -130,11 +285,7 @@ enum CompletedProbe {
 
 impl RejectionCache {
     fn fingerprint(path: &Path) -> Option<FileFingerprint> {
-        let metadata = fs::metadata(path).ok()?;
-        Some(FileFingerprint {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })
+        VerifiedFileIdentity::capture(path).ok()
     }
 
     fn unchanged_rejection(&self, path: &Path) -> Option<&CachedRejection> {
@@ -265,6 +416,7 @@ fn candidate_paths(
     provider: Provider,
     configured: Option<PathBuf>,
     managed: Option<PathBuf>,
+    sdk_bundled: Option<PathBuf>,
     home: Option<&Path>,
     host: HostPlatform,
 ) -> Vec<PathBuf> {
@@ -275,6 +427,9 @@ fn candidate_paths(
     }
     if let Some(managed) = managed {
         candidates.push(managed);
+    }
+    if let Some(sdk_bundled) = sdk_bundled {
+        candidates.push(sdk_bundled);
     }
     if provider == Provider::Antigravity {
         if let Some(home) = home {
@@ -296,19 +451,484 @@ fn candidate_paths(
     candidates
 }
 
-fn resolve_path_candidate(candidate: &Path, path_env: Option<&OsStr>) -> Option<PathBuf> {
+fn sdk_bundled_codex_launcher() -> Option<PathBuf> {
+    let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .join("node_modules/@openai/codex/bin/codex.js");
+    launcher.is_file().then_some(launcher)
+}
+
+fn resolve_path_candidate_for_host(
+    candidate: &Path,
+    path_env: Option<&OsStr>,
+    path_ext: Option<&OsStr>,
+    host: HostTarget,
+) -> Option<PathBuf> {
     let is_bare_name = candidate.components().count() == 1;
     let path = if is_bare_name {
         let search_path = path_env
             .map(OsString::from)
             .or_else(|| std::env::var_os("PATH"))?;
+        let windows = matches!(host, HostTarget::WindowsArm64 | HostTarget::WindowsX64);
+        let extensions = if windows && candidate.extension().is_none() {
+            path_ext
+                .map(|value| value.to_string_lossy().into_owned())
+                .or_else(|| std::env::var("PATHEXT").ok())
+                .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .flat_map(|extension| {
+                    [
+                        extension.to_string(),
+                        extension.to_ascii_lowercase(),
+                        extension.to_ascii_uppercase(),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         std::env::split_paths(&search_path)
-            .map(|directory| directory.join(candidate))
+            .flat_map(|directory| {
+                let direct = std::iter::once(directory.join(candidate));
+                let extended = extensions.iter().map(move |extension| {
+                    directory.join(format!("{}{extension}", candidate.display()))
+                });
+                direct.chain(extended)
+            })
             .find(|path| path.is_file())?
     } else {
         candidate.to_path_buf()
     };
     fs::canonicalize(&path).ok().or(Some(path))
+}
+
+fn resolve_path_candidate(
+    candidate: &Path,
+    path_env: Option<&OsStr>,
+    host: HostTarget,
+) -> Option<PathBuf> {
+    resolve_path_candidate_for_host(
+        candidate,
+        path_env,
+        std::env::var_os("PATHEXT").as_deref(),
+        host,
+    )
+}
+
+fn official_codex_native_target(
+    host: HostTarget,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match host {
+        HostTarget::MacOsArm64 => Some((
+            "@openai/codex-darwin-arm64",
+            "aarch64-apple-darwin",
+            "codex",
+        )),
+        HostTarget::MacOsX64 => Some(("@openai/codex-darwin-x64", "x86_64-apple-darwin", "codex")),
+        HostTarget::LinuxArm64 => Some((
+            "@openai/codex-linux-arm64",
+            "aarch64-unknown-linux-musl",
+            "codex",
+        )),
+        HostTarget::LinuxX64 => Some((
+            "@openai/codex-linux-x64",
+            "x86_64-unknown-linux-musl",
+            "codex",
+        )),
+        HostTarget::WindowsArm64 => Some((
+            "@openai/codex-win32-arm64",
+            "aarch64-pc-windows-msvc",
+            "codex.exe",
+        )),
+        HostTarget::WindowsX64 => Some((
+            "@openai/codex-win32-x64",
+            "x86_64-pc-windows-msvc",
+            "codex.exe",
+        )),
+        HostTarget::Unsupported => None,
+    }
+}
+
+fn official_codex_platform_metadata_matches(
+    metadata: &serde_json::Value,
+    platform_package: &str,
+    host: HostTarget,
+) -> bool {
+    let name = metadata.get("name").and_then(serde_json::Value::as_str);
+    if name == Some(platform_package) {
+        return true;
+    }
+    let (expected_os, expected_cpu) = match host {
+        HostTarget::MacOsArm64 => ("darwin", "arm64"),
+        HostTarget::MacOsX64 => ("darwin", "x64"),
+        HostTarget::LinuxArm64 => ("linux", "arm64"),
+        HostTarget::LinuxX64 => ("linux", "x64"),
+        HostTarget::WindowsArm64 => ("win32", "arm64"),
+        HostTarget::WindowsX64 => ("win32", "x64"),
+        HostTarget::Unsupported => return false,
+    };
+    let contains = |field: &str, expected: &str| {
+        metadata
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(expected)))
+    };
+    name == Some("@openai/codex") && contains("os", expected_os) && contains("cpu", expected_cpu)
+}
+
+fn official_codex_native_from_launcher(
+    launcher: &Path,
+    host: HostTarget,
+) -> Result<Option<PathBuf>, String> {
+    let package_root = if launcher.file_name() == Some(OsStr::new("codex.js"))
+        && launcher.parent().and_then(Path::file_name) == Some(OsStr::new("bin"))
+    {
+        launcher
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "Codex npm launcher has no package root.".to_string())?
+            .to_path_buf()
+    } else if matches!(host, HostTarget::WindowsArm64 | HostTarget::WindowsX64)
+        && launcher
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("codex.cmd") || name.eq_ignore_ascii_case("codex.ps1")
+            })
+    {
+        let shim_parent = launcher
+            .parent()
+            .ok_or_else(|| "Codex npm shim has no parent directory.".to_string())?;
+        let node_modules = if shim_parent
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(".bin"))
+        {
+            shim_parent
+                .parent()
+                .ok_or_else(|| "Codex local npm shim has no node_modules root.".to_string())?
+                .to_path_buf()
+        } else {
+            shim_parent.join("node_modules")
+        };
+        node_modules.join("@openai/codex")
+    } else {
+        return Ok(None);
+    };
+    let metadata_path = package_root.join("package.json");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).map_err(|error| {
+            format!(
+                "Could not read Codex npm package metadata at {}: {error}",
+                metadata_path.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!(
+                "Codex npm package metadata is malformed at {}: {error}",
+                metadata_path.display()
+            )
+        })?;
+    if metadata.get("name").and_then(serde_json::Value::as_str) != Some("@openai/codex") {
+        return Err(format!(
+            "Codex launcher is not inside the official @openai/codex package: {}",
+            launcher.display()
+        ));
+    }
+    let (platform_package, triple, executable) =
+        official_codex_native_target(host).ok_or_else(|| {
+            "Codex npm launcher is unsupported on this platform and architecture.".to_string()
+        })?;
+    let mut targets = Vec::new();
+    for ancestor in package_root.ancestors() {
+        let platform_root = ancestor.join("node_modules").join(platform_package);
+        let platform_metadata = platform_root.join("package.json");
+        if !platform_metadata.is_file() {
+            continue;
+        }
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&platform_metadata).map_err(|error| {
+                format!(
+                    "Could not read Codex platform package metadata at {}: {error}",
+                    platform_metadata.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "Codex platform package metadata is malformed at {}: {error}",
+                    platform_metadata.display()
+                )
+            })?;
+        if !official_codex_platform_metadata_matches(&metadata, platform_package, host) {
+            return Err(format!(
+                "Codex native target is not inside the expected {platform_package} package: {}",
+                platform_root.display()
+            ));
+        }
+        targets.push((
+            platform_root
+                .join("vendor")
+                .join(triple)
+                .join("bin")
+                .join(executable),
+            platform_root,
+        ));
+        break;
+    }
+    targets.push((
+        package_root
+            .join("vendor")
+            .join(triple)
+            .join("bin")
+            .join(executable),
+        package_root.clone(),
+    ));
+    targets.push((
+        package_root
+            .join("vendor")
+            .join(triple)
+            .join("codex")
+            .join(executable),
+        package_root.clone(),
+    ));
+    for (path, trusted_root) in targets {
+        if path.is_file() {
+            let native = fs::canonicalize(&path).map_err(|error| {
+                format!(
+                    "Could not canonicalize official Codex native executable at {}: {error}",
+                    path.display()
+                )
+            })?;
+            let trusted_root = fs::canonicalize(&trusted_root).map_err(|error| {
+                format!(
+                    "Could not canonicalize Codex package root at {}: {error}",
+                    trusted_root.display()
+                )
+            })?;
+            if !native.starts_with(&trusted_root) {
+                return Err(format!(
+                    "Official Codex native executable escapes its package root: {}",
+                    native.display()
+                ));
+            }
+            return Ok(Some(native));
+        }
+    }
+    Err(format!(
+        "Official Codex npm package is missing its native executable for this platform: {}",
+        package_root.display()
+    ))
+}
+
+struct MacTrustInspection<'a> {
+    codesign_status: i32,
+    gatekeeper_status: i32,
+    gatekeeper_raw: &'a str,
+}
+
+fn expected_macos_team(provider: Provider) -> Option<&'static str> {
+    match provider {
+        Provider::Codex => Some("2DC432GLL2"),
+        Provider::Antigravity => Some("EQHXZ8M8AV"),
+        Provider::Claude => None,
+    }
+}
+
+fn assert_macos_provider_trust(
+    provider: Provider,
+    inspection: MacTrustInspection<'_>,
+) -> Result<(), String> {
+    let Some(_) = expected_macos_team(provider) else {
+        return Ok(());
+    };
+    if inspection.codesign_status != 0 {
+        return Err(format!(
+            "{} executable failed its pinned macOS code-signature requirement.",
+            provider.label()
+        ));
+    }
+    let raw = inspection.gatekeeper_raw;
+    let structured_pair = |key: &str, value: &str| {
+        raw.split_once(&format!("<key>{key}</key>"))
+            .is_some_and(|(_, suffix)| suffix.trim_start().starts_with(value))
+    };
+    let accepted =
+        inspection.gatekeeper_status == 0 && structured_pair("assessment:verdict", "<true/>");
+    // spctl reports signed standalone CLI binaries as error -67002 because
+    // they are valid code but not application bundles. Only the structured
+    // raw assessment may grant this narrow exception; stderr echoes the path.
+    let valid_standalone_cli = inspection.gatekeeper_status != 0
+        && structured_pair("assessment:verdict", "<false/>")
+        && structured_pair("assessment:cserror", "<integer>-67002</integer>");
+    if !accepted && !valid_standalone_cli {
+        return Err(format!(
+            "{} executable was rejected by macOS Gatekeeper.",
+            provider.label()
+        ));
+    }
+    Ok(())
+}
+
+fn trust_command_output(program: &str, args: &[&OsStr]) -> Result<Output, String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    version_probe_output(&mut command, PROVIDER_VERSION_PROBE_TIMEOUT)
+        .map_err(|error| format!("Provider trust inspection failed: {}", error.message()))
+}
+
+fn verify_macos_provider_trust(provider: Provider, path: &Path) -> Result<(), String> {
+    if !HostTarget::current().is_macos() || expected_macos_team(provider).is_none() {
+        return Ok(());
+    }
+    let path_text = path.to_str().ok_or_else(|| {
+        format!(
+            "{} executable path is not valid UTF-8 for macOS trust inspection.",
+            provider.label()
+        )
+    })?;
+    if path_text.chars().any(char::is_control) {
+        return Err(format!(
+            "{} executable path contains unsafe control characters.",
+            provider.label()
+        ));
+    }
+    let expected_team = expected_macos_team(provider).expect("checked provider team");
+    let requirement =
+        format!("=anchor apple generic and certificate leaf[subject.OU] = \"{expected_team}\"");
+    let path_os = path.as_os_str();
+    let verify = trust_command_output(
+        "/usr/bin/codesign",
+        &[
+            OsStr::new("--verify"),
+            OsStr::new("--strict"),
+            OsStr::new("--verbose=2"),
+            OsStr::new("-R"),
+            OsStr::new(&requirement),
+            path_os,
+        ],
+    )?;
+    let gatekeeper = trust_command_output(
+        "/usr/sbin/spctl",
+        &[
+            OsStr::new("--assess"),
+            OsStr::new("--type"),
+            OsStr::new("execute"),
+            OsStr::new("--verbose=4"),
+            OsStr::new("--raw"),
+            path_os,
+        ],
+    )?;
+    let gatekeeper_raw = String::from_utf8_lossy(&gatekeeper.stdout);
+    assert_macos_provider_trust(
+        provider,
+        MacTrustInspection {
+            codesign_status: verify.status.code().unwrap_or(-1),
+            gatekeeper_status: gatekeeper.status.code().unwrap_or(-1),
+            gatekeeper_raw: &gatekeeper_raw,
+        },
+    )
+}
+
+#[cfg(test)]
+fn prepare_provider_candidate_with<Trust>(
+    provider: Provider,
+    candidate: PathBuf,
+    host: HostTarget,
+    trust: &mut Trust,
+) -> Result<PreparedProviderCandidate, String>
+where
+    Trust: FnMut(Provider, &Path) -> Result<(), String>,
+{
+    prepare_provider_candidate_with_options(provider, candidate, host, false, trust)
+}
+
+fn prepare_provider_candidate_with_options<Trust>(
+    provider: Provider,
+    candidate: PathBuf,
+    host: HostTarget,
+    allow_test_scripts: bool,
+    trust: &mut Trust,
+) -> Result<PreparedProviderCandidate, String>
+where
+    Trust: FnMut(Provider, &Path) -> Result<(), String>,
+{
+    let candidate = fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "Could not canonicalize provider candidate at {}: {error}",
+            candidate.display()
+        )
+    })?;
+    let path = if provider == Provider::Codex {
+        official_codex_native_from_launcher(&candidate, host)?.unwrap_or(candidate)
+    } else {
+        candidate
+    };
+    if !allow_test_scripts && matches!(provider, Provider::Codex | Provider::Antigravity) {
+        let mut prefix = [0_u8; 2];
+        let mut file = fs::File::open(&path)
+            .map_err(|error| format!("Could not read provider at {}: {error}", path.display()))?;
+        let prefix_len = file
+            .read(&mut prefix)
+            .map_err(|error| format!("Could not read provider at {}: {error}", path.display()))?;
+        let scripted_extension =
+            path.extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "js" | "cmd" | "bat" | "ps1"
+                    )
+                });
+        if (prefix_len == 2 && prefix == *b"#!") || scripted_extension {
+            return Err(format!(
+                "{} candidate is an unsupported script or shell shim and will not be executed: {}",
+                provider.label(),
+                path.display()
+            ));
+        }
+    }
+    let identity = VerifiedFileIdentity::capture(&path)?;
+    if host.is_macos() && expected_macos_team(provider).is_some() {
+        trust(provider, &path)?;
+    }
+    if VerifiedFileIdentity::capture(&path)? != identity {
+        return Err(format!(
+            "{} executable changed during trust verification: {}",
+            provider.label(),
+            path.display()
+        ));
+    }
+    Ok(PreparedProviderCandidate { path, identity })
+}
+
+fn revalidate_resolved_provider_with<'a, Trust>(
+    resolved: &'a ResolvedProviderExecutable,
+    trust: &mut Trust,
+) -> Result<&'a str, String>
+where
+    Trust: FnMut(Provider, &Path) -> Result<(), String>,
+{
+    ensure_provider_launch_allowed(resolved.provider)?;
+    let path = Path::new(&resolved.path);
+    if VerifiedFileIdentity::capture(path)? != resolved.identity {
+        return Err(format!(
+            "{} executable changed after verification: {}",
+            resolved.provider.label(),
+            path.display()
+        ));
+    }
+    if HostTarget::current().is_macos() && expected_macos_team(resolved.provider).is_some() {
+        trust(resolved.provider, path)?;
+    }
+    if VerifiedFileIdentity::capture(path)? != resolved.identity {
+        return Err(format!(
+            "{} executable changed during launch revalidation: {}",
+            resolved.provider.label(),
+            path.display()
+        ));
+    }
+    Ok(&resolved.path)
 }
 
 fn version_line(output: &std::process::Output) -> Option<String> {
@@ -455,15 +1075,19 @@ fn resolve_candidates(
     path_env: Option<&OsStr>,
     rejected: &ResolutionCache,
 ) -> Result<ResolvedProviderExecutable, String> {
-    resolve_candidates_with_timeout(
+    resolve_candidates_with_policy(
         provider,
         candidates,
         path_env,
         rejected,
         PROVIDER_VERSION_PROBE_TIMEOUT,
+        HostTarget::current(),
+        false,
+        &mut verify_macos_provider_trust,
     )
 }
 
+#[cfg(test)]
 fn resolve_candidates_with_timeout(
     provider: Provider,
     candidates: Vec<PathBuf>,
@@ -471,14 +1095,54 @@ fn resolve_candidates_with_timeout(
     rejected: &ResolutionCache,
     timeout: Duration,
 ) -> Result<ResolvedProviderExecutable, String> {
+    resolve_candidates_with_policy(
+        provider,
+        candidates,
+        path_env,
+        rejected,
+        timeout,
+        HostTarget::LinuxX64,
+        true,
+        &mut |_, _| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_candidates_with_policy<Trust>(
+    provider: Provider,
+    candidates: Vec<PathBuf>,
+    path_env: Option<&OsStr>,
+    rejected: &ResolutionCache,
+    timeout: Duration,
+    host: HostTarget,
+    allow_test_scripts: bool,
+    trust: &mut Trust,
+) -> Result<ResolvedProviderExecutable, String>
+where
+    Trust: FnMut(Provider, &Path) -> Result<(), String>,
+{
     let mut seen = HashSet::new();
     let mut failures = Vec::new();
 
     for candidate in candidates {
-        let Some(path) = resolve_path_candidate(&candidate, path_env) else {
+        let Some(candidate_path) = resolve_path_candidate(&candidate, path_env, host) else {
             failures.push(format!("{} was not found", candidate.display()));
             continue;
         };
+        let prepared = match prepare_provider_candidate_with_options(
+            provider,
+            candidate_path,
+            host,
+            allow_test_scripts,
+            trust,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        let path = prepared.path;
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -500,10 +1164,30 @@ fn resolve_candidates_with_timeout(
         match version_probe_output(&mut command, timeout) {
             Ok(output) if output.status.success() => {
                 if let Some(version) = version_line(&output) {
+                    let current_identity = match VerifiedFileIdentity::capture(&path) {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            rejected.reject(path.clone(), generation, error.clone())?;
+                            failures.push(error);
+                            continue;
+                        }
+                    };
+                    if current_identity != prepared.identity {
+                        let reason = format!(
+                            "{} executable changed during its version check: {}",
+                            provider.label(),
+                            path.display()
+                        );
+                        rejected.reject(path.clone(), generation, reason.clone())?;
+                        failures.push(reason);
+                        continue;
+                    }
                     rejected.accept(&path, generation)?;
                     return Ok(ResolvedProviderExecutable {
+                        provider,
                         path: path.to_string_lossy().into_owned(),
                         version,
+                        identity: current_identity,
                     });
                 }
                 let reason = format!("{} returned no version", path.display());
@@ -603,8 +1287,10 @@ fn provider_e2e_preflighted_resolution(
         })?;
 
     Ok(ResolvedProviderExecutable {
+        provider,
         path: path.to_string_lossy().into_owned(),
         version,
+        identity: VerifiedFileIdentity::capture(&path)?,
     })
 }
 
@@ -633,6 +1319,9 @@ pub(crate) fn resolve_provider_executable(
             provider,
             configured_path(configured),
             managed,
+            (provider == Provider::Codex)
+                .then(sdk_bundled_codex_launcher)
+                .flatten(),
             std::env::var_os("HOME").as_deref().map(Path::new),
             HostPlatform::current(),
         ),
@@ -642,6 +1331,25 @@ pub(crate) fn resolve_provider_executable(
     resolve_candidates(
         provider,
         candidates,
+        std::env::var_os("PATH").as_deref(),
+        rejection_cache(),
+    )
+}
+
+pub(crate) fn resolve_exact_provider_executable(
+    provider: Provider,
+    path: PathBuf,
+) -> Result<ResolvedProviderExecutable, String> {
+    let qa_mode = std::env::var(QA_MODE_ENV).unwrap_or_default();
+    if !qa_mode.is_empty() {
+        return Err(format!(
+            "Exact managed {} resolution is unavailable in {QA_MODE_ENV} mode `{qa_mode}`.",
+            provider.label()
+        ));
+    }
+    resolve_candidates(
+        provider,
+        vec![path],
         std::env::var_os("PATH").as_deref(),
         rejection_cache(),
     )
@@ -1054,12 +1762,30 @@ mod tests {
         fs::set_permissions(path, permissions).expect("make fake provider executable");
     }
 
+    fn resolve_test_candidates(
+        provider: Provider,
+        candidates: Vec<PathBuf>,
+        rejected: &ResolutionCache,
+    ) -> Result<ResolvedProviderExecutable, String> {
+        resolve_candidates_with_policy(
+            provider,
+            candidates,
+            None,
+            rejected,
+            PROVIDER_VERSION_PROBE_TIMEOUT,
+            HostTarget::LinuxX64,
+            true,
+            &mut |_, _| Ok(()),
+        )
+    }
+
     #[test]
-    fn apple_silicon_prefers_configured_then_managed_then_arm_homebrew() {
+    fn apple_silicon_prefers_configured_managed_and_sdk_before_homebrew() {
         let paths = candidate_paths(
             Provider::Codex,
             Some("/configured/codex".into()),
             Some("/managed/codex".into()),
+            Some("/sdk/codex.js".into()),
             Some(std::path::Path::new("/Users/test")),
             HostPlatform::MacOsArm64,
         );
@@ -1069,6 +1795,7 @@ mod tests {
             [
                 "/configured/codex",
                 "/managed/codex",
+                "/sdk/codex.js",
                 "/opt/homebrew/bin/codex",
                 "/usr/local/bin/codex",
                 "codex",
@@ -1083,6 +1810,7 @@ mod tests {
             Provider::Codex,
             None,
             None,
+            None,
             Some(std::path::Path::new("/Users/test")),
             HostPlatform::MacOsX64,
         );
@@ -1091,6 +1819,505 @@ mod tests {
             paths,
             ["/usr/local/bin/codex", "/opt/homebrew/bin/codex", "codex",]
                 .map(std::path::PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn official_codex_native_targets_match_supported_platform_packages() {
+        assert_eq!(
+            official_codex_native_target(HostTarget::MacOsArm64),
+            Some((
+                "@openai/codex-darwin-arm64",
+                "aarch64-apple-darwin",
+                "codex"
+            ))
+        );
+        assert_eq!(
+            official_codex_native_target(HostTarget::MacOsX64),
+            Some(("@openai/codex-darwin-x64", "x86_64-apple-darwin", "codex"))
+        );
+        assert_eq!(
+            official_codex_native_target(HostTarget::LinuxArm64),
+            Some((
+                "@openai/codex-linux-arm64",
+                "aarch64-unknown-linux-musl",
+                "codex"
+            ))
+        );
+        assert_eq!(
+            official_codex_native_target(HostTarget::LinuxX64),
+            Some((
+                "@openai/codex-linux-x64",
+                "x86_64-unknown-linux-musl",
+                "codex"
+            ))
+        );
+        assert_eq!(
+            official_codex_native_target(HostTarget::WindowsArm64),
+            Some((
+                "@openai/codex-win32-arm64",
+                "aarch64-pc-windows-msvc",
+                "codex.exe"
+            ))
+        );
+        assert_eq!(
+            official_codex_native_target(HostTarget::WindowsX64),
+            Some((
+                "@openai/codex-win32-x64",
+                "x86_64-pc-windows-msvc",
+                "codex.exe"
+            ))
+        );
+        assert_eq!(official_codex_native_target(HostTarget::Unsupported), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn official_codex_npm_launcher_is_unwrapped_without_executing_the_wrapper() {
+        let dir = TempJobDir::new("paintnode-codex-wrapper-test").expect("temp dir");
+        let package = dir.path().join("lib/node_modules/@openai/codex");
+        let wrapper = package.join("bin/codex.js");
+        let native = package
+            .join("node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex");
+        fs::create_dir_all(wrapper.parent().expect("wrapper parent")).expect("wrapper dir");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native dir");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"@openai/codex","version":"9.8.7"}"#,
+        )
+        .expect("package metadata");
+        fs::write(
+            package.join("node_modules/@openai/codex-darwin-arm64/package.json"),
+            r#"{"name":"@openai/codex-darwin-arm64","version":"9.8.7"}"#,
+        )
+        .expect("platform package metadata");
+        let sentinel = dir.path().join("wrapper-executed");
+        executable(&wrapper, &format!("touch '{}'", sentinel.display()));
+        executable(&native, "echo codex-cli 9.8.7");
+        let mut trusted = None;
+
+        let prepared = prepare_provider_candidate_with_options(
+            Provider::Codex,
+            wrapper,
+            HostTarget::MacOsArm64,
+            true,
+            &mut |provider, path| {
+                trusted = Some((provider, path.to_path_buf()));
+                Ok(())
+            },
+        )
+        .expect("official wrapper");
+
+        assert_eq!(
+            prepared.path,
+            fs::canonicalize(&native).expect("native path")
+        );
+        assert_eq!(trusted, Some((Provider::Codex, prepared.path.clone())));
+        assert!(!sentinel.exists(), "the npm launcher must never execute");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn malformed_missing_and_unsupported_codex_launchers_fail_before_execution() {
+        let dir = TempJobDir::new("paintnode-codex-wrapper-reject-test").expect("temp dir");
+        let package = dir.path().join("lib/node_modules/@openai/codex");
+        let wrapper = package.join("bin/codex.js");
+        fs::create_dir_all(wrapper.parent().expect("wrapper parent")).expect("wrapper dir");
+        let sentinel = dir.path().join("wrapper-executed");
+        executable(&wrapper, &format!("touch '{}'", sentinel.display()));
+
+        for (metadata, host, expected) in [
+            ("not-json", HostTarget::MacOsArm64, "metadata"),
+            (
+                r#"{"name":"not-codex"}"#,
+                HostTarget::MacOsArm64,
+                "official",
+            ),
+            (
+                r#"{"name":"@openai/codex"}"#,
+                HostTarget::MacOsArm64,
+                "native",
+            ),
+            (
+                r#"{"name":"@openai/codex"}"#,
+                HostTarget::Unsupported,
+                "platform",
+            ),
+        ] {
+            fs::write(package.join("package.json"), metadata).expect("package metadata");
+            let error = prepare_provider_candidate_with(
+                Provider::Codex,
+                wrapper.clone(),
+                host,
+                &mut |_, _| panic!("rejected wrapper must not reach trust inspection"),
+            )
+            .expect_err("invalid launcher must fail closed");
+            assert!(error.to_ascii_lowercase().contains(expected), "{error}");
+        }
+        assert!(
+            !sentinel.exists(),
+            "a rejected npm launcher must never execute"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn official_codex_launcher_resolves_a_hoisted_platform_dependency() {
+        let dir = TempJobDir::new("paintnode-codex-hoisted-wrapper-test").expect("temp dir");
+        let modules = dir.path().join("node_modules/@openai");
+        let package = modules.join("codex");
+        let platform = modules.join("codex-darwin-arm64");
+        let wrapper = package.join("bin/codex.js");
+        let native = platform.join("vendor/aarch64-apple-darwin/bin/codex");
+        fs::create_dir_all(wrapper.parent().expect("wrapper parent")).expect("wrapper dir");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native dir");
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#)
+            .expect("package metadata");
+        fs::write(
+            platform.join("package.json"),
+            r#"{"name":"@openai/codex","version":"1.2.3-linux-x64","os":["linux"],"cpu":["x64"]}"#,
+        )
+        .expect("platform metadata");
+        executable(&wrapper, "exit 99");
+        executable(&native, "echo codex-cli 1.2.3");
+
+        let error = prepare_provider_candidate_with_options(
+            Provider::Codex,
+            wrapper.clone(),
+            HostTarget::MacOsArm64,
+            true,
+            &mut |_, _| panic!("wrong-platform package must not reach trust inspection"),
+        )
+        .expect_err("wrong-platform package metadata");
+        assert!(error.contains("expected"), "{error}");
+        fs::write(
+            platform.join("package.json"),
+            r#"{"name":"@openai/codex","version":"1.2.3-darwin-arm64","os":["darwin"],"cpu":["arm64"]}"#,
+        )
+        .expect("correct platform metadata");
+
+        let prepared = prepare_provider_candidate_with_options(
+            Provider::Codex,
+            wrapper,
+            HostTarget::MacOsArm64,
+            true,
+            &mut |_, _| Ok(()),
+        )
+        .expect("hoisted native target");
+        assert_eq!(
+            prepared.path,
+            fs::canonicalize(native).expect("native path")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn windows_pathext_finds_and_unwraps_official_npm_shims_without_execution() {
+        let dir = TempJobDir::new("paintnode-codex-windows-shim-test").expect("temp dir");
+        let modules = dir.path().join("node_modules");
+        let shim = modules.join(".bin/codex.cmd");
+        let package = modules.join("@openai/codex");
+        let platform = modules.join("@openai/codex-win32-x64");
+        let native = platform.join("vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        let sentinel = dir.path().join("shim-executed");
+        fs::create_dir_all(shim.parent().expect("shim parent")).expect("shim dir");
+        fs::create_dir_all(package.join("bin")).expect("package dir");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native dir");
+        executable(&shim, &format!("touch '{}'", sentinel.display()));
+        executable(&native, "echo codex-cli 1.2.3");
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#)
+            .expect("package metadata");
+        fs::write(
+            platform.join("package.json"),
+            r#"{"name":"@openai/codex","os":["win32"],"cpu":["x64"]}"#,
+        )
+        .expect("platform metadata");
+
+        let discovered = resolve_path_candidate_for_host(
+            Path::new("codex"),
+            Some(modules.join(".bin").as_os_str()),
+            Some(OsStr::new(".EXE;.CMD;.PS1")),
+            HostTarget::WindowsX64,
+        )
+        .expect("PATHEXT shim");
+        assert_eq!(discovered, fs::canonicalize(&shim).expect("canonical shim"));
+        let prepared = prepare_provider_candidate_with_options(
+            Provider::Codex,
+            discovered,
+            HostTarget::WindowsX64,
+            true,
+            &mut |_, _| Ok(()),
+        )
+        .expect("official Windows npm shim");
+        assert_eq!(prepared.path, fs::canonicalize(&native).expect("native"));
+        assert!(!sentinel.exists(), "npm shim must never execute");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn windows_global_prefix_cmd_and_ps1_shims_unwrap_without_execution() {
+        let dir = TempJobDir::new("paintnode-codex-windows-global-test").expect("temp dir");
+        let prefix = dir.path().join("npm");
+        let modules = prefix.join("node_modules");
+        let package = modules.join("@openai/codex");
+        let platform = modules.join("@openai/codex-win32-x64");
+        let native = platform.join("vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        fs::create_dir_all(package.join("bin")).expect("package dir");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native dir");
+        executable(&native, "echo codex-cli 1.2.3");
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#)
+            .expect("package metadata");
+        fs::write(
+            platform.join("package.json"),
+            r#"{"name":"@openai/codex","os":["win32"],"cpu":["x64"]}"#,
+        )
+        .expect("platform metadata");
+
+        let cmd = prefix.join("codex.cmd");
+        let ps1 = prefix.join("codex.ps1");
+        let cmd_sentinel = dir.path().join("cmd-executed");
+        let ps1_sentinel = dir.path().join("ps1-executed");
+        executable(&cmd, &format!("touch '{}'", cmd_sentinel.display()));
+        executable(&ps1, &format!("touch '{}'", ps1_sentinel.display()));
+
+        let discovered = resolve_path_candidate_for_host(
+            Path::new("codex"),
+            Some(prefix.as_os_str()),
+            Some(OsStr::new(".eXe;.CmD;.Ps1")),
+            HostTarget::WindowsX64,
+        )
+        .expect("mixed-case PATHEXT global shim");
+        assert_eq!(discovered, fs::canonicalize(&cmd).expect("canonical cmd"));
+        for shim in [discovered, fs::canonicalize(&ps1).expect("canonical ps1")] {
+            let prepared = prepare_provider_candidate_with_options(
+                Provider::Codex,
+                shim,
+                HostTarget::WindowsX64,
+                true,
+                &mut |_, _| Ok(()),
+            )
+            .expect("official global npm shim");
+            assert_eq!(prepared.path, fs::canonicalize(&native).expect("native"));
+        }
+        assert!(!cmd_sentinel.exists(), "global cmd shim must never execute");
+        assert!(!ps1_sentinel.exists(), "global ps1 shim must never execute");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn windows_global_prefix_lookalike_shims_fail_closed_without_execution() {
+        let dir = TempJobDir::new("paintnode-codex-windows-lookalike-test").expect("temp dir");
+        let prefix = dir.path().join("npm");
+        let package = prefix.join("node_modules/@openai/codex");
+        fs::create_dir_all(&package).expect("lookalike package dir");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"not-openai-codex"}"#,
+        )
+        .expect("lookalike metadata");
+
+        for extension in ["cmd", "ps1"] {
+            let shim = prefix.join(format!("codex.{extension}"));
+            let sentinel = dir.path().join(format!("{extension}-executed"));
+            executable(&shim, &format!("touch '{}'", sentinel.display()));
+            let error = prepare_provider_candidate_with_options(
+                Provider::Codex,
+                shim,
+                HostTarget::WindowsX64,
+                true,
+                &mut |_, _| panic!("lookalike shim must not reach trust inspection"),
+            )
+            .expect_err("lookalike global shim");
+            assert!(error.contains("official @openai/codex"), "{error}");
+            assert!(!sentinel.exists(), "lookalike shim must never execute");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mac_provider_trust_rejection_precedes_any_candidate_execution() {
+        let dir = TempJobDir::new("paintnode-provider-trust-reject-test").expect("temp dir");
+        let codex = dir.path().join("codex");
+        let sentinel = dir.path().join("executed");
+        executable(
+            &codex,
+            &format!("touch '{}'; echo codex-cli 1.0.0", sentinel.display()),
+        );
+
+        let error = prepare_provider_candidate_with_options(
+            Provider::Codex,
+            codex,
+            HostTarget::MacOsArm64,
+            true,
+            &mut |_, _| Err("revoked vendor identity".into()),
+        )
+        .expect_err("revoked candidate");
+
+        assert!(error.contains("revoked"));
+        assert!(
+            !sentinel.exists(),
+            "trust rejection must happen before launch"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn direct_codex_and_antigravity_shell_shims_are_never_executed() {
+        let dir = TempJobDir::new("paintnode-provider-shell-shim-test").expect("temp dir");
+        for provider in [Provider::Codex, Provider::Antigravity] {
+            let shim = dir.path().join(provider.command_name());
+            let sentinel = dir
+                .path()
+                .join(format!("{}-executed", provider.command_name()));
+            executable(&shim, &format!("touch '{}'", sentinel.display()));
+            let error = prepare_provider_candidate_with(
+                provider,
+                shim,
+                HostTarget::LinuxX64,
+                &mut |_, _| Ok(()),
+            )
+            .expect_err("shell shim must fail closed");
+            assert!(error.contains("script or shell shim"), "{error}");
+            assert!(!sentinel.exists(), "a shell shim must never execute");
+        }
+    }
+
+    #[test]
+    fn mac_provider_trust_parser_uses_only_structured_gatekeeper_output() {
+        let cli_gatekeeper = r#"<plist><dict><key>assessment:cserror</key><integer>-67002</integer><key>assessment:verdict</key><false/></dict></plist>"#;
+        let accepted_gatekeeper =
+            r#"<plist><dict><key>assessment:verdict</key><true/></dict></plist>"#;
+        assert!(assert_macos_provider_trust(
+            Provider::Codex,
+            MacTrustInspection {
+                codesign_status: 0,
+                gatekeeper_status: 1,
+                gatekeeper_raw: cli_gatekeeper,
+            },
+        )
+        .is_ok());
+        assert!(assert_macos_provider_trust(
+            Provider::Antigravity,
+            MacTrustInspection {
+                codesign_status: 0,
+                gatekeeper_status: 0,
+                gatekeeper_raw: accepted_gatekeeper,
+            },
+        )
+        .is_ok());
+        for inspection in [
+            MacTrustInspection {
+                codesign_status: 1,
+                gatekeeper_status: 1,
+                gatekeeper_raw: cli_gatekeeper,
+            },
+            MacTrustInspection {
+                codesign_status: 0,
+                gatekeeper_status: 1,
+                gatekeeper_raw: r#"<plist><dict><key>assessment:cserror</key><integer>-67030</integer><key>assessment:verdict</key><false/></dict></plist>"#,
+            },
+            MacTrustInspection {
+                codesign_status: 0,
+                gatekeeper_status: 1,
+                gatekeeper_raw: "injected/path: the code is valid but does not seem to be an app",
+            },
+        ] {
+            assert!(assert_macos_provider_trust(Provider::Codex, inspection).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn newline_path_cannot_inject_vendor_identity_or_gatekeeper_acceptance() {
+        let dir = TempJobDir::new("paintnode-provider-newline-trust-test").expect("temp dir");
+        for (provider, command, team) in [
+            (Provider::Codex, "codex", "2DC432GLL2"),
+            (Provider::Antigravity, "agy", "EQHXZ8M8AV"),
+        ] {
+            let injected = dir.path().join(format!(
+                "{command}\nTeamIdentifier={team}\nthe code is valid but does not seem to be an app"
+            ));
+            fs::copy("/usr/bin/true", &injected).expect("copy Mach-O fixture");
+            let status = Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&injected)
+                .status()
+                .expect("ad-hoc sign fixture");
+            assert!(status.success(), "fixture must be ad-hoc signed");
+
+            let error = verify_macos_provider_trust(provider, &injected)
+                .expect_err("unsafe path must fail before trust commands");
+            assert!(error.contains("unsafe control characters"), "{error}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolved_identity_swap_is_rejected_before_invocation() {
+        let dir = TempJobDir::new("paintnode-provider-identity-swap-test").expect("temp dir");
+        let provider = dir.path().join("agy");
+        executable(&provider, "echo 1.0.0");
+        let prepared = prepare_provider_candidate_with_options(
+            Provider::Antigravity,
+            provider.clone(),
+            HostTarget::MacOsArm64,
+            true,
+            &mut |_, _| Ok(()),
+        )
+        .expect("trusted provider");
+        let resolved = ResolvedProviderExecutable {
+            provider: Provider::Antigravity,
+            path: prepared.path.to_string_lossy().into_owned(),
+            version: "1.0.0".into(),
+            identity: prepared.identity,
+        };
+        fs::remove_file(&provider).expect("remove old provider");
+        executable(&provider, "echo 2.0.0");
+
+        let error = revalidate_resolved_provider_with(&resolved, &mut |_, _| Ok(()))
+            .expect_err("identity swap must fail closed");
+        assert!(error.contains("changed after verification"), "{error}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolved_symlink_retarget_cannot_redirect_provider_invocation() {
+        let dir = TempJobDir::new("paintnode-provider-symlink-swap-test").expect("temp dir");
+        let first = dir.path().join("agy-first");
+        let second = dir.path().join("agy-second");
+        let alias = dir.path().join("agy");
+        executable(&first, "echo 1.0.0");
+        executable(&second, "echo 2.0.0");
+        symlink(&first, &alias).expect("provider alias");
+        let prepared = prepare_provider_candidate_with_options(
+            Provider::Antigravity,
+            alias.clone(),
+            HostTarget::MacOsArm64,
+            true,
+            &mut |_, _| Ok(()),
+        )
+        .expect("trusted provider");
+        let resolved = ResolvedProviderExecutable {
+            provider: Provider::Antigravity,
+            path: prepared.path.to_string_lossy().into_owned(),
+            version: "1.0.0".into(),
+            identity: prepared.identity,
+        };
+        fs::remove_file(&alias).expect("remove old alias");
+        symlink(&second, &alias).expect("retarget provider alias");
+
+        assert_eq!(
+            revalidate_resolved_provider_with(&resolved, &mut |_, _| Ok(()))
+                .expect("canonical provider remains trusted"),
+            fs::canonicalize(&first)
+                .expect("first provider")
+                .to_string_lossy()
+        );
+        assert_ne!(
+            resolved.path,
+            fs::canonicalize(&alias)
+                .expect("new alias target")
+                .to_string_lossy()
         );
     }
 
@@ -1107,10 +2334,9 @@ mod tests {
         );
         symlink(&real, &alias).expect("alias");
 
-        let resolution = resolve_candidates(
+        let resolution = resolve_test_candidates(
             Provider::Codex,
             vec![alias, real],
-            None,
             &ResolutionCache::default(),
         )
         .expect("provider resolution");
@@ -1142,14 +2368,13 @@ mod tests {
         executable(&valid, "echo codex-cli 2.0.0");
         let rejected = ResolutionCache::default();
 
-        let first = resolve_candidates(
+        let first = resolve_test_candidates(
             Provider::Codex,
             vec![failed.clone(), valid.clone()],
-            None,
             &rejected,
         )
         .expect("fallback provider");
-        let second = resolve_candidates(Provider::Codex, vec![failed, valid], None, &rejected)
+        let second = resolve_test_candidates(Provider::Codex, vec![failed, valid], &rejected)
             .expect("cached fallback provider");
 
         assert_eq!(first.version, "codex-cli 2.0.0");
@@ -1161,6 +2386,37 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejected_cache_retries_a_replaced_same_size_same_mtime_file_identity() {
+        let dir = TempJobDir::new("paintnode-provider-cache-identity-test").expect("temp dir");
+        let provider = dir.path().join("codex");
+        executable(&provider, "echo codex-cli 0.0.0; exit 1");
+        let original_modified = fs::metadata(&provider)
+            .expect("provider metadata")
+            .modified()
+            .expect("provider modified time");
+        let original_len = fs::metadata(&provider).expect("provider metadata").len();
+        let cache = ResolutionCache::default();
+        resolve_test_candidates(Provider::Codex, vec![provider.clone()], &cache)
+            .expect_err("first identity is rejected");
+
+        fs::remove_file(&provider).expect("remove rejected identity");
+        executable(&provider, "echo codex-cli 9.9.9; exit 0");
+        assert_eq!(
+            fs::metadata(&provider).expect("replacement metadata").len(),
+            original_len
+        );
+        fs::File::open(&provider)
+            .expect("replacement provider")
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .expect("restore modified time");
+
+        let resolved = resolve_test_candidates(Provider::Codex, vec![provider], &cache)
+            .expect("new file identity retries");
+        assert_eq!(resolved.version, "codex-cli 9.9.9");
     }
 
     #[test]
@@ -1189,7 +2445,7 @@ mod tests {
                 let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    resolve_candidates(Provider::Codex, vec![failed, valid], None, &cache)
+                    resolve_test_candidates(Provider::Codex, vec![failed, valid], &cache)
                         .expect("parallel provider resolution")
                 })
             })
@@ -1383,6 +2639,31 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{} detection failed: {error}", provider.label()));
             eprintln!(
                 "{} accepted from provider doctor at {} ({})",
+                provider.label(),
+                resolved.path,
+                resolved.version
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit no-generation normal-mode trust probe; set PAINTNODE_TEST_CODEX_BIN and PAINTNODE_TEST_ANTIGRAVITY_BIN"]
+    fn explicit_normal_mode_unwraps_and_revalidates_vendor_providers() {
+        assert!(std::env::var(QA_MODE_ENV).unwrap_or_default().is_empty());
+        for (provider, variable) in [
+            (Provider::Codex, "PAINTNODE_TEST_CODEX_BIN"),
+            (Provider::Antigravity, "PAINTNODE_TEST_ANTIGRAVITY_BIN"),
+        ] {
+            let configured = std::env::var(variable)
+                .unwrap_or_else(|_| panic!("{variable} is required for the explicit trust probe"));
+            let resolved = resolve_provider_executable(provider, Some(configured), None)
+                .unwrap_or_else(|error| panic!("{} trust probe failed: {error}", provider.label()));
+            resolved.revalidate_for_launch().unwrap_or_else(|error| {
+                panic!("{} revalidation failed: {error}", provider.label())
+            });
+            assert!(!resolved.path.ends_with("/bin/codex.js"));
+            eprintln!(
+                "{} trusted at {} ({})",
                 provider.label(),
                 resolved.path,
                 resolved.version

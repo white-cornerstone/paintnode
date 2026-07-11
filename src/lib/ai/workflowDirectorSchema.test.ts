@@ -30,12 +30,13 @@ describe('Workflow Director GraphDraft schema', () => {
   });
 
   it('versions and packages every shared schema dependency required by managed runners', () => {
-    expect(MANAGED_RUNTIME_PROTOCOL_VERSION).toBe(3);
+    expect(MANAGED_RUNTIME_PROTOCOL_VERSION).toBe(4);
     expect(MANAGED_RUNTIME_SHARED_BRIDGE_FILES).toEqual(expect.arrayContaining([
       'director-action-schema.mjs',
       'workflow-director-schema.mjs',
+      'provider-executable-trust.mjs',
     ]));
-    expect(providerRuntimeWorkflow).toContain('default: "3.0.0"');
+    expect(providerRuntimeWorkflow).toContain('default: "4.0.0"');
   });
 
   it('defines a strict structured-output schema for current-workflow revisions', () => {

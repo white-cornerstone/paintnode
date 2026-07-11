@@ -16,11 +16,12 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ai::apply_ai_cli_environment;
-use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
+use crate::provider_executable::{resolve_exact_provider_executable, Provider};
 
-const RUNTIME_PROTOCOL_VERSION: u32 = 3;
+const RUNTIME_PROTOCOL_VERSION: u32 = 4;
 const DIRECTOR_ACTION_SCHEMA_FILE: &str = "bridge/director-action-schema.mjs";
 const WORKFLOW_DIRECTOR_SCHEMA_FILE: &str = "bridge/workflow-director-schema.mjs";
+const PROVIDER_EXECUTABLE_TRUST_FILE: &str = "bridge/provider-executable-trust.mjs";
 const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/white-cornerstone/paintnode/releases/download/provider-runtimes-latest/runtime-manifest.json";
 
@@ -200,6 +201,9 @@ fn required_package_files(manifest: &RuntimePackageManifest) -> Vec<&str> {
         required.push(DIRECTOR_ACTION_SCHEMA_FILE);
         required.push(WORKFLOW_DIRECTOR_SCHEMA_FILE);
     }
+    if manifest.protocol_version >= 4 {
+        required.push(PROVIDER_EXECUTABLE_TRUST_FILE);
+    }
     required
 }
 
@@ -361,12 +365,13 @@ fn check_auth(provider: &str, package: &RuntimePackageManifest) -> Result<bool, 
     }
     let executable = managed_executable(provider)
         .ok_or_else(|| format!("Managed {provider} executable is missing."))?;
-    ensure_provider_launch_allowed(match provider {
+    let provider_kind = match provider {
         "codex" => Provider::Codex,
         "claude" => Provider::Claude,
         _ => return Err(format!("Unsupported managed AI provider: {provider}")),
-    })?;
-    let mut command = Command::new(executable);
+    };
+    let resolved = resolve_exact_provider_executable(provider_kind, executable)?;
+    let mut command = Command::new(resolved.revalidate_for_launch()?);
     apply_ai_cli_environment(&mut command);
     command
         .args(&package.auth_check_args)
@@ -645,11 +650,12 @@ pub(crate) async fn login_managed_runtime(
             .ok_or_else(|| format!("Install {provider} support before signing in."))?;
         let executable = managed_executable(&provider)
             .ok_or_else(|| format!("Managed {provider} executable is missing."))?;
-        ensure_provider_launch_allowed(match provider.as_str() {
+        let provider_kind = match provider.as_str() {
             "codex" => Provider::Codex,
             "claude" => Provider::Claude,
             _ => return Err(format!("Unsupported managed AI provider: {provider}")),
-        })?;
+        };
+        let resolved = resolve_exact_provider_executable(provider_kind, executable)?;
         emit_progress(
             &app,
             &provider,
@@ -658,7 +664,7 @@ pub(crate) async fn login_managed_runtime(
             None,
             "Continue sign-in in your browser…",
         );
-        let mut command = Command::new(executable);
+        let mut command = Command::new(resolved.revalidate_for_launch()?);
         apply_ai_cli_environment(&mut command);
         command.args(&package.login_args);
         let status = command
@@ -732,12 +738,14 @@ mod tests {
         let required = required_package_files(&manifest);
         assert!(required.contains(&DIRECTOR_ACTION_SCHEMA_FILE));
         assert!(required.contains(&WORKFLOW_DIRECTOR_SCHEMA_FILE));
+        assert!(required.contains(&PROVIDER_EXECUTABLE_TRUST_FILE));
         let mut old = manifest.clone();
         old.protocol_version = 1;
         assert!(!package_is_compatible(&old));
         let old_required = required_package_files(&old);
         assert!(!old_required.contains(&DIRECTOR_ACTION_SCHEMA_FILE));
         assert!(!old_required.contains(&WORKFLOW_DIRECTOR_SCHEMA_FILE));
+        assert!(!old_required.contains(&PROVIDER_EXECUTABLE_TRUST_FILE));
     }
 
     #[test]
@@ -756,7 +764,7 @@ mod tests {
         };
         let error = release_for(&release, "codex").unwrap_err();
         assert!(error.contains("outdated runtime protocol 1"));
-        assert!(error.contains("requires protocol 3"));
+        assert!(error.contains("requires protocol 4"));
     }
 
     #[test]

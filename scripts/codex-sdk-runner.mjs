@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-import { Codex } from '@openai/codex-sdk';
-import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import readline from 'node:readline';
+import { assertProviderExecutableReady } from './provider-executable-trust.mjs';
 import { directorActionSchema } from './director-action-schema.mjs';
 import {
   workflowDirectorGraphDraftSchema,
@@ -117,17 +121,9 @@ function sanitizedEnv() {
   }
   delete env.OPENAI_API_KEY;
   delete env.CODEX_API_KEY;
+  delete env.PAINTNODE_CODEX_IDENTITY;
+  if (!env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE) env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE = 'codex_sdk_ts';
   return env;
-}
-
-function sdkConfig(options) {
-  if (options.serviceTier !== 'fast') return undefined;
-  return {
-    service_tier: 'fast',
-    features: {
-      fast_mode: true,
-    },
-  };
 }
 
 async function readStdin() {
@@ -137,48 +133,89 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function codexArgs(options, schemaPath) {
+  const args = ['exec', '--experimental-json'];
+  if (options.serviceTier === 'fast') {
+    args.push('--config', 'service_tier="fast"', '--config', 'features.fast_mode=true');
+  }
+  if (options.model) args.push('--model', options.model);
+  if (options.reasoning) args.push('--config', `model_reasoning_effort="${options.reasoning}"`);
+  args.push('--sandbox', options.sandbox, '--cd', options.cwd);
+  if (options.skipGitRepoCheck) args.push('--skip-git-repo-check');
+  if (schemaPath) args.push('--output-schema', schemaPath);
+  args.push('--config', `approval_policy="${options.approval}"`);
+  if (options.sessionId) args.push('resume', options.sessionId);
+  for (const image of options.images) args.push('--image', image);
+  return args;
+}
+
+async function* runCodex(options, prompt, outputSchema) {
+  let schemaDir;
+  let schemaPath;
+  if (outputSchema) {
+    schemaDir = mkdtempSync(join(tmpdir(), 'paintnode-codex-schema-'));
+    schemaPath = join(schemaDir, 'schema.json');
+    writeFileSync(schemaPath, JSON.stringify(outputSchema), 'utf8');
+  }
+  try {
+    // This is deliberately adjacent to the only native spawn in this runner.
+    assertProviderExecutableReady('codex', options.codexPath, process.env.PAINTNODE_CODEX_IDENTITY);
+    const child = spawn(options.codexPath, codexArgs(options, schemaPath), {
+      cwd: options.cwd,
+      env: sanitizedEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    child.stdin.end(prompt);
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const exit = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (line.trim()) yield line;
+    }
+    const result = await exit;
+    if (result.code !== 0 || result.signal) {
+      const detail = result.signal ? `signal ${result.signal}` : `code ${result.code ?? 1}`;
+      throw new Error(`Codex Exec exited with ${detail}${stderr.trim() ? `: ${stderr.trim()}` : ''}`);
+    }
+  } finally {
+    if (schemaDir) rmSync(schemaDir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const prompt = options.promptParts.join(' ').trim() || (await readStdin()).trim();
   if (!prompt) throw new Error('Prompt is required');
 
-  const codex = new Codex({
-    codexPathOverride: options.codexPath,
-    env: sanitizedEnv(),
-    config: sdkConfig(options),
-  });
-  const thread = options.sessionId
-    ? codex.resumeThread(options.sessionId)
-    : codex.startThread({
-        workingDirectory: options.cwd,
-        skipGitRepoCheck: options.skipGitRepoCheck,
-        model: options.model,
-        modelReasoningEffort: options.reasoning,
-        sandboxMode: options.sandbox,
-        approvalPolicy: options.approval,
-      });
   if (options.sessionId) {
     process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: options.sessionId, resumed: true })}\n`);
   }
-  const input = [
-    ...options.images.map((path) => ({ type: 'local_image', path })),
-    { type: 'text', text: prompt },
-  ];
   const outputSchemas = {
     'director-action': directorActionSchema,
     'workflow-draft': workflowDirectorGraphDraftSchema,
     'workflow-revision': workflowDirectorRevisionSchema,
   };
-  const { events } = await thread.runStreamed(
-    input,
-    options.outputFile
-      ? { outputSchema: outputSchemas[options.outputSchema] }
-      : undefined,
-  );
   let failed = false;
   let finalResponse = null;
-  for await (const event of events) {
-    process.stdout.write(`${JSON.stringify(event)}\n`);
+  for await (const line of runCodex(
+    options,
+    prompt,
+    options.outputFile ? outputSchemas[options.outputSchema] : undefined,
+  )) {
+    process.stdout.write(`${line}\n`);
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
     if (event.type === 'turn.failed' || event.type === 'error') failed = true;
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
       finalResponse = event.item.text;
