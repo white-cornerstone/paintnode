@@ -255,6 +255,12 @@ describe('GraphDraft v1 schema and validation', () => {
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.schemaIssues)).toBe(true);
     expect(Object.isFrozen(result.proposal)).toBe(true);
+    const validationContext = (result.proposal as typeof result.proposal & {
+      validationContext: ReturnType<typeof context>;
+    })?.validationContext;
+    expect(validationContext).toEqual(context());
+    expect(Object.isFrozen(validationContext)).toBe(true);
+    expect(Object.isFrozen(validationContext.assets)).toBe(true);
     expect(() => {
       (result.schemaIssues as WorkflowDirectorSchemaIssue[]).push({ path: 'x', message: 'mutated' });
     }).toThrow(TypeError);

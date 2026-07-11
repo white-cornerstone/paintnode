@@ -74,13 +74,21 @@ function deferredCampaignRun(store: WorkflowStore, currentProjectIdentity?: () =
   return { finish, run };
 }
 
-function directorProposal() {
-  const context = buildWorkflowDirectorContext({
+function directorContext(options: { assetAvailable?: boolean; generateAvailable?: boolean } = {}) {
+  return buildWorkflowDirectorContext({
     brief: 'Create a square product launch.',
-    assets: [campaignProduct],
+    assets: [{ ...campaignProduct, exists: options.assetAvailable ?? true }],
     requestedOutputs: [{ id: 'square', name: 'Square 1:1', width: 1024, height: 1024 }],
-    capabilities: [{ id: 'generate', available: true, reason: null }],
+    capabilities: [{
+      id: 'generate',
+      available: options.generateAvailable ?? true,
+      reason: options.generateAvailable === false ? 'Generate is currently unavailable.' : null,
+    }],
   });
+}
+
+function directorProposal() {
+  const context = directorContext();
   const draft: WorkflowDirectorGraphDraft = {
     version: 1,
     name: 'Director Square',
@@ -121,13 +129,12 @@ function reviewedDirectorProposal() {
       target: { nodeId: 'square', portId: 'source' },
     },
   );
-  const context = buildWorkflowDirectorContext({
-    brief: 'Create a square product launch.',
-    assets: [campaignProduct],
-    requestedOutputs: [{ id: 'square', name: 'Square 1:1', width: 1024, height: 1024 }],
-    capabilities: [{ id: 'generate', available: true, reason: null }],
-  });
-  return createWorkflowDirectorProposal(draft, context, { graphId: 'director-reviewed-square' }).proposal!;
+  return createWorkflowDirectorProposal(draft, directorContext(), { graphId: 'director-reviewed-square' }).proposal!;
+}
+
+function directorProposalWithContext(options: { assetAvailable?: boolean; generateAvailable?: boolean }) {
+  const draft = directorProposal().draft;
+  return createWorkflowDirectorProposal(draft, directorContext(options), { graphId: 'director-context-check' }).proposal!;
 }
 
 describe('WorkflowStore graph adapter', () => {
@@ -162,7 +169,7 @@ describe('WorkflowStore graph adapter', () => {
     const rev = store.rev;
     const proposal = { ...directorProposal(), canAccept: false };
 
-    expect(() => store.applyDirectorProposal(proposal)).toThrow(/cannot be accepted/i);
+    expect(() => store.applyDirectorProposal(proposal)).toThrow(/trusted validation|cannot be accepted/i);
     expect(store.graphSnapshot()).toBe(before);
     expect(store.name).toBe('Untouched');
     expect(store.rev).toBe(rev);
@@ -192,7 +199,7 @@ describe('WorkflowStore graph adapter', () => {
       promotedAt: 1,
     }];
 
-    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh Director draft/i);
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
     expect(store.toBytes()).toEqual(before);
   });
 
@@ -229,7 +236,7 @@ describe('WorkflowStore graph adapter', () => {
     const node = graph.nodes.find((candidate) => candidate.id === nodeId)!;
     node.config = { ...node.config, ...forgedConfig };
 
-    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh Director draft/i);
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
     expect(store.toBytes()).toEqual(before);
   });
 
@@ -245,7 +252,117 @@ describe('WorkflowStore graph adapter', () => {
     graph.editorRevisions = [{ id: 'private-editor-revision' }];
     graph.workflowRoundTrips = [{ id: 'private-round-trip' }];
 
-    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/fresh Director draft/i);
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it.each([
+    ['unavailable asset', { assetAvailable: false }, 'ASSET_UNAVAILABLE'],
+    ['unsupported capability', { generateAvailable: false }, 'UNSUPPORTED_CAPABILITY'],
+  ] as const)('recomputes %s instead of trusting forged acceptance metadata', (_name, options, issueCode) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposalWithContext(options);
+    expect(proposal.canAccept).toBe(false);
+    expect(proposal.issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: issueCode })]));
+    expect(() => store.applyDirectorProposal(proposal)).toThrow(/recomputed validation issue/i);
+    expect(store.toBytes()).toEqual(before);
+
+    expect(() => store.applyDirectorProposal({
+      ...proposal,
+      canAccept: true,
+      issues: [],
+      unsupportedCapabilities: [],
+    })).toThrow(/trusted validation|cannot be accepted/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it('rejects deleted, changed, or reordered validation issues', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposalWithContext({ assetAvailable: false, generateAvailable: false });
+    expect(proposal.issues.length).toBeGreaterThan(1);
+    for (const issues of [
+      [],
+      proposal.issues.slice(1),
+      proposal.issues.map((issue, index) => index === 0 ? { ...issue, message: 'Changed issue.' } : issue),
+      [...proposal.issues].reverse(),
+    ]) {
+      expect(() => store.applyDirectorProposal({ ...proposal, canAccept: true, issues })).toThrow(/trusted validation|cannot be accepted/i);
+      expect(store.toBytes()).toEqual(before);
+    }
+  });
+
+  it('rejects a canonical semantic draft and graph swapped into another accepted proposal', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const original = directorProposal();
+    const replacement = reviewedDirectorProposal();
+
+    expect(() => store.applyDirectorProposal({
+      ...original,
+      draft: replacement.draft,
+      graph: replacement.graph,
+      summary: replacement.summary,
+      nodes: replacement.nodes,
+      requirements: replacement.requirements,
+      unsupportedCapabilities: replacement.unsupportedCapabilities,
+      issues: replacement.issues,
+      canAccept: replacement.canAccept,
+    })).toThrow(/trusted validation/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it('rejects captured asset or capability context replacement', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposalWithContext({ assetAvailable: false, generateAvailable: false });
+    const contextProposal = proposal as typeof proposal & { validationContext: ReturnType<typeof directorContext> };
+
+    expect(() => store.applyDirectorProposal({
+      ...proposal,
+      validationContext: directorContext(),
+      canAccept: true,
+      issues: [],
+      requirements: contextProposal.requirements.map((requirement) => ({ ...requirement, status: 'ready' as const })),
+      unsupportedCapabilities: [],
+    })).toThrow(/trusted validation/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it.each(['subclass', 'proxy'] as const)('rejects %s arrays that can inject config after comparison', (kind) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposal();
+    const graph = structuredClone(proposal.graph);
+    const canonicalNodes = graph.nodes;
+    const inject = () => canonicalNodes.map((node, index) => index === 0
+      ? { ...node, config: { ...node.config, resultAssetId: 'injected-after-comparison' } }
+      : node);
+    if (kind === 'subclass') {
+      class InjectingNodes<T> extends Array<T> {
+        override map<U>(_callback: (value: T, index: number, array: T[]) => U): U[] {
+          return inject() as U[];
+        }
+      }
+      const nodes = new InjectingNodes<WorkflowGraphV2['nodes'][number]>();
+      graph.nodes.forEach((node) => nodes.push(node));
+      graph.nodes = nodes;
+    } else {
+      graph.nodes = new Proxy(graph.nodes, {
+        get(target, property, receiver) {
+          if (property === 'map') return inject;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    }
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|plain data/i);
     expect(store.toBytes()).toEqual(before);
   });
 

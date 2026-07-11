@@ -452,13 +452,10 @@ export class WorkflowStore {
     )) {
       throw new Error('The workflow changed while this AI Director proposal was being reviewed. Draft again before accepting.');
     }
-    if (!proposal.canAccept || proposal.issues.length > 0) {
-      throw new Error('This AI Director proposal cannot be accepted until every validation issue is resolved.');
-    }
-    assertFreshWorkflowDirectorProposal(proposal);
+    const validatedGraph = assertFreshWorkflowDirectorProposal(proposal);
     // Build and validate the complete replacement before touching session or
     // reactive state. A failure therefore leaves the current workflow intact.
-    const nextDomain = new WorkflowGraphDomain(proposal.graph, { idGenerator: this.graphIdGenerator });
+    const nextDomain = new WorkflowGraphDomain(validatedGraph, { idGenerator: this.graphIdGenerator });
     const primaryArtDirection = nextDomain.graph.nodes.find((node) => node.type === 'art-direction') ?? null;
 
     this.beginWorkflowSession();
