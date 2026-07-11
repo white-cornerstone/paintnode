@@ -8,6 +8,13 @@ import {
   EXPECTED_BUNDLE_ID,
   verifyStudySetup,
 } from './creator-study-setup.mjs';
+import {
+  createFreshProviderFreeStudySession,
+  markStudySessionLaunchAttempted,
+  studySessionBootEvidencePath,
+  writeProviderFreeStudySession,
+} from './native-qa-session.mjs';
+import { createMemoryStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
 
 const repoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const fixtureManifest = join(repoRoot, 'docs', 'testing', 'creator-study', 'materials', 'manifest.json');
@@ -17,6 +24,10 @@ const sourceState = {
   actualSourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
   sourceDirty: false,
 };
+const sessionFixture = createFreshProviderFreeStudySession({
+  randomUUID: () => '00112233-4455-4677-8899-aabbccddeeff',
+  randomBytes: () => Buffer.alloc(32, 3),
+});
 const appBuild = {
   version: 1,
   mode: 'provider-free',
@@ -26,6 +37,12 @@ const appBuild = {
   sourceDirty: false,
   sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
   executableSha256: 'a'.repeat(64),
+  studySession: {
+    version: 3,
+    isolatedProfile: true,
+    launchIntent: 'fresh',
+    profileSha256: sessionFixture.profileSha256,
+  },
 };
 
 function setupDirectories() {
@@ -33,11 +50,28 @@ function setupDirectories() {
   const projectDir = join(root, 'participant-project');
   const rehearsalDir = join(root, 'deleted-rehearsal');
   mkdirSync(projectDir);
-  return { root, projectDir, rehearsalDir };
+  const studySessionStatePath = join(root, 'session.json');
+  writeProviderFreeStudySession(studySessionStatePath, sessionFixture);
+  markStudySessionLaunchAttempted(studySessionStatePath);
+  writeFileSync(studySessionBootEvidencePath(studySessionStatePath), JSON.stringify({
+    version: 3,
+    event: 'app-boot',
+    profileSha256: sessionFixture.profileSha256,
+    bootNonceSha256: sessionFixture.bootNonceSha256,
+  }));
+  return {
+    root,
+    projectDir,
+    rehearsalDir,
+    studySessionStatePath,
+    studySessionConsumptionAnchor: createMemoryStudySessionConsumptionAnchor(),
+  };
 }
 
 test('the committed Product materials are deterministic, distinct, and assigned to Tasks 1 and 6', () => {
-  const { projectDir, rehearsalDir } = setupDirectories();
+  const {
+    projectDir, rehearsalDir, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   const receipt = verifyStudySetup({
     repoRoot,
     projectDir,
@@ -48,6 +82,10 @@ test('the committed Product materials are deterministic, distinct, and assigned 
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   });
 
   assert.equal(receipt.ready, true);
@@ -56,11 +94,54 @@ test('the committed Product materials are deterministic, distinct, and assigned 
   assert.equal(receipt.projectState, 'empty');
   assert.equal(receipt.rehearsalState, 'deleted');
   assert.deepEqual(receipt.appBuild, appBuild);
+  assert.deepEqual(receipt.sessionReset, {
+    isolatedProfile: true,
+    profileSha256: appBuild.studySession.profileSha256,
+    macosMajorVersion: 14,
+    appBootObserved: true,
+    setupEvidenceConsumed: true,
+    monotonicAnchorRecorded: true,
+  });
+  assert.deepEqual(receipt.manualAttestations, {
+    visibleEmptyProjectAndWorkflow: true,
+  });
   assert.equal(JSON.stringify(receipt).includes(projectDir), false, 'receipt must not leak local paths');
 });
 
+test('setup requires actual app boot evidence and consumes it exactly once', () => {
+  const {
+    root, projectDir, rehearsalDir, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
+  const options = {
+    repoRoot, projectDir, rehearsalDir, studySessionStatePath, fixtureManifest,
+    expectedGitSha: sourceState.actualGitSha,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionConsumptionAnchor,
+  };
+  rmSync(studySessionBootEvidencePath(studySessionStatePath));
+  assert.throws(() => verifyStudySetup(options), /boot evidence is missing/i);
+  writeFileSync(studySessionBootEvidencePath(studySessionStatePath), JSON.stringify({
+    version: 3, event: 'app-boot', profileSha256: sessionFixture.profileSha256,
+    bootNonceSha256: sessionFixture.bootNonceSha256,
+  }));
+  assert.equal(verifyStudySetup(options).ready, true);
+  const secondProject = join(root, 'participant-project-2');
+  mkdirSync(secondProject);
+  assert.throws(
+    () => verifyStudySetup({ ...options, projectDir: secondProject }),
+    /already been consumed/i,
+  );
+});
+
 test('setup verification fails closed for dirty projects, retained rehearsal data, wrong build, or wrong bundle', () => {
-  const { projectDir, rehearsalDir } = setupDirectories();
+  const {
+    projectDir, rehearsalDir, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   writeFileSync(join(projectDir, '.hidden-state'), 'not empty');
 
   const options = {
@@ -74,6 +155,10 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
     bundleId: 'com.paintnode.editor',
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   };
   assert.throws(() => verifyStudySetup(options), /Git SHA/i);
 
@@ -98,7 +183,9 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
 });
 
 test('setup verification rejects dirty source, stale bundles, and executable fingerprint drift', () => {
-  const { projectDir, rehearsalDir } = setupDirectories();
+  const {
+    projectDir, rehearsalDir, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   const options = {
     repoRoot, projectDir, rehearsalDir, fixtureManifest,
     expectedGitSha: sourceState.actualGitSha,
@@ -106,6 +193,10 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild: { ...appBuild },
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   };
 
   options.sourceDirty = true;
@@ -122,10 +213,28 @@ test('setup verification rejects dirty source, stale bundles, and executable fin
 
   options.actualExecutableSha256 = 'b'.repeat(64);
   assert.throws(() => verifyStudySetup(options), /executable fingerprint/i);
+  options.actualExecutableSha256 = appBuild.executableSha256;
+
+  options.appBuild.studySession.launchIntent = 'resume';
+  assert.throws(() => verifyStudySetup(options), /fresh study session/i);
+  options.appBuild.studySession.launchIntent = 'fresh';
+
+  options.appBuild.studySession.isolatedProfile = false;
+  assert.throws(() => verifyStudySetup(options), /isolated study profile/i);
+  options.appBuild.studySession.isolatedProfile = true;
+
+  options.visibleEmptyStateAttested = false;
+  assert.throws(() => verifyStudySetup(options), /visible empty Project and Workflow/i);
+  options.visibleEmptyStateAttested = true;
+
+  options.macosMajorVersion = 13;
+  assert.throws(() => verifyStudySetup(options), /macOS 14/i);
 });
 
 test('project and deleted rehearsal paths are canonicalized through symlinks', () => {
-  const { root, projectDir, rehearsalDir } = setupDirectories();
+  const {
+    root, projectDir, rehearsalDir, studySessionStatePath, studySessionConsumptionAnchor,
+  } = setupDirectories();
   const linkedProject = join(root, 'linked-project');
   symlinkSync(projectDir, linkedProject);
   const options = {
@@ -135,6 +244,10 @@ test('project and deleted rehearsal paths are canonicalized through symlinks', (
     bundleId: EXPECTED_BUNDLE_ID,
     appBuild,
     actualExecutableSha256: appBuild.executableSha256,
+    visibleEmptyStateAttested: true,
+    macosMajorVersion: 14,
+    studySessionStatePath,
+    studySessionConsumptionAnchor,
   };
   assert.equal(verifyStudySetup(options).ready, true);
 

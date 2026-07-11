@@ -15,6 +15,14 @@ use crate::ai::{
 };
 
 const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
+const PROVIDER_FREE_STUDY_PROFILE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_PROFILE";
+const PROVIDER_FREE_STUDY_BOOT_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE";
+const PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE";
+const PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV: &str =
+    "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_PROFILE";
+const PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_NONCE";
+const PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV: &str =
+    "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE";
 const QA_PREFLIGHT_ENV: &str = "PAINTNODE_PROVIDER_QA_PREFLIGHT";
 const QA_PREFLIGHT_MARKER: &str = "provider-doctor-v1";
 /// Keep native discovery aligned with the provider doctor: a version probe may
@@ -669,6 +677,167 @@ pub(crate) fn provider_qa_mode() -> Option<String> {
     }
 }
 
+fn provider_free_study_profile_in_mode(
+    qa_mode: &str,
+    raw_profile: Option<&std::ffi::OsStr>,
+) -> Result<Option<[u8; 16]>, String> {
+    let Some(raw_profile) = raw_profile else {
+        return Ok(None);
+    };
+    if qa_mode != "provider-free" {
+        return Err("Study profile isolation is available only in Provider Free mode.".into());
+    }
+    let raw_profile = raw_profile.to_str().ok_or_else(|| {
+        "Provider Free study profile must contain exactly 32 hexadecimal characters.".to_string()
+    })?;
+    if raw_profile.len() != 32 || !raw_profile.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(
+            "Provider Free study profile must contain exactly 32 hexadecimal characters.".into(),
+        );
+    }
+    let mut profile = [0_u8; 16];
+    for (index, byte) in profile.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw_profile[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "Provider Free study profile contains invalid hexadecimal data.")?;
+    }
+    Ok(Some(profile))
+}
+
+pub(crate) fn provider_free_study_profile() -> Result<Option<[u8; 16]>, String> {
+    provider_free_study_profile_in_mode(
+        &std::env::var(QA_MODE_ENV).unwrap_or_default(),
+        std::env::var_os(PROVIDER_FREE_STUDY_PROFILE_ENV).as_deref(),
+    )
+}
+
+pub(crate) struct StudyEvidenceRequest {
+    pub profile: [u8; 16],
+    nonce: [u8; 32],
+    path: std::path::PathBuf,
+}
+
+fn parse_study_hex<const N: usize>(raw: &std::ffi::OsStr, label: &str) -> Result<[u8; N], String> {
+    let raw = raw.to_str().ok_or_else(|| {
+        format!(
+            "{label} must contain exactly {} hexadecimal characters.",
+            N * 2
+        )
+    })?;
+    if raw.len() != N * 2 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{label} must contain exactly {} hexadecimal characters.",
+            N * 2
+        ));
+    }
+    let mut bytes = [0_u8; N];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw[index * 2..index * 2 + 2], 16)
+            .map_err(|_| format!("{label} contains invalid hexadecimal data."))?;
+    }
+    Ok(bytes)
+}
+
+fn study_evidence_request_in_mode(
+    qa_mode: &str,
+    raw_profile: Option<&std::ffi::OsStr>,
+    raw_nonce: Option<&std::ffi::OsStr>,
+    raw_path: Option<&std::ffi::OsStr>,
+    profile_only_is_resume: bool,
+) -> Result<Option<StudyEvidenceRequest>, String> {
+    // The study profile is also present for same-session resume launches. Only
+    // the dedicated nonce/path pair opts a launch into one-shot lifecycle
+    // evidence creation.
+    if raw_profile.is_none() && raw_nonce.is_none() && raw_path.is_none() {
+        return Ok(None);
+    }
+    if profile_only_is_resume && raw_profile.is_some() && raw_nonce.is_none() && raw_path.is_none()
+    {
+        return Ok(None);
+    }
+    if qa_mode != "provider-free" {
+        return Err("Study lifecycle evidence is available only in Provider Free mode.".into());
+    }
+    let raw_profile = raw_profile
+        .ok_or_else(|| "Provider Free study lifecycle profile is missing.".to_string())?;
+    let raw_nonce =
+        raw_nonce.ok_or_else(|| "Provider Free study lifecycle nonce is missing.".to_string())?;
+    let path = raw_path
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            "Provider Free study lifecycle evidence path must be absolute.".to_string()
+        })?;
+    Ok(Some(StudyEvidenceRequest {
+        profile: parse_study_hex::<16>(raw_profile, "Provider Free study profile")?,
+        nonce: parse_study_hex::<32>(raw_nonce, "Provider Free study lifecycle nonce")?,
+        path,
+    }))
+}
+
+fn study_evidence_request(
+    profile_env: &str,
+    nonce_env: &str,
+    path_env: &str,
+    profile_only_is_resume: bool,
+) -> Result<Option<StudyEvidenceRequest>, String> {
+    let raw_profile = std::env::var_os(profile_env);
+    let raw_nonce = std::env::var_os(nonce_env);
+    let raw_path = std::env::var_os(path_env);
+    study_evidence_request_in_mode(
+        &std::env::var(QA_MODE_ENV).unwrap_or_default(),
+        raw_profile.as_deref(),
+        raw_nonce.as_deref(),
+        raw_path.as_deref(),
+        profile_only_is_resume,
+    )
+}
+
+pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidenceRequest>, String> {
+    study_evidence_request(
+        PROVIDER_FREE_STUDY_PROFILE_ENV,
+        PROVIDER_FREE_STUDY_BOOT_NONCE_ENV,
+        PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV,
+        true,
+    )
+}
+
+pub(crate) fn provider_free_study_cleanup() -> Result<Option<StudyEvidenceRequest>, String> {
+    study_evidence_request(
+        PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV,
+        PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV,
+        PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV,
+        false,
+    )
+}
+
+pub(crate) fn write_study_lifecycle_evidence(
+    request: &StudyEvidenceRequest,
+    event: &str,
+) -> Result<(), String> {
+    use sha2::Digest;
+    let profile_sha256 = format!("{:x}", sha2::Sha256::digest(request.profile));
+    let nonce_sha256 = format!("{:x}", sha2::Sha256::digest(request.nonce));
+    let nonce_key = if event == "app-boot" {
+        "bootNonceSha256"
+    } else {
+        "cleanupNonceSha256"
+    };
+    let mut payload = serde_json::Map::from_iter([
+        ("version".into(), serde_json::json!(3)),
+        ("event".into(), serde_json::json!(event)),
+        ("profileSha256".into(), serde_json::json!(profile_sha256)),
+    ]);
+    payload.insert(nonce_key.into(), serde_json::json!(nonce_sha256));
+    let payload = serde_json::Value::Object(payload);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&request.path)
+        .map_err(|error| format!("Could not create Provider Free lifecycle evidence: {error}"))?;
+    std::io::Write::write_all(&mut file, format!("{payload}\n").as_bytes())
+        .map_err(|error| format!("Could not write Provider Free lifecycle evidence: {error}"))
+}
+
 fn provider_free_qa_png_in_mode(
     qa_mode: &str,
     width: u32,
@@ -728,6 +897,109 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn provider_free_study_profile_is_exact_and_mode_gated() {
+        let raw = std::ffi::OsStr::new("00112233445566778899aabbccddeeff");
+        assert_eq!(
+            provider_free_study_profile_in_mode("provider-free", Some(raw))
+                .expect("valid Provider Free study profile"),
+            Some([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ])
+        );
+        assert_eq!(
+            provider_free_study_profile_in_mode("provider-free", None)
+                .expect("ordinary Provider Free has no study profile"),
+            None
+        );
+        assert!(
+            provider_free_study_profile_in_mode("provider-e2e", Some(raw))
+                .expect_err("Provider E2E cannot use study isolation")
+                .contains("Provider Free")
+        );
+        assert!(provider_free_study_profile_in_mode(
+            "provider-free",
+            Some(std::ffi::OsStr::new("not-a-profile"))
+        )
+        .expect_err("malformed study profile must fail closed")
+        .contains("32 hexadecimal"));
+    }
+
+    #[test]
+    fn study_lifecycle_evidence_is_optional_for_same_session_resume() {
+        let profile = std::ffi::OsStr::new("00112233445566778899aabbccddeeff");
+        assert!(
+            study_evidence_request_in_mode("provider-free", Some(profile), None, None, true)
+                .expect("resume launch does not request new boot evidence")
+                .is_none()
+        );
+
+        let nonce_text = "11".repeat(32);
+        let nonce = std::ffi::OsStr::new(&nonce_text);
+        let partial_error = match study_evidence_request_in_mode(
+            "provider-free",
+            Some(profile),
+            Some(nonce),
+            None,
+            true,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("partial lifecycle request must fail closed"),
+        };
+        assert!(partial_error.contains("path must be absolute"));
+
+        let path = std::ffi::OsStr::new("/tmp/paintnode-study-boot-evidence.json");
+        let request = study_evidence_request_in_mode(
+            "provider-free",
+            Some(profile),
+            Some(nonce),
+            Some(path),
+            true,
+        )
+        .expect("fresh launch lifecycle request")
+        .expect("fresh launch has lifecycle evidence");
+        assert_eq!(request.path, std::path::PathBuf::from(path));
+
+        assert!(
+            study_evidence_request_in_mode("provider-free", Some(profile), None, None, false,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn study_lifecycle_evidence_contains_only_fingerprints_and_is_single_create() {
+        let root = std::env::temp_dir().join(format!(
+            "paintnode-study-evidence-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create evidence fixture");
+        let request = StudyEvidenceRequest {
+            profile: [1; 16],
+            nonce: [2; 32],
+            path: root.join("boot.json"),
+        };
+        write_study_lifecycle_evidence(&request, "app-boot").expect("write boot evidence");
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&request.path).expect("read boot evidence"))
+                .expect("parse boot evidence");
+        assert_eq!(evidence["version"], 3);
+        assert_eq!(evidence["event"], "app-boot");
+        assert!(evidence["profileSha256"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64));
+        assert!(evidence["bootNonceSha256"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64));
+        assert!(!evidence.to_string().contains(&"01".repeat(16)));
+        assert!(write_study_lifecycle_evidence(&request, "app-boot")
+            .expect_err("evidence must be create-once")
+            .contains("Could not create"));
+        std::fs::remove_dir_all(root).expect("remove evidence fixture");
+    }
 
     #[test]
     fn provider_free_qa_campaign_shapes_are_exact_deterministic_pngs_and_mode_gated() {

@@ -17,12 +17,62 @@ detection, capability discovery, execution, and managed-runtime auth probes are
 disabled. Use this exact bundle identity for routine workflow-board interaction
 and Computer Use validation.
 
+Repository QA launches ignore macOS window-restoration state for that process,
+so an earlier interrupted run cannot block automation with an AppKit restore
+prompt. This does not bypass Gatekeeper or suppress a rejected provider binary.
+
 The build also writes a `.paintnode-qa-build.json` provenance sidecar beside the
 app. It binds the bundle to the source Git SHA/tree, clean-or-dirty build state,
 bundle ID, and actual executable SHA-256 without modifying the signed app.
 Creator-study readiness requires a clean checkout and keeps the sidecar beside
 the app; `qa:creator-study:setup` rejects missing/stale provenance, dirty source,
 or executable fingerprint drift.
+
+### Creator-study session isolation
+
+Generic Provider Free QA keeps its existing profile for ordinary smoke testing.
+For every new moderated participant on macOS 14 or newer, start a new isolated
+macOS WebKit data store instead:
+
+```sh
+npm run qa:native:provider-free -- --fresh-study-session
+```
+
+The generated raw 16-byte profile identifier remains in an ignored local state
+file. Build provenance and the setup receipt contain only its SHA-256
+fingerprint. A fresh profile cannot restore the generic QA project, rehearsal,
+workflow, local task/attempt data, scenario component state, or any earlier
+participant profile. Before opening a project, visibly confirm both Project and
+Workflow are empty and record that check through the creator-study setup
+command.
+
+Quit/reopen inside the same participant session uses the same profile so Task 8
+can verify real persistence:
+
+```sh
+npm run qa:native:provider-free -- --resume-study-session
+```
+
+Never use `--resume-study-session` for the next participant. Start another
+`--fresh-study-session`; the setup verifier rejects a resumed or generic build.
+Neither flag is accepted by Provider E2E, and normal PaintNode is unchanged.
+
+Fresh setup is bound to one native boot nonce. `--build-only` deliberately
+records `launchIntent: build-only` and cannot create boot evidence or a ready
+setup receipt. It allocates no live profile state. After setup consumes the real
+app-boot evidence once, a create-only marker in the macOS login Keychain keeps
+that consumption monotonic even if the ignored state/evidence files are restored
+from a snapshot; replaying that profile for another participant fails.
+
+After same-session save/reopen is complete, close the app and remove the custom
+WebKit data store with `npm run qa:creator-study:finalize-session`. The command
+verifies cleanup evidence written only after Tauri's `remove_data_store`
+completes, prints a path-free fingerprint receipt, and removes the raw local
+profile handle. A new fresh session is blocked while an earlier handle remains.
+For a failed build or any abandoned pre-setup phase, use
+`npm run qa:creator-study:abort-session`. Never-launched state is released
+without a false removal claim; after a launch attempt, abort requires the same
+verified native data-store removal as normal finalization.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates

@@ -35,7 +35,7 @@ export function captureCleanSourceState(root) {
   return state;
 }
 
-export function writeQaBuildProvenance({ appBundle, mode, bundleId, sourceState }) {
+export function writeQaBuildProvenance({ appBundle, mode, bundleId, sourceState, studySession = null }) {
   const bundle = realpathSync(appBundle);
   const executable = join(bundle, 'Contents/MacOS/PaintNode');
   accessSync(executable, constants.X_OK);
@@ -48,6 +48,7 @@ export function writeQaBuildProvenance({ appBundle, mode, bundleId, sourceState 
     sourceDirty: sourceState.sourceDirty,
     sourceStatusSha256: sourceState.sourceStatusSha256,
     executableSha256: sha256File(executable),
+    ...(studySession ? { studySession: Object.freeze({ ...studySession }) } : {}),
   });
   const output = qaBuildProvenancePath(bundle);
   writeFileSync(output, `${JSON.stringify(provenance, null, 2)}\n`);
