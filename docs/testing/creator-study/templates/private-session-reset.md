@@ -6,7 +6,8 @@
 
 - [ ] Study authorization gate is complete in approved private storage.
 - [ ] Private schedule, roles, delivery mode, and accommodation setup match the recruitment record.
-- [ ] Correct SHA and Provider Free bundle identity recorded.
+- [ ] Correct SHA, Provider Free bundle identity, and approved-build decision reference recorded.
+- [ ] Setup receipt reports the literal approved identity match.
 - [ ] Product A and Product B hashes match the committed manifest.
 - [ ] Separate rehearsal completed for both failure checkpoints.
 - [ ] Editor return, save/reopen, and Place rehearsed.

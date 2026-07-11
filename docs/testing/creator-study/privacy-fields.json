@@ -2,6 +2,7 @@
   "version": 1,
   "repositoryAllowed": [
     "approved build Git SHA and QA bundle identity",
+    "approved build identity match including source provenance and executable fingerprints",
     "Product fixture labels, dimensions, licenses, and hashes",
     "participant codes without an identity mapping",
     "eligibility and cohort buckets without raw answers",
@@ -18,6 +19,7 @@
     "facilitator, observer, technical operator, and accommodation setup assignments",
     "study owner and observer names",
     "approved storage path or internal storage reference",
+    "private approved-build record path, approval date, decision references, and mid-study change reason",
     "consent answers tied to a person",
     "raw screener answers",
     "accommodation or medical details",

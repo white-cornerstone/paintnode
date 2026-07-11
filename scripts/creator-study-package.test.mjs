@@ -12,6 +12,7 @@ const study = join(root, 'docs/testing/creator-study');
 test('every private operational form is blank and warns to copy outside the repository', () => {
   const templates = [
     'private-study-authorization-log.md',
+    'private-approved-build-record.json',
     'private-screener-and-recruitment-log.md',
     'private-session-observation.md',
     'private-intervention-log.md',
@@ -24,6 +25,23 @@ test('every private operational form is blank and warns to copy outside the repo
     assert.match(content, /PRIVATE ONLY/);
     assert.doesNotMatch(content, /P(?:0[1-9]|[1-9][0-9])|@|https?:\/\//, `${template} must not contain participant-shaped data`);
   }
+});
+
+test('private approved-build template freezes literal identity and change-control fields', () => {
+  const record = JSON.parse(readFileSync(join(study, 'templates/private-approved-build-record.json'), 'utf8'));
+  assert.equal(record.schemaVersion, 1);
+  assert.equal(record.recordType, 'paintnode-creator-study-approved-build');
+  assert.deepEqual(Object.keys(record.approvedBuild), [
+    'version', 'mode', 'bundleId', 'gitSha', 'sourceTreeSha', 'sourceDirty',
+    'sourceStatusSha256', 'executableSha256',
+  ]);
+  assert.equal(record.approvedBuild.gitSha, '');
+  assert.equal(record.approvedBuild.sourceTreeSha, '');
+  assert.equal(record.approvedBuild.executableSha256, '');
+  assert.equal(record.approval.ownerApproved, false);
+  assert.equal(record.approval.decisionReference, '');
+  assert.equal(record.changeControl.rehearsalCompletedAt, '');
+  assert.equal(record.changeControl.comparabilityDecision, '');
 });
 
 test('repository templates contain headers only and no participant results', () => {
@@ -45,6 +63,8 @@ test('privacy contract keeps identifiable and raw evidence out of repository-saf
   assert.ok(fields.privateOnly.some((field) => /participant code mapping/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /session date.*time zone.*delivery mode/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /facilitator.*observer.*technical operator/i.test(field)));
+  assert.ok(fields.privateOnly.some((field) => /approved-build record path.*approval date.*decision reference.*change reason/i.test(field)));
+  assert.ok(fields.repositoryAllowed.some((field) => /approved build identity match.*provenance.*executable/i.test(field)));
   assert.ok(fields.repositoryAllowed.every((field) => !/participant name|contact details|raw or potentially identifying quotes|approved storage path/i.test(field)));
 });
 
@@ -89,6 +109,9 @@ test('private handoff templates capture schema fields and concrete scheduling as
   ]) {
     assert.match(recruitment, new RegExp(label));
   }
+  assert.match(session, /Approved-build decision reference/);
+  assert.match(session, /Setup receipt approved identity match/);
+  assert.match(reset, /approved-build decision reference/i);
   assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
 });
 

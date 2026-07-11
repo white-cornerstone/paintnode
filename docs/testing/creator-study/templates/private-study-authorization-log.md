@@ -16,6 +16,22 @@
 - Recruitment authorization: approved / blocked
 - Authorization date/signature:
 
+## Approved study build
+
+- Current private approved-build record reference:
+- Current approved-build decision reference:
+- Initial or mid-study approval:
+- Build approval verified before first affected session: yes / no
+
+Every session must use the literal build identity in the current private
+approved-build record. A clean checkout or current branch head is not approval.
+
+## Mid-study build-change decisions
+
+| Approval date/time | Prior decision reference | New decision reference | Change reason | New rehearsal completed | Comparability decision: comparable / restart-required | Owner approval |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
 ## Retention and deletion ledger
 
 | Evidence group | Decision date | Due date | Consent withdrawal/earlier requirement | Actual deletion date | Verified by |

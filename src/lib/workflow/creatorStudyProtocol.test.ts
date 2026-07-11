@@ -5,6 +5,7 @@ import privacyFields from '../../../docs/testing/creator-study/privacy-fields.js
 import materialManifest from '../../../docs/testing/creator-study/materials/manifest.json';
 import privateSession from '../../../docs/testing/creator-study/templates/private-session-observation.md?raw';
 import privateRecruitment from '../../../docs/testing/creator-study/templates/private-screener-and-recruitment-log.md?raw';
+import approvedBuildTemplate from '../../../docs/testing/creator-study/templates/private-approved-build-record.json';
 
 describe('Creative Blueprint creator study protocol', () => {
   it('reads access, de-identification, retention, and exceptions aloud before recording opt-in', () => {
@@ -38,6 +39,22 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(protocol).toContain('npm run qa:creator-study:synthesize');
     expect(protocol).toContain('Product A');
     expect(protocol).toContain('Product B');
+    expect(protocol).toContain('--approved-build-record');
+    expect(protocol).not.toContain('--expected-sha');
+    expect(protocol).not.toContain('$(git rev-parse HEAD)');
+  });
+
+  it('freezes a literal approved build and requires explicit mid-study comparability decisions', () => {
+    expect(approvedBuildTemplate.recordType).toBe('paintnode-creator-study-approved-build');
+    expect(approvedBuildTemplate.approvedBuild.gitSha).toBe('');
+    expect(approvedBuildTemplate.approvedBuild.sourceTreeSha).toBe('');
+    expect(approvedBuildTemplate.approvedBuild.executableSha256).toBe('');
+    expect(protocol).toMatch(/mid-study build change/i);
+    expect(protocol).toMatch(/owner approval/i);
+    expect(protocol).toMatch(/new rehearsal/i);
+    expect(protocol).toMatch(/comparability decision/i);
+    expect(protocol).toContain('Approved-build decision reference:');
+    expect(protocol).toContain('Setup receipt approved identity match: yes / no');
   });
 
   it('protects both visible recovery interventions and the exact task order', () => {

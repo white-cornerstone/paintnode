@@ -21,7 +21,8 @@ The build also writes a `.paintnode-qa-build.json` provenance sidecar beside the
 app. It binds the bundle to the source Git SHA/tree, clean-or-dirty build state,
 bundle ID, and actual executable SHA-256 without modifying the signed app.
 Creator-study readiness requires a clean checkout and keeps the sidecar beside
-the app; `qa:creator-study:setup` rejects missing/stale provenance, dirty source,
+the app; `qa:creator-study:setup` reads a private literal approved-build record
+and rejects missing/stale approval or provenance, dirty source,
 or executable fingerprint drift.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA

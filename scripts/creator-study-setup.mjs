@@ -10,6 +10,11 @@ export const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.fre
 export const EXPECTED_BUNDLE_NAME = 'PaintNode Blueprint QA — Provider Free';
 
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const APPROVED_BUILD_RECORD_TYPE = 'paintnode-creator-study-approved-build';
+const CLEAN_STATUS_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const GIT_SHA_PATTERN = /^[a-f0-9]{40}$/;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const DECISION_REFERENCE_PATTERN = /^[A-Z0-9][A-Z0-9._-]{2,63}$/;
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -40,6 +45,117 @@ function canonicalDeletedPath(path) {
     ancestor = parent;
   }
   return join(realpathSync(ancestor), ...suffix);
+}
+
+function exactObject(value, keys, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const expected = new Set(keys);
+  for (const key of Object.keys(value)) {
+    if (!expected.has(key)) throw new Error(`${label} has unsupported field ${key}.`);
+  }
+  for (const key of keys) {
+    if (!Object.hasOwn(value, key)) throw new Error(`${label} is missing required field ${key}.`);
+  }
+  return value;
+}
+
+function validTimestamp(value, label) {
+  if (typeof value !== 'string' || value.trim() === '' || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`${label} must be a valid timestamp.`);
+  }
+  return value;
+}
+
+function validDecisionReference(value, label) {
+  if (typeof value !== 'string' || !DECISION_REFERENCE_PATTERN.test(value)) {
+    throw new Error(`${label} must be a non-identifying 3–64 character uppercase reference using only letters, numbers, dots, underscores, or hyphens.`);
+  }
+  return value;
+}
+
+function readApprovedBuildRecord(recordPath, canonicalRepo) {
+  if (!recordPath) throw new Error('An absolute private approved-build record path is required.');
+  if (!isAbsolute(recordPath)) throw new Error('The approved-build record path must be absolute.');
+  const canonicalRecord = canonicalExisting(recordPath, 'Approved-build record');
+  if (isInside(canonicalRepo, canonicalRecord)) {
+    throw new Error('The completed approved-build record must be outside the Git repository.');
+  }
+  if (!statSync(canonicalRecord).isFile()) throw new Error('Approved-build record must be a regular file.');
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(canonicalRecord, 'utf8'));
+  } catch (error) {
+    throw new Error(`Approved-build record must contain valid JSON: ${error instanceof Error ? error.message : error}`);
+  }
+  const record = exactObject(
+    parsed,
+    ['_copyWarning', '_privacyWarning', 'schemaVersion', 'recordType', 'approvedBuild', 'approval', 'changeControl'],
+    'Approved-build record',
+  );
+  if (typeof record._copyWarning !== 'string' || !record._copyWarning.includes('COPY OUTSIDE REPOSITORY')
+    || typeof record._privacyWarning !== 'string' || !record._privacyWarning.includes('PRIVATE ONLY')) {
+    throw new Error('Approved-build record must retain its copy-outside-repository and private-only warnings.');
+  }
+  if (record.schemaVersion !== 1 || record.recordType !== APPROVED_BUILD_RECORD_TYPE) {
+    throw new Error('Approved-build record schema or record type is unsupported.');
+  }
+  const approvedBuild = exactObject(
+    record.approvedBuild,
+    ['version', 'mode', 'bundleId', 'gitSha', 'sourceTreeSha', 'sourceDirty', 'sourceStatusSha256', 'executableSha256'],
+    'Approved-build identity',
+  );
+  if (approvedBuild.version !== 1) throw new Error('Approved provenance version must be 1.');
+  if (approvedBuild.mode !== 'provider-free') throw new Error('Approved provenance mode must be provider-free.');
+  if (approvedBuild.bundleId !== EXPECTED_BUNDLE_ID) throw new Error('Approved bundle identity is not the Provider Free study app.');
+  if (!GIT_SHA_PATTERN.test(approvedBuild.gitSha || '')) throw new Error('Approved Git SHA must be a literal 40-character lowercase hexadecimal commit.');
+  if (!GIT_SHA_PATTERN.test(approvedBuild.sourceTreeSha || '')) throw new Error('Approved source tree must be a literal 40-character lowercase hexadecimal tree identity.');
+  if (approvedBuild.sourceDirty !== false) throw new Error('Approved dirty source is forbidden.');
+  if (approvedBuild.sourceStatusSha256 !== CLEAN_STATUS_SHA256) throw new Error('Approved source status must identify an empty clean status.');
+  if (!SHA256_PATTERN.test(approvedBuild.executableSha256 || '')) throw new Error('Approved executable fingerprint must be a SHA-256 value.');
+
+  const approval = exactObject(
+    record.approval,
+    ['ownerApproved', 'approvedAt', 'decisionReference'],
+    'Approved-build owner decision',
+  );
+  if (approval.ownerApproved !== true) throw new Error('Approved-build owner approval must be recorded as true.');
+  validTimestamp(approval.approvedAt, 'Approved-build approval date');
+  validDecisionReference(approval.decisionReference, 'Approved-build decision reference');
+
+  const change = exactObject(
+    record.changeControl,
+    ['kind', 'replacesDecisionReference', 'reason', 'rehearsalCompletedAt', 'comparabilityDecision'],
+    'Approved-build change control',
+  );
+  validTimestamp(change.rehearsalCompletedAt, 'Approved-build rehearsal completion');
+  if (Date.parse(change.rehearsalCompletedAt) > Date.parse(approval.approvedAt)) {
+    throw new Error('Approved-build owner approval must occur after the recorded rehearsal.');
+  }
+  if (change.kind === 'initial') {
+    if (change.replacesDecisionReference !== null || change.reason !== null || change.comparabilityDecision !== 'baseline') {
+      throw new Error('Initial approved-build change control must use null replacement/reason and baseline comparability.');
+    }
+  } else if (change.kind === 'mid-study') {
+    validDecisionReference(change.replacesDecisionReference, 'Mid-study replaces decision reference');
+    if (change.replacesDecisionReference === approval.decisionReference) {
+      throw new Error('Mid-study build change requires a new decision reference distinct from the replaced approval.');
+    }
+    if (typeof change.reason !== 'string' || change.reason.trim() === '') {
+      throw new Error('Mid-study build change reason is required.');
+    }
+    if (!['comparable', 'restart-required'].includes(change.comparabilityDecision)) {
+      throw new Error('Mid-study comparability decision must be comparable or restart-required.');
+    }
+  } else {
+    throw new Error('Approved-build change kind must be initial or mid-study.');
+  }
+  return Object.freeze({
+    schemaVersion: record.schemaVersion,
+    approvedBuild: Object.freeze({ ...approvedBuild }),
+    changeKind: change.kind,
+  });
 }
 
 function pngDimensions(bytes) {
@@ -99,8 +215,8 @@ export function verifyStudySetup({
   repoRoot = scriptRoot,
   projectDir,
   rehearsalDir,
+  approvedBuildRecordPath,
   fixtureManifest = join(scriptRoot, 'docs/testing/creator-study/materials/manifest.json'),
-  expectedGitSha,
   actualGitSha,
   actualSourceTreeSha,
   actualSourceStatusSha256,
@@ -110,11 +226,14 @@ export function verifyStudySetup({
   actualExecutableSha256,
 }) {
   if (!projectDir || !rehearsalDir) throw new Error('Project and rehearsal paths are required.');
-  if (![projectDir, rehearsalDir, fixtureManifest].every(isAbsolute)) {
-    throw new Error('Project, rehearsal, and fixture-manifest paths must be absolute.');
+  if (![projectDir, rehearsalDir, approvedBuildRecordPath, fixtureManifest].every((path) => typeof path === 'string' && isAbsolute(path))) {
+    throw new Error('Project, rehearsal, approved-build-record, and fixture-manifest paths must be absolute.');
   }
-  if (!expectedGitSha || actualGitSha !== expectedGitSha) {
-    throw new Error(`Git SHA mismatch: expected ${expectedGitSha || '(missing)'}, received ${actualGitSha || '(missing)'}.`);
+  const canonicalRepo = canonicalExisting(repoRoot, 'Git repository');
+  const approval = readApprovedBuildRecord(approvedBuildRecordPath, canonicalRepo);
+  const approved = approval.approvedBuild;
+  if (actualGitSha !== approved.gitSha) {
+    throw new Error(`Approved Git SHA mismatch: expected ${approved.gitSha}, received ${actualGitSha || '(missing)'}.`);
   }
   if (sourceDirty) throw new Error('Creator-study readiness cannot use dirty source.');
   if (bundleId !== EXPECTED_BUNDLE_ID) {
@@ -124,7 +243,7 @@ export function verifyStudySetup({
     throw new Error('Provider Free app build provenance is missing or invalid.');
   }
   if (appBuild.sourceDirty) throw new Error('Provider Free app was built from dirty source.');
-  if (appBuild.gitSha !== actualGitSha || appBuild.gitSha !== expectedGitSha) {
+  if (appBuild.gitSha !== actualGitSha || appBuild.gitSha !== approved.gitSha) {
     throw new Error('Provider Free app build Git SHA does not match the approved checkout.');
   }
   if (!actualSourceTreeSha || appBuild.sourceTreeSha !== actualSourceTreeSha) {
@@ -137,8 +256,19 @@ export function verifyStudySetup({
     || appBuild.executableSha256 !== actualExecutableSha256) {
     throw new Error('Provider Free app executable fingerprint does not match its build provenance.');
   }
+  if (approved.bundleId !== bundleId) throw new Error('Approved bundle identity does not match the app bundle.');
+  if (approved.sourceTreeSha !== actualSourceTreeSha || approved.sourceTreeSha !== appBuild.sourceTreeSha) {
+    throw new Error('Approved source tree does not match the checkout and app provenance.');
+  }
+  if (approved.sourceStatusSha256 !== actualSourceStatusSha256
+    || approved.sourceStatusSha256 !== appBuild.sourceStatusSha256) {
+    throw new Error('Approved source status does not match the checkout and app provenance.');
+  }
+  if (approved.executableSha256 !== actualExecutableSha256
+    || approved.executableSha256 !== appBuild.executableSha256) {
+    throw new Error('Approved executable fingerprint does not match the app executable and provenance.');
+  }
 
-  const canonicalRepo = canonicalExisting(repoRoot, 'Git repository');
   const canonicalProject = canonicalExisting(projectDir, 'Participant project folder');
   const canonicalRehearsal = canonicalDeletedPath(rehearsalDir);
   const canonicalManifest = canonicalExisting(fixtureManifest, 'Fixture manifest');
@@ -159,7 +289,12 @@ export function verifyStudySetup({
     gitSha: actualGitSha,
     bundleId,
     bundleName: EXPECTED_BUNDLE_NAME,
-    appBuild: Object.freeze({ ...appBuild }),
+    approvedBuildIdentity: Object.freeze({ matched: true, ...approved }),
+    approvalRecord: Object.freeze({
+      schemaVersion: approval.schemaVersion,
+      validated: true,
+      changeKind: approval.changeKind,
+    }),
     projectState: 'empty',
     rehearsalState: 'deleted',
     scenarioControls: ['standard', 'branch-recovery', 'format-recovery'],
@@ -202,7 +337,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       repoRoot: scriptRoot,
       projectDir: valueAfter(args, '--project-dir'),
       rehearsalDir: valueAfter(args, '--rehearsal-dir'),
-      expectedGitSha: valueAfter(args, '--expected-sha'),
+      approvedBuildRecordPath: valueAfter(args, '--approved-build-record'),
       actualGitSha: sourceState.gitSha,
       actualSourceTreeSha: sourceState.sourceTreeSha,
       actualSourceStatusSha256: sourceState.sourceStatusSha256,

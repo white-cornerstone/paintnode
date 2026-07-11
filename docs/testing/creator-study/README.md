@@ -13,6 +13,9 @@ study storage.
 
 - `templates/private-*` are blank copy-outside-repository forms. Completed
   copies are private-only.
+- `templates/private-approved-build-record.json` freezes the one literal QA
+  build identity approved for sessions. Copy and complete it privately; never
+  point setup verification at the blank repository template.
 - `templates/de-identified-recruitment-matrix.csv` may be used for aggregate
   cohort control only after direct identifiers and sensitive detail are
   removed.
@@ -33,14 +36,33 @@ study storage.
    facilitator, observers, technical operator, and accommodation setup. None of
    these assignments belong in repository-safe evidence.
 
+## Approve the study build before the first session
+
+1. From a committed, clean `feature/creative-blueprint` checkout, build the
+   repo-native Provider Free app with `npm run qa:native:provider-free`.
+2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
+   Place in a separate project. Delete that rehearsal project.
+3. Copy `templates/private-approved-build-record.json` to approved restricted
+   storage. Copy the literal `gitSha`, `sourceTreeSha`, `sourceStatusSha256`,
+   and `executableSha256` values from the app's provenance sidecar. Record the
+   fixed Provider Free bundle ID, rehearsal completion time, owner approval
+   time, and a non-identifying decision reference.
+4. Set initial change control to `kind: "initial"`, null replacement/reason,
+   and `comparabilityDecision: "baseline"`. Keep the approved app and its
+   sidecar together and reuse that exact bundle for every session.
+
+The current HEAD does not approve itself. Do not regenerate this record from
+`git rev-parse HEAD`, and do not rebuild between sessions: a rebuild has a new
+executable identity even when source files appear unchanged.
+
 ## Before every session
 
-1. From a committed, clean checkout, build the repo-native provider-free app
-   with `npm run qa:native:provider-free`. Close it after rehearsal. The build
-   writes a provenance sidecar beside the app containing the source SHA/tree
-   and actual executable fingerprint; keep the app and sidecar together.
+1. Use a committed, clean checkout at the literal SHA in the current private
+   approved-build record. Use the exact preserved app bundle and provenance
+   sidecar named by that record; do not build or approve the current HEAD.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
-   Place in a separate folder. Delete that rehearsal folder.
+   Place with the approved bundle in a separate folder. Delete that rehearsal
+   folder. Record this session-preparation rehearsal privately.
 3. Create a different, genuinely empty participant project folder outside the
    repository.
 4. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
@@ -48,19 +70,32 @@ study storage.
 
    ```sh
    npm run qa:creator-study:setup -- \
-     --expected-sha "$(git rev-parse HEAD)" \
+     --approved-build-record "ABSOLUTE_PRIVATE_APPROVED_BUILD_RECORD.json" \
      --app-bundle "ABSOLUTE_PATH_TO_PROVIDER_FREE_APP" \
      --project-dir "ABSOLUTE_EMPTY_PARTICIPANT_PROJECT" \
      --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT"
    ```
 
-The verifier checks a clean source tree, the exact SHA/tree recorded by the
-actual build, bundle identity, executable fingerprint, canonicalized paths,
-empty project, deleted and separate rehearsal path, Product hashes/dimensions,
-and all three QA scenario controls. Stale bundles, modified executables, dirty
-source, broken symlinks, and symlink aliases into the repository fail closed.
-Its receipt deliberately omits local paths. It does not replace the visible
-rehearsal or the private authorization gate.
+The verifier reads approval only from that private record. It checks the clean
+checkout, app provenance, actual executable, bundle identity, approved literal
+SHA/tree/status/executable fingerprints, canonicalized paths, empty project,
+deleted rehearsal path, Product hashes/dimensions, and all three QA controls.
+Missing, malformed, in-repository, stale, or mismatched approval records fail
+closed. Its receipt reports the matched build identity but omits the private
+record path, approval date, decision references, change reason, storage data,
+and participant paths. It does not replace rehearsal or authorization.
+
+## Mid-study build changes
+
+Pause scheduling before changing the approved app. Build the proposed change
+from committed clean source, complete a **new rehearsal**, and copy a new
+private approved-build record. `kind` must be `mid-study`; record the prior
+decision reference, change reason, owner approval, rehearsal completion time,
+and a comparability decision of `comparable` or `restart-required`. The setup
+verifier rejects an incomplete change decision. If the decision is
+`restart-required`, do not combine earlier sessions with the new build; record
+which sessions are replaced and recruit replacements under the new baseline.
+Never overwrite the earlier private approval record.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either
