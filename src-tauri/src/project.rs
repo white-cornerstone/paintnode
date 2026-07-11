@@ -1,6 +1,7 @@
 //! Project folders: manifest, assets, documents, thumbnails, and their commands.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -9,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use base64::Engine;
@@ -34,6 +36,11 @@ const PROJECT_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PROJECT_MATERIAL_ENVELOPE_MAGIC: &[u8; 8] = b"PNMATRAW";
 const PROJECT_MATERIAL_ENVELOPE_VERSION: u16 = 1;
 const PROJECT_MATERIAL_METADATA_MAX_BYTES: usize = 4 * 1024;
+
+// Strong ownership is intentional: transaction poison must remain durable after
+// the last active operation drops its Arc. The registry grows by one small mutex
+// per canonical project opened during the process lifetime.
+static PROJECT_TRANSACTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -178,6 +185,56 @@ fn project_manifest_path(project_path: &Path) -> PathBuf {
     project_path.join(PROJECT_MANIFEST)
 }
 
+fn project_transaction(project_path: &Path) -> Result<Arc<Mutex<()>>, String> {
+    ensure_project_dirs(project_path)?;
+    let canonical_path = fs::canonicalize(project_path).map_err(|error| {
+        format!(
+            "Failed to identify the project transaction boundary at {}: {error}",
+            project_path.display()
+        )
+    })?;
+    let transactions = PROJECT_TRANSACTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut transactions = transactions
+        .lock()
+        .map_err(|_| "Project transaction registry is unavailable.".to_string())?;
+    if let Some(transaction) = transactions.get(&canonical_path) {
+        return Ok(Arc::clone(transaction));
+    }
+    let transaction = Arc::new(Mutex::new(()));
+    transactions.insert(canonical_path, Arc::clone(&transaction));
+    Ok(transaction)
+}
+
+fn with_project_transaction<T>(
+    project_path: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    with_project_transaction_observed(project_path, || {}, operation)
+}
+
+fn with_project_transaction_observed<T>(
+    project_path: &Path,
+    on_contention: impl FnOnce(),
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let transaction = project_transaction(project_path)?;
+    let _guard = match transaction.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            on_contention();
+            transaction.lock().map_err(|_| {
+                "Project transaction was interrupted and cannot continue safely.".to_string()
+            })?
+        }
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err(
+                "Project transaction was interrupted and cannot continue safely.".to_string(),
+            );
+        }
+    };
+    operation()
+}
+
 pub(crate) fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
     fs::create_dir_all(project_path.join("documents"))
         .map_err(|e| format!("Failed to create documents folder: {e}"))?;
@@ -224,18 +281,38 @@ fn new_manifest(project_path: &Path) -> ProjectManifest {
 }
 
 fn load_manifest(project_path: &Path) -> Result<ProjectManifest, String> {
+    load_manifest_observed(project_path, || {})
+}
+
+fn load_manifest_observed(
+    project_path: &Path,
+    before_initialize: impl FnOnce(),
+) -> Result<ProjectManifest, String> {
+    ensure_project_dirs(project_path)?;
+    let path = project_manifest_path(project_path);
+    if path.exists() {
+        return read_manifest(&path);
+    }
+    before_initialize();
+    with_project_transaction(project_path, || load_manifest_unlocked(project_path))
+}
+
+fn load_manifest_unlocked(project_path: &Path) -> Result<ProjectManifest, String> {
     ensure_project_dirs(project_path)?;
     let path = project_manifest_path(project_path);
     if !path.exists() {
-        let manifest = new_manifest(project_path);
-        save_manifest(project_path, &manifest)?;
-        return Ok(manifest);
+        save_manifest_atomic(project_path, &new_manifest(project_path))?;
     }
-    let text = fs::read_to_string(&path)
+    read_manifest(&path)
+}
+
+fn read_manifest(path: &Path) -> Result<ProjectManifest, String> {
+    let text = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read project manifest at {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("Project manifest is invalid JSON: {e}"))
 }
 
+#[cfg(test)]
 fn save_manifest(project_path: &Path, manifest: &ProjectManifest) -> Result<(), String> {
     ensure_project_dirs(project_path)?;
     let mut next = manifest.clone();
@@ -1000,10 +1077,20 @@ pub(crate) fn add_asset(
     project_path: &Path,
     asset: ProjectAsset,
 ) -> Result<ProjectAssetView, String> {
-    let mut manifest = load_manifest(project_path)?;
-    manifest.assets.retain(|existing| existing.id != asset.id);
-    manifest.assets.push(asset.clone());
-    save_manifest(project_path, &manifest)?;
+    add_asset_with_transaction_observer(project_path, asset, || {})
+}
+
+fn add_asset_with_transaction_observer(
+    project_path: &Path,
+    asset: ProjectAsset,
+    on_contention: impl FnOnce(),
+) -> Result<ProjectAssetView, String> {
+    with_project_transaction_observed(project_path, on_contention, || {
+        let mut manifest = load_manifest_unlocked(project_path)?;
+        manifest.assets.retain(|existing| existing.id != asset.id);
+        manifest.assets.push(asset.clone());
+        save_manifest_atomic(project_path, &manifest)
+    })?;
     Ok(asset_view(project_path, asset))
 }
 
@@ -1088,10 +1175,11 @@ fn workflow_editor_cleanup_token() -> Result<String, String> {
     ))
 }
 
-fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> Result<(), String> {
-    if !valid_editor_revision_id(cleanup_token) {
-        return Err("Workflow editor cleanup token is invalid.".into());
-    }
+fn rollback_workflow_editor_return_unlocked(
+    project_dir: &Path,
+    cleanup_token: &str,
+    persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
+) -> Result<(), String> {
     let receipt_path = workflow_editor_receipt_path(project_dir, cleanup_token);
     if !receipt_path.exists() {
         return Ok(());
@@ -1119,8 +1207,8 @@ fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> R
     let output_relative = safe_project_relative_path(&receipt.output_relative_path)?;
     let document_path = project_dir.join(document_relative);
     let output_path = project_dir.join(output_relative);
-    let mut manifest = load_manifest(project_dir)?;
-    let matches = manifest
+    let mut manifest = load_manifest_unlocked(project_dir)?;
+    let matching_assets = manifest
         .assets
         .iter()
         .filter(|asset| {
@@ -1130,28 +1218,50 @@ fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> R
                     == Some(receipt.document_relative_path.as_str())
         })
         .count();
-    if matches == 0 && !document_path.exists() && !output_path.exists() {
-        fs::remove_file(receipt_path).map_err(|error| {
-            format!("Workflow editor cleanup receipt could not finish a prior rollback: {error}")
-        })?;
-        return Ok(());
-    }
-    if matches != 1 {
+    let conflicting_assets = manifest
+        .assets
+        .iter()
+        .filter(|asset| {
+            asset.id == receipt.asset_id || asset.relative_path == receipt.output_relative_path
+        })
+        .count();
+    if matching_assets > 1 || conflicting_assets != matching_assets {
         return Err("Workflow editor cleanup receipt no longer matches the manifest.".into());
     }
-    let document_hash = fs::read(&document_path)
-        .ok()
-        .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)));
-    let output_hash = fs::read(&output_path)
-        .ok()
-        .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)));
-    if document_hash.as_deref() != Some(receipt.document_content_hash.as_str())
-        || output_hash.as_deref() != Some(receipt.output_content_hash.as_str())
-    {
-        return Err(
-            "Workflow editor cleanup receipt no longer matches the stored artifact hashes.".into(),
-        );
+
+    for (path, expected_hash) in [
+        (&document_path, receipt.document_content_hash.as_str()),
+        (&output_path, receipt.output_content_hash.as_str()),
+    ] {
+        match fs::read(path) {
+            Ok(bytes) if format!("sha256:{:x}", Sha256::digest(&bytes)) == expected_hash => {}
+            Ok(_) => {
+                return Err(
+                    "Workflow editor cleanup receipt no longer matches the stored artifact hashes."
+                        .into(),
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A missing artifact is an already-completed destructive step
+                // from an interrupted rollback. Every artifact that remains is
+                // still authenticated before cleanup continues.
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Workflow editor cleanup could not verify {}: {error}",
+                    path.display()
+                ));
+            }
+        }
     }
+
+    if matching_assets == 1 {
+        manifest.assets.retain(|asset| {
+            !(asset.id == receipt.asset_id && asset.relative_path == receipt.output_relative_path)
+        });
+        persist_manifest(project_dir, &manifest)?;
+    }
+
     for path in [&document_path, &output_path] {
         if let Err(error) = fs::remove_file(path) {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -1162,23 +1272,53 @@ fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> R
             }
         }
     }
-    manifest.assets.retain(|asset| {
-        !(asset.id == receipt.asset_id && asset.relative_path == receipt.output_relative_path)
-    });
-    save_manifest_atomic(project_dir, &manifest)?;
     fs::remove_file(receipt_path).map_err(|error| {
         format!("Workflow editor cleanup receipt could not be removed: {error}")
     })?;
     Ok(())
 }
 
+fn rollback_workflow_editor_return_with(
+    project_dir: &Path,
+    cleanup_token: &str,
+    persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
+) -> Result<(), String> {
+    if !valid_editor_revision_id(cleanup_token) {
+        return Err("Workflow editor cleanup token is invalid.".into());
+    }
+    with_project_transaction(project_dir, || {
+        rollback_workflow_editor_return_unlocked(project_dir, cleanup_token, persist_manifest)
+    })
+}
+
+fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> Result<(), String> {
+    rollback_workflow_editor_return_with(project_dir, cleanup_token, &save_manifest_atomic)
+}
+
 fn finalize_workflow_editor_return(
     project_dir: &Path,
     cleanup_token: &str,
 ) -> Result<bool, String> {
+    finalize_workflow_editor_return_observed(project_dir, cleanup_token, || {})
+}
+
+fn finalize_workflow_editor_return_observed(
+    project_dir: &Path,
+    cleanup_token: &str,
+    on_contention: impl FnOnce(),
+) -> Result<bool, String> {
     if !valid_editor_revision_id(cleanup_token) {
         return Err("Workflow editor cleanup token is invalid.".into());
     }
+    with_project_transaction_observed(project_dir, on_contention, || {
+        finalize_workflow_editor_return_unlocked(project_dir, cleanup_token)
+    })
+}
+
+fn finalize_workflow_editor_return_unlocked(
+    project_dir: &Path,
+    cleanup_token: &str,
+) -> Result<bool, String> {
     let receipt_path = workflow_editor_receipt_path(project_dir, cleanup_token);
     if !receipt_path.exists() {
         return Ok(true);
@@ -1239,6 +1379,28 @@ fn commit_workflow_editor_return_with(
     input: WorkflowEditorReturnCommit<'_>,
     persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
 ) -> Result<WorkflowEditorReturnResult, String> {
+    if !valid_editor_revision_id(input.revision_id) {
+        return Err("Workflow editor revision ID is invalid.".into());
+    }
+    if input.document_bytes.is_empty()
+        || !is_png(input.output_bytes)
+        || input.width == 0
+        || input.height == 0
+    {
+        return Err(
+            "Workflow editor return requires a valid OpenRaster document and PNG output.".into(),
+        );
+    }
+    with_project_transaction(project_dir, || {
+        commit_workflow_editor_return_unlocked(project_dir, input, persist_manifest)
+    })
+}
+
+fn commit_workflow_editor_return_unlocked(
+    project_dir: &Path,
+    input: WorkflowEditorReturnCommit<'_>,
+    persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
+) -> Result<WorkflowEditorReturnResult, String> {
     let WorkflowEditorReturnCommit {
         revision_id,
         name,
@@ -1247,16 +1409,8 @@ fn commit_workflow_editor_return_with(
         width,
         height,
     } = input;
-    if !valid_editor_revision_id(revision_id) {
-        return Err("Workflow editor revision ID is invalid.".into());
-    }
-    if document_bytes.is_empty() || !is_png(output_bytes) || width == 0 || height == 0 {
-        return Err(
-            "Workflow editor return requires a valid OpenRaster document and PNG output.".into(),
-        );
-    }
     ensure_project_dirs(project_dir)?;
-    let mut manifest = load_manifest(project_dir)?;
+    let mut manifest = load_manifest_unlocked(project_dir)?;
     let nonce = now_id();
     let cleanup_token = workflow_editor_cleanup_token()?;
     let asset_id = format!("asset-{nonce}");
@@ -1639,23 +1793,25 @@ pub(crate) async fn project_delete_asset(
 ) -> Result<ProjectState, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ProjectState, String> {
         let project_dir = PathBuf::from(project_path.trim());
-        let mut manifest = load_manifest(&project_dir)?;
-        let Some(index) = manifest
-            .assets
-            .iter()
-            .position(|asset| asset.id == asset_id)
-        else {
-            return project_state(&project_dir);
-        };
-        let asset = manifest.assets[index].clone();
-        let source = project_dir.join(&asset.relative_path);
-        if source.exists() {
-            trash::delete(&source)
-                .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
-        }
-        manifest.assets.remove(index);
-        save_manifest(&project_dir, &manifest)?;
-        project_state(&project_dir)
+        with_project_transaction(&project_dir, || {
+            let mut manifest = load_manifest_unlocked(&project_dir)?;
+            let Some(index) = manifest
+                .assets
+                .iter()
+                .position(|asset| asset.id == asset_id)
+            else {
+                return project_state(&project_dir);
+            };
+            let asset = manifest.assets[index].clone();
+            let source = project_dir.join(&asset.relative_path);
+            if source.exists() {
+                trash::delete(&source)
+                    .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
+            }
+            manifest.assets.remove(index);
+            save_manifest_atomic(&project_dir, &manifest)?;
+            project_state(&project_dir)
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -1820,6 +1976,78 @@ mod tests {
     }
 
     #[test]
+    fn manifest_initialization_cannot_overwrite_concurrent_asset_addition() {
+        let project =
+            TempJobDir::new("paintnode-project-concurrent-initialize").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        assert!(!project_manifest_path(project.path()).exists());
+        let relative = "assets/imported/concurrent-initialize.bin";
+        fs::write(project.path().join(relative), b"concurrent material")
+            .expect("candidate asset file");
+        let mut asset = material_asset("concurrent-initialize", relative);
+        asset.mime = None;
+
+        std::thread::scope(|scope| {
+            let project_path = project.path();
+            let (initialization_observed_tx, initialization_observed_rx) =
+                std::sync::mpsc::channel();
+            let (release_initialization_tx, release_initialization_rx) = std::sync::mpsc::channel();
+            let initialize = scope.spawn(move || {
+                load_manifest_observed(project_path, || {
+                    initialization_observed_tx
+                        .send(())
+                        .expect("signal missing manifest observation");
+                    release_initialization_rx
+                        .recv()
+                        .expect("release manifest initialization");
+                })
+            });
+            initialization_observed_rx
+                .recv()
+                .expect("read-oriented initialization observed missing manifest");
+
+            add_asset(project.path(), asset).expect("concurrent asset addition");
+            release_initialization_tx
+                .send(())
+                .expect("release read-oriented initialization");
+            let initialized = initialize
+                .join()
+                .expect("initialization thread")
+                .expect("initialization result");
+            assert_eq!(initialized.assets.len(), 1);
+            assert_eq!(initialized.assets[0].id, "concurrent-initialize");
+        });
+
+        let manifest = load_manifest(project.path()).expect("final manifest");
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].id, "concurrent-initialize");
+    }
+
+    #[test]
+    fn project_transaction_poison_survives_idle_and_fails_closed() {
+        let project = TempJobDir::new("paintnode-project-transaction-poison").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_project_transaction(project.path(), || -> Result<(), String> {
+                panic!("adversarial interruption while project transaction is held")
+            });
+        }));
+        assert!(panic.is_err(), "adversarial transaction must panic");
+
+        let relative = "assets/imported/after-poison.bin";
+        fs::write(project.path().join(relative), b"must not be committed")
+            .expect("candidate asset file");
+        let mut asset = material_asset("after-poison", relative);
+        asset.mime = None;
+        let error = add_asset(project.path(), asset)
+            .expect_err("poisoned project transaction must remain fail closed while idle");
+
+        assert!(error.contains("interrupted"));
+        assert!(!project_manifest_path(project.path()).exists());
+    }
+
+    #[test]
     fn workflow_editor_return_commits_unique_document_png_and_edited_manifest_asset() {
         let project = TempJobDir::new("paintnode-workflow-editor-return").expect("project dir");
         ensure_project_dirs(project.path()).expect("project dirs");
@@ -1959,17 +2187,349 @@ mod tests {
             &save_manifest_atomic,
         )
         .expect("editor return");
+        let mut manifest = load_manifest(project.path()).expect("manifest");
+        manifest.assets.clear();
+        save_manifest_atomic(project.path(), &manifest).expect("persist partial rollback");
         fs::remove_file(project.path().join(&result.document.relative_path))
             .expect("remove document");
         fs::remove_file(project.path().join(&result.output.asset.relative_path))
             .expect("remove output");
-        let mut manifest = load_manifest(project.path()).expect("manifest");
-        manifest.assets.clear();
-        save_manifest_atomic(project.path(), &manifest).expect("persist partial rollback");
 
         rollback_workflow_editor_return(project.path(), &result.cleanup_token)
             .expect("finish interrupted rollback");
         assert!(!workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_repairs_one_missing_artifact_with_stale_manifest() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-stale-manifest").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let unrelated_relative = "assets/imported/unrelated.png";
+        fs::write(project.path().join(unrelated_relative), ONE_PIXEL_PNG).expect("unrelated asset");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-stale-manifest",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let document_path = project.path().join(&result.document.relative_path);
+        let output_path = project.path().join(&result.output.asset.relative_path);
+        let mut manifest = load_manifest(project.path()).expect("manifest");
+        manifest
+            .assets
+            .push(material_asset("unrelated", unrelated_relative));
+        save_manifest_atomic(project.path(), &manifest).expect("unrelated manifest asset");
+        fs::remove_file(&document_path).expect("interrupt after document deletion");
+
+        rollback_workflow_editor_return(project.path(), &result.cleanup_token)
+            .expect("retry stale-manifest rollback");
+
+        assert!(!document_path.exists());
+        assert!(!output_path.exists());
+        assert!(project.path().join(unrelated_relative).exists());
+        let manifest = load_manifest(project.path()).expect("repaired manifest");
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].id, "unrelated");
+        assert!(!workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_rollback_serializes_concurrent_unrelated_asset_addition() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-concurrent-asset").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-concurrent-asset",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let unrelated_relative = "assets/imported/concurrent-unrelated.bin";
+        fs::write(
+            project.path().join(unrelated_relative),
+            b"unrelated material",
+        )
+        .expect("unrelated asset file");
+        let mut unrelated_asset = material_asset("concurrent-unrelated", unrelated_relative);
+        unrelated_asset.mime = None;
+
+        std::thread::scope(|scope| {
+            let project_path = project.path();
+            let cleanup_token = result.cleanup_token.as_str();
+            let (rollback_at_manifest_tx, rollback_at_manifest_rx) = std::sync::mpsc::channel();
+            let (release_rollback_tx, release_rollback_rx) = std::sync::mpsc::channel();
+            let (asset_waiting_tx, asset_waiting_rx) = std::sync::mpsc::channel();
+            let rollback = scope.spawn(move || {
+                rollback_workflow_editor_return_with(
+                    project_path,
+                    cleanup_token,
+                    &|project_dir, manifest| {
+                        rollback_at_manifest_tx
+                            .send(())
+                            .expect("signal rollback manifest transition");
+                        release_rollback_rx
+                            .recv()
+                            .expect("release rollback manifest transition");
+                        save_manifest_atomic(project_dir, manifest)
+                    },
+                )
+            });
+            rollback_at_manifest_rx
+                .recv()
+                .expect("rollback reached manifest transition");
+
+            let add = scope.spawn(move || {
+                add_asset_with_transaction_observer(project_path, unrelated_asset, || {
+                    asset_waiting_tx
+                        .send(())
+                        .expect("signal blocked asset addition")
+                })
+            });
+            asset_waiting_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("asset addition must contend on rollback's project transaction");
+
+            release_rollback_tx.send(()).expect("release rollback");
+            rollback.join().expect("rollback thread").expect("rollback");
+            add.join().expect("asset thread").expect("asset addition");
+        });
+
+        let manifest = load_manifest(project.path()).expect("manifest after concurrent transition");
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].id, "concurrent-unrelated");
+        assert!(project.path().join(unrelated_relative).exists());
+        assert!(!project.path().join(&result.document.relative_path).exists());
+        assert!(!project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_rollback_serializes_concurrent_finalize() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-concurrent-finalize").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-concurrent-finalize",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+
+        std::thread::scope(|scope| {
+            let project_path = project.path();
+            let cleanup_token = result.cleanup_token.as_str();
+            let (rollback_at_manifest_tx, rollback_at_manifest_rx) = std::sync::mpsc::channel();
+            let (release_rollback_tx, release_rollback_rx) = std::sync::mpsc::channel();
+            let (finalize_waiting_tx, finalize_waiting_rx) = std::sync::mpsc::channel();
+            let rollback = scope.spawn(move || {
+                rollback_workflow_editor_return_with(
+                    project_path,
+                    cleanup_token,
+                    &|project_dir, manifest| {
+                        rollback_at_manifest_tx
+                            .send(())
+                            .expect("signal rollback manifest transition");
+                        release_rollback_rx
+                            .recv()
+                            .expect("release rollback manifest transition");
+                        save_manifest_atomic(project_dir, manifest)
+                    },
+                )
+            });
+            rollback_at_manifest_rx
+                .recv()
+                .expect("rollback reached manifest transition");
+
+            let finalize = scope.spawn(move || {
+                finalize_workflow_editor_return_observed(project_path, cleanup_token, || {
+                    finalize_waiting_tx
+                        .send(())
+                        .expect("signal blocked finalize")
+                })
+            });
+            finalize_waiting_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("finalization must contend on rollback's project transaction");
+
+            release_rollback_tx.send(()).expect("release rollback");
+            rollback.join().expect("rollback thread").expect("rollback");
+            assert!(finalize
+                .join()
+                .expect("finalize thread")
+                .expect("idempotent finalize after rollback"));
+        });
+
+        assert!(!workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+        assert!(load_manifest(project.path())
+            .expect("manifest after concurrent transition")
+            .assets
+            .is_empty());
+        assert!(!project.path().join(&result.document.relative_path).exists());
+        assert!(!project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_recovers_every_post_manifest_interruption_boundary() {
+        for deleted_artifacts in 0..=2 {
+            let project = TempJobDir::new(&format!(
+                "paintnode-workflow-editor-post-manifest-{deleted_artifacts}"
+            ))
+            .expect("project dir");
+            ensure_project_dirs(project.path()).expect("project dirs");
+            let unrelated_relative = "assets/imported/unrelated.png";
+            fs::write(project.path().join(unrelated_relative), ONE_PIXEL_PNG)
+                .expect("unrelated asset");
+            let ora = workflow_editor_ora_bytes();
+            let result = commit_workflow_editor_return_with(
+                project.path(),
+                WorkflowEditorReturnCommit {
+                    revision_id: &format!("edit-post-manifest-{deleted_artifacts}"),
+                    name: "Edited concept",
+                    document_bytes: &ora,
+                    output_bytes: ONE_PIXEL_PNG,
+                    width: 1,
+                    height: 1,
+                },
+                &save_manifest_atomic,
+            )
+            .expect("editor return");
+            let document_path = project.path().join(&result.document.relative_path);
+            let output_path = project.path().join(&result.output.asset.relative_path);
+            let mut manifest = load_manifest(project.path()).expect("manifest");
+            manifest
+                .assets
+                .retain(|asset| asset.id != result.output.asset.id);
+            manifest
+                .assets
+                .push(material_asset("unrelated", unrelated_relative));
+            save_manifest_atomic(project.path(), &manifest)
+                .expect("interrupt after manifest commit");
+            if deleted_artifacts >= 1 {
+                fs::remove_file(&document_path).expect("interrupt after document deletion");
+            }
+            if deleted_artifacts >= 2 {
+                fs::remove_file(&output_path).expect("interrupt after output deletion");
+            }
+
+            rollback_workflow_editor_return(project.path(), &result.cleanup_token)
+                .expect("retry post-manifest rollback");
+
+            assert!(!document_path.exists());
+            assert!(!output_path.exists());
+            assert!(project.path().join(unrelated_relative).exists());
+            let manifest = load_manifest(project.path()).expect("repaired manifest");
+            assert_eq!(manifest.assets.len(), 1);
+            assert_eq!(manifest.assets[0].id, "unrelated");
+            assert!(!workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+        }
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_keeps_artifacts_when_manifest_commit_fails() {
+        let project = TempJobDir::new("paintnode-workflow-editor-cleanup-manifest-failure")
+            .expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-cleanup-manifest-failure",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let document_path = project.path().join(&result.document.relative_path);
+        let output_path = project.path().join(&result.output.asset.relative_path);
+
+        let error =
+            rollback_workflow_editor_return_with(project.path(), &result.cleanup_token, &|_, _| {
+                Err("interrupted manifest commit".into())
+            })
+            .expect_err("manifest interruption");
+
+        assert!(error.contains("interrupted manifest commit"));
+        assert!(document_path.exists());
+        assert!(output_path.exists());
+        assert_eq!(
+            load_manifest(project.path())
+                .expect("unchanged manifest")
+                .assets
+                .len(),
+            1
+        );
+        assert!(workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_rechecks_remaining_hash_after_manifest_commit() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-post-manifest-hash").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-post-manifest-hash",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let document_path = project.path().join(&result.document.relative_path);
+        let output_path = project.path().join(&result.output.asset.relative_path);
+        let mut manifest = load_manifest(project.path()).expect("manifest");
+        manifest
+            .assets
+            .retain(|asset| asset.id != result.output.asset.id);
+        save_manifest_atomic(project.path(), &manifest).expect("manifest commit");
+        fs::write(&output_path, b"tampered output").expect("tamper remaining output");
+
+        let error = rollback_workflow_editor_return(project.path(), &result.cleanup_token)
+            .expect_err("remaining artifact mismatch must fail closed");
+
+        assert!(error.contains("artifact hashes"));
+        assert!(document_path.exists());
+        assert!(output_path.exists());
+        assert!(workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
     }
 
     #[test]
