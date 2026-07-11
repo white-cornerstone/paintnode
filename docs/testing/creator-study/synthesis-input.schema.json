@@ -1,15 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://paintnode.com/schemas/creative-blueprint-study-input-v1.json",
-  "title": "De-identified Creative Blueprint study input",
+  "$id": "https://paintnode.com/schemas/creative-blueprint-study-input-v2.json",
+  "title": "De-identified Creative Blueprint study input v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "participants", "findings", "recruitmentDecisionDocumented", "configuredProviderEvidenceRecorded", "requiredSignoffsRecorded", "outstandingNonBlockingActions"],
+  "required": ["schemaVersion", "participants", "findings", "recruitmentExceptions", "configuredProviderEvidenceRecorded", "requiredSignoffsRecorded", "outstandingNonBlockingActions"],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "participants": { "type": "array", "maxItems": 99, "items": { "$ref": "#/$defs/participant" } },
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
-    "recruitmentDecisionDocumented": { "type": "boolean" },
+    "recruitmentExceptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cohortMix", "keyboardOrAccessibilityCoverage"],
+      "properties": {
+        "cohortMix": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["approved", "rationaleRecorded", "decisionReference"],
+          "properties": {
+            "approved": { "type": "boolean" },
+            "rationaleRecorded": { "type": "boolean" },
+            "decisionReference": { "type": ["string", "null"], "pattern": "^CB-DEC-[1-9][0-9]*$" }
+          },
+          "allOf": [{
+            "if": { "properties": { "approved": { "const": true } }, "required": ["approved"] },
+            "then": { "properties": { "rationaleRecorded": { "const": true }, "decisionReference": { "type": "string", "pattern": "^CB-DEC-[1-9][0-9]*$" } } },
+            "else": { "properties": { "rationaleRecorded": { "const": false }, "decisionReference": { "const": null } } }
+          }]
+        },
+        "keyboardOrAccessibilityCoverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["approved", "rationaleRecorded", "decisionReference"],
+          "properties": {
+            "approved": { "type": "boolean" },
+            "rationaleRecorded": { "type": "boolean" },
+            "decisionReference": { "type": ["string", "null"], "pattern": "^CB-DEC-[1-9][0-9]*$" }
+          },
+          "allOf": [{
+            "if": { "properties": { "approved": { "const": true } }, "required": ["approved"] },
+            "then": { "properties": { "rationaleRecorded": { "const": true }, "decisionReference": { "type": "string", "pattern": "^CB-DEC-[1-9][0-9]*$" } } },
+            "else": { "properties": { "rationaleRecorded": { "const": false }, "decisionReference": { "const": null } } }
+          }]
+        }
+      }
+    },
     "configuredProviderEvidenceRecorded": { "type": "boolean" },
     "requiredSignoffsRecorded": { "type": "boolean" },
     "outstandingNonBlockingActions": { "type": "array", "items": { "type": "string", "minLength": 1 } }

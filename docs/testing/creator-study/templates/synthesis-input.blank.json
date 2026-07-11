@@ -1,8 +1,19 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "participants": [],
   "findings": [],
-  "recruitmentDecisionDocumented": false,
+  "recruitmentExceptions": {
+    "cohortMix": {
+      "approved": false,
+      "rationaleRecorded": false,
+      "decisionReference": null
+    },
+    "keyboardOrAccessibilityCoverage": {
+      "approved": false,
+      "rationaleRecorded": false,
+      "decisionReference": null
+    }
+  },
   "configuredProviderEvidenceRecorded": false,
   "requiredSignoffsRecorded": false,
   "outstandingNonBlockingActions": []
