@@ -469,7 +469,13 @@ fn resolve_path_candidate_for_host(
                 .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
                 .split(';')
                 .filter(|extension| !extension.is_empty())
-                .map(str::to_string)
+                .flat_map(|extension| {
+                    [
+                        extension.to_string(),
+                        extension.to_ascii_lowercase(),
+                        extension.to_ascii_uppercase(),
+                    ]
+                })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -575,16 +581,30 @@ fn official_codex_native_from_launcher(
             .and_then(Path::parent)
             .ok_or_else(|| "Codex npm launcher has no package root.".to_string())?
             .to_path_buf()
-    } else if matches!(
-        launcher.file_name().and_then(OsStr::to_str),
-        Some("codex.cmd" | "codex.ps1")
-    ) && launcher.parent().and_then(Path::file_name) == Some(OsStr::new(".bin"))
+    } else if matches!(host, HostTarget::WindowsArm64 | HostTarget::WindowsX64)
+        && launcher
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("codex.cmd") || name.eq_ignore_ascii_case("codex.ps1")
+            })
     {
-        launcher
+        let shim_parent = launcher
             .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| "Codex npm shim has no node_modules root.".to_string())?
-            .join("@openai/codex")
+            .ok_or_else(|| "Codex npm shim has no parent directory.".to_string())?;
+        let node_modules = if shim_parent
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(".bin"))
+        {
+            shim_parent
+                .parent()
+                .ok_or_else(|| "Codex local npm shim has no node_modules root.".to_string())?
+                .to_path_buf()
+        } else {
+            shim_parent.join("node_modules")
+        };
+        node_modules.join("@openai/codex")
     } else {
         return Ok(None);
     };
@@ -1759,6 +1779,86 @@ mod tests {
         .expect("official Windows npm shim");
         assert_eq!(prepared.path, fs::canonicalize(&native).expect("native"));
         assert!(!sentinel.exists(), "npm shim must never execute");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn windows_global_prefix_cmd_and_ps1_shims_unwrap_without_execution() {
+        let dir = TempJobDir::new("paintnode-codex-windows-global-test").expect("temp dir");
+        let prefix = dir.path().join("npm");
+        let modules = prefix.join("node_modules");
+        let package = modules.join("@openai/codex");
+        let platform = modules.join("@openai/codex-win32-x64");
+        let native = platform.join("vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        fs::create_dir_all(package.join("bin")).expect("package dir");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native dir");
+        executable(&native, "echo codex-cli 1.2.3");
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#)
+            .expect("package metadata");
+        fs::write(
+            platform.join("package.json"),
+            r#"{"name":"@openai/codex","os":["win32"],"cpu":["x64"]}"#,
+        )
+        .expect("platform metadata");
+
+        let cmd = prefix.join("codex.cmd");
+        let ps1 = prefix.join("codex.ps1");
+        let cmd_sentinel = dir.path().join("cmd-executed");
+        let ps1_sentinel = dir.path().join("ps1-executed");
+        executable(&cmd, &format!("touch '{}'", cmd_sentinel.display()));
+        executable(&ps1, &format!("touch '{}'", ps1_sentinel.display()));
+
+        let discovered = resolve_path_candidate_for_host(
+            Path::new("codex"),
+            Some(prefix.as_os_str()),
+            Some(OsStr::new(".eXe;.CmD;.Ps1")),
+            HostTarget::WindowsX64,
+        )
+        .expect("mixed-case PATHEXT global shim");
+        assert_eq!(discovered, fs::canonicalize(&cmd).expect("canonical cmd"));
+        for shim in [discovered, fs::canonicalize(&ps1).expect("canonical ps1")] {
+            let prepared = prepare_provider_candidate_with_options(
+                Provider::Codex,
+                shim,
+                HostTarget::WindowsX64,
+                true,
+                &mut |_, _| Ok(()),
+            )
+            .expect("official global npm shim");
+            assert_eq!(prepared.path, fs::canonicalize(&native).expect("native"));
+        }
+        assert!(!cmd_sentinel.exists(), "global cmd shim must never execute");
+        assert!(!ps1_sentinel.exists(), "global ps1 shim must never execute");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn windows_global_prefix_lookalike_shims_fail_closed_without_execution() {
+        let dir = TempJobDir::new("paintnode-codex-windows-lookalike-test").expect("temp dir");
+        let prefix = dir.path().join("npm");
+        let package = prefix.join("node_modules/@openai/codex");
+        fs::create_dir_all(&package).expect("lookalike package dir");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"not-openai-codex"}"#,
+        )
+        .expect("lookalike metadata");
+
+        for extension in ["cmd", "ps1"] {
+            let shim = prefix.join(format!("codex.{extension}"));
+            let sentinel = dir.path().join(format!("{extension}-executed"));
+            executable(&shim, &format!("touch '{}'", sentinel.display()));
+            let error = prepare_provider_candidate_with_options(
+                Provider::Codex,
+                shim,
+                HostTarget::WindowsX64,
+                true,
+                &mut |_, _| panic!("lookalike shim must not reach trust inspection"),
+            )
+            .expect_err("lookalike global shim");
+            assert!(error.contains("official @openai/codex"), "{error}");
+            assert!(!sentinel.exists(), "lookalike shim must never execute");
+        }
     }
 
     #[test]
