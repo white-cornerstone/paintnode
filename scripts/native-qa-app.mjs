@@ -3,8 +3,11 @@ import { accessSync, constants, realpathSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join } from 'node:path';
 
+import { captureSourceState, writeQaBuildProvenance } from './native-qa-build-provenance.mjs';
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
+const buildSourceState = captureSourceState(root);
 
 function valueAfter(flag) {
   const index = args.indexOf(flag);
@@ -80,7 +83,7 @@ if (build.status !== 0) process.exit(build.status ?? 1);
 if (process.platform !== 'darwin') {
   throw new Error('Computer Use native QA currently requires the macOS app bundle');
 }
-const executable = join(
+const appBundle = join(
   root,
   'src-tauri',
   'target',
@@ -88,11 +91,20 @@ const executable = join(
   'bundle',
   'macos',
   `${productName}.app`,
-  'Contents',
-  'MacOS',
-  'PaintNode',
 );
+const executable = join(appBundle, 'Contents', 'MacOS', 'PaintNode');
 accessSync(executable, constants.X_OK);
+
+const finalSourceState = captureSourceState(root);
+if (JSON.stringify(finalSourceState) !== JSON.stringify(buildSourceState)) {
+  throw new Error('QA build source changed while the app was building; discard this bundle and build again.');
+}
+writeQaBuildProvenance({
+  appBundle,
+  mode,
+  bundleId: `com.paintnode.editor.blueprintqa.${slug}`,
+  sourceState: finalSourceState,
+});
 
 console.log(`[native-qa] launching ${executable}`);
 const app = spawnSync(executable, [], { cwd: root, env, stdio: 'inherit' });

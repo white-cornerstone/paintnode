@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+
+import { captureSourceState, readQaBuildProvenance, sha256File } from './native-qa-build-provenance.mjs';
 
 export const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.free';
 export const EXPECTED_BUNDLE_NAME = 'PaintNode Blueprint QA — Provider Free';
@@ -14,8 +16,30 @@ function sha256(bytes) {
 }
 
 function isInside(parent, candidate) {
-  const path = relative(resolve(parent), resolve(candidate));
+  const path = relative(parent, candidate);
   return path === '' || (!path.startsWith('..') && !isAbsolute(path));
+}
+
+function pathEntryExists(path) {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+function canonicalExisting(path, label) {
+  try { return realpathSync(path); } catch { throw new Error(`${label} must exist and resolve without a broken symlink.`); }
+}
+
+function canonicalDeletedPath(path) {
+  const requested = resolve(path);
+  if (pathEntryExists(requested)) throw new Error('The separate rehearsal project must be deleted before participant setup is ready.');
+  const suffix = [];
+  let ancestor = requested;
+  while (!pathEntryExists(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error('Could not resolve the deleted rehearsal path.');
+    suffix.unshift(basename(ancestor));
+    ancestor = parent;
+  }
+  return join(realpathSync(ancestor), ...suffix);
 }
 
 function pngDimensions(bytes) {
@@ -32,12 +56,6 @@ function assertEmptyProject(projectDir) {
   }
   if (readdirSync(projectDir).length !== 0) {
     throw new Error('Participant project folder must be genuinely empty, including hidden files.');
-  }
-}
-
-function assertRehearsalDeleted(rehearsalDir) {
-  if (existsSync(rehearsalDir)) {
-    throw new Error('The separate rehearsal project must be deleted before participant setup is ready.');
   }
 }
 
@@ -84,7 +102,12 @@ export function verifyStudySetup({
   fixtureManifest = join(scriptRoot, 'docs/testing/creator-study/materials/manifest.json'),
   expectedGitSha,
   actualGitSha,
+  actualSourceTreeSha,
+  actualSourceStatusSha256,
+  sourceDirty,
   bundleId,
+  appBuild,
+  actualExecutableSha256,
 }) {
   if (!projectDir || !rehearsalDir) throw new Error('Project and rehearsal paths are required.');
   if (![projectDir, rehearsalDir, fixtureManifest].every(isAbsolute)) {
@@ -93,19 +116,42 @@ export function verifyStudySetup({
   if (!expectedGitSha || actualGitSha !== expectedGitSha) {
     throw new Error(`Git SHA mismatch: expected ${expectedGitSha || '(missing)'}, received ${actualGitSha || '(missing)'}.`);
   }
+  if (sourceDirty) throw new Error('Creator-study readiness cannot use dirty source.');
   if (bundleId !== EXPECTED_BUNDLE_ID) {
     throw new Error(`Wrong bundle identity: expected ${EXPECTED_BUNDLE_ID}.`);
   }
-  if (isInside(repoRoot, projectDir) || isInside(repoRoot, rehearsalDir)) {
+  if (!appBuild || appBuild.version !== 1 || appBuild.mode !== 'provider-free' || appBuild.bundleId !== EXPECTED_BUNDLE_ID) {
+    throw new Error('Provider Free app build provenance is missing or invalid.');
+  }
+  if (appBuild.sourceDirty) throw new Error('Provider Free app was built from dirty source.');
+  if (appBuild.gitSha !== actualGitSha || appBuild.gitSha !== expectedGitSha) {
+    throw new Error('Provider Free app build Git SHA does not match the approved checkout.');
+  }
+  if (!actualSourceTreeSha || appBuild.sourceTreeSha !== actualSourceTreeSha) {
+    throw new Error('Provider Free app source tree fingerprint does not match the checkout.');
+  }
+  if (!actualSourceStatusSha256 || appBuild.sourceStatusSha256 !== actualSourceStatusSha256) {
+    throw new Error('Provider Free app source status fingerprint does not match the clean checkout.');
+  }
+  if (!/^[a-f0-9]{64}$/.test(actualExecutableSha256 || '')
+    || appBuild.executableSha256 !== actualExecutableSha256) {
+    throw new Error('Provider Free app executable fingerprint does not match its build provenance.');
+  }
+
+  const canonicalRepo = canonicalExisting(repoRoot, 'Git repository');
+  const canonicalProject = canonicalExisting(projectDir, 'Participant project folder');
+  const canonicalRehearsal = canonicalDeletedPath(rehearsalDir);
+  const canonicalManifest = canonicalExisting(fixtureManifest, 'Fixture manifest');
+  if (isInside(canonicalRepo, canonicalProject) || isInside(canonicalRepo, canonicalRehearsal)) {
     throw new Error('Participant and rehearsal projects must be outside the Git repository.');
   }
-  if (resolve(projectDir) === resolve(rehearsalDir)) {
+  if (canonicalProject === canonicalRehearsal || isInside(canonicalProject, canonicalRehearsal)) {
     throw new Error('Participant and rehearsal projects must use separate paths.');
   }
-  assertEmptyProject(projectDir);
-  assertRehearsalDeleted(rehearsalDir);
-  verifyScenarioControls(repoRoot);
-  const materials = verifyMaterials(fixtureManifest);
+  if (!isInside(canonicalRepo, canonicalManifest)) throw new Error('Fixture manifest must resolve inside the Git repository.');
+  assertEmptyProject(canonicalProject);
+  verifyScenarioControls(canonicalRepo);
+  const materials = verifyMaterials(canonicalManifest);
 
   return Object.freeze({
     schemaVersion: 1,
@@ -113,6 +159,7 @@ export function verifyStudySetup({
     gitSha: actualGitSha,
     bundleId,
     bundleName: EXPECTED_BUNDLE_NAME,
+    appBuild: Object.freeze({ ...appBuild }),
     projectState: 'empty',
     rehearsalState: 'deleted',
     scenarioControls: ['standard', 'branch-recovery', 'format-recovery'],
@@ -132,32 +179,35 @@ function valueAfter(args, flag) {
   return args[index + 1];
 }
 
-function readBundleId(appBundle) {
+function readAppBundle(appBundle) {
   if (!isAbsolute(appBundle)) throw new Error('--app-bundle must be an absolute path.');
   const bundle = realpathSync(appBundle);
   accessSync(join(bundle, 'Contents/MacOS/PaintNode'), constants.X_OK);
   const plist = join(bundle, 'Contents/Info.plist');
   const result = spawnSync('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plist], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`Could not read QA app bundle identity: ${result.stderr || result.error}`);
-  return result.stdout.trim();
-}
-
-function currentGitSha(repoRoot) {
-  const result = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
-  if (result.status !== 0) throw new Error('Could not read the current Git SHA.');
-  return result.stdout.trim();
+  return {
+    bundleId: result.stdout.trim(),
+    appBuild: readQaBuildProvenance(bundle),
+    actualExecutableSha256: sha256File(join(bundle, 'Contents/MacOS/PaintNode')),
+  };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2);
+    const sourceState = captureSourceState(scriptRoot);
+    const app = readAppBundle(valueAfter(args, '--app-bundle'));
     const receipt = verifyStudySetup({
       repoRoot: scriptRoot,
       projectDir: valueAfter(args, '--project-dir'),
       rehearsalDir: valueAfter(args, '--rehearsal-dir'),
       expectedGitSha: valueAfter(args, '--expected-sha'),
-      actualGitSha: currentGitSha(scriptRoot),
-      bundleId: readBundleId(valueAfter(args, '--app-bundle')),
+      actualGitSha: sourceState.gitSha,
+      actualSourceTreeSha: sourceState.sourceTreeSha,
+      actualSourceStatusSha256: sourceState.sourceStatusSha256,
+      sourceDirty: sourceState.sourceDirty,
+      ...app,
     });
     process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
   } catch (error) {

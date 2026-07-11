@@ -4,6 +4,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+import { FINDING_CATEGORIES } from './creator-study-contract.mjs';
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const study = join(root, 'docs/testing/creator-study');
 
@@ -20,7 +22,7 @@ test('every private operational form is blank and warns to copy outside the repo
     const content = readFileSync(join(study, 'templates', template), 'utf8');
     assert.match(content, /COPY OUTSIDE REPOSITORY/);
     assert.match(content, /PRIVATE ONLY/);
-    assert.doesNotMatch(content, /P0[1-8]|@|https?:\/\//, `${template} must not contain participant-shaped data`);
+    assert.doesNotMatch(content, /P(?:0[1-9]|[1-9][0-9])|@|https?:\/\//, `${template} must not contain participant-shaped data`);
   }
 });
 
@@ -49,4 +51,14 @@ test('Product materials include repository-owned provenance and a public-domain 
   assert.match(license, /generated deterministically/i);
   assert.match(license, /no client,\s+participant, stock, or externally sourced material/i);
   assert.match(license, /CC0 1\.0 Universal/);
+});
+
+test('synthesis schema matches the shared finding categories and supports replacement records', () => {
+  const schema = JSON.parse(readFileSync(join(study, 'synthesis-input.schema.json'), 'utf8'));
+  assert.deepEqual(schema.$defs.finding.properties.category.enum, FINDING_CATEGORIES);
+  assert.equal(schema.$defs.finding.properties.participantIds.minItems, 1);
+  assert.equal(schema.$defs.finding.properties.participantIds.uniqueItems, true);
+  assert.equal(schema.properties.participants.maxItems > 8, true);
+  assert.equal(new RegExp(schema.$defs.participant.properties.id.pattern).test('P99'), true);
+  assert.equal(schema.$defs.finding.properties.id.pattern, '^CB-[1-9][0-9]*$');
 });

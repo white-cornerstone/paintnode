@@ -2,13 +2,15 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  FINDING_CATEGORIES,
+  isIntegrityBlockingFindingCategory,
+} from './creator-study-contract.mjs';
+
 const OUTCOMES = new Set(['unaided success', 'assisted success', 'failure', 'not attempted']);
 const SEVERITIES = new Set(['S0', 'S1', 'S2', 'S3', 'S4']);
 const CRITICAL_TASKS = new Set([3, 4, 5, 7, 8]);
-const INTEGRITY_CATEGORIES = new Set([
-  'privacy', 'data-integrity', 'wrong-lineage', 'accepted-direction',
-  'editor-return', 'save-reopen', 'keyboard-accessibility', 'provider-invocation',
-]);
+const FINDING_CATEGORY_SET = new Set(FINDING_CATEGORIES);
 const AI_EXPERIENCE = new Set(['never', 'occasional', 'monthly', 'weekly', 'daily']);
 const INVALID_REASONS = new Set(['withdrawn-consent', 'wrong-or-unusable-build', 'provider-invocation', 'prior-exposure', 'facilitator-deviation']);
 const FORBIDDEN_KEYS = /(^|_)(name|email|phone|contact|employer|client|medical|credential|storagePath|storageLocation|participantMapping|rawQuote|recordingPath|observerNames?)$/i;
@@ -55,8 +57,8 @@ function validate(input) {
   if (input.schemaVersion !== 1 || !Array.isArray(input.participants) || !Array.isArray(input.findings)) {
     throw new Error('Synthesis input must use schemaVersion 1 with participants and findings arrays.');
   }
-  if (input.participants.length > 8 || new Set(input.participants.map((participant) => participant.id)).size !== input.participants.length) {
-    throw new Error('Synthesis input may contain at most eight uniquely coded participant records.');
+  if (input.participants.length > 99 || new Set(input.participants.map((participant) => participant.id)).size !== input.participants.length) {
+    throw new Error('Synthesis input may contain at most 99 uniquely coded participant records.');
   }
   for (const flag of ['recruitmentDecisionDocumented', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded']) {
     if (typeof input[flag] !== 'boolean') throw new Error(`${flag} must be boolean.`);
@@ -70,7 +72,8 @@ function validate(input) {
     if (String(participant.id).startsWith('TEST-') && (!input.testOnly || !participant.testOnly)) {
       throw new Error('TEST- records must remain explicitly test-only.');
     }
-    if (!input.testOnly && !/^P0[1-8]$/.test(participant.id)) throw new Error(`Invalid participant code: ${participant.id}`);
+    if (input.testOnly && !/^TEST-[1-9][0-9]*$/.test(participant.id)) throw new Error(`Invalid test-only participant code: ${participant.id}`);
+    if (!input.testOnly && !/^P(?:0[1-9]|[1-9][0-9])$/.test(participant.id)) throw new Error(`Invalid participant code: ${participant.id}`);
     if (typeof participant.valid !== 'boolean' || !AI_EXPERIENCE.has(participant.aiExperience)) {
       throw new Error(`${participant.id} has invalid validity or AI-experience data.`);
     }
@@ -106,12 +109,23 @@ function validate(input) {
       }
     }
   }
+  if (new Set(input.findings.map((finding) => finding.id)).size !== input.findings.length) {
+    throw new Error('Finding IDs must be unique.');
+  }
   for (const finding of input.findings) {
     assertKeys(finding, FINDING_KEYS, `Finding ${finding.id || '(missing)'}`);
     requireKeys(finding, ['id', 'severity', 'participantIds', 'category', 'resolved', 'traceable'], `Finding ${finding.id || '(missing)'}`);
     if (!SEVERITIES.has(finding.severity) || !finding.id || !Array.isArray(finding.participantIds)) {
       throw new Error('Every finding needs an ID, S0-S4 severity, and participantIds.');
     }
+    if ((input.testOnly && !/^TEST-F[0-9A-Z-]*$/.test(finding.id))
+      || (!input.testOnly && !/^CB-[1-9][0-9]*$/.test(finding.id))) {
+      throw new Error(`Finding ID is invalid: ${finding.id}`);
+    }
+    if (!FINDING_CATEGORY_SET.has(finding.category)) {
+      throw new Error(`Finding category is invalid: ${finding.category}`);
+    }
+    if (finding.participantIds.length === 0) throw new Error(`Finding ${finding.id} must reference at least one participant.`);
     if (typeof finding.resolved !== 'boolean' || typeof finding.traceable !== 'boolean'
       || finding.participantIds.some((id) => !input.participants.some((participant) => participant.id === id))) {
       throw new Error(`Finding ${finding.id} has invalid traceability or participant references.`);
@@ -185,7 +199,7 @@ export function calculateStudySynthesis(input) {
     if (finding.blocksExit) return true;
     if (finding.severity === 'S0') return true;
     if (finding.severity !== 'S1') return false;
-    return INTEGRITY_CATEGORIES.has(finding.category) || finding.participantIds.length >= 2
+    return isIntegrityBlockingFindingCategory(finding.category) || finding.participantIds.length >= 2
       || !finding.exceptionApproved || !finding.exceptionRationaleRecorded;
   });
   const traceabilityComplete = input.findings.every((finding) => finding.traceable);
@@ -222,6 +236,7 @@ export function calculateStudySynthesis(input) {
       id: finding.id,
       severity: finding.severity,
       category: finding.category,
+      integrityBlocker: isIntegrityBlockingFindingCategory(finding.category),
       frequency: new Set(finding.participantIds).size,
       resolved: finding.resolved,
       traceable: finding.traceable,

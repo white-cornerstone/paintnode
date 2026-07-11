@@ -17,6 +17,13 @@ detection, capability discovery, execution, and managed-runtime auth probes are
 disabled. Use this exact bundle identity for routine workflow-board interaction
 and Computer Use validation.
 
+The build also writes a `.paintnode-qa-build.json` provenance sidecar beside the
+app. It binds the bundle to the source Git SHA/tree, clean-or-dirty build state,
+bundle ID, and actual executable SHA-256 without modifying the signed app.
+Creator-study readiness requires a clean checkout and keeps the sidecar beside
+the app; `qa:creator-study:setup` rejects missing/stale provenance, dirty source,
+or executable fingerprint drift.
+
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates
 deterministic 1024 x 1024, 1024 x 1280, and 1280 x 720 PNGs in memory and stores them through the normal project

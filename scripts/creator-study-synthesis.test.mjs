@@ -214,3 +214,47 @@ test('outcome labels cannot disguise direct facilitator assistance', () => {
   input.participants[0].tasks[0].directAssists = 1;
   assert.throws(() => calculateStudySynthesis(input), /outcome conflicts.*direct-assist/i);
 });
+
+test('finding categories are typed and integrity variants cannot bypass blockers', () => {
+  const input = passingInput();
+  input.findings.push({
+    id: 'TEST-F5', severity: 'S1', participantIds: ['TEST-1'],
+    category: 'save_reopen', resolved: false, traceable: true,
+    exceptionApproved: true, exceptionRationaleRecorded: true,
+  });
+  assert.throws(() => calculateStudySynthesis(input), /finding category/i);
+});
+
+test('finding IDs are unique and every finding references at least one participant', () => {
+  const duplicate = passingInput();
+  duplicate.findings.push(
+    { id: 'TEST-F6', severity: 'S2', participantIds: ['TEST-1'], category: 'copy-clarity', resolved: false, traceable: true },
+    { id: 'TEST-F6', severity: 'S3', participantIds: ['TEST-2'], category: 'copy-clarity', resolved: false, traceable: true },
+  );
+  assert.throws(() => calculateStudySynthesis(duplicate), /finding IDs.*unique/i);
+
+  const emptyReferences = passingInput();
+  emptyReferences.findings.push({
+    id: 'TEST-F7', severity: 'S3', participantIds: [],
+    category: 'copy-clarity', resolved: false, traceable: true,
+  });
+  assert.throws(() => calculateStudySynthesis(emptyReferences), /at least one participant/i);
+});
+
+test('eight valid sessions plus invalid replacements remain representable', () => {
+  const input = passingInput();
+  input.participants.push(
+    testOnlyParticipant(9, { valid: false, invalidReasonCategory: 'wrong-or-unusable-build' }),
+    testOnlyParticipant(10, { valid: false, invalidReasonCategory: 'facilitator-deviation' }),
+  );
+  input.testOnly = false;
+  input.participants.forEach((participant, index) => {
+    participant.id = `P${String(index + 1).padStart(2, '0')}`;
+    delete participant.testOnly;
+  });
+  const result = calculateStudySynthesis(input);
+  assert.equal(result.recruitedSessions, 10);
+  assert.equal(result.validSessions, 8);
+  assert.equal(result.invalidSessions, 2);
+  assert.equal(result.recommendation, 'pass');
+});

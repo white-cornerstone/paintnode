@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,22 @@ import {
 
 const repoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const fixtureManifest = join(repoRoot, 'docs', 'testing', 'creator-study', 'materials', 'manifest.json');
+const sourceState = {
+  actualGitSha: '405524d393f07ecd588d7476e83adc38e00a90cc',
+  actualSourceTreeSha: 'tree-current',
+  actualSourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  sourceDirty: false,
+};
+const appBuild = {
+  version: 1,
+  mode: 'provider-free',
+  bundleId: EXPECTED_BUNDLE_ID,
+  gitSha: sourceState.actualGitSha,
+  sourceTreeSha: sourceState.actualSourceTreeSha,
+  sourceDirty: false,
+  sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  executableSha256: 'a'.repeat(64),
+};
 
 function setupDirectories() {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-creator-study-'));
@@ -28,8 +44,10 @@ test('the committed Product materials are deterministic, distinct, and assigned 
     rehearsalDir,
     fixtureManifest,
     expectedGitSha: '405524d393f07ecd588d7476e83adc38e00a90cc',
-    actualGitSha: '405524d393f07ecd588d7476e83adc38e00a90cc',
+    ...sourceState,
     bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
   });
 
   assert.equal(receipt.ready, true);
@@ -37,6 +55,7 @@ test('the committed Product materials are deterministic, distinct, and assigned 
   assert.equal(new Set(receipt.materials.map(({ sha256 }) => sha256)).size, 2);
   assert.equal(receipt.projectState, 'empty');
   assert.equal(receipt.rehearsalState, 'deleted');
+  assert.deepEqual(receipt.appBuild, appBuild);
   assert.equal(JSON.stringify(receipt).includes(projectDir), false, 'receipt must not leak local paths');
 });
 
@@ -50,8 +69,11 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
     rehearsalDir,
     fixtureManifest,
     expectedGitSha: '405524d393f07ecd588d7476e83adc38e00a90cc',
+    ...sourceState,
     actualGitSha: 'wrong',
     bundleId: 'com.paintnode.editor',
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
   };
   assert.throws(() => verifyStudySetup(options), /Git SHA/i);
 
@@ -73,6 +95,58 @@ test('setup verification fails closed for dirty projects, retained rehearsal dat
   options.projectDir = 'relative-project';
   options.rehearsalDir = 'relative-rehearsal';
   assert.throws(() => verifyStudySetup(options), /paths must be absolute/i);
+});
+
+test('setup verification rejects dirty source, stale bundles, and executable fingerprint drift', () => {
+  const { projectDir, rehearsalDir } = setupDirectories();
+  const options = {
+    repoRoot, projectDir, rehearsalDir, fixtureManifest,
+    expectedGitSha: sourceState.actualGitSha,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild: { ...appBuild },
+    actualExecutableSha256: appBuild.executableSha256,
+  };
+
+  options.sourceDirty = true;
+  assert.throws(() => verifyStudySetup(options), /dirty source/i);
+  options.sourceDirty = false;
+
+  options.appBuild.gitSha = 'stale-build';
+  assert.throws(() => verifyStudySetup(options), /app build Git SHA/i);
+  options.appBuild.gitSha = sourceState.actualGitSha;
+
+  options.appBuild.sourceTreeSha = 'stale-tree';
+  assert.throws(() => verifyStudySetup(options), /source tree/i);
+  options.appBuild.sourceTreeSha = sourceState.actualSourceTreeSha;
+
+  options.actualExecutableSha256 = 'b'.repeat(64);
+  assert.throws(() => verifyStudySetup(options), /executable fingerprint/i);
+});
+
+test('project and deleted rehearsal paths are canonicalized through symlinks', () => {
+  const { root, projectDir, rehearsalDir } = setupDirectories();
+  const linkedProject = join(root, 'linked-project');
+  symlinkSync(projectDir, linkedProject);
+  const options = {
+    repoRoot, projectDir: linkedProject, rehearsalDir, fixtureManifest,
+    expectedGitSha: sourceState.actualGitSha,
+    ...sourceState,
+    bundleId: EXPECTED_BUNDLE_ID,
+    appBuild,
+    actualExecutableSha256: appBuild.executableSha256,
+  };
+  assert.equal(verifyStudySetup(options).ready, true);
+
+  const repoLink = join(root, 'repo-link');
+  symlinkSync(repoRoot, repoLink);
+  options.projectDir = projectDir;
+  options.rehearsalDir = join(repoLink, 'deleted-rehearsal');
+  assert.throws(() => verifyStudySetup(options), /outside the Git repository/i);
+
+  options.projectDir = repoLink;
+  options.rehearsalDir = rehearsalDir;
+  assert.throws(() => verifyStudySetup(options), /outside the Git repository/i);
 });
 
 test('material manifest hashes match the committed bytes', () => {

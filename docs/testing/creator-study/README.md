@@ -32,8 +32,10 @@ study storage.
 
 ## Before every session
 
-1. Build the repo-native provider-free app with
-   `npm run qa:native:provider-free`. Close it after rehearsal.
+1. From a committed, clean checkout, build the repo-native provider-free app
+   with `npm run qa:native:provider-free`. Close it after rehearsal. The build
+   writes a provenance sidecar beside the app containing the source SHA/tree
+   and actual executable fingerprint; keep the app and sidecar together.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate folder. Delete that rehearsal folder.
 3. Create a different, genuinely empty participant project folder outside the
@@ -49,10 +51,13 @@ study storage.
      --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT"
    ```
 
-The verifier checks the exact SHA, bundle identity, empty project, deleted and
-separate rehearsal path, Product hashes/dimensions, and the presence of all
-three QA scenario controls. Its receipt deliberately omits local paths. It does
-not replace the visible rehearsal or the private authorization gate.
+The verifier checks a clean source tree, the exact SHA/tree recorded by the
+actual build, bundle identity, executable fingerprint, canonicalized paths,
+empty project, deleted and separate rehearsal path, Product hashes/dimensions,
+and all three QA scenario controls. Stale bundles, modified executables, dirty
+source, broken symlinks, and symlink aliases into the repository fail closed.
+Its receipt deliberately omits local paths. It does not replace the visible
+rehearsal or the private authorization gate.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either
@@ -80,3 +85,10 @@ sign-offs, complete traceability, thresholds, and blocker rules all pass.
 Review the generated aggregate output against the private records, then copy
 only approved values into `de-identified-study-decision.md`. Humans remain
 responsible for severity decisions, de-identification, exceptions, and sign-off.
+
+Participant records use sequential codes `P01`–`P99`. Invalid sessions and
+replacements keep their own records and codes, so eight valid sessions may
+coexist with additional invalid/replacement records. Only the valid-session
+count is constrained to 6–8. Finding categories come from the closed enum in
+`scripts/creator-study-contract.mjs`; finding IDs must be unique and every
+finding must reference at least one participant code.

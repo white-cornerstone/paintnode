@@ -113,7 +113,10 @@ answer is explicitly `yes`. A participant who declines recording may still take
 part with written notes. Stop recording and the session immediately if
 participation consent is withdrawn.
 
-Use participant IDs `P01`–`P08`. Raw recordings and identifiable notes stay in
+Assign participant IDs sequentially from `P01`; replacements and invalid
+sessions continue with `P09` and above rather than reusing a code. The valid
+cohort remains 6–8 sessions even when the total recruitment record is larger.
+Raw recordings and identifiable notes stay in
 the approved restricted research location, never in the Git repository. Access
 is limited to the study owner and the named observers recorded before
 recruitment. De-identify working notes under the participant code as soon as
@@ -152,7 +155,9 @@ separate rehearsal folder. Delete the rehearsal project. Do not pre-import the
 Product, pre-create Campaign Composer, or leave a workflow open in the session
 folder. Run `npm run qa:creator-study:setup` with the approved SHA, built app
 bundle, empty participant project, and deleted rehearsal path as documented in
-the operations runbook. The verifier does not replace the visible rehearsal.
+the operations runbook. The verifier rejects dirty source, stale bundles,
+executable fingerprint drift, and symlink aliases into the repository. The
+verifier does not replace the visible rehearsal.
 
 Use committed **Product A** for Task 1. Keep **Product B** hidden until Task 6.
 Their task assignments, dimensions, provenance, and hashes are pinned in
