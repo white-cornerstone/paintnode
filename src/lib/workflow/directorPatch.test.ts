@@ -497,6 +497,52 @@ describe('Workflow Director patch proposal', () => {
     expect(JSON.stringify(result.proposal?.graph.reviewPromotions)).toBe(promotions);
   });
 
+  it('rejects adding a second candidate source to a promoted Review atomically', () => {
+    const graph = campaignWithPromotedReview();
+    const before = JSON.stringify(graph);
+    const result = createWorkflowDirectorPatchProposal(
+      patch([{
+        op: 'add-edge',
+        edge: {
+          id: 'edge-composition-review-second-source',
+          source: { nodeId: 'composition', portId: 'layout' },
+          target: { nodeId: 'review-concepts', portId: 'candidates' },
+        },
+      }]),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.proposal).toBeNull();
+    expect(result.issues).toEqual([expect.objectContaining({ code: 'PROTECTED_REVIEW_HISTORY' })]);
+    expect(JSON.stringify(graph)).toBe(before);
+  });
+
+  it('permits adding a separate unpromoted Review without changing promoted Review topology', () => {
+    const graph = campaignWithPromotedReview();
+    const result = createWorkflowDirectorPatchProposal(
+      patch([
+        { op: 'add-node', node: { id: 'review-draft', type: 'review', title: 'Draft Review' } },
+        {
+          op: 'add-edge',
+          edge: {
+            id: 'edge-composition-review-draft',
+            source: { nodeId: 'composition', portId: 'layout' },
+            target: { nodeId: 'review-draft', portId: 'candidates' },
+          },
+        },
+      ]),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.issues).toEqual([]);
+    expect(result.proposal?.graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'review-concepts', type: 'review' }),
+      expect.objectContaining({ id: 'review-draft', type: 'review' }),
+    ]));
+  });
+
   it('rejects removal of a dormant edge owned by an unsupported future node', () => {
     const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
       graphId: 'campaign-revision-source',

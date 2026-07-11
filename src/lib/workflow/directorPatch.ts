@@ -821,19 +821,25 @@ export function workflowDirectorProtectedReviewHistoryBytes(graph: WorkflowGraph
       edge.source.nodeId === promotion.sourceNodeId
       && edge.target.nodeId === promotion.reviewNodeId
     ));
+    const reviewLayoutInputIds = new Set(
+      review?.ports.inputs.filter((port) => port.dataType === 'layout').map((port) => port.id) ?? [],
+    );
+    const reviewInputs = graph.edges.filter((edge) => (
+      edge.target.nodeId === promotion.reviewNodeId
+      && reviewLayoutInputIds.has(edge.target.portId)
+    ));
     const reviewOutputs = graph.edges
       .filter((edge) => edge.source.nodeId === promotion.reviewNodeId)
-      .map((edge) => ({
-        edge,
-        target: graph.nodes.find((node) => node.id === edge.target.nodeId)
-          ? { id: edge.target.nodeId, type: graph.nodes.find((node) => node.id === edge.target.nodeId)!.type }
-          : null,
-      }));
+      .map((edge) => {
+        const target = graph.nodes.find((node) => node.id === edge.target.nodeId);
+        return { edge, target: target ? { id: target.id, type: target.type } : null };
+      });
     return {
       promotionId: promotion.id,
       source: source ? { id: source.id, type: source.type } : null,
       review: review ? { id: review.id, type: review.type } : null,
       sourceToReview,
+      reviewInputs,
       reviewOutputs,
     };
   });
