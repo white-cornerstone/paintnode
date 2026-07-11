@@ -5,6 +5,7 @@
 ## Before participant arrival
 
 - [ ] Study authorization gate is complete in approved private storage.
+- [ ] Facilitator calibration sign-off matches the current instrument version, SHA-256, and approved Git change reference.
 - [ ] Private schedule, roles, delivery mode, and accommodation setup match the recruitment record.
 - [ ] Correct SHA and Provider Free bundle identity recorded.
 - [ ] Product A and Product B hashes match the committed manifest.

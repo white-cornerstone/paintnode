@@ -20,6 +20,10 @@ study storage.
   decision template. It contains aggregate counts, de-identified finding IDs,
   and role sign-offs, not names or raw evidence locations.
 - `privacy-fields.json` is the allow/deny contract.
+- `facilitator-hints.json` is the versioned, participant-hidden hint, takeover,
+  assist, and deviation instrument; its approved text is repository-safe.
+  `facilitator-hints.sha256` pins its exact bytes. Participant-linked delivered
+  intervention records remain private-only.
 
 ## Before recruitment
 
@@ -32,6 +36,12 @@ study storage.
 5. Privately assign each scheduled date/start/time zone, delivery mode,
    facilitator, observers, technical operator, and accommodation setup. None of
    these assignments belong in repository-safe evidence.
+6. Verify `facilitator-hints.json` against `facilitator-hints.sha256`. Record its
+   version, SHA-256, and approved Git SHA/change reference in the private sign-off.
+7. Calibrate and rehearse every facilitator against that exact instrument before
+   participant 1 and after every approved instrument change. Any instrument edit
+   requires a new committed hash, approved Git change reference, and renewed
+   sign-off even if the integer version is unchanged.
 
 ## Before every session
 
@@ -41,9 +51,11 @@ study storage.
    and actual executable fingerprint; keep the app and sidecar together.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate folder. Delete that rehearsal folder.
-3. Create a different, genuinely empty participant project folder outside the
+3. Verify the assigned facilitator's private calibration sign-off matches the
+   current hint instrument version, SHA-256, and approved Git change reference.
+4. Create a different, genuinely empty participant project folder outside the
    repository.
-4. Start a new isolated study profile. This generates a cryptographically random
+5. Start a new isolated study profile. This generates a cryptographically random
    WebKit data-store identifier that has no access to the generic QA profile,
    rehearsal, or any prior participant profile. The study mechanism requires
    macOS 14 or newer and fails closed on older systems:
@@ -52,10 +64,10 @@ study storage.
    npm run qa:native:provider-free -- --fresh-study-session
    ```
 
-5. Before opening any folder, visibly confirm the Project panel has no open
+6. Before opening any folder, visibly confirm the Project panel has no open
    project or imported assets and no workflow is open. Close the app if either
    is present; do not continue the session.
-6. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle and
+7. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle and
    run the setup verifier only after making that visible check:
 
    ```sh
@@ -67,7 +79,7 @@ study storage.
      --visible-empty-state-attested
    ```
 
-7. To test quit/reopen within this same participant session, relaunch with the
+8. To test quit/reopen within this same participant session, relaunch with the
    same isolated profile:
 
    ```sh
@@ -75,7 +87,7 @@ study storage.
    ```
 
    `--resume-study-session` must never start a new participant. The next
-   participant always begins again at step 4 with `--fresh-study-session`.
+   participant always begins again at step 5 with `--fresh-study-session`.
 
 The verifier checks a clean source tree, the exact SHA/tree recorded by the
 actual build, bundle identity, executable fingerprint, canonicalized paths,
