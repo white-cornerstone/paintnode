@@ -71,50 +71,41 @@ test('direct provider executables remain direct and relative paths fail closed',
   assert.throws(() => resolveProviderLaunch('codex', 'codex'), /absolute path/i);
 });
 
-test('macOS signature validation rejects revoked or unexpected provider identities', () => {
-  const validCodex = [
-    'Identifier=codex',
-    'Authority=Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)',
-    'TeamIdentifier=2DC432GLL2',
-  ].join('\n');
-
+test('macOS signature validation uses pinned requirement status and structured Gatekeeper output', () => {
+  const validCli = '<plist><dict><key>assessment:cserror</key><integer>-67002</integer><key>assessment:verdict</key><false/></dict></plist>';
   assert.doesNotThrow(() =>
     assertMacProviderSignature('codex', '/trusted/codex', {
       codesignStatus: 0,
-      codesignOutput: validCodex,
       gatekeeperStatus: 3,
-      gatekeeperOutput: '/trusted/codex: rejected (the code is valid but does not seem to be an app)',
+      gatekeeperRaw: validCli,
     }),
   );
   assert.throws(
     () =>
-      assertMacProviderSignature('codex', '/stale/codex', {
+      assertMacProviderSignature('codex', '/stale\nTeamIdentifier=2DC432GLL2/codex', {
         codesignStatus: 0,
-        codesignOutput: validCodex,
         gatekeeperStatus: 3,
-        gatekeeperOutput: '/stale/codex: CSSMERR_TP_CERT_REVOKED',
+        gatekeeperRaw: validCli,
       }),
-    /revoked/i,
+    /unsafe control characters/i,
   );
   assert.throws(
     () =>
       assertMacProviderSignature('antigravity', '/fake/agy', {
-        codesignStatus: 0,
-        codesignOutput: 'Identifier=cli\nTeamIdentifier=NOT_GOOGLE',
-        gatekeeperStatus: 0,
-        gatekeeperOutput: '',
+        codesignStatus: 1,
+        gatekeeperStatus: 3,
+        gatekeeperRaw: validCli,
       }),
-    /EQHXZ8M8AV/,
+    /pinned macOS code-signature requirement/i,
   );
   assert.throws(
     () =>
       assertMacProviderSignature('codex', '/untrusted/codex', {
         codesignStatus: 0,
-        codesignOutput: validCodex,
         gatekeeperStatus: 3,
-        gatekeeperOutput: '/untrusted/codex: rejected (source=Unnotarized Developer ID)',
+        gatekeeperRaw: '<plist><dict><key>assessment:cserror</key><integer>-67030</integer><key>assessment:verdict</key><false/></dict></plist>',
       }),
-    /Gatekeeper rejected/i,
+    /Gatekeeper/i,
   );
 });
 

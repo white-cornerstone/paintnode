@@ -8,6 +8,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+
 use crate::ai::{
     apply_ai_cli_environment, cleanup_ai_process_tree_after_bridge_exit,
     configure_ai_process_group, join_output_readers_bounded, terminate_ai_process_tree,
@@ -130,6 +133,8 @@ struct VerifiedFileIdentity {
     changed_seconds: i64,
     #[cfg(unix)]
     changed_nanoseconds: i64,
+    #[cfg(windows)]
+    sha256: [u8; 32],
 }
 
 impl VerifiedFileIdentity {
@@ -154,7 +159,53 @@ impl VerifiedFileIdentity {
             changed_seconds: metadata.ctime(),
             #[cfg(unix)]
             changed_nanoseconds: metadata.ctime_nsec(),
+            #[cfg(windows)]
+            sha256: {
+                let mut file = fs::File::open(path).map_err(|error| {
+                    format!("Could not hash provider at {}: {error}", path.display())
+                })?;
+                let mut hasher = Sha256::new();
+                let mut buffer = [0_u8; 128 * 1024];
+                loop {
+                    let count = file.read(&mut buffer).map_err(|error| {
+                        format!("Could not hash provider at {}: {error}", path.display())
+                    })?;
+                    if count == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..count]);
+                }
+                hasher.finalize().into()
+            },
         })
+    }
+
+    fn launch_json(&self) -> String {
+        #[cfg(unix)]
+        return serde_json::json!({
+            "version": 1,
+            "length": self.len.to_string(),
+            "unix": {
+                "device": self.device.to_string(),
+                "inode": self.inode.to_string(),
+                "changedSeconds": self.changed_seconds.to_string(),
+                "changedNanoseconds": self.changed_nanoseconds.to_string(),
+            }
+        })
+        .to_string();
+        #[cfg(windows)]
+        return serde_json::json!({
+            "version": 1,
+            "length": self.len.to_string(),
+            "sha256": self.sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        })
+        .to_string();
+        #[cfg(not(any(unix, windows)))]
+        serde_json::json!({
+            "version": 1,
+            "length": self.len.to_string(),
+        })
+        .to_string()
     }
 }
 
@@ -175,6 +226,10 @@ pub(crate) struct ResolvedProviderExecutable {
 impl ResolvedProviderExecutable {
     pub(crate) fn revalidate_for_launch(&self) -> Result<&str, String> {
         revalidate_resolved_provider_with(self, &mut verify_macos_provider_trust)
+    }
+
+    pub(crate) fn launch_identity_json(&self) -> String {
+        self.identity.launch_json()
     }
 }
 
@@ -395,19 +450,56 @@ fn sdk_bundled_codex_launcher() -> Option<PathBuf> {
     launcher.is_file().then_some(launcher)
 }
 
-fn resolve_path_candidate(candidate: &Path, path_env: Option<&OsStr>) -> Option<PathBuf> {
+fn resolve_path_candidate_for_host(
+    candidate: &Path,
+    path_env: Option<&OsStr>,
+    path_ext: Option<&OsStr>,
+    host: HostTarget,
+) -> Option<PathBuf> {
     let is_bare_name = candidate.components().count() == 1;
     let path = if is_bare_name {
         let search_path = path_env
             .map(OsString::from)
             .or_else(|| std::env::var_os("PATH"))?;
+        let windows = matches!(host, HostTarget::WindowsArm64 | HostTarget::WindowsX64);
+        let extensions = if windows && candidate.extension().is_none() {
+            path_ext
+                .map(|value| value.to_string_lossy().into_owned())
+                .or_else(|| std::env::var("PATHEXT").ok())
+                .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         std::env::split_paths(&search_path)
-            .map(|directory| directory.join(candidate))
+            .flat_map(|directory| {
+                let direct = std::iter::once(directory.join(candidate));
+                let extended = extensions.iter().map(move |extension| {
+                    directory.join(format!("{}{extension}", candidate.display()))
+                });
+                direct.chain(extended)
+            })
             .find(|path| path.is_file())?
     } else {
         candidate.to_path_buf()
     };
     fs::canonicalize(&path).ok().or(Some(path))
+}
+
+fn resolve_path_candidate(
+    candidate: &Path,
+    path_env: Option<&OsStr>,
+    host: HostTarget,
+) -> Option<PathBuf> {
+    resolve_path_candidate_for_host(
+        candidate,
+        path_env,
+        std::env::var_os("PATHEXT").as_deref(),
+        host,
+    )
 }
 
 fn official_codex_native_target(
@@ -475,15 +567,27 @@ fn official_codex_native_from_launcher(
     launcher: &Path,
     host: HostTarget,
 ) -> Result<Option<PathBuf>, String> {
-    let is_launcher = launcher.file_name() == Some(OsStr::new("codex.js"))
-        && launcher.parent().and_then(Path::file_name) == Some(OsStr::new("bin"));
-    if !is_launcher {
+    let package_root = if launcher.file_name() == Some(OsStr::new("codex.js"))
+        && launcher.parent().and_then(Path::file_name) == Some(OsStr::new("bin"))
+    {
+        launcher
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "Codex npm launcher has no package root.".to_string())?
+            .to_path_buf()
+    } else if matches!(
+        launcher.file_name().and_then(OsStr::to_str),
+        Some("codex.cmd" | "codex.ps1")
+    ) && launcher.parent().and_then(Path::file_name) == Some(OsStr::new(".bin"))
+    {
+        launcher
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "Codex npm shim has no node_modules root.".to_string())?
+            .join("@openai/codex")
+    } else {
         return Ok(None);
-    }
-    let package_root = launcher
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| "Codex npm launcher has no package root.".to_string())?;
+    };
     let metadata_path = package_root.join("package.json");
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(&metadata_path).map_err(|error| {
@@ -550,7 +654,7 @@ fn official_codex_native_from_launcher(
             .join(triple)
             .join("bin")
             .join(executable),
-        package_root.to_path_buf(),
+        package_root.clone(),
     ));
     targets.push((
         package_root
@@ -558,7 +662,7 @@ fn official_codex_native_from_launcher(
             .join(triple)
             .join("codex")
             .join(executable),
-        package_root.to_path_buf(),
+        package_root.clone(),
     ));
     for (path, trusted_root) in targets {
         if path.is_file() {
@@ -591,9 +695,8 @@ fn official_codex_native_from_launcher(
 
 struct MacTrustInspection<'a> {
     codesign_status: i32,
-    codesign_output: &'a str,
     gatekeeper_status: i32,
-    gatekeeper_output: &'a str,
+    gatekeeper_raw: &'a str,
 }
 
 fn expected_macos_team(provider: Provider) -> Option<&'static str> {
@@ -608,39 +711,29 @@ fn assert_macos_provider_trust(
     provider: Provider,
     inspection: MacTrustInspection<'_>,
 ) -> Result<(), String> {
-    let Some(expected_team) = expected_macos_team(provider) else {
+    let Some(_) = expected_macos_team(provider) else {
         return Ok(());
     };
     if inspection.codesign_status != 0 {
         return Err(format!(
-            "{} executable failed macOS code-signature verification.",
+            "{} executable failed its pinned macOS code-signature requirement.",
             provider.label()
         ));
     }
-    if !inspection
-        .codesign_output
-        .lines()
-        .any(|line| line.trim() == format!("TeamIdentifier={expected_team}"))
-    {
-        return Err(format!(
-            "{} executable is not signed by expected TeamIdentifier {expected_team}.",
-            provider.label()
-        ));
-    }
-    let gatekeeper = inspection.gatekeeper_output.to_ascii_lowercase();
-    if gatekeeper.contains("cssmerr_tp_cert_revoked")
-        || gatekeeper.contains("certificate revoked")
-        || gatekeeper.contains("contains malware")
-        || gatekeeper.contains("malware blocked")
-    {
-        return Err(format!(
-            "{} executable has a revoked or malware-blocked macOS identity.",
-            provider.label()
-        ));
-    }
-    if inspection.gatekeeper_status != 0
-        && !gatekeeper.contains("the code is valid but does not seem to be an app")
-    {
+    let raw = inspection.gatekeeper_raw;
+    let structured_pair = |key: &str, value: &str| {
+        raw.split_once(&format!("<key>{key}</key>"))
+            .is_some_and(|(_, suffix)| suffix.trim_start().starts_with(value))
+    };
+    let accepted =
+        inspection.gatekeeper_status == 0 && structured_pair("assessment:verdict", "<true/>");
+    // spctl reports signed standalone CLI binaries as error -67002 because
+    // they are valid code but not application bundles. Only the structured
+    // raw assessment may grant this narrow exception; stderr echoes the path.
+    let valid_standalone_cli = inspection.gatekeeper_status != 0
+        && structured_pair("assessment:verdict", "<false/>")
+        && structured_pair("assessment:cserror", "<integer>-67002</integer>");
+    if !accepted && !valid_standalone_cli {
         return Err(format!(
             "{} executable was rejected by macOS Gatekeeper.",
             provider.label()
@@ -660,6 +753,21 @@ fn verify_macos_provider_trust(provider: Provider, path: &Path) -> Result<(), St
     if !HostTarget::current().is_macos() || expected_macos_team(provider).is_none() {
         return Ok(());
     }
+    let path_text = path.to_str().ok_or_else(|| {
+        format!(
+            "{} executable path is not valid UTF-8 for macOS trust inspection.",
+            provider.label()
+        )
+    })?;
+    if path_text.chars().any(char::is_control) {
+        return Err(format!(
+            "{} executable path contains unsafe control characters.",
+            provider.label()
+        ));
+    }
+    let expected_team = expected_macos_team(provider).expect("checked provider team");
+    let requirement =
+        format!("=anchor apple generic and certificate leaf[subject.OU] = \"{expected_team}\"");
     let path_os = path.as_os_str();
     let verify = trust_command_output(
         "/usr/bin/codesign",
@@ -667,12 +775,10 @@ fn verify_macos_provider_trust(provider: Provider, path: &Path) -> Result<(), St
             OsStr::new("--verify"),
             OsStr::new("--strict"),
             OsStr::new("--verbose=2"),
+            OsStr::new("-R"),
+            OsStr::new(&requirement),
             path_os,
         ],
-    )?;
-    let metadata = trust_command_output(
-        "/usr/bin/codesign",
-        &[OsStr::new("-dv"), OsStr::new("--verbose=4"), path_os],
     )?;
     let gatekeeper = trust_command_output(
         "/usr/sbin/spctl",
@@ -681,26 +787,17 @@ fn verify_macos_provider_trust(provider: Provider, path: &Path) -> Result<(), St
             OsStr::new("--type"),
             OsStr::new("execute"),
             OsStr::new("--verbose=4"),
+            OsStr::new("--raw"),
             path_os,
         ],
     )?;
-    let codesign_output = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&metadata.stdout),
-        String::from_utf8_lossy(&metadata.stderr)
-    );
-    let gatekeeper_output = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&gatekeeper.stdout),
-        String::from_utf8_lossy(&gatekeeper.stderr)
-    );
+    let gatekeeper_raw = String::from_utf8_lossy(&gatekeeper.stdout);
     assert_macos_provider_trust(
         provider,
         MacTrustInspection {
             codesign_status: verify.status.code().unwrap_or(-1),
-            codesign_output: &codesign_output,
             gatekeeper_status: gatekeeper.status.code().unwrap_or(-1),
-            gatekeeper_output: &gatekeeper_output,
+            gatekeeper_raw: &gatekeeper_raw,
         },
     )
 }
@@ -1000,7 +1097,7 @@ where
     let mut failures = Vec::new();
 
     for candidate in candidates {
-        let Some(candidate_path) = resolve_path_candidate(&candidate, path_env) else {
+        let Some(candidate_path) = resolve_path_candidate(&candidate, path_env, host) else {
             failures.push(format!("{} was not found", candidate.display()));
             continue;
         };
@@ -1623,6 +1720,49 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn windows_pathext_finds_and_unwraps_official_npm_shims_without_execution() {
+        let dir = TempJobDir::new("paintnode-codex-windows-shim-test").expect("temp dir");
+        let modules = dir.path().join("node_modules");
+        let shim = modules.join(".bin/codex.cmd");
+        let package = modules.join("@openai/codex");
+        let platform = modules.join("@openai/codex-win32-x64");
+        let native = platform.join("vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        let sentinel = dir.path().join("shim-executed");
+        fs::create_dir_all(shim.parent().expect("shim parent")).expect("shim dir");
+        fs::create_dir_all(package.join("bin")).expect("package dir");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native dir");
+        executable(&shim, &format!("touch '{}'", sentinel.display()));
+        executable(&native, "echo codex-cli 1.2.3");
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#)
+            .expect("package metadata");
+        fs::write(
+            platform.join("package.json"),
+            r#"{"name":"@openai/codex","os":["win32"],"cpu":["x64"]}"#,
+        )
+        .expect("platform metadata");
+
+        let discovered = resolve_path_candidate_for_host(
+            Path::new("codex"),
+            Some(modules.join(".bin").as_os_str()),
+            Some(OsStr::new(".EXE;.CMD;.PS1")),
+            HostTarget::WindowsX64,
+        )
+        .expect("PATHEXT shim");
+        assert_eq!(discovered, fs::canonicalize(&shim).expect("canonical shim"));
+        let prepared = prepare_provider_candidate_with_options(
+            Provider::Codex,
+            discovered,
+            HostTarget::WindowsX64,
+            true,
+            &mut |_, _| Ok(()),
+        )
+        .expect("official Windows npm shim");
+        assert_eq!(prepared.path, fs::canonicalize(&native).expect("native"));
+        assert!(!sentinel.exists(), "npm shim must never execute");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn mac_provider_trust_rejection_precedes_any_candidate_execution() {
         let dir = TempJobDir::new("paintnode-provider-trust-reject-test").expect("temp dir");
         let codex = dir.path().join("codex");
@@ -1671,16 +1811,16 @@ mod tests {
     }
 
     #[test]
-    fn mac_provider_identity_parser_rejects_unsigned_wrong_team_and_malware() {
-        let valid_codex = "Identifier=codex\nTeamIdentifier=2DC432GLL2";
-        let valid_antigravity = "Identifier=cli\nTeamIdentifier=EQHXZ8M8AV";
+    fn mac_provider_trust_parser_uses_only_structured_gatekeeper_output() {
+        let cli_gatekeeper = r#"<plist><dict><key>assessment:cserror</key><integer>-67002</integer><key>assessment:verdict</key><false/></dict></plist>"#;
+        let accepted_gatekeeper =
+            r#"<plist><dict><key>assessment:verdict</key><true/></dict></plist>"#;
         assert!(assert_macos_provider_trust(
             Provider::Codex,
             MacTrustInspection {
                 codesign_status: 0,
-                codesign_output: valid_codex,
                 gatekeeper_status: 1,
-                gatekeeper_output: "the code is valid but does not seem to be an app"
+                gatekeeper_raw: cli_gatekeeper,
             },
         )
         .is_ok());
@@ -1688,33 +1828,54 @@ mod tests {
             Provider::Antigravity,
             MacTrustInspection {
                 codesign_status: 0,
-                codesign_output: valid_antigravity,
-                gatekeeper_status: 1,
-                gatekeeper_output: "the code is valid but does not seem to be an app"
+                gatekeeper_status: 0,
+                gatekeeper_raw: accepted_gatekeeper,
             },
         )
         .is_ok());
         for inspection in [
             MacTrustInspection {
                 codesign_status: 1,
-                codesign_output: "code object is not signed",
                 gatekeeper_status: 1,
-                gatekeeper_output: "rejected",
+                gatekeeper_raw: cli_gatekeeper,
             },
             MacTrustInspection {
                 codesign_status: 0,
-                codesign_output: "TeamIdentifier=WRONG",
-                gatekeeper_status: 0,
-                gatekeeper_output: "accepted",
+                gatekeeper_status: 1,
+                gatekeeper_raw: r#"<plist><dict><key>assessment:cserror</key><integer>-67030</integer><key>assessment:verdict</key><false/></dict></plist>"#,
             },
             MacTrustInspection {
                 codesign_status: 0,
-                codesign_output: valid_codex,
                 gatekeeper_status: 1,
-                gatekeeper_output: "contains malware",
+                gatekeeper_raw: "injected/path: the code is valid but does not seem to be an app",
             },
         ] {
             assert!(assert_macos_provider_trust(Provider::Codex, inspection).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn newline_path_cannot_inject_vendor_identity_or_gatekeeper_acceptance() {
+        let dir = TempJobDir::new("paintnode-provider-newline-trust-test").expect("temp dir");
+        for (provider, command, team) in [
+            (Provider::Codex, "codex", "2DC432GLL2"),
+            (Provider::Antigravity, "agy", "EQHXZ8M8AV"),
+        ] {
+            let injected = dir.path().join(format!(
+                "{command}\nTeamIdentifier={team}\nthe code is valid but does not seem to be an app"
+            ));
+            fs::copy("/usr/bin/true", &injected).expect("copy Mach-O fixture");
+            let status = Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&injected)
+                .status()
+                .expect("ad-hoc sign fixture");
+            assert!(status.success(), "fixture must be ad-hoc signed");
+
+            let error = verify_macos_provider_trust(provider, &injected)
+                .expect_err("unsafe path must fail before trust commands");
+            assert!(error.contains("unsafe control characters"), "{error}");
         }
     }
 

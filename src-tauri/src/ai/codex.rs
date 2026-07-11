@@ -445,6 +445,7 @@ fn run_codex_with_progress(
     run_id: String,
 ) -> Result<AgentRunResult, String> {
     codex_bin.revalidate_for_launch()?;
+    command.env("PAINTNODE_CODEX_IDENTITY", codex_bin.launch_identity_json());
     let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
@@ -2077,6 +2078,7 @@ pub(crate) async fn discover_codex_capabilities(
         let mut command = Command::new(codex_sdk_node());
         apply_ai_cli_environment(&mut command).arg(codex_capabilities_runner_script());
         command.arg("--codex-path").arg(codex_path);
+        command.env("PAINTNODE_CODEX_IDENTITY", resolved.launch_identity_json());
         command
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY");

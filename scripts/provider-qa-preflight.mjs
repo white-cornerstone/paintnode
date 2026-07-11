@@ -1,11 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { accessSync, constants, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-
-const PROVIDER_TEAMS = {
-  codex: '2DC432GLL2',
-  antigravity: 'EQHXZ8M8AV',
-};
+import {
+  assertMacProviderTrustInspection,
+  assertSafeExecutablePath,
+  inspectMacProviderTrust,
+} from './provider-executable-trust.mjs';
 
 const CODEX_TARGETS = {
   'darwin-arm64': ['@openai/codex-darwin-arm64', 'aarch64-apple-darwin'],
@@ -71,6 +71,7 @@ export function resolveProviderLaunch(provider, requestedPath, host = {}) {
   if (!isAbsolute(requestedPath)) {
     throw new Error(`${provider} provider QA requires an absolute path.`);
   }
+  assertSafeExecutablePath(provider, requestedPath);
 
   const resolvedPath = executable(realpathSync(requestedPath), `${provider} executable`);
   if (provider === 'codex') {
@@ -109,57 +110,12 @@ export function providerCapabilityArgs(provider) {
 }
 
 export function assertMacProviderSignature(provider, path, inspection) {
-  const expectedTeam = PROVIDER_TEAMS[provider];
-  if (!expectedTeam) throw new Error(`Unsupported provider ${provider}.`);
-  if (inspection.codesignStatus !== 0) {
-    throw new Error(`${provider} executable failed macOS code-signature verification: ${path}`);
-  }
-  if (!inspection.codesignOutput.includes(`TeamIdentifier=${expectedTeam}`)) {
-    throw new Error(`${provider} executable must be signed by TeamIdentifier ${expectedTeam}: ${path}`);
-  }
-  if (/CSSMERR_TP_CERT_REVOKED|certificate[^\n]*revoked|contains malware|malware blocked/i.test(inspection.gatekeeperOutput)) {
-    throw new Error(`${provider} executable has a revoked or blocked macOS identity: ${path}`);
-  }
-  if (
-    inspection.gatekeeperStatus !== 0 &&
-    !/the code is valid but does not seem to be an app/i.test(inspection.gatekeeperOutput)
-  ) {
-    throw new Error(`${provider} executable was Gatekeeper rejected before launch: ${path}`);
-  }
-}
-
-function combinedOutput(result) {
-  return `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim();
+  assertSafeExecutablePath(provider, path);
+  assertMacProviderTrustInspection(provider, inspection);
 }
 
 function inspectMacSignature(provider, path) {
-  const verified = spawnSync('codesign', ['--verify', '--strict', '--verbose=2', path], {
-    encoding: 'utf8',
-    timeout: 15_000,
-  });
-  const metadata = spawnSync('codesign', ['-dv', '--verbose=4', path], {
-    encoding: 'utf8',
-    timeout: 15_000,
-  });
-  const gatekeeper = spawnSync('spctl', ['--assess', '--type', 'execute', '--verbose=4', path], {
-    encoding: 'utf8',
-    timeout: 15_000,
-  });
-  for (const [name, result] of [
-    ['codesign verification', verified],
-    ['codesign identity inspection', metadata],
-    ['Gatekeeper inspection', gatekeeper],
-  ]) {
-    if (result.error?.code === 'ETIMEDOUT') {
-      throw new Error(`${provider} ${name} timed out before launch: ${path}`);
-    }
-  }
-  assertMacProviderSignature(provider, path, {
-    codesignStatus: verified.status,
-    codesignOutput: combinedOutput(metadata),
-    gatekeeperStatus: gatekeeper.status,
-    gatekeeperOutput: combinedOutput(gatekeeper),
-  });
+  inspectMacProviderTrust(provider, path);
 }
 
 export function terminateProviderTree(child, platform, taskkill = spawnSync) {

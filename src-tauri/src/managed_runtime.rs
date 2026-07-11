@@ -18,9 +18,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::ai::apply_ai_cli_environment;
 use crate::provider_executable::{resolve_exact_provider_executable, Provider};
 
-const RUNTIME_PROTOCOL_VERSION: u32 = 3;
+const RUNTIME_PROTOCOL_VERSION: u32 = 4;
 const DIRECTOR_ACTION_SCHEMA_FILE: &str = "bridge/director-action-schema.mjs";
 const WORKFLOW_DIRECTOR_SCHEMA_FILE: &str = "bridge/workflow-director-schema.mjs";
+const PROVIDER_EXECUTABLE_TRUST_FILE: &str = "bridge/provider-executable-trust.mjs";
 const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/white-cornerstone/paintnode/releases/download/provider-runtimes-latest/runtime-manifest.json";
 
@@ -199,6 +200,9 @@ fn required_package_files(manifest: &RuntimePackageManifest) -> Vec<&str> {
     if manifest.protocol_version >= 2 {
         required.push(DIRECTOR_ACTION_SCHEMA_FILE);
         required.push(WORKFLOW_DIRECTOR_SCHEMA_FILE);
+    }
+    if manifest.protocol_version >= 4 {
+        required.push(PROVIDER_EXECUTABLE_TRUST_FILE);
     }
     required
 }
@@ -734,12 +738,14 @@ mod tests {
         let required = required_package_files(&manifest);
         assert!(required.contains(&DIRECTOR_ACTION_SCHEMA_FILE));
         assert!(required.contains(&WORKFLOW_DIRECTOR_SCHEMA_FILE));
+        assert!(required.contains(&PROVIDER_EXECUTABLE_TRUST_FILE));
         let mut old = manifest.clone();
         old.protocol_version = 1;
         assert!(!package_is_compatible(&old));
         let old_required = required_package_files(&old);
         assert!(!old_required.contains(&DIRECTOR_ACTION_SCHEMA_FILE));
         assert!(!old_required.contains(&WORKFLOW_DIRECTOR_SCHEMA_FILE));
+        assert!(!old_required.contains(&PROVIDER_EXECUTABLE_TRUST_FILE));
     }
 
     #[test]
@@ -758,7 +764,7 @@ mod tests {
         };
         let error = release_for(&release, "codex").unwrap_err();
         assert!(error.contains("outdated runtime protocol 1"));
-        assert!(error.contains("requires protocol 3"));
+        assert!(error.contains("requires protocol 4"));
     }
 
     #[test]
