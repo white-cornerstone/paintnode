@@ -133,9 +133,21 @@ function providerFreeCampaignDraft(context: WorkflowDirectorContext): WorkflowDi
       {
         id: 'generate-square',
         type: 'transform',
-        title: 'Generate Square',
+        title: 'Generate Concepts',
         capability: 'generate',
-        instructions: 'Generate the square campaign result.',
+        instructions: 'Generate square campaign concepts.',
+      },
+      {
+        id: 'review-direction', type: 'review', title: 'Choose Campaign Direction', mode: 'human',
+        instructions: 'Choose the strongest campaign direction before adapting it to every format.',
+      },
+      {
+        id: 'generate-portrait', type: 'transform', title: 'Generate Portrait', capability: 'generate',
+        instructions: 'Adapt the accepted direction to Portrait 4:5.',
+      },
+      {
+        id: 'generate-landscape', type: 'transform', title: 'Generate Landscape', capability: 'generate',
+        instructions: 'Adapt the accepted direction to Landscape 16:9.',
       },
       ...context.requestedOutputs.map((output) => ({
         id: output.id,
@@ -162,15 +174,15 @@ function providerFreeCampaignDraft(context: WorkflowDirectorContext): WorkflowDi
         target: { nodeId: 'generate-square', portId: 'source' },
       },
       {
-        id: 'generate-square-output',
+        id: 'generate-square-review',
         source: { nodeId: 'generate-square', portId: 'result' },
-        target: { nodeId: context.requestedOutputs[0].id, portId: 'source' },
+        target: { nodeId: 'review-direction', portId: 'candidates' },
       },
-      ...context.requestedOutputs.slice(1).map((output) => ({
-        id: `composition-${output.id}`,
-        source: { nodeId: 'composition', portId: 'layout' },
-        target: { nodeId: output.id, portId: 'source' },
-      })),
+      { id: 'review-square', source: { nodeId: 'review-direction', portId: 'selected' }, target: { nodeId: context.requestedOutputs[0].id, portId: 'source' } },
+      { id: 'review-portrait', source: { nodeId: 'review-direction', portId: 'selected' }, target: { nodeId: 'generate-portrait', portId: 'source' } },
+      { id: 'generate-portrait-output', source: { nodeId: 'generate-portrait', portId: 'result' }, target: { nodeId: context.requestedOutputs[1].id, portId: 'source' } },
+      { id: 'review-landscape', source: { nodeId: 'review-direction', portId: 'selected' }, target: { nodeId: 'generate-landscape', portId: 'source' } },
+      { id: 'generate-landscape-output', source: { nodeId: 'generate-landscape', portId: 'result' }, target: { nodeId: context.requestedOutputs[2].id, portId: 'source' } },
     ],
   };
 }

@@ -33,10 +33,16 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function campaignStore(): WorkflowStore {
+function campaignStore(assignProduct = true): WorkflowStore {
   const store = new WorkflowStore();
   store.newFromTemplate('campaign-composer', 'Selective campaign');
-  store.assignAsset('slot-product', productAsset);
+  store.removeNode('review-campaign-direction');
+  store.removeNode('transform-generate-portrait');
+  store.removeNode('transform-generate-landscape');
+  store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');
+  store.connectPorts('composition', 'layout', 'output-portrait', 'source');
+  store.connectPorts('composition', 'layout', 'output-landscape', 'source');
+  if (assignProduct) store.assignAsset('slot-product', productAsset);
   return store;
 }
 
@@ -475,8 +481,7 @@ describe('WorkflowStore selective execution integration', () => {
   });
 
   it('returns an explicit blocked reason when Campaign Generate material cannot be prepared', async () => {
-    const store = new WorkflowStore();
-    store.newFromTemplate('campaign-composer', 'Blocked campaign');
+    const store = campaignStore(false);
     const run = harness();
 
     const preflight = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());

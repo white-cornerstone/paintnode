@@ -364,7 +364,7 @@ describe('selective workflow planning', () => {
     expect(plan.materialKeys).toEqual({ 'transform-b': 'key-transform-b' });
   });
 
-  it('runs only Generate for the real Campaign structural topology', async () => {
+  it('stops the real Campaign structural topology at its unpromoted Review', async () => {
     const input = instantiateWorkflowTemplate('campaign-composer', { graphId: 'selective-campaign' });
     const plan = planSelectiveWorkflowExecution(input, {
       mode: 'run-node',
@@ -375,19 +375,21 @@ describe('selective workflow planning', () => {
     await execute(plan, calls);
 
     expect(plan.requiredNodeIds).toEqual([
-      'slot-product', 'slot-subject', 'slot-style', 'brief', 'composition', 'transform-generate-square', 'output-square',
+      'slot-product', 'slot-subject', 'slot-style', 'brief', 'composition', 'transform-generate-square',
+      'review-campaign-direction', 'output-square',
     ]);
-    expect(plan.executionNodeIds).toEqual(['transform-generate-square']);
+    expect(plan.executionNodeIds).toEqual([]);
     expect(plan.preflight.map(({ nodeId, willExecute }) => [nodeId, willExecute])).toEqual([
       ['slot-product', false],
       ['slot-subject', false],
       ['slot-style', false],
       ['brief', false],
       ['composition', false],
-      ['transform-generate-square', true],
+      ['transform-generate-square', false],
+      ['review-campaign-direction', false],
       ['output-square', false],
     ]);
-    expect(calls).toEqual(['transform-generate-square']);
+    expect(calls).toEqual([]);
   });
 
   it('blocks a configured transform capability that the registry does not support', () => {

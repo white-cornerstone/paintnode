@@ -785,6 +785,7 @@ describe('WorkflowStore Director patch review lifecycle', () => {
           bytes: new Uint8Array([1, 2, 3]),
         };
       })],
+      allowUnpromotedReview: true,
       assets: [productAsset],
       resolveAsset: async () => ({
         assetId: productAsset.id,

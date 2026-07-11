@@ -22,6 +22,8 @@ gates. Do not duplicate live issue status here.
 - [Architecture](architecture.md) — WorkflowGraph v2, execution, persistence,
   migration, and test boundaries.
 - [Roadmap](roadmap.md) — milestones, release gates, and delivery conventions.
+- [Campaign Composer user flow](campaign-composer-user-flow.md) — flagship
+  activation, review, adaptation, recovery, and exit evidence.
 
 ## Working rules
 

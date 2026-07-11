@@ -1,5 +1,6 @@
 import { WorkflowGraphDomain } from './domain';
-import { resolveWorkflowCampaignPath } from './candidatePromotion';
+import { resolveWorkflowCampaignPath, resolveWorkflowReviewTopology } from './candidatePromotion';
+import { resolveWorkflowEffectiveResult } from './effectiveResult';
 import { planWorkflowExecution, type WorkflowExecutionPlan } from './execution';
 import { workflowReadiness } from './readiness';
 import {
@@ -315,21 +316,45 @@ function requireTransformPath(graph: WorkflowGraphV2, outputNodeId: string): {
   output: WorkflowNodeV2;
   transform: WorkflowNodeV2;
   artDirection: WorkflowNodeV2;
-  reviewNodeId: string | null;
+  candidateReviewNodeId: string | null;
+  sourceReviewNodeId: string | null;
 } {
   const output = graph.nodes.find((node) => node.id === outputNodeId && node.type === 'output');
   const path = resolveWorkflowCampaignPath(graph, { outputNodeId });
   const transform = graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform');
-  const artEdge = transform && graph.edges.find((edge) => edge.target.nodeId === transform.id && edge.target.portId === 'source');
-  const artDirection = graph.nodes.find((node) => node.id === artEdge?.source.nodeId && node.type === 'art-direction');
-  if (!output || !path || !transform || !artDirection || artEdge?.source.portId !== 'layout') {
+  const sourceEdge = transform && graph.edges.find((edge) => edge.target.nodeId === transform.id && edge.target.portId === 'source');
+  const directArtDirection = graph.nodes.find((node) => node.id === sourceEdge?.source.nodeId && node.type === 'art-direction');
+  const sourceReview = graph.nodes.find((node) => node.id === sourceEdge?.source.nodeId && node.type === 'review');
+  const conceptEdge = sourceReview && graph.edges.find((edge) => (
+    edge.target.nodeId === sourceReview.id && edge.target.portId === 'candidates'
+  ));
+  const conceptTransform = graph.nodes.find((node) => node.id === conceptEdge?.source.nodeId && node.type === 'transform');
+  const conceptSourceEdge = conceptTransform && graph.edges.find((edge) => (
+    edge.target.nodeId === conceptTransform.id && edge.target.portId === 'source'
+  ));
+  const tracedArtDirection = graph.nodes.find((node) => (
+    node.id === conceptSourceEdge?.source.nodeId && node.type === 'art-direction'
+  ));
+  const artDirection = directArtDirection ?? tracedArtDirection;
+  const validSourcePort = directArtDirection
+    ? sourceEdge?.source.portId === 'layout'
+    : sourceReview
+      ? sourceEdge?.source.portId === 'selected'
+      : false;
+  if (!output || !path || !transform || !artDirection || !validSourcePort) {
     throw new WorkflowTransformExecutionError(
       'INVALID_TRANSFORM_PATH',
       'Square Output must be connected through a Generate Transform from Art Direction.',
       'Reconnect Art Direction to Generate, then Generate to Square Output',
     );
   }
-  return { output, transform, artDirection, reviewNodeId: path.reviewNodeId };
+  return {
+    output,
+    transform,
+    artDirection,
+    candidateReviewNodeId: path.reviewNodeId,
+    sourceReviewNodeId: sourceReview?.id ?? null,
+  };
 }
 
 function boundAsset(node: WorkflowNodeV2, assets: readonly WorkflowProjectAsset[]): WorkflowProjectAsset | null {
@@ -444,8 +469,10 @@ async function campaignGenerateTransform(
       'Choose or create a project folder',
     );
   }
-  const { output, transform, artDirection, reviewNodeId } = requireTransformPath(graph, outputNodeId);
-  if (reviewNodeId && !options.allowUnpromotedReview && !options.candidateLineage) {
+  const {
+    output, transform, artDirection, candidateReviewNodeId, sourceReviewNodeId,
+  } = requireTransformPath(graph, outputNodeId);
+  if (candidateReviewNodeId && !options.allowUnpromotedReview && !options.candidateLineage) {
     throw new WorkflowTransformExecutionError(
       'NOT_READY',
       'This Transform feeds a Review. Generate concept branches and promote one before continuing downstream.',
@@ -491,7 +518,11 @@ async function campaignGenerateTransform(
     );
   }
 
-  const plan = planWorkflowExecution(graph, reviewNodeId && options.allowUnpromotedReview ? transform.id : outputNodeId, { maxConcurrency: 4 });
+  const plan = planWorkflowExecution(
+    graph,
+    candidateReviewNodeId && options.allowUnpromotedReview ? transform.id : outputNodeId,
+    { maxConcurrency: 4 },
+  );
   if (plan.blocked.length > 0) {
     throw new WorkflowTransformExecutionError('NOT_READY', plan.blocked[0].message, 'Reconnect the blocked workflow inputs');
   }
@@ -636,6 +667,63 @@ async function campaignGenerateTransform(
   };
   const inputEdges = graph.edges.filter((edge) => edge.target.nodeId === artDirection.id && edge.target.portId === 'assets');
   const sources: WorkflowTransformSource[] = [];
+  if (sourceReviewNodeId) {
+    const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: sourceReviewNodeId });
+    if (resolution.state === 'blocked') {
+      throw new WorkflowTransformExecutionError('NOT_READY', resolution.reason.message, resolution.reason.action);
+    }
+    const effective = resolveWorkflowEffectiveResult(graph, {
+      nodeId: resolution.transformNodeId,
+      rootRunId: resolution.promotion.candidateRunId,
+      candidateId: resolution.promotion.candidateId,
+      promotionId: resolution.promotion.id,
+    });
+    if (!effective) {
+      throw new WorkflowTransformExecutionError(
+        'NOT_READY',
+        'The accepted campaign direction is no longer available.',
+        'Promote another candidate',
+      );
+    }
+    const acceptedAsset = options.assets.find((asset) => (
+      asset.id === effective.output.assetId && asset.relativePath === effective.output.relativePath
+    )) ?? {
+      id: effective.output.assetId,
+      name: 'Accepted campaign direction',
+      relativePath: effective.output.relativePath,
+      width: null,
+      height: null,
+      mime: 'image/png',
+    };
+    const material = await awaitMaterialization(() => options.resolveAsset(acceptedAsset));
+    const bytes = material.bytes instanceof Uint8Array && material.bytes.length > 0
+      ? new Uint8Array(material.bytes)
+      : null;
+    const computedHash = bytes ? workflowSha256Bytes(bytes) : null;
+    const claimedHash = canonicalContentHash(material.contentHash);
+    if (material.assetId !== effective.output.assetId
+      || material.relativePath !== effective.output.relativePath
+      || !claimedHash
+      || claimedHash !== effective.output.contentHash
+      || (computedHash && computedHash !== effective.output.contentHash)
+      || (executor.materialization !== 'metadata-only' && !bytes)) {
+      throw new WorkflowTransformExecutionError(
+        'MISSING_ASSET',
+        'The accepted campaign direction could not be verified from the exact promoted or editor-returned asset.',
+        'Restore the accepted direction or promote another candidate',
+      );
+    }
+    sources.push({
+      nodeId: sourceReviewNodeId,
+      portId: 'selected',
+      name: effective.editorRevision ? 'Accepted edited campaign direction' : 'Accepted campaign direction',
+      role: 'Mandatory accepted visual direction for this format adaptation',
+      assetId: effective.output.assetId,
+      relativePath: effective.output.relativePath,
+      contentHash: effective.output.contentHash,
+      bytes: executor.materialization === 'metadata-only' ? new Uint8Array() : bytes!,
+    });
+  }
   for (const edge of inputEdges) {
     const input = graph.nodes.find((node) => node.id === edge.source.nodeId && node.type === 'input');
     if (!input) continue;

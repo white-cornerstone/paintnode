@@ -69,7 +69,7 @@ pub fn run() {
             managed_runtime::install_managed_runtime,
             managed_runtime::login_managed_runtime,
             provider_executable::provider_qa_mode,
-            provider_executable::provider_free_qa_square_png,
+            provider_executable::provider_free_qa_png,
             ai::codex::generate_codex_image,
             ai::codex::generate_codex_fill_image,
             ai::codex::generate_codex_retouch_image,

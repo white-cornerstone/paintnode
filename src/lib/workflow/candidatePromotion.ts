@@ -66,11 +66,25 @@ function reviewTopology(graph: WorkflowGraphV2, reviewNodeId: string) {
     ? graph.nodes.find((node) => node.id === incoming.source.nodeId && node.type === 'transform')
     : undefined;
   const outgoingEdges = graph.edges.filter((edge) => edge.source.nodeId === reviewNodeId && edge.source.portId === 'selected');
-  const outgoing = outgoingEdges.length === 1 ? outgoingEdges[0] : undefined;
+  const directOutputEdges = outgoingEdges.filter((edge) => (
+    edge.target.portId === 'source'
+    && graph.nodes.some((node) => node.id === edge.target.nodeId && node.type === 'output')
+  ));
+  const supportedFanout = outgoingEdges.every((edge) => (
+    directOutputEdges.includes(edge)
+    || (edge.target.portId === 'source'
+      && graph.nodes.some((node) => node.id === edge.target.nodeId && node.type === 'transform'))
+  ));
+  const outgoing = directOutputEdges.length === 1 ? directOutputEdges[0] : undefined;
   const output = outgoing?.target.portId === 'source'
     ? graph.nodes.find((node) => node.id === outgoing.target.nodeId && node.type === 'output')
     : undefined;
-  return { review, transform, output, valid: Boolean(review && transform && output && incomingEdges.length === 1 && outgoingEdges.length === 1) };
+  return {
+    review,
+    transform,
+    output,
+    valid: Boolean(review && transform && output && incomingEdges.length === 1 && directOutputEdges.length === 1 && supportedFanout),
+  };
 }
 
 function stableValue(value: unknown): unknown {
@@ -202,7 +216,11 @@ export function resolveWorkflowReviewTopology(
   });
   if (!review) return blocked('REVIEW_NOT_FOUND', 'The Review node is unavailable.', 'Reconnect the Review node');
   if (!valid || !transform || !outputNode) {
-    return blocked('REVIEW_TOPOLOGY_INVALID', 'Review must connect one Transform result to one Output.', 'Reconnect the Review path');
+    return blocked(
+      'REVIEW_TOPOLOGY_INVALID',
+      'Review must connect one concept Transform to one primary Output; supported format Transforms may fan out from the same decision.',
+      'Reconnect the Review path',
+    );
   }
   const promotion = (graph.reviewPromotions ?? []).filter((item) => item.reviewNodeId === review.id).at(-1);
   if (!promotion) return blocked('PROMOTION_REQUIRED', 'Choose a concept before continuing downstream.', 'Promote a candidate');

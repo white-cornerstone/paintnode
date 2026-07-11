@@ -44,6 +44,10 @@
   } from '../state/workflow.svelte';
   import { WorkflowSelectiveUiState } from '../state/workflowSelectiveUiState.svelte';
   import {
+    nextWorkflowCandidateIndex,
+    type WorkflowCandidateNavigationKey,
+  } from '../workflow/candidateKeyboard';
+  import {
     creatorNodeDefinition,
     creatorNodeFitsPlacementBounds,
     createWorkflowBoardRunIdGenerator,
@@ -1925,11 +1929,13 @@
     if (candidates.length === 0) return;
     const current = selectedReviewCandidate(nodeId);
     const currentIndex = Math.max(0, candidates.findIndex((candidate) => candidate.candidateId === current?.candidateId));
-    const next = event.key === 'Home'
-      ? candidates[0]
-      : event.key === 'End'
-        ? candidates.at(-1)!
-        : candidates[(currentIndex + (event.key === 'ArrowLeft' ? -1 : 1) + candidates.length) % candidates.length];
+    const nextIndex = nextWorkflowCandidateIndex(
+      event.key as WorkflowCandidateNavigationKey,
+      currentIndex,
+      candidates.length,
+    );
+    if (nextIndex === null) return;
+    const next = candidates[nextIndex];
     selectedReviewCandidates[nodeId] = next.candidateId;
     await tick();
     document.getElementById(`review-candidate-tab-${nodeId}-${next.candidateId}`)?.focus();

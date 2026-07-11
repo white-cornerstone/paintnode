@@ -5,7 +5,7 @@ import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from '../workflow/sche
 import { instantiateWorkflowTemplate } from '../workflow/templates';
 import { createProviderFreeQaWorkflowExecutor } from './providerFreeQaWorkflowExecutor';
 
-function request(): WorkflowTransformExecutionRequest {
+function request(width = 1024, height = 1024): WorkflowTransformExecutionRequest {
   return {
     workflowId: 'qa-workflow',
     nodeId: 'transform-generate-square',
@@ -18,7 +18,7 @@ function request(): WorkflowTransformExecutionRequest {
     prompt: 'Provider-free QA campaign',
     sources: [],
     storyboard: null,
-    output: { nodeId: 'output-square', title: 'Square 1:1', width: 1024, height: 1024 },
+    output: { nodeId: 'output-square', title: 'Campaign output', width, height },
   };
 }
 
@@ -50,6 +50,7 @@ describe('provider-free QA workflow executor', () => {
       });
       expect(second).toEqual(first);
       expect(loadPng).toHaveBeenCalledTimes(2);
+      expect(loadPng).toHaveBeenNthCalledWith(1, 1024, 1024);
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
@@ -144,12 +145,27 @@ describe('provider-free QA workflow executor', () => {
     expect(loadPng).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects any output contract other than the QA Square fixture before loading bytes', async () => {
-    const loadPng = vi.fn();
-    const invalid = request();
-    invalid.output = { ...invalid.output, width: 1024, height: 1280 };
+  it('supports the exact three Campaign Composer shapes through the dimension-aware loader', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const loadPng = vi.fn(async () => png);
     const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
-    await expect(executor.execute(invalid)).rejects.toThrow(/1024 x 1024/i);
+
+    await expect(executor.execute(request(1024, 1024))).resolves.toMatchObject({
+      name: 'paintnode-provider-free-qa-square.png', width: 1024, height: 1024,
+    });
+    await expect(executor.execute(request(1024, 1280))).resolves.toMatchObject({
+      name: 'paintnode-provider-free-qa-portrait.png', width: 1024, height: 1280,
+    });
+    await expect(executor.execute(request(1280, 720))).resolves.toMatchObject({
+      name: 'paintnode-provider-free-qa-landscape.png', width: 1280, height: 720,
+    });
+    expect(loadPng.mock.calls).toEqual([[1024, 1024], [1024, 1280], [1280, 720]]);
+  });
+
+  it('rejects any output contract outside the three Campaign Composer fixtures before loading bytes', async () => {
+    const loadPng = vi.fn();
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
+    await expect(executor.execute(request(900, 900))).rejects.toThrow(/1:1, 4:5, and 16:9/i);
     expect(loadPng).not.toHaveBeenCalled();
   });
 
@@ -180,7 +196,7 @@ describe('provider-free QA workflow executor', () => {
       async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
     );
     expect(executor.executor).toEqual({
-      id: 'paintnode-qa-fake-square', version: '1', requestSchemaVersion: '1',
+      id: 'paintnode-qa-fake-campaign', version: '2', requestSchemaVersion: '1',
     });
     expect(executor.describeRun(request())).toEqual({
       id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' },
@@ -197,6 +213,7 @@ describe('provider-free QA workflow executor', () => {
       resolveAsset,
       readStoryboard,
       storeAsset,
+      allowUnpromotedReview: true,
     });
 
     expect(resolveAsset).toHaveBeenCalledOnce();

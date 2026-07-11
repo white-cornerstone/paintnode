@@ -1,4 +1,4 @@
-import { providerFreeQaSquarePng, type ProviderQaMode } from './desktop';
+import { providerFreeQaPng, type ProviderQaMode } from './desktop';
 import {
   createWorkflowCompositionExecutor,
   WorkflowTransformExecutionError,
@@ -6,7 +6,7 @@ import {
 } from '../workflow/transformExecutor';
 import { raceWorkflowCancellation, throwIfWorkflowCancelled } from '../workflow/runControl';
 
-export type ProviderFreeQaPngLoader = () => Promise<Uint8Array>;
+export type ProviderFreeQaPngLoader = (width: number, height: number) => Promise<Uint8Array>;
 export type ProviderFreeQaScenario = 'success' | 'slow-success' | 'failure' | 'branch-one-failure';
 
 export interface ProviderFreeQaWorkflowExecutorOptions {
@@ -22,7 +22,7 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
 
 export function createProviderFreeQaWorkflowExecutor(
   mode: ProviderQaMode,
-  loadPng: ProviderFreeQaPngLoader = providerFreeQaSquarePng,
+  loadPng: ProviderFreeQaPngLoader = providerFreeQaPng,
   options: ProviderFreeQaWorkflowExecutorOptions = {},
 ): WorkflowNodeExecutor {
   if (mode !== 'provider-free') {
@@ -32,11 +32,18 @@ export function createProviderFreeQaWorkflowExecutor(
   const progressSteps = boundedInteger(options.progressSteps, 10, 1, 20);
   const stepDelayMs = boundedInteger(options.stepDelayMs, 500, 1, 2_000);
   return createWorkflowCompositionExecutor('qa-fake', async (request, context) => {
-    if (request.output.width !== 1024 || request.output.height !== 1024) {
+    const fixture = request.output.width === 1024 && request.output.height === 1024
+      ? 'square'
+      : request.output.width === 1024 && request.output.height === 1280
+        ? 'portrait'
+        : request.output.width === 1280 && request.output.height === 720
+          ? 'landscape'
+          : null;
+    if (!fixture) {
       throw new WorkflowTransformExecutionError(
         'INVALID_EXECUTOR_RESULT',
-        'The provider-free QA fixture supports only the 1024 x 1024 Square output.',
-        'Run Square Output',
+        'The provider-free QA fixture supports only Campaign Composer 1:1, 4:5, and 16:9 outputs.',
+        'Run a configured Campaign Composer output',
       );
     }
     if (scenario === 'failure') {
@@ -63,18 +70,25 @@ export function createProviderFreeQaWorkflowExecutor(
       }
       throwIfWorkflowCancelled(context.signal);
     }
-    const bytes = await loadPng();
+    const bytes = await loadPng(request.output.width, request.output.height);
     return {
       kind: 'bytes',
-      name: 'paintnode-provider-free-qa-square.png',
+      name: `paintnode-provider-free-qa-${fixture}.png`,
       bytes: new Uint8Array(bytes),
       mime: 'image/png',
-      width: 1024,
-      height: 1024,
+      width: request.output.width,
+      height: request.output.height,
     };
   }, {
     materialization: 'metadata-only',
-    executor: { id: 'paintnode-qa-fake-square', version: '1', requestSchemaVersion: '1' },
-    describeRun: () => ({ id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' } }),
+    executor: { id: 'paintnode-qa-fake-campaign', version: '2', requestSchemaVersion: '1' },
+    describeRun: (request) => ({
+      id: 'qa-fake', model: null,
+      effectiveOptions: {
+        fixture: request.output.width === 1024 && request.output.height === 1024
+          ? 'square'
+          : request.output.width === 1024 ? 'portrait' : 'landscape',
+      },
+    }),
   });
 }

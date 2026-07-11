@@ -79,7 +79,10 @@ describe('WorkflowStore candidate branches', () => {
       'run-node', 'output-square', runOptions,
     );
     expect(selective.stateByNodeId['transform-generate-square']).not.toMatchObject({ state: 'cached' });
-    expect(selective.stateByNodeId['transform-generate-square'].willExecute).toBe(true);
+    expect(selective.stateByNodeId['transform-generate-square'].willExecute).toBe(false);
+    expect(selective.stateByNodeId['review-campaign-direction']).toMatchObject({
+      state: 'blocked', reason: { code: 'NODE_DISABLED' },
+    });
     const reopened = new WorkflowStore();
     reopened.openFromBytes(workflow.toBytes(), null, 'Reopened candidates');
     expect(reopened.candidateBranchGroups()).toEqual(workflow.candidateBranchGroups());
@@ -114,10 +117,7 @@ describe('WorkflowStore candidate branches', () => {
   it('verifies candidate bytes before atomically appending and reopening a promotion', async () => {
     const workflow = store();
     const originalBrief = String(workflow.serialize().nodes.find((node) => node.id === 'brief')!.config.objective);
-    const reviewId = workflow.addCreatorNode('review');
-    workflow.disconnectNodes('transform-generate-square', 'output-square');
-    expect(workflow.connectPorts('transform-generate-square', 'result', reviewId, 'candidates')).toBe(true);
-    expect(workflow.connectPorts(reviewId, 'selected', 'output-square', 'source')).toBe(true);
+    const reviewId = 'review-campaign-direction';
     const candidateBytes = new Uint8Array([137, 80, 78, 71, 81, 1]);
     const runOptions = options(async () => ({
       kind: 'bytes', name: 'concept.png', bytes: candidateBytes,

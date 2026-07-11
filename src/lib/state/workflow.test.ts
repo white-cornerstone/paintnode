@@ -48,6 +48,12 @@ const campaignProduct = {
 function campaignStore(): WorkflowStore {
   const store = new WorkflowStore({ idGenerator: ids() });
   store.newFromTemplate('campaign-composer');
+  store.removeNode('review-campaign-direction');
+  store.removeNode('transform-generate-portrait');
+  store.removeNode('transform-generate-landscape');
+  store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');
+  store.connectPorts('composition', 'layout', 'output-portrait', 'source');
+  store.connectPorts('composition', 'layout', 'output-landscape', 'source');
   store.assignAsset('slot-product', campaignProduct);
   return store;
 }
@@ -452,13 +458,11 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.name).toBe('Renamed while previewing');
   });
   it('exposes fake Transform running/succeeded state and persists the bound Square output on reopen', async () => {
-    const store = new WorkflowStore({ idGenerator: ids() });
-    store.newFromTemplate('campaign-composer');
+    const store = campaignStore();
     const product = {
       id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png',
       createdAt: 1, exists: true, width: 1200, height: 1200, mime: 'image/png',
     } satisfies ProjectAsset;
-    store.assignAsset('slot-product', product);
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => { finish = resolve; });
     const run = store.runCampaignGenerate('output-square', {
@@ -707,13 +711,11 @@ describe('WorkflowStore graph adapter', () => {
   });
 
   it('keeps the newest overlapping Transform result when an older run finishes late', async () => {
-    const store = new WorkflowStore({ idGenerator: ids() });
-    store.newFromTemplate('campaign-composer');
+    const store = campaignStore();
     const product = {
       id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png',
       createdAt: 1, exists: true, width: 1200, height: 1200, mime: 'image/png',
     } satisfies ProjectAsset;
-    store.assignAsset('slot-product', product);
     const resolvers: Array<(id: string) => void> = [];
     const executor = createWorkflowCompositionExecutor('fake', () => new Promise((resolve) => {
       resolvers.push((assetId) => resolve({
@@ -1107,8 +1109,7 @@ describe('WorkflowStore graph adapter', () => {
   });
 
   it('reconnects Brief through the compatible named prompt port and restores readiness', () => {
-    const store = new WorkflowStore({ idGenerator: ids() });
-    store.newFromTemplate('campaign-composer');
+    const store = campaignStore();
     store.assignAsset('slot-product', {
       id: 'product-asset', kind: 'imported', name: 'Product.png', relativePath: 'assets/product.png', createdAt: 1, exists: true,
     });

@@ -29,6 +29,25 @@ function boundCampaign() {
   const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
     graphId: 'campaign-transform-test',
   }));
+  graph.nodes = graph.nodes.filter((node) => ![
+    'review-campaign-direction', 'transform-generate-portrait', 'transform-generate-landscape',
+  ].includes(node.id));
+  graph.edges = graph.edges.filter((edge) => (
+    graph.nodes.some((node) => node.id === edge.source.nodeId)
+    && graph.nodes.some((node) => node.id === edge.target.nodeId)
+  ));
+  graph.edges.push(
+    {
+      id: 'edge-transform-generate-square-output-square',
+      source: { nodeId: 'transform-generate-square', portId: 'result' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    },
+    ...['portrait', 'landscape'].map((format) => ({
+      id: `edge-composition-output-${format}`,
+      source: { nodeId: 'composition', portId: 'layout' },
+      target: { nodeId: `output-${format}`, portId: 'source' },
+    })),
+  );
   const product = graph.nodes.find((node) => node.id === 'slot-product')!;
   product.config = { ...product.config, assetId: productAsset.id, relativePath: productAsset.relativePath };
   return graph;

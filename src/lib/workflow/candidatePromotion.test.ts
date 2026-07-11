@@ -5,11 +5,14 @@ import {
   resolveWorkflowReviewTopology,
   workflowReviewPromotionMaterialKey,
 } from './candidatePromotion';
-import { createCreatorNode } from './registry';
 import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from './schema';
 import { instantiateWorkflowTemplate } from './templates';
 import { executeWorkflowCandidateBranches } from './candidateBranches';
-import { createWorkflowCompositionExecutor, type ExecuteCampaignGenerateOptions } from './transformExecutor';
+import {
+  createWorkflowCompositionExecutor,
+  prepareCampaignGenerateTransform,
+  type ExecuteCampaignGenerateOptions,
+} from './transformExecutor';
 import { createWorkflowRevision, isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
 import { planSelectiveWorkflowExecution } from './selectiveExecution';
 import { appendWorkflowEditorRevision, resolveWorkflowEffectiveResult } from './editorRoundTrip';
@@ -27,20 +30,13 @@ async function reviewGraph() {
     ...graph.nodes.find((node) => node.id === 'slot-product')!.config,
     assetId: product.id, relativePath: product.relativePath,
   };
-  graph.nodes.push(createCreatorNode('review', { id: 'review-concepts', position: { x: 1250, y: 500 } }));
-  graph.edges = graph.edges.filter((edge) => edge.id !== 'edge-transform-generate-square-output-square');
-  graph.edges.push(
-    {
-      id: 'edge-transform-review',
-      source: { nodeId: 'transform-generate-square', portId: 'result' },
-      target: { nodeId: 'review-concepts', portId: 'candidates' },
-    },
-    {
-      id: 'edge-review-output',
-      source: { nodeId: 'review-concepts', portId: 'selected' },
-      target: { nodeId: 'output-square', portId: 'source' },
-    },
-  );
+  graph.nodes.find((node) => node.id === 'review-campaign-direction')!.id = 'review-concepts';
+  for (const edge of graph.edges) {
+    if (edge.source.nodeId === 'review-campaign-direction') edge.source.nodeId = 'review-concepts';
+    if (edge.target.nodeId === 'review-campaign-direction') edge.target.nodeId = 'review-concepts';
+  }
+  graph.edges.find((edge) => edge.target.nodeId === 'review-concepts')!.id = 'edge-transform-review';
+  graph.edges.find((edge) => edge.source.nodeId === 'review-concepts' && edge.target.nodeId === 'output-square')!.id = 'edge-review-output';
   let stored = 0;
   const executor = createWorkflowCompositionExecutor('fake', async () => ({
     kind: 'bytes', name: 'concept.png', bytes: new Uint8Array([...bytes, ++stored]),
@@ -228,6 +224,50 @@ describe('workflow candidate promotion', () => {
     }));
     expect(editedPlan.cachedResults.find((item) => item.nodeId === 'review-concepts')?.cacheKey)
       .not.toBe(originalPlan.cachedResults.find((item) => item.nodeId === 'review-concepts')?.cacheKey);
+
+    const formatExecutor = createWorkflowCompositionExecutor('fake', async () => {
+      throw new Error('Preflight must not invoke the provider.');
+    }, { materialization: 'metadata-only' });
+    const formatOptions: ExecuteCampaignGenerateOptions = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [formatExecutor],
+      assets: [product, {
+        id: editedOutput.assetId, name: 'Edited direction.png', relativePath: editedOutput.relativePath,
+        width: 1024, height: 1024, mime: 'image/png',
+      }],
+      resolveAsset: async (asset) => ({
+        assetId: asset.id,
+        relativePath: asset.relativePath,
+        bytes: null,
+        contentHash: asset.id === editedOutput.assetId
+          ? editedOutput.contentHash
+          : workflowSha256Bytes(bytes),
+      }),
+      storeAsset: async () => { throw new Error('Preflight must not store output.'); },
+    };
+    const portrait = await prepareCampaignGenerateTransform(edited, 'output-portrait', formatOptions);
+    const landscape = await prepareCampaignGenerateTransform(edited, 'output-landscape', formatOptions);
+    expect(portrait.request.sources[0]).toMatchObject({
+      nodeId: 'review-concepts', portId: 'selected', name: 'Accepted edited campaign direction',
+      assetId: editedOutput.assetId, relativePath: editedOutput.relativePath,
+      contentHash: editedOutput.contentHash,
+    });
+    expect(landscape.request.sources[0]).toEqual(portrait.request.sources[0]);
+    expect(portrait.materialKey).not.toBe(landscape.materialKey);
+    const formatPlan = planSelectiveWorkflowExecution(edited, {
+      mode: 'run-from-here', nodeId: 'review-concepts',
+      materialKeys: {
+        'transform-generate-square': promotion.materialKey,
+        'transform-generate-portrait': portrait.materialKey,
+        'transform-generate-landscape': landscape.materialKey,
+      },
+      reviewEffectiveOutputs: { 'review-concepts': effective.output },
+      isReviewOutputAvailable: () => true,
+      isRunRecordReusable: () => false,
+    });
+    expect(formatPlan.executionNodeIds).toEqual([
+      'transform-generate-portrait', 'transform-generate-landscape',
+    ]);
+    expect(formatPlan.executionNodeIds).not.toContain('transform-generate-square');
 
     const replacement = promoteWorkflowCandidate(edited, {
       reviewNodeId: 'review-concepts', candidateId: candidates[1].candidateId,
