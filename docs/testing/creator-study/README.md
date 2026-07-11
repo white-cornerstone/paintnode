@@ -20,6 +20,8 @@ study storage.
   decision template. It contains aggregate counts, de-identified finding IDs,
   and role sign-offs, not names or raw evidence locations.
 - `privacy-fields.json` is the allow/deny contract.
+- `facilitator-hints.json` is the versioned, participant-hidden hint, assist,
+  and deviation instrument. Exact delivered hint records remain private-only.
 
 ## Before recruitment
 
@@ -32,6 +34,9 @@ study storage.
 5. Privately assign each scheduled date/start/time zone, delivery mode,
    facilitator, observers, technical operator, and accommodation setup. None of
    these assignments belong in repository-safe evidence.
+6. Calibrate and rehearse every facilitator against the current
+   `facilitator-hints.json`, and complete the private sign-off before participant
+   1 and after every approved instrument change.
 
 ## Before every session
 
@@ -41,10 +46,12 @@ study storage.
    and actual executable fingerprint; keep the app and sidecar together.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate folder. Delete that rehearsal folder.
-3. Create a different, genuinely empty participant project folder outside the
+3. Verify the assigned facilitator's private calibration sign-off matches the
+   current hint instrument version.
+4. Create a different, genuinely empty participant project folder outside the
    repository.
-4. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
-5. Run:
+5. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
+6. Run:
 
    ```sh
    npm run qa:creator-study:setup -- \

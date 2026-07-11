@@ -37,6 +37,15 @@ For Tasks 1–7, `acceptedWorkPreserved` is always `null`. For Task 8 record
 `true` only when accepted work reopens with no data loss or wrong lineage,
 `false` when it does not, and `null` only when preservation was not observed.
 
+## Hint, assist, and deviation log
+
+Copy exact values from `facilitator-hints.json`. Assist ordinal is task-local
+and increases only for an event with `assistIncrement: 1`.
+
+| Time | Task | Hint ID | Exact hint used | Assist ordinal | Assist event type | Deviation ID | Session validity effect |
+| --- | --- | --- | --- | ---: | --- | --- | --- |
+| | | | | | | | |
+
 ## Findings and debrief
 
 For each finding, use participant codes only in `participantIds` and copy one

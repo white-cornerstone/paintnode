@@ -24,3 +24,30 @@ export const INTEGRITY_BLOCKING_FINDING_CATEGORIES = new Set(
 export function isIntegrityBlockingFindingCategory(category) {
   return INTEGRITY_BLOCKING_FINDING_CATEGORIES.has(category);
 }
+
+export const FACILITATOR_ASSIST_EVENT_DEFINITIONS = Object.freeze([
+  Object.freeze({ id: 'neutral-probe', assistIncrement: 0, forcesTaskFailure: false }),
+  Object.freeze({ id: 'standard-hint', assistIncrement: 1, forcesTaskFailure: false }),
+  Object.freeze({ id: 'verbatim-repeat', assistIncrement: 0, forcesTaskFailure: false }),
+  Object.freeze({ id: 'takeover', assistIncrement: 1, forcesTaskFailure: true }),
+  Object.freeze({ id: 'unscripted-assist', assistIncrement: 1, forcesTaskFailure: false }),
+]);
+
+export const FACILITATOR_ASSIST_EVENT_IDS = Object.freeze(
+  FACILITATOR_ASSIST_EVENT_DEFINITIONS.map(({ id }) => id),
+);
+
+export const FACILITATOR_DEVIATION_DEFINITIONS = Object.freeze([
+  Object.freeze({ id: 'none', sessionValidity: 'valid' }),
+  Object.freeze({ id: 'late-timing', sessionValidity: 'valid' }),
+  Object.freeze({ id: 'verbatim-repeat', sessionValidity: 'valid' }),
+  Object.freeze({ id: 'approved-accommodation', sessionValidity: 'valid' }),
+  Object.freeze({ id: 'early-hint', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'out-of-order-hint', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'wording-changed', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'unlogged-assist', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'silent-app-state-change', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'unauthorized-takeover', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'calibration-missing', sessionValidity: 'invalid' }),
+  Object.freeze({ id: 'instrument-version-mismatch', sessionValidity: 'invalid' }),
+]);

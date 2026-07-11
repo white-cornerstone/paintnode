@@ -136,6 +136,8 @@ For every session record:
 
 - completed study authorization gate, including the approved private storage
   reference, study owner, and named observers;
+- facilitator calibration and rehearsal sign-off for the current
+  `facilitator-hints.json` version;
 - scheduled date, start time, time zone, and delivery mode;
 - assigned facilitator, named session observers, technical session operator,
   and accommodation setup confirmation;
@@ -184,13 +186,35 @@ unattempted task accurately.
 
 ## Facilitator rules
 
+- The authoritative, versioned intervention instrument is
+  [`creator-study/facilitator-hints.json`](creator-study/facilitator-hints.json).
+  Keep it hidden from participants before use. Exact hint text, hint IDs,
+  assist ordinals, and deviation logs remain private and never enter
+  repository-safe result artifacts.
+- A facilitator may conduct sessions only after calibration and rehearsal is
+  signed off before participant 1 and after every approved instrument change.
+  A missing sign-off or version mismatch invalidates the session.
 - Ask the participant to think aloud: what they expect, notice, and choose.
 - Read each task prompt verbatim. Do not name controls, point, take the mouse,
   or explain nodes before the participant attempts the task.
 - After 90 seconds without progress, ask: “What are you looking for?” This is a
-  neutral probe, not assistance.
-- If still blocked after another 90 seconds, offer the minimum next-step hint
-  and record an assist. Further hints are allowed only to expose later tasks.
+  `neutral-probe`; record it, but it adds zero direct assists.
+- At 180 total seconds, if the participant is still blocked, select the
+  earliest incomplete checkpoint for that task and read its `firstHint`
+  verbatim. Record a `standard-hint` and add one direct assist.
+- If still blocked 90 seconds later, read the same checkpoint's `secondHint`
+  verbatim. Record another `standard-hint` and add one direct assist. Do not
+  skip ahead to a later checkpoint.
+- A `verbatim-repeat` adds zero assists only when the wording is exact and adds
+  no information. A paraphrase, addition, gesture, control name, or other new
+  direction is an `unscripted-assist`: add one direct assist and record the
+  invalidating `wording-changed` deviation.
+- If still blocked after another 90 seconds, the facilitator may take over only
+  to expose later tasks. A `takeover` adds one direct assist and
+  forces the task outcome to `failure`; it can never be recorded as assisted
+  success.
+- Number counted events per task in delivery order using Assist ordinal 1..N.
+  The Direct assists total is the sum of each event's `assistIncrement`.
 - Do not defend the design or interpret an error for the participant.
 - Ask follow-up questions only after the task or at a natural stopping point.
 - Trigger the candidate and format failures through the QA scenario controls at
@@ -204,15 +228,26 @@ unattempted task accurately.
   to force the retry to succeed.
 - Never convert facilitator help into an unaided success.
 
+### Closed deviation validity
+
+Use only the deviation IDs in `facilitator-hints.json`. `none`, `late-timing`,
+`verbatim-repeat`, and `approved-accommodation` keep the session valid. An
+`early-hint`, `out-of-order-hint`, `wording-changed`, `unlogged-assist`,
+`silent-app-state-change`, `unauthorized-takeover`, `calibration-missing`, or
+`instrument-version-mismatch` invalidates the session. Record every deviation
+and its Session validity effect; do not invent a free-text category. A valid
+deviation can still be described privately, but it does not erase the assist
+event or change its count.
+
 ### Facilitator intervention log
 
 Maintain this log in the approved private study location. Every setup and reset
 must be visible and narrated as a test-checkpoint change without revealing the
 target branch or format.
 
-| Time | Task | Action | Visible label | Expected trigger | Observed trigger | Reset time | Deviation |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| | | setup / reset | | | | | |
+| Time | Task | Action | Visible label | Expected trigger | Observed trigger | Reset time | Hint ID | Exact hint used | Assist ordinal | Assist event type | Deviation ID | Session validity effect |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- | --- | --- |
+| | | setup / reset / hint / takeover | | | | | | | | | | |
 
 ## Empty-project flagship tasks and neutral prompts
 
@@ -364,9 +399,9 @@ For each task record:
 - confidence evidence in the participant's own words.
 
 Report denominators. `Not attempted` is not a success and must not be silently
-excluded. A session is invalid only for withdrawn consent, unusable/wrong build,
+excluded. A session is invalid for withdrawn consent, unusable/wrong build,
 provider invocation in provider-free mode, prior exposure that violates the
-screener, or facilitator deviation severe enough to coach the result. Report
+screener, or any deviation whose closed `sessionValidity` is `invalid`. Report
 invalid sessions and replacements.
 
 Primary study metrics:
@@ -496,6 +531,15 @@ not commit identifiable raw notes.
 | 7 | | | | | | | | | | null | |
 | 8 | | | | | | | | | | true / false / null | |
 
+## Hint, assist, and deviation log
+
+Copy exact values from `facilitator-hints.json`. The Assist ordinal is task-local
+and increases only for events whose `assistIncrement` is 1.
+
+| Time | Task | Hint ID | Exact hint used | Assist ordinal | Assist event type | Deviation ID | Session validity effect |
+| --- | --- | --- | --- | ---: | --- | --- | --- |
+| | | | | | | | |
+
 ## Findings
 
 Copy `category` from the closed enum in
@@ -521,9 +565,9 @@ required cross-functional approval and recorded rationale.
 
 ## Facilitator interventions
 
-| Time | Task | Action | Visible label | Expected trigger | Observed trigger | Reset time | Deviation |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| | | setup / reset | | | | | |
+| Time | Task | Action | Visible label | Expected trigger | Observed trigger | Reset time | Hint ID | Exact hint used | Assist ordinal | Assist event type | Deviation ID | Session validity effect |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- | --- | --- |
+| | | setup / reset / hint / takeover | | | | | | | | | | |
 
 ## Debrief
 

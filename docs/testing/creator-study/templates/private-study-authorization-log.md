@@ -16,6 +16,16 @@
 - Recruitment authorization: approved / blocked
 - Authorization date/signature:
 
+## Facilitator calibration and rehearsal sign-off
+
+Complete this before participant 1 and after every approved instrument change.
+A facilitator may not run a session unless their sign-off matches the current
+`facilitator-hints.json` instrument version.
+
+| Facilitator | Instrument version | Calibration/rehearsal completed | Scope: before participant 1 / after approved change | Approved by | Date/time |
+| --- | ---: | --- | --- | --- | --- |
+| | | yes / no | | | |
+
 ## Retention and deletion ledger
 
 | Evidence group | Decision date | Due date | Consent withdrawal/earlier requirement | Actual deletion date | Verified by |

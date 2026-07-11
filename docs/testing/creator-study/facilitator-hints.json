@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "participantVisibility": "hidden-until-used",
+  "timing": {
+    "neutralProbeAfterSeconds": 90,
+    "firstHintAfterTotalSeconds": 180,
+    "secondHintAfterAdditionalSeconds": 90,
+    "takeoverAfterAdditionalSeconds": 90
+  },
+  "assistEvents": [
+    { "id": "neutral-probe", "assistIncrement": 0, "forcesTaskFailure": false },
+    { "id": "standard-hint", "assistIncrement": 1, "forcesTaskFailure": false },
+    { "id": "verbatim-repeat", "assistIncrement": 0, "forcesTaskFailure": false },
+    { "id": "takeover", "assistIncrement": 1, "forcesTaskFailure": true },
+    { "id": "unscripted-assist", "assistIncrement": 1, "forcesTaskFailure": false }
+  ],
+  "deviations": [
+    { "id": "none", "sessionValidity": "valid" },
+    { "id": "late-timing", "sessionValidity": "valid" },
+    { "id": "verbatim-repeat", "sessionValidity": "valid" },
+    { "id": "approved-accommodation", "sessionValidity": "valid" },
+    { "id": "early-hint", "sessionValidity": "invalid" },
+    { "id": "out-of-order-hint", "sessionValidity": "invalid" },
+    { "id": "wording-changed", "sessionValidity": "invalid" },
+    { "id": "unlogged-assist", "sessionValidity": "invalid" },
+    { "id": "silent-app-state-change", "sessionValidity": "invalid" },
+    { "id": "unauthorized-takeover", "sessionValidity": "invalid" },
+    { "id": "calibration-missing", "sessionValidity": "invalid" },
+    { "id": "instrument-version-mismatch", "sessionValidity": "invalid" }
+  ],
+  "tasks": [
+    {
+      "task": 1,
+      "checkpoints": [
+        {
+          "id": "T1-C1",
+          "completionCriterion": "A PaintNode project is open in the supplied empty folder.",
+          "firstHint": "Look for the place where you can open a project folder.",
+          "secondHint": "Use Open Project Folder and choose the supplied empty folder."
+        },
+        {
+          "id": "T1-C2",
+          "completionCriterion": "Product A is imported into the open project.",
+          "firstHint": "Look for a way to bring the supplied image into this project.",
+          "secondHint": "Use Import and choose the supplied Product image."
+        },
+        {
+          "id": "T1-C3",
+          "completionCriterion": "A Campaign Composer workflow is open.",
+          "firstHint": "Look for a way to start the campaign workflow named in the task.",
+          "secondHint": "Create a new Campaign Composer workflow."
+        },
+        {
+          "id": "T1-C4",
+          "completionCriterion": "The imported image is assigned as the required Product input.",
+          "firstHint": "Look for the required Product input in the campaign.",
+          "secondHint": "Assign the imported image to Product."
+        }
+      ]
+    },
+    {
+      "task": 2,
+      "checkpoints": [
+        {
+          "id": "T2-C1",
+          "completionCriterion": "Generation of three campaign directions has been started.",
+          "firstHint": "Look for where you can ask for three different directions.",
+          "secondHint": "Set the direction count to three and start creating them."
+        },
+        {
+          "id": "T2-C2",
+          "completionCriterion": "Only the incomplete direction is retried while completed alternatives remain available.",
+          "firstHint": "Look at the incomplete direction for an action that affects only it.",
+          "secondHint": "Use Retry on the incomplete direction."
+        }
+      ]
+    },
+    {
+      "task": 3,
+      "checkpoints": [
+        {
+          "id": "T3-C1",
+          "completionCriterion": "The participant has inspected more than one available direction.",
+          "firstHint": "Look for a way to move between the available directions.",
+          "secondHint": "Select each direction to inspect it before choosing."
+        },
+        {
+          "id": "T3-C2",
+          "completionCriterion": "One preferred direction is accepted for downstream work.",
+          "firstHint": "Look for the action that continues with the direction you prefer.",
+          "secondHint": "Use the accept action on your preferred direction."
+        }
+      ]
+    },
+    {
+      "task": 4,
+      "checkpoints": [
+        {
+          "id": "T4-C1",
+          "completionCriterion": "The accepted direction is open in the image editor.",
+          "firstHint": "Look for a way to continue editing the direction you chose.",
+          "secondHint": "Use Open in Editor on the accepted direction."
+        },
+        {
+          "id": "T4-C2",
+          "completionCriterion": "The specified visible edit has been made.",
+          "firstHint": "Make the requested change in the editor before returning.",
+          "secondHint": "Change the requested layer name and opacity now."
+        },
+        {
+          "id": "T4-C3",
+          "completionCriterion": "The edited result has been returned to the workflow.",
+          "firstHint": "Look for a way to send this edited result back to the campaign.",
+          "secondHint": "Use Return to Workflow."
+        }
+      ]
+    },
+    {
+      "task": 5,
+      "checkpoints": [
+        {
+          "id": "T5-C1",
+          "completionCriterion": "The participant has previewed what the downstream run will create.",
+          "firstHint": "Look for a preview of what the campaign will produce next.",
+          "secondHint": "Open the run preview before confirming the campaign."
+        },
+        {
+          "id": "T5-C2",
+          "completionCriterion": "The downstream campaign run has been confirmed and started.",
+          "firstHint": "Look for the action that confirms and starts the prepared outputs.",
+          "secondHint": "Confirm the preview and run the campaign."
+        },
+        {
+          "id": "T5-C3",
+          "completionCriterion": "Square, Portrait, and Landscape outputs are all complete and verified.",
+          "firstHint": "Check the output area for each format named in the task.",
+          "secondHint": "Verify that Square, Portrait, and Landscape each show a completed result."
+        }
+      ]
+    },
+    {
+      "task": 6,
+      "checkpoints": [
+        {
+          "id": "T6-C1",
+          "completionCriterion": "The unchanged campaign has been run again and reuse is visible.",
+          "firstHint": "Run the unchanged campaign again and notice what it says can be reused.",
+          "secondHint": "Use Run again without making a change, then inspect the reuse status."
+        },
+        {
+          "id": "T6-C2",
+          "completionCriterion": "Product A has been replaced by Product B.",
+          "firstHint": "Look at the Product input for a way to replace its image.",
+          "secondHint": "Replace Product with the newly supplied image."
+        },
+        {
+          "id": "T6-C3",
+          "completionCriterion": "Stale descendants are updated while unrelated work remains reused.",
+          "firstHint": "Look for the parts marked as needing an update after the Product changed.",
+          "secondHint": "Update the stale downstream work and leave reusable work unchanged."
+        }
+      ]
+    },
+    {
+      "task": 7,
+      "checkpoints": [
+        {
+          "id": "T7-C1",
+          "completionCriterion": "The failed Landscape output and its recovery action are identified.",
+          "firstHint": "Look at the failed format for an action that affects only that output.",
+          "secondHint": "Find Retry on the failed Landscape output."
+        },
+        {
+          "id": "T7-C2",
+          "completionCriterion": "Landscape is retried successfully without rerunning completed Square or Portrait outputs.",
+          "firstHint": "Recover only the failed format and leave the completed formats in place.",
+          "secondHint": "Retry Landscape only, then confirm Square and Portrait stayed complete."
+        }
+      ]
+    },
+    {
+      "task": 8,
+      "checkpoints": [
+        {
+          "id": "T8-C1",
+          "completionCriterion": "The project and workflow have been saved and PaintNode has been quit.",
+          "firstHint": "Look for the normal save action before closing PaintNode.",
+          "secondHint": "Save the project, then quit PaintNode."
+        },
+        {
+          "id": "T8-C2",
+          "completionCriterion": "The same project and campaign are reopened with the prior state preserved.",
+          "firstHint": "Reopen the same project folder and look for the campaign you saved.",
+          "secondHint": "Open the saved project, then reopen its Campaign Composer workflow."
+        },
+        {
+          "id": "T8-C3",
+          "completionCriterion": "The participant has confirmed that the accepted edit and output state survived reopening.",
+          "firstHint": "Check whether the chosen edit and completed outputs are still present.",
+          "secondHint": "Inspect the accepted direction and output statuses to confirm they were preserved."
+        },
+        {
+          "id": "T8-C4",
+          "completionCriterion": "The edited campaign result has been placed as a real layer in an image document.",
+          "firstHint": "Look for a way to use the edited campaign result in an image document.",
+          "secondHint": "Use Place on the edited result and confirm it appears as a layer."
+        }
+      ]
+    }
+  ]
+}

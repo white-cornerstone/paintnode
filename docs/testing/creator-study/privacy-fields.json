@@ -24,6 +24,7 @@
     "recordings, screens, audio, and raw notes",
     "raw or potentially identifying quotes",
     "intervention and session logs with identifying timestamps or paths",
+    "exact facilitator hint text, hint IDs, assist ordinals, and deviation logs",
     "retention and deletion ledger",
     "access-control evidence and exceptions"
   ]
