@@ -1774,6 +1774,56 @@ pub(crate) fn correct_part_result_drift(
     Ok((encode_rgba_png(shifted, label)?, Some(correction)))
 }
 
+/// Reject an upscale result that changed the crop's low-frequency structure
+/// instead of restoring detail. Downsampling suppresses legitimate new texture
+/// while retaining composition, subject placement, and large color regions.
+pub(crate) fn validate_upscale_part_structure(
+    source_png: &[u8],
+    result_png: &[u8],
+    label: &str,
+) -> Result<(), String> {
+    const CHECK_SIDE: u32 = 32;
+    const MAX_MEAN_CHANNEL_DELTA: f64 = 0.18;
+    let source = decode_png_rgba(source_png, label)?;
+    let result = decode_png_rgba(result_png, label)?;
+    if source.dimensions() != result.dimensions() {
+        return Err(format!(
+            "{label} structure-check inputs must have identical dimensions."
+        ));
+    }
+    let source = image::imageops::resize(
+        &source,
+        CHECK_SIDE,
+        CHECK_SIDE,
+        image::imageops::FilterType::Triangle,
+    );
+    let result = image::imageops::resize(
+        &result,
+        CHECK_SIDE,
+        CHECK_SIDE,
+        image::imageops::FilterType::Triangle,
+    );
+    let total_delta = source
+        .pixels()
+        .zip(result.pixels())
+        .map(|(a, b)| {
+            a.0[..3]
+                .iter()
+                .zip(&b.0[..3])
+                .map(|(x, y)| u64::from(x.abs_diff(*y)))
+                .sum::<u64>()
+        })
+        .sum::<u64>();
+    let samples = u64::from(CHECK_SIDE) * u64::from(CHECK_SIDE) * 3;
+    let mean_delta = total_delta as f64 / samples as f64 / 255.0;
+    if mean_delta > MAX_MEAN_CHANNEL_DELTA {
+        return Err(format!(
+            "{label} changed the crop composition instead of restoring detail (structural delta {mean_delta:.3})."
+        ));
+    }
+    Ok(())
+}
+
 /// Width of the cross-fade band between a part and previously generated
 /// content: matches the per-axis tiling overlap so it always sits inside the
 /// region both parts actually rendered.
@@ -1844,6 +1894,9 @@ fn mix_rgba(old: image::Rgba<u8>, new: image::Rgba<u8>, weight: u8) -> image::Rg
 /// to edit the mask after import. The mask still shapes the per-part agent
 /// inputs (`part_inputs`).
 pub(crate) struct AiEditComposer {
+    /// Immutable source used when every part must refine the same deterministic
+    /// base image (not progressively generated neighboring output).
+    original_source: image::RgbaImage,
     source: image::RgbaImage,
     edit_target: image::RgbaImage,
     /// `None` means every pixel is editable (detail-restoration passes).
@@ -1882,6 +1935,7 @@ impl AiEditComposer {
         let editable = CoverageGrid::from_mask(&mask);
         let (width, height) = source.dimensions();
         Ok(Self {
+            original_source: source.clone(),
             source,
             edit_target,
             mask: Some(mask),
@@ -1897,6 +1951,7 @@ impl AiEditComposer {
         let source = decode_png_rgba(source_png, label)?;
         let (width, height) = source.dimensions();
         Ok(Self {
+            original_source: source.clone(),
             edit_target: source.clone(),
             editable: CoverageGrid::full(width, height),
             painted: CoverageGrid::empty(width, height),
@@ -2056,6 +2111,22 @@ impl AiEditComposer {
         label: &str,
     ) -> Result<AiEditPartInputs, String> {
         self.part_inputs_with_padding_rule(part, label, false, false)
+    }
+
+    /// Inputs for independent restoration/upscale parts. Every crop comes from
+    /// the same immutable base image even after earlier results are composed.
+    pub(crate) fn part_inputs_from_original(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+    ) -> Result<AiEditPartInputs, String> {
+        self.part_inputs_from_images(
+            part,
+            label,
+            false,
+            &self.original_source,
+            &self.original_source,
+        )
     }
 
     pub(crate) fn part_inputs_hiding_unpainted_editable(
@@ -2579,6 +2650,18 @@ pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usi
 - The attached images already include finished content adjacent to the editable region. Match its content, lighting, perspective, and style so your result joins it seamlessly.
 - The user prompt describes an edit that extends beyond this crop; produce only what belongs inside this crop's mask and let content continue naturally past the crop edges instead of composing a complete standalone picture.
 - Treat the attached frame as the fixed canvas: do not crop, zoom, pan, rotate, or reframe it, and do not pass any document or canvas pixel dimensions to the image-generation tool."#
+        .into()
+}
+
+/// Geometry contract for deterministic upscale parts. Each provider receives
+/// an independent crop from the same enlarged original; no progressively
+/// generated neighboring pixels or full-document overview are input context.
+pub(crate) fn ai_upscale_part_geometry_note() -> String {
+    r#"PaintNode upscale geometry:
+- The attached source image is one fixed crop from PaintNode's deterministic enlarged original.
+- Refine only this exact crop. PaintNode will blend and paste it back into the document automatically.
+- Do not infer or recreate the wider composition, and do not add, remove, move, or rescale content.
+- Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or change camera geometry."#
         .into()
 }
 
@@ -4222,6 +4305,13 @@ mod tests {
         let second_source =
             decode_png_rgba(&second_inputs.source_png, "source").expect("decode source");
         assert_eq!(second_source.get_pixel(0, 0).0, [200, 0, 0, 255]);
+
+        let independent_inputs = composer
+            .part_inputs_from_original(&second, "AI upscale")
+            .expect("independent upscale inputs");
+        let independent_source = decode_png_rgba(&independent_inputs.source_png, "source")
+            .expect("decode independent source");
+        assert_eq!(independent_source.get_pixel(0, 0).0, [0, 0, 200, 255]);
     }
 
     #[test]
@@ -4236,6 +4326,16 @@ mod tests {
         );
         assert!(ai_upscale_target_dimensions((1600, 600), 99).is_err());
         assert!(ai_upscale_target_dimensions((1600, 600), 1001).is_err());
+    }
+
+    #[test]
+    fn upscale_structure_gate_rejects_recomposition() {
+        let source = solid_png(64, 64, [20, 80, 180, 255]);
+        assert!(validate_upscale_part_structure(&source, &source, "AI upscale").is_ok());
+        let unrelated = solid_png(64, 64, [220, 30, 20, 255]);
+        let error = validate_upscale_part_structure(&source, &unrelated, "AI upscale")
+            .expect_err("unrelated composition must fail");
+        assert!(error.contains("changed the crop composition"));
     }
 
     #[test]

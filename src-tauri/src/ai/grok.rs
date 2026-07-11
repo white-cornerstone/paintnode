@@ -43,11 +43,12 @@ use crate::ai::canvas::{
 };
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
-    ai_upscale_target_dimensions, correct_part_result_drift, cover_crop_png_to_dimensions,
-    fill_part_needs_overview, fill_placement_returns_layer_results, plan_ai_edit_placement,
-    plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
-    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result, AiEditComposer,
-    AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_upscale_part_geometry_note, ai_upscale_target_dimensions, correct_part_result_drift,
+    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
+    plan_ai_edit_placement, plan_ai_fill_placement, plan_ai_restore_placement,
+    plan_ai_upscale_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
+    reuse_part_result, validate_upscale_part_structure, AiEditComposer, AiEditProvider,
+    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
@@ -1204,21 +1205,27 @@ fn grok_restore_image_details(
             let _ = fs::remove_file(part_path.join("part_result.png"));
             let _ = fs::remove_file(part_path.join("result.png"));
         }
-        let inputs = composer.part_inputs(part, label)?;
+        let inputs = if upscale_layers {
+            composer.part_inputs_from_original(part, label)?
+        } else {
+            composer.part_inputs(part, label)?
+        };
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
-        let has_overview = placement.is_split();
+        let has_overview = placement.is_split() && !upscale_layers;
         let mut attachments = GrokEditAttachments::new();
         attachments.push(
             part_path.join("source.png"),
             "the image region to restore (`source.png`). It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.",
         );
-        attachments.push(
-            part_path.join("mask.png"),
-            "an editable-area mask over <IMAGE_0> (`mask.png`). White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades the result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged. The mask itself must never appear in the output.",
-        );
+        if !upscale_layers {
+            attachments.push(
+                part_path.join("mask.png"),
+                "an editable-area mask over <IMAGE_0> (`mask.png`). White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades the result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged. The mask itself must never appear in the output.",
+            );
+        }
         if has_overview {
             fs::write(
                 part_path.join("overview.png"),
@@ -1230,7 +1237,11 @@ fn grok_restore_image_details(
                 GROK_OVERVIEW_ATTACHMENT_NOTE,
             );
         }
-        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let geometry_note = if upscale_layers {
+            ai_upscale_part_geometry_note()
+        } else {
+            ai_part_geometry_note(&placement, part_index)
+        };
         let prompt_text = grok_restore_prompt(&attachments.notes_block(), &geometry_note);
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
         emit_codex_part_progress(
@@ -1268,6 +1279,9 @@ fn grok_restore_image_details(
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
         let _ = fs::remove_file(&result_path);
         let unaligned_bytes = bytes.clone();
+        if upscale_layers {
+            validate_upscale_part_structure(&inputs.source_png, &bytes, label)?;
+        }
         let (bytes, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &bytes, label)?;
         if let Some(correction) = drift_correction {

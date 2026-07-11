@@ -48,13 +48,14 @@ use crate::ai::fill_storyboard::{
 use crate::ai::grok::{final_grok_agent_message, run_grok_director_request};
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
-    ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
-    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
-    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, plan_ai_upscale_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, storyboard_draft_canvas_png,
-    storyboard_draft_mask_png, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_part_prompt_context, ai_upscale_part_geometry_note, ai_upscale_target_dimensions,
+    correct_part_result_drift, cover_crop_png_to_dimensions, fill_part_needs_overview,
+    fill_placement_returns_layer_results, normalize_storyboard_draft_png, plan_ai_edit_placement,
+    plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
+    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result,
+    storyboard_draft_canvas_png, storyboard_draft_mask_png, validate_upscale_part_structure,
+    AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod, AiFillRedundancy,
+    AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
@@ -2902,12 +2903,16 @@ fn antigravity_restore_image_details(
             let _ = fs::remove_file(part_path.join("result.png"));
         }
         let job_dir = antigravity_job_dir_label(workspace_path, &part_path);
-        let inputs = composer.part_inputs(part, label)?;
+        let inputs = if upscale_layers {
+            composer.part_inputs_from_original(part, label)?
+        } else {
+            composer.part_inputs(part, label)?
+        };
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
-        let has_overview = placement.is_split();
+        let has_overview = placement.is_split() && !upscale_layers;
         if has_overview {
             fs::write(
                 part_path.join("overview.png"),
@@ -2915,7 +2920,11 @@ fn antigravity_restore_image_details(
             )
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
-        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let geometry_note = if upscale_layers {
+            ai_upscale_part_geometry_note()
+        } else {
+            ai_part_geometry_note(&placement, part_index)
+        };
         let prompt_text = antigravity_restore_director_prompt(
             &job_dir,
             autonomy,
@@ -2963,6 +2972,9 @@ fn antigravity_restore_image_details(
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
         let _ = fs::remove_file(&result_path);
         let unaligned_bytes = bytes.clone();
+        if upscale_layers {
+            validate_upscale_part_structure(&inputs.source_png, &bytes, label)?;
+        }
         let (bytes, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &bytes, label)?;
         if let Some(correction) = drift_correction {

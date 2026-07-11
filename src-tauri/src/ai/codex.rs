@@ -50,12 +50,13 @@ use crate::ai::grok::{
 };
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
-    ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
-    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
-    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, plan_ai_upscale_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider,
-    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_part_prompt_context, ai_upscale_part_geometry_note, ai_upscale_target_dimensions,
+    correct_part_result_drift, cover_crop_png_to_dimensions, fill_part_needs_overview,
+    fill_placement_returns_layer_results, normalize_storyboard_draft_png, plan_ai_edit_placement,
+    plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
+    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result,
+    validate_upscale_part_structure, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
@@ -3226,12 +3227,16 @@ fn codex_restore_image_details(
             let _ = fs::remove_file(part_path.join("part_result.png"));
             let _ = fs::remove_file(part_path.join("result.png"));
         }
-        let inputs = composer.part_inputs(part, label)?;
+        let inputs = if upscale_layers {
+            composer.part_inputs_from_original(part, label)?
+        } else {
+            composer.part_inputs(part, label)?
+        };
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
-        let has_overview = placement.is_split();
+        let has_overview = placement.is_split() && !upscale_layers;
         if has_overview {
             fs::write(
                 part_path.join("overview.png"),
@@ -3240,7 +3245,11 @@ fn codex_restore_image_details(
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
         write_codex_imagegen_options(&part_path, part.working.original_dimensions, options)?;
-        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let geometry_note = if upscale_layers {
+            ai_upscale_part_geometry_note()
+        } else {
+            ai_part_geometry_note(&placement, part_index)
+        };
         let prompt_text = codex_direct_restore_director_prompt(
             &geometry_note,
             director_provider,
@@ -3343,6 +3352,9 @@ fn codex_restore_image_details(
         };
         let _ = fs::remove_file(&part_run.recovered_source_path);
         let unaligned_bytes = part_run.normalized_png.clone();
+        if upscale_layers {
+            validate_upscale_part_structure(&inputs.source_png, &part_run.normalized_png, label)?;
+        }
         let (part_result_png, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &part_run.normalized_png, label)?;
         if let Some(correction) = drift_correction {
