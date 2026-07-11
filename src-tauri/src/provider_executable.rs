@@ -737,30 +737,59 @@ fn parse_study_hex<const N: usize>(raw: &std::ffi::OsStr, label: &str) -> Result
     Ok(bytes)
 }
 
-fn study_evidence_request(
-    profile_env: &str,
-    nonce_env: &str,
-    path_env: &str,
+fn study_evidence_request_in_mode(
+    qa_mode: &str,
+    raw_profile: Option<&std::ffi::OsStr>,
+    raw_nonce: Option<&std::ffi::OsStr>,
+    raw_path: Option<&std::ffi::OsStr>,
+    profile_only_is_resume: bool,
 ) -> Result<Option<StudyEvidenceRequest>, String> {
-    let Some(raw_profile) = std::env::var_os(profile_env) else {
+    // The study profile is also present for same-session resume launches. Only
+    // the dedicated nonce/path pair opts a launch into one-shot lifecycle
+    // evidence creation.
+    if raw_profile.is_none() && raw_nonce.is_none() && raw_path.is_none() {
         return Ok(None);
-    };
-    if std::env::var(QA_MODE_ENV).as_deref() != Ok("provider-free") {
+    }
+    if profile_only_is_resume && raw_profile.is_some() && raw_nonce.is_none() && raw_path.is_none()
+    {
+        return Ok(None);
+    }
+    if qa_mode != "provider-free" {
         return Err("Study lifecycle evidence is available only in Provider Free mode.".into());
     }
-    let raw_nonce = std::env::var_os(nonce_env)
-        .ok_or_else(|| "Provider Free study lifecycle nonce is missing.".to_string())?;
-    let path = std::env::var_os(path_env)
+    let raw_profile = raw_profile
+        .ok_or_else(|| "Provider Free study lifecycle profile is missing.".to_string())?;
+    let raw_nonce =
+        raw_nonce.ok_or_else(|| "Provider Free study lifecycle nonce is missing.".to_string())?;
+    let path = raw_path
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute())
         .ok_or_else(|| {
             "Provider Free study lifecycle evidence path must be absolute.".to_string()
         })?;
     Ok(Some(StudyEvidenceRequest {
-        profile: parse_study_hex::<16>(&raw_profile, "Provider Free study profile")?,
-        nonce: parse_study_hex::<32>(&raw_nonce, "Provider Free study lifecycle nonce")?,
+        profile: parse_study_hex::<16>(raw_profile, "Provider Free study profile")?,
+        nonce: parse_study_hex::<32>(raw_nonce, "Provider Free study lifecycle nonce")?,
         path,
     }))
+}
+
+fn study_evidence_request(
+    profile_env: &str,
+    nonce_env: &str,
+    path_env: &str,
+    profile_only_is_resume: bool,
+) -> Result<Option<StudyEvidenceRequest>, String> {
+    let raw_profile = std::env::var_os(profile_env);
+    let raw_nonce = std::env::var_os(nonce_env);
+    let raw_path = std::env::var_os(path_env);
+    study_evidence_request_in_mode(
+        &std::env::var(QA_MODE_ENV).unwrap_or_default(),
+        raw_profile.as_deref(),
+        raw_nonce.as_deref(),
+        raw_path.as_deref(),
+        profile_only_is_resume,
+    )
 }
 
 pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidenceRequest>, String> {
@@ -768,6 +797,7 @@ pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidence
         PROVIDER_FREE_STUDY_PROFILE_ENV,
         PROVIDER_FREE_STUDY_BOOT_NONCE_ENV,
         PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV,
+        true,
     )
 }
 
@@ -776,6 +806,7 @@ pub(crate) fn provider_free_study_cleanup() -> Result<Option<StudyEvidenceReques
         PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV,
         PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV,
         PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV,
+        false,
     )
 }
 
@@ -894,6 +925,47 @@ mod tests {
         )
         .expect_err("malformed study profile must fail closed")
         .contains("32 hexadecimal"));
+    }
+
+    #[test]
+    fn study_lifecycle_evidence_is_optional_for_same_session_resume() {
+        let profile = std::ffi::OsStr::new("00112233445566778899aabbccddeeff");
+        assert!(
+            study_evidence_request_in_mode("provider-free", Some(profile), None, None, true)
+                .expect("resume launch does not request new boot evidence")
+                .is_none()
+        );
+
+        let nonce_text = "11".repeat(32);
+        let nonce = std::ffi::OsStr::new(&nonce_text);
+        let partial_error = match study_evidence_request_in_mode(
+            "provider-free",
+            Some(profile),
+            Some(nonce),
+            None,
+            true,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("partial lifecycle request must fail closed"),
+        };
+        assert!(partial_error.contains("path must be absolute"));
+
+        let path = std::ffi::OsStr::new("/tmp/paintnode-study-boot-evidence.json");
+        let request = study_evidence_request_in_mode(
+            "provider-free",
+            Some(profile),
+            Some(nonce),
+            Some(path),
+            true,
+        )
+        .expect("fresh launch lifecycle request")
+        .expect("fresh launch has lifecycle evidence");
+        assert_eq!(request.path, std::path::PathBuf::from(path));
+
+        assert!(
+            study_evidence_request_in_mode("provider-free", Some(profile), None, None, false,)
+                .is_err()
+        );
     }
 
     #[test]
