@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   FINDING_CATEGORIES,
+  INVALID_SESSION_REASON_IDS,
   RECRUITMENT_EXCEPTION_IDS,
   isIntegrityBlockingFindingCategory,
 } from './creator-study-contract.mjs';
@@ -13,7 +14,7 @@ const SEVERITIES = new Set(['S0', 'S1', 'S2', 'S3', 'S4']);
 const CRITICAL_TASKS = new Set([3, 4, 5, 7, 8]);
 const FINDING_CATEGORY_SET = new Set(FINDING_CATEGORIES);
 const AI_EXPERIENCE = new Set(['never', 'occasional', 'monthly', 'weekly', 'daily']);
-const INVALID_REASONS = new Set(['withdrawn-consent', 'wrong-or-unusable-build', 'provider-invocation', 'prior-exposure', 'facilitator-deviation']);
+const INVALID_REASONS = new Set(INVALID_SESSION_REASON_IDS);
 const FORBIDDEN_KEYS = /(^|_)(name|email|phone|contact|employer|client|medical|credential|storagePath|storageLocation|participantMapping|rawQuote|recordingPath|observerNames?)$/i;
 const TOP_LEVEL_KEYS = new Set(['schemaVersion', 'testOnly', 'participants', 'findings', 'recruitmentExceptions', 'configuredProviderEvidenceRecorded', 'requiredSignoffsRecorded', 'outstandingNonBlockingActions']);
 const PARTICIPANT_KEYS = new Set(['id', 'testOnly', 'valid', 'invalidReasonCategory', 'multiFormatRegular', 'aiExperience', 'keyboardOrAccessibilityCoverage', 'tasks']);
@@ -121,7 +122,7 @@ function validate(input) {
     }
     if ((participant.valid && participant.invalidReasonCategory !== null)
       || (!participant.valid && !INVALID_REASONS.has(participant.invalidReasonCategory))) {
-      throw new Error(`${participant.id} has an invalid invalid-session reason.`);
+      throw new Error(`${participant.id} has an invalid reason category.`);
     }
     if (!Array.isArray(participant.tasks) || participant.tasks.length !== 8) {
       throw new Error(`${participant.id} must contain exactly eight task records.`);

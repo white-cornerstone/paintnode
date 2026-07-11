@@ -11,6 +11,7 @@ import {
   FACILITATOR_ASSIST_EVENT_IDS,
   FACILITATOR_DEVIATION_DEFINITIONS,
   FINDING_CATEGORIES,
+  INVALID_SESSION_REASON_IDS,
   nextFacilitatorIntervention,
   RECRUITMENT_EXCEPTION_IDS,
 } from './creator-study-contract.mjs';
@@ -126,6 +127,10 @@ test('synthesis schema matches the shared finding categories and supports replac
     );
   }
   assert.deepEqual(schema.$defs.finding.properties.category.enum, FINDING_CATEGORIES);
+  assert.deepEqual(schema.$defs.participant.properties.invalidReasonCategory.enum, [
+    null,
+    ...INVALID_SESSION_REASON_IDS,
+  ]);
   assert.equal(schema.$defs.finding.properties.participantIds.minItems, 1);
   assert.equal(schema.$defs.finding.properties.participantIds.uniqueItems, true);
   assert.equal(schema.properties.participants.maxItems > 8, true);
@@ -145,6 +150,7 @@ test('private handoff templates capture schema fields and concrete scheduling as
   const recruitment = readFileSync(join(study, 'templates/private-screener-and-recruitment-log.md'), 'utf8');
   const authorization = readFileSync(join(study, 'templates/private-study-authorization-log.md'), 'utf8');
   const reset = readFileSync(join(study, 'templates/private-session-reset.md'), 'utf8');
+  const incident = readFileSync(join(study, 'templates/private-incident-and-invalid-session.md'), 'utf8');
   for (const field of [
     'acceptedWorkPreserved', 'participantIds', 'category', 'traceable', 'resolved',
     'blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded',
@@ -169,6 +175,20 @@ test('private handoff templates capture schema fields and concrete scheduling as
   assert.match(reset, /--visible-empty-state-attested/);
   for (const id of RECRUITMENT_EXCEPTION_IDS) assert.match(authorization, new RegExp(`\\b${id}\\b`));
   assert.match(authorization, /one requirement never waives the other/i);
+  for (const template of [authorization, recruitment, session]) {
+    assert.match(template, /Accessibility support owner:.*not required/i);
+  }
+  assert.match(recruitment, /Accessibility support handoff: complete \/ pending \/ not required/i);
+  assert.match(session, /Accessibility support handoff: complete \/ pending \/ not required/i);
+  assert.match(reset, /accessibility support owner.*explicitly not required/i);
+  for (const id of INVALID_SESSION_REASON_IDS) assert.match(incident, new RegExp(`\\b${id}\\b`));
+  assert.doesNotMatch(incident, /(?:^|\s)other(?:\s|$)/i);
+  assert.match(authorization, /authoritative source.*decision owner.*retention.*deletion ledger/is);
+  for (const template of [session]) {
+    assert.match(template, /Private authorization\/retention log reference:/);
+    assert.match(template, /Authorization\/retention status verified for this session: yes \/ no/);
+    assert.doesNotMatch(template, /Milestone decision date \/.*deletion due date/i);
+  }
 });
 
 test('operations require a fresh isolated profile and preserve only same-session reopen', () => {

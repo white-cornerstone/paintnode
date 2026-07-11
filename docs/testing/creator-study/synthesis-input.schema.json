@@ -58,7 +58,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^P(?:0[1-9]|[1-9][0-9])$" },
         "valid": { "type": "boolean" },
-        "invalidReasonCategory": { "type": ["string", "null"], "enum": [null, "withdrawn-consent", "wrong-or-unusable-build", "provider-invocation", "prior-exposure", "facilitator-deviation"] },
+        "invalidReasonCategory": { "description": "Closed privacy-safe reason category; null only for a valid session. Free-text and other are forbidden.", "type": ["string", "null"], "enum": [null, "withdrawn-consent", "wrong-or-unusable-build", "provider-invocation", "prior-exposure", "facilitator-deviation"] },
         "multiFormatRegular": { "type": "boolean" },
         "aiExperience": { "enum": ["never", "occasional", "monthly", "weekly", "daily"] },
         "keyboardOrAccessibilityCoverage": { "type": "boolean" },

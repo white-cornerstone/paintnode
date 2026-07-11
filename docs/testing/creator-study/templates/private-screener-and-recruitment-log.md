@@ -16,6 +16,8 @@
 - Named session observers:
 - Technical session operator:
 - Accommodation setup confirmation: complete / pending / none stated
+- Accessibility support owner: [private assignment] / not required
+- Accessibility support handoff: complete / pending / not required
 - Asked by/date:
 
 ## Eligibility categories only

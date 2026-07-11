@@ -772,8 +772,11 @@ export function verifyStudySetup({
   });
 
   return Object.freeze({
-    schemaVersion: 1,
-    ready: true,
+    schemaVersion: 2,
+    receiptType: 'paintnode-creator-study-technical-setup',
+    scope: 'technical-setup-only',
+    technicalSetupReady: true,
+    studyAuthorizationEvaluated: false,
     gitSha: actualGitSha,
     bundleId,
     bundleName: EXPECTED_BUNDLE_NAME,
@@ -799,7 +802,10 @@ export function verifyStudySetup({
     manualChecksStillRequired: [
       'visible rehearsal of both failure checkpoints',
       'editor return, save/reopen, and Place',
-      'private study authorization and recording state',
+      'private recruitment authorization and study authorization',
+      'participation consent and recording consent/state',
+      'facilitator calibration authorization',
+      'accessibility support owner or explicit not-required handoff',
     ],
   });
 }

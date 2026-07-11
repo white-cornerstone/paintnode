@@ -9,6 +9,8 @@ import approvedBuildTemplate from '../../../docs/testing/creator-study/templates
 import activeBuildDecisionsTemplate from '../../../docs/testing/creator-study/templates/private-active-build-decisions.json';
 import privateIntervention from '../../../docs/testing/creator-study/templates/private-intervention-log.md?raw';
 import privateAuthorization from '../../../docs/testing/creator-study/templates/private-study-authorization-log.md?raw';
+import privateIncident from '../../../docs/testing/creator-study/templates/private-incident-and-invalid-session.md?raw';
+import privateReset from '../../../docs/testing/creator-study/templates/private-session-reset.md?raw';
 import facilitatorHints from '../../../docs/testing/creator-study/facilitator-hints.json';
 
 describe('Creative Blueprint creator study protocol', () => {
@@ -130,6 +132,37 @@ describe('Creative Blueprint creator study protocol', () => {
     const perSessionTemplate = /## Per-session observation template[\s\S]*?## Private working synthesis template/
       .exec(protocol)?.[0] ?? '';
     expect(perSessionTemplate.match(/Build Git SHA and QA bundle identity:/g) ?? []).toHaveLength(1);
+  });
+
+  it('closes invalid-session, accessibility-support, and retention handoff drift', () => {
+    const invalidReasons = [
+      'withdrawn-consent', 'wrong-or-unusable-build', 'provider-invocation',
+      'prior-exposure', 'facilitator-deviation',
+    ];
+    for (const reason of invalidReasons) {
+      expect(privateIncident).toContain(reason);
+      expect(protocol).toContain(reason);
+    }
+    expect(privateIncident).not.toMatch(/(?:^|\s)other(?:\s|$)/i);
+
+    for (const template of [privateAuthorization, privateRecruitment, privateSession]) {
+      expect(template).toMatch(/Accessibility support owner:.*not required/i);
+    }
+    expect(privateRecruitment).toContain('Accessibility support handoff: complete / pending / not required');
+    expect(privateSession).toContain('Accessibility support handoff: complete / pending / not required');
+    expect(privateReset).toMatch(/accessibility support owner.*explicitly not required/i);
+
+    expect(privateAuthorization).toMatch(/authoritative source.*decision owner.*retention.*deletion ledger/is);
+    const perSessionTemplate = /## Per-session observation template[\s\S]*?## Private working synthesis template/
+      .exec(protocol)?.[0] ?? '';
+    for (const template of [privateSession, perSessionTemplate]) {
+      expect(template).toContain('Private authorization/retention log reference:');
+      expect(template).toContain('Authorization/retention status verified for this session: yes / no');
+      expect(template).not.toMatch(/Milestone decision date \/.*deletion due date/i);
+    }
+    expect(privacyFields.privateOnly).toContain('accessibility support owner assignments and handoff status');
+    expect(privacyFields.privateOnly).toContain('private authorization/retention log references');
+    expect(privacyFields.repositoryAllowed).not.toContain('accessibility support owner assignments and handoff status');
   });
 
   it('standardizes every task hint, assist count, deviation, and calibration gate', () => {
