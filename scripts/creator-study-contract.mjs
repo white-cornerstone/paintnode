@@ -51,3 +51,12 @@ export const FACILITATOR_DEVIATION_DEFINITIONS = Object.freeze([
   Object.freeze({ id: 'calibration-missing', sessionValidity: 'invalid' }),
   Object.freeze({ id: 'instrument-version-mismatch', sessionValidity: 'invalid' }),
 ]);
+
+export const RECRUITMENT_EXCEPTION_DEFINITIONS = Object.freeze([
+  { id: 'cohortMix', requirement: 'Required multi-format and AI-experience cohort mix' },
+  { id: 'keyboardOrAccessibilityCoverage', requirement: 'Keyboard/accessibility cohort coverage' },
+]);
+
+export const RECRUITMENT_EXCEPTION_IDS = Object.freeze(
+  RECRUITMENT_EXCEPTION_DEFINITIONS.map(({ id }) => id),
+);

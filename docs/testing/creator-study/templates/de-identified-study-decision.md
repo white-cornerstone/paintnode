@@ -11,6 +11,18 @@
 - Recording/identifiable-note deletion status: pending / complete / exception approved privately
 - Configured-provider evidence reference:
 
+## Recruitment exception decisions
+
+Use the exact closed IDs below. `approved=true` requires
+`rationaleRecorded=true` and a de-identified `CB-DEC-N` `decisionReference`.
+An approval applies only when its own requirement is unmet; it never waives the
+other requirement. Approved rows use distinct decision references.
+
+| Exception ID | Requirement met | `approved` | `rationaleRecorded` | `decisionReference` | `applied` | Separate effect/rationale |
+| --- | --- | --- | --- | --- | --- | --- |
+| `cohortMix` | true / false | true / false | true / false | null / `CB-DEC-N` | true / false | |
+| `keyboardOrAccessibilityCoverage` | true / false | true / false | true / false | null / `CB-DEC-N` | true / false | |
+
 ## Executive result
 
 - Recommendation: pass / conditional / block / insufficient evidence
@@ -69,6 +81,6 @@ required cross-functional approval and recorded rationale.
 - Accessibility role sign-off:
 
 `conditional` never closes issue #85. `pass` requires 6–8 valid real sessions,
-complete traceability, cohort coverage or a documented recruitment decision,
-all study thresholds, no unresolved blocker, configured-provider evidence, and
-all required role sign-offs.
+complete traceability, each cohort requirement or its own complete approved
+exception, all study thresholds, no unresolved blocker, configured-provider
+evidence, and all required role sign-offs.

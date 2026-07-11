@@ -81,6 +81,20 @@ Complete private session records first. Create a de-identified JSON input from
 `synthesis-input.schema.json`. Never include names, contact details, raw quotes,
 storage paths, or participant-code mappings.
 
+The current input contract is schema version 2. Its closed
+`recruitmentExceptions` object has separate `cohortMix` and
+`keyboardOrAccessibilityCoverage` records. An exception is complete only when
+`approved=true`, `rationaleRecorded=true`, and `decisionReference` is a
+de-identified `CB-DEC-N` ID. Otherwise keep the record at `approved=false`,
+`rationaleRecorded=false`, and `decisionReference=null`. Each exception applies
+only to its own missing requirement; one can never waive the other. When both
+are approved, their `decisionReference` values must be distinct even if both
+rows live in the same overall study decision document.
+
+No real participant input exists under version 1, so the calculator rejects
+version 1 instead of guessing how its generic flag should split. Start every
+real synthesis from the committed version-2 blank template.
+
 Record `acceptedWorkPreserved=null` for Tasks 1–7. For Task 8 use `true` only
 when accepted work reopens with no data loss or wrong lineage, `false` when it
 does not, and `null` only when preservation was not observed. Every finding must
@@ -97,7 +111,8 @@ values instead of inventing them. It computes task/full-journey rates,
 medians/ranges, cohort counts, severity blockers, thresholds, and a deterministic
 recommendation. A `conditional` result does not close issue #85. Only `pass`
 sets `milestoneMayClose`, and only when configured-provider evidence, required
-sign-offs, complete traceability, thresholds, and blocker rules all pass.
+sign-offs, complete traceability, thresholds, blocker rules, and both
+recruitment requirements or their own complete approved exceptions all pass.
 
 Review the generated aggregate output against the private records, then copy
 only approved values into `de-identified-study-decision.md`. Humans remain

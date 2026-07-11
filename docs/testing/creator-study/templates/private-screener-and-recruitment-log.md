@@ -34,3 +34,11 @@
 
 Do not copy raw answers, contact details, employer/client information, medical
 details, or accommodation detail into repository evidence.
+
+## Cohort review handoff
+
+Complete aggregate exception decisions only in the private authorization log.
+Use separate `cohortMix` and `keyboardOrAccessibilityCoverage` decisions; never
+use one recruitment approval to cover both requirements. Copy only each
+approved decision's de-identified `CB-DEC-N` reference and rationale-recorded
+state into the repository-safe synthesis input.

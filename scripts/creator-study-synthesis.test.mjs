@@ -33,14 +33,25 @@ function testOnlyParticipant(index, overrides = {}) {
 
 function passingInput() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     testOnly: true,
     participants: Array.from({ length: 8 }, (_, index) => testOnlyParticipant(index + 1)),
     findings: [],
-    recruitmentDecisionDocumented: false,
+    recruitmentExceptions: {
+      cohortMix: { approved: false, rationaleRecorded: false, decisionReference: null },
+      keyboardOrAccessibilityCoverage: { approved: false, rationaleRecorded: false, decisionReference: null },
+    },
     configuredProviderEvidenceRecorded: true,
     requiredSignoffsRecorded: true,
     outstandingNonBlockingActions: [],
+  };
+}
+
+function approveRecruitmentException(input, exception, suffix) {
+  input.recruitmentExceptions[exception] = {
+    approved: true,
+    rationaleRecorded: true,
+    decisionReference: `TEST-DEC-${suffix}`,
   };
 }
 
@@ -64,6 +75,7 @@ test('calculator reports exact denominators, median/range, cohort mix, threshold
   input.participants.forEach((participant, index) => { participant.tasks[0].seconds = 50 + (index * 10); });
   const result = calculateStudySynthesis(input);
 
+  assert.equal(result.schemaVersion, 2);
   assert.equal(result.validSessions, 8);
   assert.equal(result.fullJourney.unaided.count, 8);
   assert.equal(result.fullJourney.unaided.denominator, 8);
@@ -164,7 +176,7 @@ test('insufficient evidence, blocker, conditional, and severity mappings are det
   assert.ok(missingProviderResult.warnings.some((warning) => /configured-provider evidence/i.test(warning)));
 });
 
-test('critical thresholds, even medians, invalid-session exclusion, and cohort exceptions are explicit', () => {
+test('critical thresholds, even medians, and invalid-session exclusion are explicit', () => {
   const input = passingInput();
   input.participants[0].tasks[4].seconds = 40;
   input.participants[1].tasks[4].seconds = 80;
@@ -184,11 +196,125 @@ test('critical thresholds, even medians, invalid-session exclusion, and cohort e
   assert.equal(result.tasks[4].criticalAtMostOneAssist.count, 5);
   assert.equal(result.recommendation, 'block');
 
-  const cohortGap = passingInput();
-  cohortGap.participants.forEach((participant) => { participant.multiFormatRegular = false; });
-  assert.equal(calculateStudySynthesis(cohortGap).recommendation, 'insufficient evidence');
-  cohortGap.recruitmentDecisionDocumented = true;
-  assert.equal(calculateStudySynthesis(cohortGap).recommendation, 'pass');
+});
+
+test('cohort-mix and keyboard/accessibility gaps require independent closed approvals', () => {
+  const scenario = ({ cohortGap, accessibilityGap, cohortApproval, accessibilityApproval }) => {
+    const input = passingInput();
+    if (cohortGap) input.participants.forEach((participant) => { participant.multiFormatRegular = false; });
+    if (accessibilityGap) input.participants.forEach((participant) => { participant.keyboardOrAccessibilityCoverage = false; });
+    if (cohortApproval) approveRecruitmentException(input, 'cohortMix', '1');
+    if (accessibilityApproval) approveRecruitmentException(input, 'keyboardOrAccessibilityCoverage', '2');
+    return calculateStudySynthesis(input);
+  };
+
+  assert.equal(scenario({}).recommendation, 'pass');
+
+  const cohortMissing = scenario({ cohortGap: true });
+  assert.equal(cohortMissing.recommendation, 'insufficient evidence');
+  assert.match(cohortMissing.warnings.join('\n'), /cohort mix/i);
+  assert.doesNotMatch(cohortMissing.warnings.join('\n'), /keyboard\/accessibility/i);
+
+  const accessibilityMissing = scenario({ accessibilityGap: true });
+  assert.equal(accessibilityMissing.recommendation, 'insufficient evidence');
+  assert.doesNotMatch(accessibilityMissing.warnings.join('\n'), /cohort mix/i);
+  assert.match(accessibilityMissing.warnings.join('\n'), /keyboard\/accessibility/i);
+
+  const neitherApproved = scenario({ cohortGap: true, accessibilityGap: true });
+  assert.equal(neitherApproved.recommendation, 'insufficient evidence');
+  assert.match(neitherApproved.warnings.join('\n'), /cohort mix/i);
+  assert.match(neitherApproved.warnings.join('\n'), /keyboard\/accessibility/i);
+
+  const cohortOnly = scenario({
+    cohortGap: true, accessibilityGap: true, cohortApproval: true,
+  });
+  assert.equal(cohortOnly.recommendation, 'insufficient evidence');
+  assert.doesNotMatch(cohortOnly.warnings.join('\n'), /cohort mix/i);
+  assert.match(cohortOnly.warnings.join('\n'), /keyboard\/accessibility/i);
+  assert.equal(cohortOnly.recruitmentExceptions.cohortMix.applied, true);
+  assert.equal(cohortOnly.recruitmentExceptions.keyboardOrAccessibilityCoverage.applied, false);
+
+  const accessibilityOnly = scenario({
+    cohortGap: true, accessibilityGap: true, accessibilityApproval: true,
+  });
+  assert.equal(accessibilityOnly.recommendation, 'insufficient evidence');
+  assert.match(accessibilityOnly.warnings.join('\n'), /cohort mix/i);
+  assert.doesNotMatch(accessibilityOnly.warnings.join('\n'), /keyboard\/accessibility/i);
+
+  const bothApproved = scenario({
+    cohortGap: true, accessibilityGap: true, cohortApproval: true, accessibilityApproval: true,
+  });
+  assert.equal(bothApproved.recommendation, 'pass');
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(bothApproved.recruitmentExceptions)
+      .map(([id, exception]) => [id, {
+        requirementMet: exception.requirementMet,
+        approved: exception.approved,
+        decisionReference: exception.decisionReference,
+        rationaleRecorded: exception.rationaleRecorded,
+        applied: exception.applied,
+        effectiveComplete: exception.effectiveComplete,
+      }])),
+    {
+      cohortMix: {
+        requirementMet: false, approved: true, decisionReference: 'TEST-DEC-1',
+        rationaleRecorded: true, applied: true, effectiveComplete: true,
+      },
+      keyboardOrAccessibilityCoverage: {
+        requirementMet: false, approved: true, decisionReference: 'TEST-DEC-2',
+        rationaleRecorded: true, applied: true, effectiveComplete: true,
+      },
+    },
+  );
+
+  assert.equal(scenario({ cohortGap: true, cohortApproval: true }).recommendation, 'pass');
+  assert.equal(scenario({ accessibilityGap: true, accessibilityApproval: true }).recommendation, 'pass');
+  assert.equal(scenario({ cohortGap: true, accessibilityApproval: true }).recommendation, 'insufficient evidence');
+  assert.equal(scenario({ accessibilityGap: true, cohortApproval: true }).recommendation, 'insufficient evidence');
+
+  const unusedApproval = scenario({ cohortApproval: true });
+  assert.equal(unusedApproval.recommendation, 'pass');
+  assert.equal(unusedApproval.recruitmentExceptions.cohortMix.applied, false);
+});
+
+test('recruitment exception approvals require closed rationale and decision-reference state', () => {
+  const legacyVersion = passingInput();
+  legacyVersion.schemaVersion = 1;
+  assert.throws(() => calculateStudySynthesis(legacyVersion), /schemaVersion 2/i);
+
+  const generic = passingInput();
+  generic.recruitmentDecisionDocumented = true;
+  assert.throws(() => calculateStudySynthesis(generic), /unsupported field.*recruitmentDecisionDocumented/i);
+
+  for (const record of [
+    { approved: true, rationaleRecorded: false, decisionReference: 'TEST-DEC-1' },
+    { approved: true, rationaleRecorded: true, decisionReference: null },
+    { approved: false, rationaleRecorded: true, decisionReference: null },
+    { approved: false, rationaleRecorded: false, decisionReference: 'TEST-DEC-1' },
+    { approved: true, rationaleRecorded: true, decisionReference: 'private/path' },
+  ]) {
+    const input = passingInput();
+    input.recruitmentExceptions.cohortMix = record;
+    assert.throws(
+      () => calculateStudySynthesis(input),
+      /cohortMix.*approval|cohortMix.*decision reference/i,
+    );
+  }
+
+  const missingRecord = passingInput();
+  delete missingRecord.recruitmentExceptions.keyboardOrAccessibilityCoverage;
+  assert.throws(
+    () => calculateStudySynthesis(missingRecord),
+    /recruitmentExceptions.*keyboardOrAccessibilityCoverage/i,
+  );
+
+  const sharedDecision = passingInput();
+  approveRecruitmentException(sharedDecision, 'cohortMix', '4');
+  approveRecruitmentException(sharedDecision, 'keyboardOrAccessibilityCoverage', '4');
+  assert.throws(
+    () => calculateStudySynthesis(sharedDecision),
+    /distinct de-identified decision references/i,
+  );
 });
 
 test('S1 integrity rules and approved non-integrity exceptions map separately', () => {
@@ -222,7 +348,7 @@ test('accessibility recruitment limits and explicitly blocking S2 burden are pre
   const accessibilityGap = passingInput();
   accessibilityGap.participants.forEach((participant) => { participant.keyboardOrAccessibilityCoverage = false; });
   assert.equal(calculateStudySynthesis(accessibilityGap).recommendation, 'insufficient evidence');
-  accessibilityGap.recruitmentDecisionDocumented = true;
+  approveRecruitmentException(accessibilityGap, 'keyboardOrAccessibilityCoverage', '3');
   assert.equal(calculateStudySynthesis(accessibilityGap).recommendation, 'pass');
 
   const repeatedBurden = passingInput();
