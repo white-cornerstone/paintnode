@@ -136,6 +136,9 @@ For every session record:
 
 - completed study authorization gate, including the approved private storage
   reference, study owner, and named observers;
+- scheduled date, start time, time zone, and delivery mode;
+- assigned facilitator, named session observers, technical session operator,
+  and accommodation setup confirmation;
 - exact Git SHA and QA app bundle identity;
 - operating system, display scale, input method, and app window size;
 - whether recording was permitted;
@@ -355,6 +358,8 @@ For each task record:
 - neutral probes and direct assists separately;
 - wrong turns, repeated actions, error loops, and recovery attempts;
 - SEQ rating from 1–7;
+- `acceptedWorkPreserved`: `null` for Tasks 1–7, then `true`, `false`, or
+  `null` for Task 8 according to observed save/reopen lineage;
 - input method and any accessibility barrier;
 - confidence evidence in the participant's own words.
 
@@ -451,7 +456,15 @@ not commit identifiable raw notes.
 ```markdown
 # Creative Blueprint session P__
 
-- Date/time and facilitator:
+- Scheduled date:
+- Scheduled start time:
+- Time zone:
+- Delivery mode:
+- Assigned facilitator:
+- Named session observers:
+- Technical session operator:
+- Accommodation setup confirmation:
+- Actual start/end time:
 - Build Git SHA and QA bundle identity:
 - OS/display/window/input method:
 - Eligibility summary and cohort bucket:
@@ -472,22 +485,39 @@ not commit identifiable raw notes.
 
 ## Task observations
 
-| Task | Outcome | Seconds | Neutral probes | Direct assists | SEQ 1–7 | Errors/behavior | Evidence or de-identified quote |
-| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
-| 1. Start and Product | | | | | | | |
-| 2. Alternatives/retry | | | | | | | |
-| 3. Compare/choose | | | | | | | |
-| 4. Editor return | | | | | | | |
-| 5. Three outputs | | | | | | | |
-| 6. Reuse/Product change | | | | | | | |
-| 7. Format recovery | | | | | | | |
-| 8. Save/reopen/Place | | | | | | | |
+| Task | Outcome | Seconds | Neutral probes | Direct assists | Wrong turns | Repeated actions | Error loops | Recovery attempts | SEQ 1–7 | `acceptedWorkPreserved` | Raw evidence/time reference |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | | | | | | | | | | null | |
+| 2 | | | | | | | | | | null | |
+| 3 | | | | | | | | | | null | |
+| 4 | | | | | | | | | | null | |
+| 5 | | | | | | | | | | null | |
+| 6 | | | | | | | | | | null | |
+| 7 | | | | | | | | | | null | |
+| 8 | | | | | | | | | | true / false / null | |
 
 ## Findings
 
-| Finding ID | Observation | Task | Severity | Outcome impact | Artifact/time reference |
-| --- | --- | --- | --- | --- | --- |
-| | | | | | |
+Copy `category` from the closed enum in
+`creator-study/synthesis-input.schema.json`; never invent a category variant.
+
+- Finding ID:
+- `participantIds`:
+- Task:
+- `category`:
+- Severity: S0 / S1 / S2 / S3 / S4
+- `traceable`: true / false
+- `resolved`: true / false
+- `blocksExit`: true / false
+- `exceptionApproved`: true / false
+- `exceptionRationaleRecorded`: true / false
+- Outcome impact:
+- Private observation:
+- Artifact/time reference:
+
+Set every boolean explicitly. `resolved=true` requires `blocksExit=false`.
+Exception fields remain `false` unless a single non-integrity S1 has the
+required cross-functional approval and recorded rationale.
 
 ## Facilitator interventions
 
@@ -548,9 +578,9 @@ excludes the private fields below.
 
 ## Prioritized findings
 
-| ID | Finding and evidence | Frequency | Severity | Requirement affected | Owner | Decision/fix | Re-test evidence |
-| --- | --- | ---: | --- | --- | --- | --- | --- |
-| | | | | | | | |
+| ID | `participantIds` | `category` | Finding and evidence | Frequency | Severity | `traceable` | `resolved` | `blocksExit` | `exceptionApproved` | `exceptionRationaleRecorded` | Requirement | Owner | Decision/fix | Re-test evidence |
+| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | | | | | | | | |
 
 ## Decision audit
 

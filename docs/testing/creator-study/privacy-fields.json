@@ -14,6 +14,8 @@
   "privateOnly": [
     "participant name and contact or scheduling details",
     "participant code mapping to identity",
+    "session date, start time, time zone, delivery mode, and private meeting reference",
+    "facilitator, observer, technical operator, and accommodation setup assignments",
     "study owner and observer names",
     "approved storage path or internal storage reference",
     "consent answers tied to a person",

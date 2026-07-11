@@ -3,6 +3,8 @@ import protocol from '../../../docs/testing/creative-blueprint-creator-study.md?
 import decisionTemplate from '../../../docs/testing/creator-study/templates/de-identified-study-decision.md?raw';
 import privacyFields from '../../../docs/testing/creator-study/privacy-fields.json';
 import materialManifest from '../../../docs/testing/creator-study/materials/manifest.json';
+import privateSession from '../../../docs/testing/creator-study/templates/private-session-observation.md?raw';
+import privateRecruitment from '../../../docs/testing/creator-study/templates/private-screener-and-recruitment-log.md?raw';
 
 describe('Creative Blueprint creator study protocol', () => {
   it('reads access, de-identification, retention, and exceptions aloud before recording opt-in', () => {
@@ -61,5 +63,30 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(materialManifest.materials.map((material) => material.task)).toEqual([1, 6]);
     expect(new Set(materialManifest.materials.map((material) => material.sha256)).size).toBe(2);
     expect(materialManifest.materials.every((material) => material.nonConfidential)).toBe(true);
+  });
+
+  it('maps Task 8 and closed finding decisions explicitly into synthesis', () => {
+    expect(protocol).toContain('acceptedWorkPreserved');
+    for (const field of [
+      'participantIds', 'category', 'traceable', 'resolved', 'blocksExit',
+      'exceptionApproved', 'exceptionRationaleRecorded',
+    ]) {
+      expect(privateSession).toContain(field);
+    }
+  });
+
+  it('keeps concrete scheduling assignments in the private recruitment record', () => {
+    for (const label of [
+      'Scheduled date', 'Scheduled start time', 'Time zone', 'Delivery mode',
+      'Assigned facilitator', 'Named session observers', 'Technical session operator',
+      'Accommodation setup confirmation',
+    ]) {
+      expect(privateRecruitment).toContain(label);
+    }
+    expect(protocol).toContain('scheduled date, start time, time zone, and delivery mode');
+
+    const perSessionTemplate = /## Per-session observation template[\s\S]*?## Private working synthesis template/
+      .exec(protocol)?.[0] ?? '';
+    expect(perSessionTemplate.match(/Build Git SHA and QA bundle identity:/g) ?? []).toHaveLength(1);
   });
 });

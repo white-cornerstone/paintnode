@@ -114,7 +114,10 @@ function validate(input) {
   }
   for (const finding of input.findings) {
     assertKeys(finding, FINDING_KEYS, `Finding ${finding.id || '(missing)'}`);
-    requireKeys(finding, ['id', 'severity', 'participantIds', 'category', 'resolved', 'traceable'], `Finding ${finding.id || '(missing)'}`);
+    requireKeys(finding, [
+      'id', 'severity', 'participantIds', 'category', 'resolved', 'traceable',
+      'blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded',
+    ], `Finding ${finding.id || '(missing)'}`);
     if (!SEVERITIES.has(finding.severity) || !finding.id || !Array.isArray(finding.participantIds)) {
       throw new Error('Every finding needs an ID, S0-S4 severity, and participantIds.');
     }
@@ -124,6 +127,19 @@ function validate(input) {
     }
     if (!FINDING_CATEGORY_SET.has(finding.category)) {
       throw new Error(`Finding category is invalid: ${finding.category}`);
+    }
+    if (![finding.resolved, finding.traceable, finding.blocksExit, finding.exceptionApproved, finding.exceptionRationaleRecorded]
+      .every((value) => typeof value === 'boolean')) {
+      throw new Error(`Finding handoff fields must be boolean: ${finding.id}`);
+    }
+    if (finding.resolved && finding.blocksExit) {
+      throw new Error(`Resolved finding ${finding.id} cannot keep blocksExit=true.`);
+    }
+    if (!finding.exceptionApproved && finding.exceptionRationaleRecorded) {
+      throw new Error(`Finding ${finding.id} cannot record an exception rationale without an approved exception.`);
+    }
+    if (finding.severity !== 'S1' && (finding.exceptionApproved || finding.exceptionRationaleRecorded)) {
+      throw new Error(`Only S1 findings may record an exception decision: ${finding.id}`);
     }
     if (finding.participantIds.length === 0) throw new Error(`Finding ${finding.id} must reference at least one participant.`);
     if (typeof finding.resolved !== 'boolean' || typeof finding.traceable !== 'boolean'
@@ -234,12 +250,16 @@ export function calculateStudySynthesis(input) {
     severityCounts: Object.fromEntries([...SEVERITIES].map((severity) => [severity, input.findings.filter((finding) => finding.severity === severity).length])),
     findings: input.findings.map((finding) => ({
       id: finding.id,
+      participantIds: [...finding.participantIds],
       severity: finding.severity,
       category: finding.category,
       integrityBlocker: isIntegrityBlockingFindingCategory(finding.category),
       frequency: new Set(finding.participantIds).size,
       resolved: finding.resolved,
       traceable: finding.traceable,
+      declaredBlocksExit: finding.blocksExit,
+      exceptionApproved: finding.exceptionApproved,
+      exceptionRationaleRecorded: finding.exceptionRationaleRecorded,
       blocksExit: blockerFindings.includes(finding),
     })),
     blockerFindingIds: blockerFindings.map((finding) => finding.id),

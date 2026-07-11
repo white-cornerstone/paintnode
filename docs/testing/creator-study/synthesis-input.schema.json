@@ -50,7 +50,7 @@
     "finding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "severity", "participantIds", "category", "resolved", "traceable"],
+      "required": ["id", "severity", "participantIds", "category", "resolved", "traceable", "blocksExit", "exceptionApproved", "exceptionRationaleRecorded"],
       "properties": {
         "id": { "type": "string", "pattern": "^CB-[1-9][0-9]*$" },
         "severity": { "enum": ["S0", "S1", "S2", "S3", "S4"] },

@@ -43,6 +43,8 @@ test('privacy contract keeps identifiable and raw evidence out of repository-saf
   assert.ok(fields.privateOnly.some((field) => /recordings/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /storage path/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /participant code mapping/i.test(field)));
+  assert.ok(fields.privateOnly.some((field) => /session date.*time zone.*delivery mode/i.test(field)));
+  assert.ok(fields.privateOnly.some((field) => /facilitator.*observer.*technical operator/i.test(field)));
   assert.ok(fields.repositoryAllowed.every((field) => !/participant name|contact details|raw or potentially identifying quotes|approved storage path/i.test(field)));
 });
 
@@ -61,4 +63,42 @@ test('synthesis schema matches the shared finding categories and supports replac
   assert.equal(schema.properties.participants.maxItems > 8, true);
   assert.equal(new RegExp(schema.$defs.participant.properties.id.pattern).test('P99'), true);
   assert.equal(schema.$defs.finding.properties.id.pattern, '^CB-[1-9][0-9]*$');
+  assert.deepEqual(schema.$defs.finding.required, [
+    'id', 'severity', 'participantIds', 'category', 'resolved', 'traceable',
+    'blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded',
+  ]);
+  for (const field of ['resolved', 'traceable', 'blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded']) {
+    assert.equal(schema.$defs.finding.properties[field].type, 'boolean');
+  }
+});
+
+test('private handoff templates capture schema fields and concrete scheduling assignments', () => {
+  const session = readFileSync(join(study, 'templates/private-session-observation.md'), 'utf8');
+  const recruitment = readFileSync(join(study, 'templates/private-screener-and-recruitment-log.md'), 'utf8');
+  const reset = readFileSync(join(study, 'templates/private-session-reset.md'), 'utf8');
+  for (const field of [
+    'acceptedWorkPreserved', 'participantIds', 'category', 'traceable', 'resolved',
+    'blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded',
+  ]) {
+    assert.match(session, new RegExp(`\\b${field}\\b`));
+  }
+  for (const label of [
+    'Scheduled date', 'Scheduled start time', 'Time zone', 'Delivery mode',
+    'Assigned facilitator', 'Named session observers', 'Technical session operator',
+    'Accommodation setup confirmation',
+  ]) {
+    assert.match(recruitment, new RegExp(label));
+  }
+  assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
+});
+
+test('repository-safe decision handoff excludes private scheduling and identity fields', () => {
+  const decision = readFileSync(join(study, 'templates/de-identified-study-decision.md'), 'utf8');
+  for (const field of [
+    'participantIds', 'category', 'traceable', 'resolved', 'blocksExit',
+    'exceptionApproved', 'exceptionRationaleRecorded',
+  ]) {
+    assert.match(decision, new RegExp(`\\b${field}\\b`));
+  }
+  assert.doesNotMatch(decision, /Scheduled start time|Time zone|Assigned facilitator|Named session observers|Technical session operator|Private location or meeting reference/);
 });

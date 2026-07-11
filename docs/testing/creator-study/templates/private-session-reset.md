@@ -5,6 +5,7 @@
 ## Before participant arrival
 
 - [ ] Study authorization gate is complete in approved private storage.
+- [ ] Private schedule, roles, delivery mode, and accommodation setup match the recruitment record.
 - [ ] Correct SHA and Provider Free bundle identity recorded.
 - [ ] Product A and Product B hashes match the committed manifest.
 - [ ] Separate rehearsal completed for both failure checkpoints.

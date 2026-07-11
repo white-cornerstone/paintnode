@@ -7,6 +7,15 @@
 - Participant code:
 - Identity/contact record reference:
 - Scheduling status:
+- Scheduled date:
+- Scheduled start time:
+- Time zone:
+- Delivery mode: in person / remote screen share / other approved private mode
+- Private location or meeting reference:
+- Assigned facilitator:
+- Named session observers:
+- Technical session operator:
+- Accommodation setup confirmation: complete / pending / none stated
 - Asked by/date:
 
 ## Eligibility categories only

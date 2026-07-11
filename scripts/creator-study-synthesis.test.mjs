@@ -44,6 +44,21 @@ function passingInput() {
   };
 }
 
+function testFinding(overrides = {}) {
+  return {
+    id: 'TEST-F8',
+    severity: 'S3',
+    participantIds: ['TEST-1'],
+    category: 'copy-clarity',
+    resolved: false,
+    traceable: true,
+    blocksExit: false,
+    exceptionApproved: false,
+    exceptionRationaleRecorded: false,
+    ...overrides,
+  };
+}
+
 test('calculator reports exact denominators, median/range, cohort mix, thresholds, and pass mapping', () => {
   const input = passingInput();
   input.participants.forEach((participant, index) => { participant.tasks[0].seconds = 50 + (index * 10); });
@@ -107,10 +122,10 @@ test('insufficient evidence, blocker, conditional, and severity mappings are det
   assert.equal(calculateStudySynthesis(insufficient).recommendation, 'insufficient evidence');
 
   const blocked = passingInput();
-  blocked.findings.push({
+  blocked.findings.push(testFinding({
     id: 'TEST-F1', severity: 'S0', participantIds: ['TEST-1'],
     category: 'wrong-lineage', resolved: false, traceable: true,
-  });
+  }));
   assert.equal(calculateStudySynthesis(blocked).recommendation, 'block');
 
   const conditional = passingInput();
@@ -153,25 +168,25 @@ test('critical thresholds, even medians, invalid-session exclusion, and cohort e
 
 test('S1 integrity rules and approved non-integrity exceptions map separately', () => {
   const integrity = passingInput();
-  integrity.findings.push({
+  integrity.findings.push(testFinding({
     id: 'TEST-F2', severity: 'S1', participantIds: ['TEST-1'],
     category: 'save-reopen', resolved: false, traceable: true, exceptionApproved: true,
-  });
+  }));
   assert.equal(calculateStudySynthesis(integrity).recommendation, 'block');
 
   const missingRationale = passingInput();
-  missingRationale.findings.push({
+  missingRationale.findings.push(testFinding({
     id: 'TEST-F2B', severity: 'S1', participantIds: ['TEST-1'],
     category: 'copy-clarity', resolved: false, traceable: true, exceptionApproved: true,
-  });
+  }));
   assert.equal(calculateStudySynthesis(missingRationale).recommendation, 'block');
 
   const approvedException = passingInput();
-  approvedException.findings.push({
+  approvedException.findings.push(testFinding({
     id: 'TEST-F3', severity: 'S1', participantIds: ['TEST-1'],
     category: 'copy-clarity', resolved: false, traceable: true,
     exceptionApproved: true, exceptionRationaleRecorded: true,
-  });
+  }));
   const result = calculateStudySynthesis(approvedException);
   assert.equal(result.recommendation, 'pass');
   assert.equal(result.severityCounts.S1, 1);
@@ -186,10 +201,10 @@ test('accessibility recruitment limits and explicitly blocking S2 burden are pre
   assert.equal(calculateStudySynthesis(accessibilityGap).recommendation, 'pass');
 
   const repeatedBurden = passingInput();
-  repeatedBurden.findings.push({
+  repeatedBurden.findings.push(testFinding({
     id: 'TEST-F4', severity: 'S2', participantIds: ['TEST-1', 'TEST-2', 'TEST-3'],
     category: 'repeated-error-burden', resolved: false, traceable: true, blocksExit: true,
-  });
+  }));
   assert.equal(calculateStudySynthesis(repeatedBurden).recommendation, 'block');
 });
 
@@ -217,27 +232,27 @@ test('outcome labels cannot disguise direct facilitator assistance', () => {
 
 test('finding categories are typed and integrity variants cannot bypass blockers', () => {
   const input = passingInput();
-  input.findings.push({
+  input.findings.push(testFinding({
     id: 'TEST-F5', severity: 'S1', participantIds: ['TEST-1'],
     category: 'save_reopen', resolved: false, traceable: true,
     exceptionApproved: true, exceptionRationaleRecorded: true,
-  });
+  }));
   assert.throws(() => calculateStudySynthesis(input), /finding category/i);
 });
 
 test('finding IDs are unique and every finding references at least one participant', () => {
   const duplicate = passingInput();
   duplicate.findings.push(
-    { id: 'TEST-F6', severity: 'S2', participantIds: ['TEST-1'], category: 'copy-clarity', resolved: false, traceable: true },
-    { id: 'TEST-F6', severity: 'S3', participantIds: ['TEST-2'], category: 'copy-clarity', resolved: false, traceable: true },
+    testFinding({ id: 'TEST-F6', severity: 'S2', participantIds: ['TEST-1'] }),
+    testFinding({ id: 'TEST-F6', severity: 'S3', participantIds: ['TEST-2'] }),
   );
   assert.throws(() => calculateStudySynthesis(duplicate), /finding IDs.*unique/i);
 
   const emptyReferences = passingInput();
-  emptyReferences.findings.push({
+  emptyReferences.findings.push(testFinding({
     id: 'TEST-F7', severity: 'S3', participantIds: [],
     category: 'copy-clarity', resolved: false, traceable: true,
-  });
+  }));
   assert.throws(() => calculateStudySynthesis(emptyReferences), /at least one participant/i);
 });
 
@@ -257,4 +272,24 @@ test('eight valid sessions plus invalid replacements remain representable', () =
   assert.equal(result.validSessions, 8);
   assert.equal(result.invalidSessions, 2);
   assert.equal(result.recommendation, 'pass');
+});
+
+test('every finding requires the complete closed handoff contract', () => {
+  for (const field of ['blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded']) {
+    const input = passingInput();
+    const finding = testFinding();
+    delete finding[field];
+    input.findings.push(finding);
+    assert.throws(() => calculateStudySynthesis(input), new RegExp(`missing required field.*${field}`, 'i'));
+  }
+
+  const nonBoolean = passingInput();
+  nonBoolean.findings.push(testFinding({ traceable: 'yes' }));
+  assert.throws(() => calculateStudySynthesis(nonBoolean), /finding handoff fields.*boolean/i);
+});
+
+test('resolved findings cannot remain explicitly marked as exit blockers', () => {
+  const input = passingInput();
+  input.findings.push(testFinding({ resolved: true, blocksExit: true }));
+  assert.throws(() => calculateStudySynthesis(input), /resolved finding.*blocksExit/i);
 });
