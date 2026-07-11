@@ -63,7 +63,12 @@
         "aiExperience": { "enum": ["never", "occasional", "monthly", "weekly", "daily"] },
         "keyboardOrAccessibilityCoverage": { "type": "boolean" },
         "tasks": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "$ref": "#/$defs/task" } }
-      }
+      },
+      "allOf": [{
+        "if": { "properties": { "valid": { "const": true } }, "required": ["valid"] },
+        "then": { "properties": { "invalidReasonCategory": { "const": null } } },
+        "else": { "properties": { "invalidReasonCategory": { "enum": ["withdrawn-consent", "wrong-or-unusable-build", "provider-invocation", "prior-exposure", "facilitator-deviation"] } } }
+      }]
     },
     "task": {
       "type": "object",

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import Ajv2020 from 'ajv/dist/2020.js';
 
 import {
   assertFacilitatorCalibration,
@@ -143,6 +144,49 @@ test('synthesis schema matches the shared finding categories and supports replac
   for (const field of ['resolved', 'traceable', 'blocksExit', 'exceptionApproved', 'exceptionRationaleRecorded']) {
     assert.equal(schema.$defs.finding.properties[field].type, 'boolean');
   }
+});
+
+test('Ajv 2020 binds participant validity to the closed invalid-session reason contract', () => {
+  const schema = JSON.parse(readFileSync(join(study, 'synthesis-input.schema.json'), 'utf8'));
+  const validate = new Ajv2020({ strict: false }).compile(schema);
+  const task = (taskNumber) => ({
+    task: taskNumber,
+    outcome: 'unaided success',
+    seconds: 60,
+    neutralProbes: 0,
+    directAssists: 0,
+    wrongTurns: 0,
+    repeatedActions: 0,
+    errorLoops: 0,
+    recoveryAttempts: 0,
+    seq: 6,
+    acceptedWorkPreserved: taskNumber === 8 ? true : null,
+  });
+  const input = (valid, invalidReasonCategory) => ({
+    schemaVersion: 2,
+    participants: [{
+      id: 'P01',
+      valid,
+      invalidReasonCategory,
+      multiFormatRegular: true,
+      aiExperience: 'weekly',
+      keyboardOrAccessibilityCoverage: true,
+      tasks: Array.from({ length: 8 }, (_, index) => task(index + 1)),
+    }],
+    findings: [],
+    recruitmentExceptions: {
+      cohortMix: { approved: false, rationaleRecorded: false, decisionReference: null },
+      keyboardOrAccessibilityCoverage: { approved: false, rationaleRecorded: false, decisionReference: null },
+    },
+    configuredProviderEvidenceRecorded: true,
+    requiredSignoffsRecorded: true,
+    outstandingNonBlockingActions: [],
+  });
+
+  assert.equal(validate(input(true, null)), true, JSON.stringify(validate.errors));
+  assert.equal(validate(input(false, INVALID_SESSION_REASON_IDS[0])), true, JSON.stringify(validate.errors));
+  assert.equal(validate(input(true, INVALID_SESSION_REASON_IDS[0])), false);
+  assert.equal(validate(input(false, null)), false);
 });
 
 test('private handoff templates capture schema fields and concrete scheduling assignments', () => {
