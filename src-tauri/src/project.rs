@@ -143,6 +143,15 @@ pub(crate) struct WorkflowEditorReturnResult {
     document: WorkflowEditorDocumentResult,
     output: ProjectAssetView,
     output_content_hash: String,
+    cleanup_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowEditorReturnReceipt {
+    asset_id: String,
+    document_relative_path: String,
+    output_relative_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1052,6 +1061,84 @@ fn promote_new_file(staged: &Path, destination: &Path) -> Result<(), String> {
     })
 }
 
+fn workflow_editor_receipt_path(project_dir: &Path, cleanup_token: &str) -> PathBuf {
+    project_dir
+        .join(PAINTNODE_WORK_DIR)
+        .join("workflow-editor-returns")
+        .join("receipts")
+        .join(format!("{cleanup_token}.json"))
+}
+
+fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> Result<(), String> {
+    if !valid_editor_revision_id(cleanup_token) {
+        return Err("Workflow editor cleanup token is invalid.".into());
+    }
+    let receipt_path = workflow_editor_receipt_path(project_dir, cleanup_token);
+    if !receipt_path.exists() {
+        return Ok(());
+    }
+    let receipt_metadata = fs::symlink_metadata(&receipt_path).map_err(|error| {
+        format!("Workflow editor cleanup receipt metadata could not be read: {error}")
+    })?;
+    if receipt_metadata.file_type().is_symlink() || !receipt_metadata.is_file() {
+        return Err("Workflow editor cleanup receipt must be a regular non-symlink file.".into());
+    }
+    let receipt: WorkflowEditorReturnReceipt =
+        serde_json::from_slice(&fs::read(&receipt_path).map_err(|error| {
+            format!("Workflow editor cleanup receipt could not be read: {error}")
+        })?)
+        .map_err(|error| format!("Workflow editor cleanup receipt is invalid: {error}"))?;
+    let document_relative = safe_project_relative_path(&receipt.document_relative_path)?;
+    let output_relative = safe_project_relative_path(&receipt.output_relative_path)?;
+    let document_path = project_dir.join(document_relative);
+    let output_path = project_dir.join(output_relative);
+    let mut manifest = load_manifest(project_dir)?;
+    let matches = manifest
+        .assets
+        .iter()
+        .filter(|asset| {
+            asset.id == receipt.asset_id
+                && asset.relative_path == receipt.output_relative_path
+                && asset.source_file_name.as_deref()
+                    == Some(receipt.document_relative_path.as_str())
+        })
+        .count();
+    if matches != 1 {
+        return Err("Workflow editor cleanup receipt no longer matches the manifest.".into());
+    }
+    for path in [&document_path, &output_path] {
+        if let Err(error) = fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "Workflow editor cleanup could not remove {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    manifest.assets.retain(|asset| {
+        !(asset.id == receipt.asset_id && asset.relative_path == receipt.output_relative_path)
+    });
+    save_manifest_atomic(project_dir, &manifest)?;
+    fs::remove_file(receipt_path).map_err(|error| {
+        format!("Workflow editor cleanup receipt could not be removed: {error}")
+    })?;
+    Ok(())
+}
+
+fn finalize_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> Result<(), String> {
+    if !valid_editor_revision_id(cleanup_token) {
+        return Err("Workflow editor cleanup token is invalid.".into());
+    }
+    let receipt_path = workflow_editor_receipt_path(project_dir, cleanup_token);
+    if receipt_path.exists() {
+        fs::remove_file(receipt_path).map_err(|error| {
+            format!("Workflow editor cleanup receipt could not be finalized: {error}")
+        })?;
+    }
+    Ok(())
+}
+
 struct WorkflowEditorReturnCommit<'a> {
     revision_id: &'a str,
     name: &'a str,
@@ -1172,6 +1259,43 @@ fn commit_workflow_editor_return_with(
         let _ = fs::remove_file(&output_path);
         return Err(error);
     }
+    let cleanup_token = format!("return-{nonce}");
+    let receipt = WorkflowEditorReturnReceipt {
+        asset_id: asset.id.clone(),
+        document_relative_path: document_relative.to_string_lossy().replace('\\', "/"),
+        output_relative_path: output_relative.to_string_lossy().replace('\\', "/"),
+    };
+    let receipt_path = workflow_editor_receipt_path(project_dir, &cleanup_token);
+    if let Some(parent) = receipt_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            manifest.assets.retain(|existing| existing.id != asset.id);
+            let _ = persist_manifest(project_dir, &manifest);
+            let _ = fs::remove_file(&document_path);
+            let _ = fs::remove_file(&output_path);
+            return Err(format!(
+                "Workflow editor cleanup receipt folder failed: {error}"
+            ));
+        }
+    }
+    let receipt_bytes = match serde_json::to_vec(&receipt) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            manifest.assets.retain(|existing| existing.id != asset.id);
+            let _ = persist_manifest(project_dir, &manifest);
+            let _ = fs::remove_file(&document_path);
+            let _ = fs::remove_file(&output_path);
+            return Err(format!(
+                "Workflow editor cleanup receipt could not be serialized: {error}"
+            ));
+        }
+    };
+    if let Err(error) = write_new_synced(&receipt_path, &receipt_bytes) {
+        manifest.assets.retain(|existing| existing.id != asset.id);
+        let _ = persist_manifest(project_dir, &manifest);
+        let _ = fs::remove_file(&document_path);
+        let _ = fs::remove_file(&output_path);
+        return Err(error);
+    }
     Ok(WorkflowEditorReturnResult {
         document: WorkflowEditorDocumentResult {
             relative_path: document_relative.to_string_lossy().replace('\\', "/"),
@@ -1184,6 +1308,7 @@ fn commit_workflow_editor_return_with(
             exists: true,
         },
         output_content_hash: output_hash,
+        cleanup_token,
     })
 }
 
@@ -1210,6 +1335,30 @@ pub(crate) async fn project_commit_workflow_editor_return(
             },
             &save_manifest_atomic,
         )
+    })
+    .await
+    .map_err(|error| format!("Task error: {error}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn project_rollback_workflow_editor_return(
+    project_path: String,
+    cleanup_token: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rollback_workflow_editor_return(Path::new(project_path.trim()), &cleanup_token)
+    })
+    .await
+    .map_err(|error| format!("Task error: {error}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn project_finalize_workflow_editor_return(
+    project_path: String,
+    cleanup_token: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        finalize_workflow_editor_return(Path::new(project_path.trim()), &cleanup_token)
     })
     .await
     .map_err(|error| format!("Task error: {error}"))?
@@ -1616,6 +1765,14 @@ mod tests {
         let manifest = load_manifest(project.path()).expect("manifest");
         assert_eq!(manifest.assets.len(), 1);
         assert_eq!(manifest.assets[0].id, result.output.asset.id);
+        finalize_workflow_editor_return(project.path(), &result.cleanup_token).expect("finalize");
+        finalize_workflow_editor_return(project.path(), &result.cleanup_token)
+            .expect("idempotent finalize");
+        assert!(project.path().join(&result.document.relative_path).exists());
+        assert!(project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
     }
 
     #[test]
@@ -1648,6 +1805,117 @@ mod tests {
             .expect("generated dir")
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_token_is_idempotent_and_removes_manifest_and_files() {
+        let project = TempJobDir::new("paintnode-workflow-editor-cleanup").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-cleanup",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let document_path = project.path().join(&result.document.relative_path);
+        let output_path = project.path().join(&result.output.asset.relative_path);
+
+        rollback_workflow_editor_return(project.path(), &result.cleanup_token).expect("cleanup");
+        rollback_workflow_editor_return(project.path(), &result.cleanup_token)
+            .expect("idempotent cleanup");
+
+        assert!(!document_path.exists());
+        assert!(!output_path.exists());
+        assert!(load_manifest(project.path())
+            .expect("manifest")
+            .assets
+            .is_empty());
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_refuses_manifest_mismatch_without_removing_files() {
+        let project = TempJobDir::new("paintnode-workflow-editor-mismatch").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-mismatch",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let document_path = project.path().join(&result.document.relative_path);
+        let output_path = project.path().join(&result.output.asset.relative_path);
+        let mut manifest = load_manifest(project.path()).expect("manifest");
+        manifest.assets[0].source_file_name = Some("documents/different.ora".into());
+        save_manifest_atomic(project.path(), &manifest).expect("tamper manifest");
+
+        let error = rollback_workflow_editor_return(project.path(), &result.cleanup_token)
+            .expect_err("mismatch must fail closed");
+
+        assert!(error.contains("no longer matches"));
+        assert!(document_path.exists());
+        assert!(output_path.exists());
+        assert_eq!(
+            load_manifest(project.path())
+                .expect("manifest")
+                .assets
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn workflow_editor_return_cleanup_rejects_invalid_token_and_receipt_path() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-path-mismatch").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-path-mismatch",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        assert!(rollback_workflow_editor_return(project.path(), "../invalid").is_err());
+        let receipt_path = workflow_editor_receipt_path(project.path(), &result.cleanup_token);
+        let mut receipt: WorkflowEditorReturnReceipt =
+            serde_json::from_slice(&fs::read(&receipt_path).expect("receipt"))
+                .expect("receipt json");
+        receipt.document_relative_path = "../outside.ora".into();
+        fs::write(
+            &receipt_path,
+            serde_json::to_vec(&receipt).expect("receipt bytes"),
+        )
+        .expect("tamper receipt");
+
+        assert!(rollback_workflow_editor_return(project.path(), &result.cleanup_token).is_err());
+        assert!(project.path().join(&result.document.relative_path).exists());
+        assert!(project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
     }
 
     #[test]

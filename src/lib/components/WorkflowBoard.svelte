@@ -450,6 +450,14 @@
         asset.id === resolution.output.assetId && asset.relativePath === resolution.output.relativePath
       )) ?? null;
     }
+    if (path?.transformNodeId) {
+      const effective = workflow.effectiveAcceptedEditorOutput(path.transformNodeId);
+      if (effective) {
+        return assets.find((asset) => (
+          asset.id === effective.assetId && asset.relativePath === effective.relativePath
+        )) ?? null;
+      }
+    }
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 

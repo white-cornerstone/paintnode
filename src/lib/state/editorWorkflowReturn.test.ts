@@ -52,6 +52,7 @@ describe('EditorStore workflow return baseline', () => {
       label: 'Return to Workflow',
       pendingReturn: false,
       returnedRevisionId: null,
+      recoveryStatus: 'source-png',
     };
 
     store.resizeCanvas(80, 64, 'center', { kind: 'transparent' });
@@ -66,6 +67,7 @@ describe('EditorStore workflow return baseline', () => {
       label: 'Return to Workflow',
       pendingReturn: false,
       returnedRevisionId: 'editor-revision-1',
+      recoveryStatus: 'source-png',
     });
     expect(store.hasUnsavedChanges(session)).toBe(false);
 

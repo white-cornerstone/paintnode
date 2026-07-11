@@ -23,7 +23,7 @@ export type WorkflowRoundTripAuthority = Readonly<WorkflowRoundTripAuthorityInpu
   readonly [workflowRoundTripBrand]: true;
 };
 
-const authorities = new WeakMap<object, WorkflowRoundTripAuthority>();
+const authorities = new Map<object, WorkflowRoundTripAuthority>();
 
 export function bindWorkflowRoundTripAuthority(session: object, input: WorkflowRoundTripAuthorityInput): void {
   authorities.set(session, Object.freeze({
@@ -38,4 +38,14 @@ export function workflowRoundTripAuthority(session: object): WorkflowRoundTripAu
 
 export function clearWorkflowRoundTripAuthority(session: object): void {
   authorities.delete(session);
+}
+
+export function workflowRoundTripSessionsForWorkflow(workflowId: string): object[] {
+  return [...authorities.entries()]
+    .filter(([, authority]) => authority.workflowId === workflowId)
+    .map(([session]) => session);
+}
+
+export function hasWorkflowRoundTripSessions(): boolean {
+  return authorities.size > 0;
 }

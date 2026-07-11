@@ -291,12 +291,12 @@
 
   async function switchProject(): Promise<void> {
     closeFileMenu();
-    await project.openFolder();
+    if (!await project.openFolder() && project.error) editor.flash(project.error);
   }
 
   function closeProject(): void {
     closeFileMenu();
-    project.clear();
+    if (!project.clear() && project.error) editor.flash(project.error);
   }
 
   function toggleGroup(id: ProjectSectionId): void {

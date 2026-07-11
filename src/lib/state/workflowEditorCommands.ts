@@ -5,7 +5,6 @@ import { readProjectFile, resolveProjectAssetMaterial } from '../integrations/de
 import { bytesToBitmap, canvasToPngBytes } from '../io';
 import { loadOra } from '../ora/load';
 import { saveOra } from '../ora/save';
-import { workflowSha256Bytes } from '../workflow/provenance';
 import { workflowResultDocumentSourceKey } from './documentSource';
 import { editor, type DocumentSession } from './editor.svelte';
 import { project } from './project.svelte';
@@ -14,6 +13,8 @@ import {
   bindWorkflowRoundTripAuthority,
   workflowRoundTripAuthority,
 } from './workflowEditorSession';
+import { commitWorkflowEditorReturnTransaction } from './workflowEditorTransaction';
+import { resolveWorkflowEditorRecovery } from './workflowEditorRecovery';
 
 export interface OpenWorkflowResultRequest {
   nodeId: string;
@@ -60,23 +61,24 @@ export async function openWorkflowResultInEditor(request: OpenWorkflowResultRequ
     project.current?.assets ?? [],
     project.identity,
   );
+  const recovered = await resolveWorkflowEditorRecovery({
+    document: descriptor.documentRelativePath && descriptor.documentContentHash
+      ? { relativePath: descriptor.documentRelativePath, contentHash: descriptor.documentContentHash }
+      : null,
+    output: descriptor.output,
+    readDocument: (relativePath) => readProjectFile(project.path!, relativePath),
+    readOutput: (assetId) => resolveProjectAssetMaterial(project.path!, assetId),
+  });
   let document: PaintDocument;
-  if (descriptor.documentRelativePath) {
-    const bytes = await readProjectFile(project.path, descriptor.documentRelativePath);
-    if (!descriptor.documentContentHash || workflowSha256Bytes(bytes) !== descriptor.documentContentHash) {
-      throw new Error('The saved workflow edit no longer matches its recorded document.');
+  if (recovered.kind === 'ora') {
+    try {
+      document = await loadOra(recovered.bytes.slice().buffer as ArrayBuffer);
+    } catch {
+      throw new Error('The saved workflow edit is corrupt and cannot be recovered automatically.');
     }
-    document = await loadOra(bytes.slice().buffer as ArrayBuffer);
-    document.name = resultName(descriptor.documentRelativePath);
+    document.name = resultName(descriptor.documentRelativePath!);
   } else {
-    const material = await resolveProjectAssetMaterial(project.path, descriptor.output.assetId);
-    if (material.assetId !== descriptor.output.assetId
-      || material.relativePath !== descriptor.output.relativePath
-      || material.contentHash !== descriptor.output.contentHash
-      || workflowSha256Bytes(material.bytes) !== descriptor.output.contentHash) {
-      throw new Error('The workflow result no longer matches its recorded source asset.');
-    }
-    document = await openPngDocument(material.bytes, resultName(descriptor.output.relativePath));
+    document = await openPngDocument(recovered.bytes, resultName(descriptor.output.relativePath));
   }
 
   const session = editor.openDocument(document, true, sourceKey, true);
@@ -85,8 +87,14 @@ export async function openWorkflowResultInEditor(request: OpenWorkflowResultRequ
     label: 'Return to Workflow',
     pendingReturn: false,
     returnedRevisionId: descriptor.editorRevisionId,
+    recoveryStatus: recovered.status,
   };
   bindWorkflowRoundTripAuthority(session, descriptor.authority);
+  if (recovered.status === 'flattened-from-png') {
+    editor.flash('Layered edit was missing; opened the exact flattened PNG for repair.');
+  } else if (recovered.status === 'layered-with-missing-png') {
+    editor.flash('Flattened output was missing; opened the exact layered edit for repair.');
+  }
   return session;
 }
 
@@ -108,24 +116,32 @@ export async function returnActiveDocumentToWorkflow(): Promise<void> {
     const documentBlob = await saveOra(returnedDocument);
     const documentBytes = new Uint8Array(await documentBlob.arrayBuffer());
     const outputBytes = await canvasToPngBytes(compositeToCanvas(returnedDocument));
-    const artifacts = await project.commitWorkflowEditorReturn({
-      revisionId,
-      name: returnedDocument.name || 'Workflow edit',
-      documentBytes,
-      outputBytes,
-      width: returnedDocument.width,
-      height: returnedDocument.height,
+    const committed = await commitWorkflowEditorReturnTransaction({
+      preflight: () => { workflow.assertWorkflowEditorReturnAuthority(session); },
+      writeArtifacts: () => project.commitWorkflowEditorReturn({
+        revisionId,
+        name: returnedDocument.name || 'Workflow edit',
+        documentBytes,
+        outputBytes,
+        width: returnedDocument.width,
+        height: returnedDocument.height,
+      }),
+      commitGraph: (artifacts) => ({
+        revision: workflow.commitWorkflowEditorReturn(session, {
+          revisionId,
+          bindingId,
+          outputAssetReferenceId,
+          artifacts,
+          width: returnedDocument.width,
+          height: returnedDocument.height,
+          createdAt: Date.now(),
+        }),
+        cleanupToken: artifacts.cleanupToken,
+      }),
+      rollbackArtifacts: (artifacts) => project.rollbackWorkflowEditorReturn(artifacts.cleanupToken),
     });
-    const revision = workflow.commitWorkflowEditorReturn(session, {
-      revisionId,
-      bindingId,
-      outputAssetReferenceId,
-      artifacts,
-      width: returnedDocument.width,
-      height: returnedDocument.height,
-      createdAt: Date.now(),
-    });
-    editor.markWorkflowReturned(session.id, revision.id, returnedDocumentRevision);
+    await project.finalizeWorkflowEditorReturn(committed.cleanupToken).catch(() => undefined);
+    editor.markWorkflowReturned(session.id, committed.revision.id, returnedDocumentRevision);
   } finally {
     returningSessions.delete(session);
   }

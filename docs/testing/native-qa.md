@@ -54,9 +54,14 @@ Editor round-trip checkpoint:
    open. Returning the old tab must fail safely and must not link its newly
    stored artifacts into the workflow.
 
-Missing or hash-mismatched PNG/ORA files are a recoverable block. Restore the
-recorded file or generate/return a new result; do not silently substitute a
-different project asset.
+A missing ORA recovers from its exact-hash PNG as a flattened one-layer repair;
+a missing PNG recovers from its exact-hash ORA so Return can recreate the
+flattened output. If both are missing, or either present file has the wrong
+hash, opening blocks rather than substituting a different project asset.
+
+Workflow close and project switch/close remain blocked while any editor tab is
+linked to that workflow. Return, discard, or close those tabs first so their
+private return authority cannot outlive the workflow or project it belongs to.
 
 Normal PaintNode and **Provider E2E** never expose this fake executor.
 

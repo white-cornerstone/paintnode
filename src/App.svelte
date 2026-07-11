@@ -185,7 +185,7 @@
   let quitApproved = false;
 
   type UnsavedWorkItem =
-    | { kind: 'document'; id: string; name: string }
+    | { kind: 'document' | 'workflow-return'; id: string; name: string }
     | { kind: 'workflow'; name: string };
 
   function expandRightPanels(): void {
@@ -282,7 +282,11 @@
   function unsavedWorkItems(): UnsavedWorkItem[] {
     const items: UnsavedWorkItem[] = editor.documents
       .filter((session) => editor.hasUnsavedChanges(session))
-      .map((session) => ({ kind: 'document', id: session.id, name: documentDisplayName(session) }));
+      .map((session) => ({
+        kind: session.workflowReturnState ? 'workflow-return' as const : 'document' as const,
+        id: session.id,
+        name: documentDisplayName(session),
+      }));
     if (workflow.active && workflow.dirty) {
       items.push({ kind: 'workflow', name: workflow.name || 'Untitled Workflow' });
     }
@@ -310,7 +314,7 @@
 
     editor.switchDocument(session.id);
     const choice = await ui.askSaveChanges({
-      kind: 'document',
+      kind: session.workflowReturnState ? 'workflow-return' : 'document',
       name: documentDisplayName(session),
       index: 1,
       total: 1,
@@ -325,7 +329,7 @@
 
   async function closeActiveDocument(): Promise<void> {
     if (ui.activeSurface === 'workflow') {
-      workflow.close();
+      if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
       return;
     }
     const session = editor.activeDocument;
@@ -343,7 +347,7 @@
     const total = items.length;
     for (let index = 0; index < items.length; index++) {
       const item = items[index];
-      if (item.kind === 'document') {
+      if (item.kind === 'document' || item.kind === 'workflow-return') {
         const session = editor.documents.find((documentSession) => documentSession.id === item.id);
         if (!session || !editor.hasUnsavedChanges(session)) continue;
         editor.switchDocument(item.id);
@@ -362,7 +366,9 @@
       if (choice === 'cancel') return false;
       if (choice === 'discard') continue;
 
-      const saved = item.kind === 'document' ? await saveDocumentForClose(item.id) : await saveWorkflowForClose();
+      const saved = item.kind === 'document' || item.kind === 'workflow-return'
+        ? await saveDocumentForClose(item.id)
+        : await saveWorkflowForClose();
       if (!saved) return false;
     }
     return true;

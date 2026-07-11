@@ -21,7 +21,7 @@ import { WORKFLOW_TEMPLATES, instantiateWorkflowTemplate } from '../workflow/tem
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
-import { bindWorkflowRoundTripAuthority } from './workflowEditorSession';
+import { bindWorkflowRoundTripAuthority, clearWorkflowRoundTripAuthority } from './workflowEditorSession';
 import { project } from './project.svelte';
 import {
   WorkflowTransformExecutionError,
@@ -94,6 +94,7 @@ function editorArtifacts(id: string, digit: string) {
       width: 64, height: 64, mime: 'image/png', previewDataUrl: null,
     },
     outputContentHash: `sha256:${digit.repeat(64)}`,
+    cleanupToken: `cleanup-${id}`,
   };
 }
 
@@ -1520,7 +1521,7 @@ describe('WorkflowStore graph adapter', () => {
     });
   });
 
-  it('rotates return authority for repeated edits and rejects stale duplicate or workflow-drift commits', () => {
+  it('rotates return authority and blocks workflow close or project switch while linked', async () => {
     const store = editorRoundTripStore();
     const request = {
       nodeId: 'transform-generate-square', rootRunId: 'store-run', assetReferenceId: 'store-source-ref',
@@ -1558,6 +1559,9 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.serialize().editorRevisions?.map((revision) => revision.id))
       .toEqual(['store-edit-1', 'store-edit-2']);
     expect(store.serialize().workflowRoundTrips?.[1].supersedesRoundTripId).toBe('store-binding-1');
+    expect(store.effectiveAcceptedEditorOutput('transform-generate-square')).toMatchObject({
+      assetReferenceId: 'store-edit-ref-2', assetId: 'asset-store-edit-2',
+    });
 
     const driftDescriptor = store.prepareWorkflowEditorRoundTrip(request, [], project.identity);
     expect(driftDescriptor).toMatchObject({
@@ -1574,5 +1578,13 @@ describe('WorkflowStore graph adapter', () => {
       artifacts: editorArtifacts('store-edit-drift', '8'), width: 64, height: 64, createdAt: 8,
     })).toThrow(/workflow or project changed/i);
     expect(store.serialize().editorRevisions).toHaveLength(2);
+    expect(store.close()).toBe(false);
+    await expect(project.openFolder()).resolves.toBe(false);
+    expect(project.error).toMatch(/workflow-linked editor tabs/i);
+    expect(project.clear()).toBe(false);
+    clearWorkflowRoundTripAuthority(activeSession);
+    clearWorkflowRoundTripAuthority(duplicateSession);
+    clearWorkflowRoundTripAuthority(driftSession);
+    expect(store.close()).toBe(true);
   });
 });

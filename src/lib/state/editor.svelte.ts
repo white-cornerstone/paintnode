@@ -304,6 +304,7 @@ export interface DocumentSession {
     label: string;
     pendingReturn: boolean;
     returnedRevisionId: string | null;
+    recoveryStatus: 'source-png' | 'layered' | 'flattened-from-png' | 'layered-with-missing-png';
   };
 }
 
