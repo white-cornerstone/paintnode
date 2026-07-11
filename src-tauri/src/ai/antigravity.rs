@@ -3044,6 +3044,7 @@ pub(crate) async fn generate_antigravity_image(
     claude_effort: Option<String>,
     grok_bin: Option<String>,
     grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -3268,6 +3269,7 @@ pub(crate) async fn generate_antigravity_image(
                                 &run_id,
                                 grok_bin.clone(),
                                 grok_model.clone(),
+                                grok_reasoning_effort.clone(),
                                 options.keep_debug_artifacts,
                                 &job_path,
                                 &director_prompt_with_image_paths(

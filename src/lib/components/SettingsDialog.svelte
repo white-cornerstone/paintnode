@@ -16,6 +16,7 @@
     AUTOSAVE_INTERVAL_OPTIONS,
     GROK_IMAGE_MODEL_OPTIONS,
     GROK_IMAGE_RESOLUTION_OPTIONS,
+    GROK_REASONING_EFFORT_OPTIONS,
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
@@ -47,6 +48,7 @@
     type AntigravitySafetyThreshold,
     type GrokImageModelId,
     type GrokImageResolution,
+    type GrokReasoningEffort,
     type GrokModelId,
     type ReasoningEffort,
     type ServiceTier,
@@ -1415,17 +1417,33 @@
           <span>Used only when Grok is selected as the Director provider.</span>
         </div>
 
-        <label class="field">
-          <span>Director model</span>
-          <select
-            value={settings.value.ai.grokModel}
-            onchange={(event) => settings.update({ ai: { grokModel: textValue(event) as GrokModelId } })}
-          >
-            {#each availableGrokModels as option (option.id)}
-              <option value={option.id}>{option.label}</option>
-            {/each}
-          </select>
-        </label>
+        <div class="grid-2">
+          <label class="field">
+            <span>Director model</span>
+            <select
+              value={settings.value.ai.grokModel}
+              onchange={(event) => settings.update({ ai: { grokModel: textValue(event) as GrokModelId } })}
+            >
+              {#each availableGrokModels as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Reasoning effort</span>
+            <select
+              value={settings.value.ai.grokReasoningEffort}
+              onchange={(event) =>
+                settings.update({ ai: { grokReasoningEffort: textValue(event) as GrokReasoningEffort } })}
+            >
+              {#each GROK_REASONING_EFFORT_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+            <small>Override how deeply supported Grok reasoning models think.</small>
+          </label>
+        </div>
 
         <div class="subsection-title">
           <h3>Image Generator</h3>
@@ -1739,17 +1757,33 @@
                         <small>{autonomyLevels.find((option) => option.value === profileDraftOptions.autonomyLevel)?.hint}</small>
                       </label>
                     {:else if profileDraftOptions.directorProvider === 'grok'}
-                      <label class="field">
-                        <span>Director model</span>
-                        <select
-                          value={profileDraftOptions.grokModel}
-                          onchange={(event) => updateProfileDraftOptions({ grokModel: textValue(event) as GrokModelId })}
-                        >
-                          {#each profileGrokModels as option (option.id)}
-                            <option value={option.id}>{option.label}</option>
-                          {/each}
-                        </select>
-                      </label>
+                      <div class="grid-2">
+                        <label class="field">
+                          <span>Director model</span>
+                          <select
+                            value={profileDraftOptions.grokModel}
+                            onchange={(event) => updateProfileDraftOptions({ grokModel: textValue(event) as GrokModelId })}
+                          >
+                            {#each profileGrokModels as option (option.id)}
+                              <option value={option.id}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                        <label class="field">
+                          <span>Reasoning effort</span>
+                          <select
+                            value={profileDraftOptions.grokReasoningEffort}
+                            onchange={(event) =>
+                              updateProfileDraftOptions({
+                                grokReasoningEffort: textValue(event) as GrokReasoningEffort,
+                              })}
+                          >
+                            {#each GROK_REASONING_EFFORT_OPTIONS as option (option.id)}
+                              <option value={option.id}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                      </div>
                     {:else}
                       <div class="grid-2">
                         <label class="field">

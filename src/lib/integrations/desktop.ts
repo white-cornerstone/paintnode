@@ -23,6 +23,7 @@ import type {
   GrokModelId,
   GrokImageModelId,
   GrokImageResolution,
+  GrokReasoningEffort,
   ReasoningEffort,
   ServiceTier,
 } from '../state/settings';
@@ -205,6 +206,8 @@ export interface AntigravityGeneratorConfig {
   grokBin?: string | null;
   /** Grok model used when Grok is selected as AI Director. */
   grokModel?: GrokModelId | null;
+  /** Grok reasoning effort used when Grok is selected as AI Director. */
+  grokReasoningEffort?: GrokReasoningEffort | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
   /** Optional Antigravity aspect-ratio override for mask-guided generative fill. */
@@ -216,6 +219,8 @@ export interface GrokDirectorConfig {
   bin?: string;
   /** Grok Director model; 'auto' uses the CLI default. */
   model?: GrokModelId;
+  /** Grok reasoning effort; 'auto' uses the selected model's default. */
+  reasoningEffort?: GrokReasoningEffort;
 }
 
 export interface PlannedFillImageConfig {
@@ -407,7 +412,7 @@ function grokInvokeConfig(config: GrokGeneratorConfig) {
     keepJobDir: config.keepJobDir ?? false,
     keepDebugArtifacts: config.keepDebugArtifacts ?? false,
     runId: config.runId?.trim() ? config.runId.trim() : null,
-    imageModel: config.imageModel ?? 'grok-imagine-image-quality',
+    imageModel: config.imageModel ?? 'grok-imagine-image',
     imageResolution: config.imageResolution ?? 'auto',
   };
 }
@@ -475,6 +480,7 @@ function antigravityInvokeConfig(config: AntigravityGeneratorConfig, includeImag
     claudeEffort: config.claudeEffort ?? null,
     grokBin: config.grokBin?.trim() ? config.grokBin.trim() : null,
     grokModel: config.grokModel ?? null,
+    grokReasoningEffort: config.grokReasoningEffort ?? null,
     editChecksLevel: config.editChecksLevel ?? 1,
     fillAspectRatio: config.fillAspectRatio?.trim() ? config.fillAspectRatio.trim() : null,
   };
@@ -569,6 +575,7 @@ export function antigravityConfigFromRunOptions(
     claudeEffort: options.claudeEffort,
     grokBin: options.grokExecutableMode === 'custom' ? options.grokBin : '',
     grokModel: options.grokModel,
+    grokReasoningEffort: options.grokReasoningEffort,
     editChecksLevel: options.editChecksLevel,
     fillAspectRatio: options.fillAspectRatio ?? null,
   };
@@ -578,6 +585,7 @@ export function grokDirectorConfigFromRunOptions(options: AiRunOptions): GrokDir
   return {
     bin: options.grokExecutableMode === 'custom' ? options.grokBin : '',
     model: options.grokModel,
+    reasoningEffort: options.grokReasoningEffort,
   };
 }
 
@@ -711,6 +719,7 @@ export async function generateCodexFillImage(
     claudeEffort: claude?.effort ?? null,
     grokBin: grok?.bin?.trim() ? grok.bin.trim() : grokImage?.bin?.trim() ? grokImage.bin.trim() : null,
     grokModel: grok?.model ?? null,
+    grokReasoningEffort: grok?.reasoningEffort ?? null,
     grokImageModel: grokImage?.imageModel ?? null,
     grokImageResolution: grokImage?.imageResolution ?? null,
     imageProvider: plannedImage?.imageProvider ?? 'codex',

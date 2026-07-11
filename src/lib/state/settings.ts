@@ -31,6 +31,7 @@ export const GROK_MODEL_OPTIONS = [
 ] as const;
 
 export const GROK_IMAGE_MODEL_OPTIONS = [
+  { id: 'grok-imagine-image', label: 'Grok Imagine (Standard)' },
   { id: 'grok-imagine-image-quality', label: 'Grok Imagine (Quality)' },
 ] as const;
 
@@ -38,6 +39,13 @@ export const GROK_IMAGE_RESOLUTION_OPTIONS = [
   { id: 'auto', label: 'Auto' },
   { id: '1k', label: '1k (~1024px)' },
   { id: '2k', label: '2k (~2048px)' },
+] as const;
+
+export const GROK_REASONING_EFFORT_OPTIONS = [
+  { id: 'auto', label: 'Auto (model default)' },
+  { id: 'low', label: 'Low' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'high', label: 'High' },
 ] as const;
 
 export const ANTIGRAVITY_IMAGE_MODEL_OPTIONS = [
@@ -93,6 +101,7 @@ export type ClaudeModelId = string;
 export type GrokModelId = string;
 export type GrokImageModelId = (typeof GROK_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type GrokImageResolution = (typeof GROK_IMAGE_RESOLUTION_OPTIONS)[number]['id'];
+export type GrokReasoningEffort = (typeof GROK_REASONING_EFFORT_OPTIONS)[number]['id'];
 export type AntigravityImageModelId = (typeof ANTIGRAVITY_IMAGE_MODEL_OPTIONS)[number]['id'];
 export type AntigravityImageSize = (typeof ANTIGRAVITY_IMAGE_SIZE_OPTIONS)[number]['id'];
 export type AntigravityPersonGeneration = (typeof ANTIGRAVITY_PERSON_GENERATION_OPTIONS)[number]['id'];
@@ -165,6 +174,7 @@ export interface AiRunOptions {
   grokExecutableMode: AiExecutableMode;
   grokBin: string;
   grokModel: GrokModelId;
+  grokReasoningEffort: GrokReasoningEffort;
   grokImageModel: GrokImageModelId;
   grokImageResolution: GrokImageResolution;
   editChecksLevel: AiEditChecksLevel;
@@ -234,6 +244,7 @@ export interface PaintNodeSettings {
     grokExecutableMode: AiExecutableMode;
     grokBin: string;
     grokModel: GrokModelId;
+    grokReasoningEffort: GrokReasoningEffort;
     grokImageModel: GrokImageModelId;
     grokImageResolution: GrokImageResolution;
     editChecksLevel: AiEditChecksLevel;
@@ -262,6 +273,7 @@ export const AUTOSAVE_INTERVAL_OPTIONS = [
 const ANTIGRAVITY_IMAGE_MODEL_IDS = new Set<string>(ANTIGRAVITY_IMAGE_MODEL_OPTIONS.map((option) => option.id));
 const GROK_IMAGE_MODEL_IDS = new Set<string>(GROK_IMAGE_MODEL_OPTIONS.map((option) => option.id));
 const GROK_IMAGE_RESOLUTION_IDS = new Set<string>(GROK_IMAGE_RESOLUTION_OPTIONS.map((option) => option.id));
+const GROK_REASONING_EFFORT_IDS = new Set<string>(GROK_REASONING_EFFORT_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_IMAGE_SIZE_IDS = new Set<string>(ANTIGRAVITY_IMAGE_SIZE_OPTIONS.map((option) => option.id));
 const ANTIGRAVITY_PERSON_GENERATION_IDS = new Set<string>(
   ANTIGRAVITY_PERSON_GENERATION_OPTIONS.map((option) => option.id),
@@ -366,7 +378,8 @@ export function defaultSettings(): PaintNodeSettings {
       grokExecutableMode: 'builtin',
       grokBin: '',
       grokModel: 'auto',
-      grokImageModel: 'grok-imagine-image-quality',
+      grokReasoningEffort: 'auto',
+      grokImageModel: 'grok-imagine-image',
       grokImageResolution: 'auto',
       editChecksLevel: 1,
       profiles: [],
@@ -484,6 +497,9 @@ function normalizeAiProfileOptions(raw: unknown, fallback: PaintNodeSettings['ai
       fallback.antigravitySafetyDangerousContent,
     ),
     grokModel: stringOrDefault(value.grokModel, fallback.grokModel),
+    grokReasoningEffort: GROK_REASONING_EFFORT_IDS.has(String(value.grokReasoningEffort))
+      ? (value.grokReasoningEffort as GrokReasoningEffort)
+      : fallback.grokReasoningEffort,
     grokImageModel: GROK_IMAGE_MODEL_IDS.has(String(value.grokImageModel))
       ? (value.grokImageModel as GrokImageModelId)
       : fallback.grokImageModel,
@@ -605,6 +621,9 @@ export function normalizeSettings(raw: unknown): PaintNodeSettings {
     grokExecutableMode: normalizeExecutableMode(ai.grokExecutableMode, defaults.ai.grokExecutableMode),
     grokBin: stringOrDefault(ai.grokBin, defaults.ai.grokBin),
     grokModel: stringOrDefault(ai.grokModel, defaults.ai.grokModel),
+    grokReasoningEffort: GROK_REASONING_EFFORT_IDS.has(String(ai.grokReasoningEffort))
+      ? (ai.grokReasoningEffort as GrokReasoningEffort)
+      : defaults.ai.grokReasoningEffort,
     grokImageModel: GROK_IMAGE_MODEL_IDS.has(String(ai.grokImageModel))
       ? (ai.grokImageModel as GrokImageModelId)
       : defaults.ai.grokImageModel,
@@ -713,6 +732,7 @@ export function defaultAiRunOptions(): AiRunOptions {
     grokExecutableMode: ai.grokExecutableMode,
     grokBin: ai.grokBin,
     grokModel: ai.grokModel,
+    grokReasoningEffort: ai.grokReasoningEffort,
     grokImageModel: ai.grokImageModel,
     grokImageResolution: ai.grokImageResolution,
     editChecksLevel: ai.editChecksLevel,
@@ -757,6 +777,7 @@ export function aiProviderDefaultsFromSettings(value: PaintNodeSettings): AiRunO
     grokExecutableMode: value.ai.grokExecutableMode,
     grokBin: value.ai.grokBin,
     grokModel: value.ai.grokModel,
+    grokReasoningEffort: value.ai.grokReasoningEffort,
     grokImageModel: value.ai.grokImageModel,
     grokImageResolution: value.ai.grokImageResolution,
     editChecksLevel: value.ai.editChecksLevel,
@@ -839,6 +860,7 @@ export function cloneAiRunOptions(options: AiRunOptions): AiRunOptions {
     grokExecutableMode: options.grokExecutableMode,
     grokBin: options.grokBin,
     grokModel: options.grokModel,
+    grokReasoningEffort: options.grokReasoningEffort,
     grokImageModel: options.grokImageModel,
     grokImageResolution: options.grokImageResolution,
     editChecksLevel: options.editChecksLevel,

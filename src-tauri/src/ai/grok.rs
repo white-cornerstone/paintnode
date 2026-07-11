@@ -66,7 +66,7 @@ use crate::project::{safe_stem, store_generated_png_asset};
 /// Fixed xAI image model used by Grok Build's `image_gen` tool. The `grok
 /// models` CLI listing advertises chat/coding models (used for the Director),
 /// not image models, so the image model is a constant here.
-const DEFAULT_GROK_IMAGE_MODEL: &str = "grok-imagine-image-quality";
+const DEFAULT_GROK_IMAGE_MODEL: &str = "grok-imagine-image";
 /// Default output resolution tier sent to the xAI Images API.
 const GROK_IMAGE_RESOLUTION: &str = "1k";
 const GROK_IMAGE_REQUEST_FILE: &str = "paintnode-grok-image-request.json";
@@ -2408,11 +2408,18 @@ pub(crate) async fn discover_grok_capabilities(
 #[derive(Debug, Default)]
 struct GrokDirectorOptions {
     model: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
-fn grok_director_options(model: Option<String>) -> GrokDirectorOptions {
+fn grok_director_options(
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+) -> GrokDirectorOptions {
     GrokDirectorOptions {
         model: clean_option(model).filter(|value| value != "auto"),
+        reasoning_effort: clean_option(reasoning_effort)
+            .map(|value| value.to_ascii_lowercase())
+            .filter(|value| matches!(value.as_str(), "low" | "medium" | "high")),
     }
 }
 
@@ -2435,6 +2442,9 @@ fn build_grok_director_command(
     command.arg("--disable-web-search");
     if let Some(model) = options.model.as_deref() {
         command.arg("--model").arg(model);
+    }
+    if let Some(reasoning_effort) = options.reasoning_effort.as_deref() {
+        command.arg("--reasoning-effort").arg(reasoning_effort);
     }
     if let Some(session_id) = session_id {
         command.arg("--resume").arg(session_id);
@@ -2571,6 +2581,7 @@ pub(crate) fn run_grok_director_request(
     run_id: &str,
     bin: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     _keep_debug_artifacts: bool,
     job_path: &Path,
     prompt: &str,
@@ -2579,7 +2590,7 @@ pub(crate) fn run_grok_director_request(
     // The CLI refreshes its own stored token on launch, so no auth pre-wake
     // is needed here; a sign-in failure surfaces through the exit status.
     let grok_bin = configured_or_default_grok_bin(bin)?;
-    let options = grok_director_options(model);
+    let options = grok_director_options(model, reasoning_effort);
     let mut command =
         build_grok_director_command(&grok_bin, job_path, prompt, &options, session_id);
     let run = run_grok_with_progress(&mut command, app.clone(), run_id.to_string(), job_path)?;
@@ -2640,6 +2651,18 @@ mod tests {
         assert!(text.contains("\"resolution\":\"1k\""));
         assert!(!text.contains("1024"));
         assert!(!text.contains('x')); // no "1024x768"-style geometry
+    }
+
+    #[test]
+    fn standard_imagine_model_is_forwarded_without_aliasing_to_quality() {
+        assert_eq!(
+            configured_or_default_grok_image_model(Some("grok-imagine-image".into())),
+            "grok-imagine-image"
+        );
+        assert_eq!(
+            configured_or_default_grok_image_model(None),
+            DEFAULT_GROK_IMAGE_MODEL
+        );
     }
 
     /// Write a valid 1x1 PNG into `dir` and return its path.
@@ -2780,6 +2803,21 @@ mod tests {
         );
         // No target: the constant default.
         assert_eq!(grok_generation_resolution(None, None, None), "1k");
+    }
+
+    #[test]
+    fn director_command_forwards_supported_reasoning_effort() {
+        let options = grok_director_options(Some("grok-4.5".into()), Some("high".into()));
+        let command =
+            build_grok_director_command("grok", Path::new("/tmp"), "review", &options, None);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--model", "grok-4.5"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--reasoning-effort", "high"]));
     }
 
     #[test]
