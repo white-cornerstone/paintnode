@@ -48,7 +48,8 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('Lineage:');
     expect(boardSource).toContain('aria-label="Candidate count"');
     expect(boardSource).toContain('aria-label="Candidate concurrency"');
-    expect(boardSource).toContain('Branches / candidate 2 fails once');
+    expect(boardSource).toContain('Branch recovery checkpoint');
+    expect(boardSource).toContain('Format recovery checkpoint');
     expect(boardSource).toContain(
       'if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);',
     );

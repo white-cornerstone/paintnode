@@ -68,6 +68,22 @@ client, medical, credential, or unrelated demographic information.
 
 ## Consent and privacy note
 
+### Study authorization gate
+
+Before recruitment begins, the study owner must complete the private study log
+with all of the following:
+
+- study owner name;
+- the names of every observer who may access raw research evidence;
+- the approved private storage location for recordings and identifiable notes;
+- the milestone decision owner and the planned decision date.
+
+Recruitment and sessions are blocked if the approved private storage location
+is blank, inaccessible to the study owner, or accessible beyond the study owner
+and named observers. The location itself is private study metadata and must not
+be committed to this repository. Record only its approved internal reference in
+the session log.
+
 Read this before recording or screen sharing:
 
 > We are evaluating PaintNode, not you. You may pause, skip a question, or stop
@@ -78,19 +94,32 @@ Read this before recording or screen sharing:
 > your name. Do you consent to participate? Do you separately consent to
 > recording?
 
-Record `yes` or `no` for participation and recording separately. A participant
-who declines recording may still take part with written notes. Stop immediately
-if participation consent is withdrawn.
+Recording is off by default. Record `yes` or `no` for participation and
+recording separately, and start recording only after the separate recording
+answer is explicitly `yes`. A participant who declines recording may still take
+part with written notes. Stop recording and the session immediately if
+participation consent is withdrawn.
 
 Use participant IDs `P01`–`P08`. Raw recordings and identifiable notes stay in
-the approved restricted research location, never in the Git repository. Keep
-only as long as the team's stated research-retention policy requires; record
-the deletion date in the study log. Repository evidence must be de-identified.
+the approved restricted research location, never in the Git repository. Access
+is limited to the study owner and the named observers recorded before
+recruitment. De-identify working notes under the participant code as soon as
+they are created and remove names, employers, client details, file paths, and
+other direct identifiers from synthesis evidence.
+
+Delete recordings and identifiable notes by default 30 calendar days after the
+milestone decision. The study owner records the decision date, calculated
+deletion due date, and actual deletion date in the private study log. Delete
+earlier when consent is withdrawn or policy requires it; a longer retention
+period requires a documented approved exception. Repository evidence must
+always be de-identified.
 
 ## Build, materials, and setup
 
 For every session record:
 
+- completed study authorization gate, including the approved private storage
+  reference, study owner, and named observers;
 - exact Git SHA and QA app bundle identity;
 - operating system, display scale, input method, and app window size;
 - whether recording was permitted;
@@ -139,7 +168,24 @@ unattempted task accurately.
 - Ask follow-up questions only after the task or at a natural stopping point.
 - Trigger the candidate and format failures through the QA scenario controls at
   the specified time. Do not tell the participant which control will fail.
+- Say “I am setting the test checkpoint for this task” before every scenario
+  change. Record the selected checkpoint, timestamp, task, expected trigger,
+  observed trigger, and reset in the intervention log. Never change a scenario,
+  graph, output, or participant input silently.
+- Reset to `Standard checkpoint` immediately after the planned first failure is
+  visible and before the participant retries. Do not use another intervention
+  to force the retry to succeed.
 - Never convert facilitator help into an unaided success.
+
+### Facilitator intervention log
+
+Maintain this log in the approved private study location. Every setup and reset
+must be visible and narrated as a test-checkpoint change without revealing the
+target branch or format.
+
+| Time | Task | Action | Visible label | Expected trigger | Observed trigger | Reset time | Deviation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | setup / reset | | | | | |
 
 ## Empty-project flagship tasks and neutral prompts
 
@@ -161,7 +207,16 @@ choice, and Product assignment are understood without graph terminology.
 
 ### Task 2 — Create alternatives and recover one
 
-Setup: enable the QA scenario in which candidate 2 fails on its first attempt.
+Facilitator setup, in this exact order:
+
+1. Confirm the QA scenario reads `Standard checkpoint`.
+2. Say “I am setting the test checkpoint for this task.”
+3. Select `Branch recovery checkpoint` and record the setup in the intervention
+   log. Do not change branch count, graph state, or participant inputs.
+4. Read the prompt and start timing.
+5. When the planned first branch failure is visible, record the observed trigger,
+   say “I am resetting the test checkpoint,” select `Standard checkpoint`, and
+   record the reset before the participant retries.
 
 Prompt:
 
@@ -217,7 +272,17 @@ understood as stale, and the creator avoids rebuilding unrelated inputs.
 
 ### Task 7 — Recover one format
 
-Setup: enable the QA scenario in which Landscape fails once.
+Facilitator setup, in this exact order:
+
+1. Confirm the QA scenario reads `Standard checkpoint` and Square and Portrait
+   remain complete.
+2. Say “I am setting the test checkpoint for this task.”
+3. Select `Format recovery checkpoint` and record the setup in the intervention
+   log. Do not change graph state, output state, or participant inputs.
+4. Read the prompt and start timing.
+5. When the planned first Landscape failure is visible, record the observed
+   trigger, say “I am resetting the test checkpoint,” select
+   `Standard checkpoint`, and record the reset before the participant retries.
 
 Prompt:
 
@@ -311,6 +376,8 @@ data-loss or lineage problem.
 
 The issue #85/MVP exit is blocked when any of these is true:
 
+- recruitment or a session began with a blank approved private storage
+  location, or raw evidence access exceeded the study owner and named observers;
 - one confirmed S0 finding;
 - one unresolved S1 involving data integrity, accepted-direction identity,
   editor return, save/reopen, or keyboard/assistive access;
@@ -343,7 +410,10 @@ not commit identifiable raw notes.
 - Eligibility summary and cohort bucket:
 - Participation consent: yes / withdrawn
 - Recording consent: yes / no
-- Recording deletion date or not recorded:
+- Recording status at session start: off / on after opt-in
+- Approved private storage reference (required; never the path itself):
+- Study owner and named observers with evidence access:
+- Milestone decision date / deletion due date / actual deletion date, or not recorded:
 - Session validity: valid / invalid — reason
 
 ## Background
@@ -372,6 +442,12 @@ not commit identifiable raw notes.
 | --- | --- | --- | --- | --- | --- |
 | | | | | | |
 
+## Facilitator interventions
+
+| Time | Task | Action | Visible label | Expected trigger | Observed trigger | Reset time | Deviation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | setup / reset | | | | | |
+
 ## Debrief
 
 - Participant's mental model:
@@ -394,6 +470,8 @@ Complete this only from the real session records.
 - Recruited / valid / invalid / replacement counts:
 - Cohort mix, including AI experience and accessibility coverage:
 - Evidence location and recording deletion date:
+- Study owner / named observers / approved private storage reference:
+- Milestone decision date / default deletion due date / actual deletion date:
 
 ## Executive result
 

@@ -37,8 +37,13 @@ describe('workflow provider QA selection', () => {
     expect(boardSource).toContain("createProviderFreeQaWorkflowExecutor('provider-free', undefined, { scenario: qaScenario })");
     expect(boardSource).toContain('Deterministic provider-free output. No AI provider or authentication is used.');
     expect(boardSource).toContain('aria-label="QA Fake scenario"');
+    expect(boardSource).toContain('<option value="success">Standard checkpoint</option>');
     expect(boardSource).toContain('<option value="slow-success">Slow / cancellable</option>');
     expect(boardSource).toContain('<option value="failure">Failure / retry</option>');
+    expect(boardSource).toContain('<option value="branch-one-failure">Branch recovery checkpoint</option>');
+    expect(boardSource).toContain('<option value="landscape-first-failure">Format recovery checkpoint</option>');
+    expect(boardSource).not.toContain('Branches / candidate 2 fails once');
+    expect(boardSource).not.toContain('Landscape fails once');
     expect(boardSource).toContain("editor.flash(cancelled ? 'Workflow generation cancelled' : 'Workflow generation failed')");
     expect(boardSource).toContain("providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'");
     expect(boardSource).toMatch(/const executors = runSelection\.qaFake\s*\?/);
