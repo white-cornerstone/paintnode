@@ -431,29 +431,52 @@ pub(crate) fn provider_qa_mode() -> Option<String> {
     }
 }
 
-fn provider_free_qa_png_in_mode(qa_mode: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
+fn provider_free_qa_png_in_mode(
+    qa_mode: &str,
+    width: u32,
+    height: u32,
+    variant: u8,
+) -> Result<Vec<u8>, String> {
     if qa_mode != "provider-free" {
         return Err("QA Fake output is available only in provider-free native QA mode.".into());
     }
     if !matches!((width, height), (1024, 1024) | (1024, 1280) | (1280, 720)) {
         return Err("QA Fake supports only Campaign Composer 1:1, 4:5, and 16:9 outputs.".into());
     }
+    if variant > 4 {
+        return Err("QA Fake fixture variant must be between 0 and 4.".into());
+    }
+    let (dark, light, green_start, blue_start) = match variant {
+        0 => (38, 69, 60, 70),
+        1 => (151, 210, 48, 74),
+        2 => (27, 64, 108, 78),
+        3 => (91, 148, 47, 112),
+        4 => (142, 202, 94, 38),
+        _ => unreachable!("variant is bounded above"),
+    };
+    let grid_size = 128 - u32::from(variant) * 12;
     let image = image::RgbaImage::from_fn(width, height, |x, y| {
-        let grid = ((x / 128) + (y / 128)) % 2;
-        let red = if grid == 0 { 38 } else { 69 };
-        let green = ((x * 160) / width.saturating_sub(1).max(1)) as u8 + 60;
-        let blue = ((y * 150) / height.saturating_sub(1).max(1)) as u8 + 70;
+        let grid = ((x / grid_size) + (y / grid_size) + u32::from(variant)) % 2;
+        let red = if grid == 0 { dark } else { light };
+        let green =
+            (((x * 120) / width.saturating_sub(1).max(1)) as u8).saturating_add(green_start);
+        let blue = (((y * 110) / height.saturating_sub(1).max(1)) as u8).saturating_add(blue_start);
         image::Rgba([red, green, blue, 255])
     });
     crate::png::encode_rgba_png(image, "provider-free QA Campaign")
 }
 
 #[tauri::command]
-pub(crate) fn provider_free_qa_png(width: u32, height: u32) -> Result<Vec<u8>, String> {
+pub(crate) fn provider_free_qa_png(
+    width: u32,
+    height: u32,
+    variant: u8,
+) -> Result<Vec<u8>, String> {
     provider_free_qa_png_in_mode(
         &std::env::var(QA_MODE_ENV).unwrap_or_default(),
         width,
         height,
+        variant,
     )
 }
 
@@ -462,6 +485,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::ai::TempJobDir;
+    use sha2::Digest;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
@@ -470,10 +494,12 @@ mod tests {
     #[test]
     fn provider_free_qa_campaign_shapes_are_exact_deterministic_pngs_and_mode_gated() {
         for dimensions in [(1024, 1024), (1024, 1280), (1280, 720)] {
-            let first = provider_free_qa_png_in_mode("provider-free", dimensions.0, dimensions.1)
-                .expect("provider-free QA PNG");
-            let second = provider_free_qa_png_in_mode("provider-free", dimensions.0, dimensions.1)
-                .expect("deterministic provider-free QA PNG");
+            let first =
+                provider_free_qa_png_in_mode("provider-free", dimensions.0, dimensions.1, 0)
+                    .expect("provider-free QA PNG");
+            let second =
+                provider_free_qa_png_in_mode("provider-free", dimensions.0, dimensions.1, 0)
+                    .expect("deterministic provider-free QA PNG");
             assert_eq!(first, second);
             assert_eq!(
                 crate::png::png_dimensions_from_bytes(&first),
@@ -481,12 +507,29 @@ mod tests {
             );
             assert!(crate::png::decode_png_rgba(&first, "provider-free QA Campaign").is_ok());
         }
-        assert!(provider_free_qa_png_in_mode("provider-free", 640, 640)
+        let candidate_one = provider_free_qa_png_in_mode("provider-free", 1024, 1024, 1)
+            .expect("candidate one fixture");
+        let candidate_one_retry = provider_free_qa_png_in_mode("provider-free", 1024, 1024, 1)
+            .expect("candidate one retry fixture");
+        let candidate_two = provider_free_qa_png_in_mode("provider-free", 1024, 1024, 2)
+            .expect("candidate two fixture");
+        assert_eq!(candidate_one, candidate_one_retry);
+        assert_ne!(candidate_one, candidate_two);
+        assert_ne!(
+            sha2::Sha256::digest(&candidate_one),
+            sha2::Sha256::digest(&candidate_two)
+        );
+
+        assert!(provider_free_qa_png_in_mode("provider-free", 640, 640, 0)
             .expect_err("unsupported shape must be rejected")
             .contains("1:1, 4:5, and 16:9"));
 
+        assert!(provider_free_qa_png_in_mode("provider-free", 1024, 1024, 9)
+            .expect_err("unsupported variant must be rejected")
+            .contains("variant"));
+
         for mode in ["", "provider-e2e", "unexpected"] {
-            assert!(provider_free_qa_png_in_mode(mode, 1024, 1024)
+            assert!(provider_free_qa_png_in_mode(mode, 1024, 1024, 0)
                 .expect_err("non-provider-free modes must be rejected")
                 .contains("only in provider-free"));
         }

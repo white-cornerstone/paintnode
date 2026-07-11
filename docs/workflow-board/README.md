@@ -24,6 +24,9 @@ gates. Do not duplicate live issue status here.
 - [Roadmap](roadmap.md) — milestones, release gates, and delivery conventions.
 - [Campaign Composer user flow](campaign-composer-user-flow.md) — flagship
   activation, review, adaptation, recovery, and exit evidence.
+- [Moderated creator study protocol](../testing/creative-blueprint-creator-study.md)
+  — issue #85 recruitment, facilitation, metrics, blocker rules, and evidence
+  templates; the protocol is not completed-study evidence.
 
 ## Working rules
 

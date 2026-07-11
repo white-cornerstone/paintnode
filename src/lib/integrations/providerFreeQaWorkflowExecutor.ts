@@ -6,8 +6,15 @@ import {
 } from '../workflow/transformExecutor';
 import { raceWorkflowCancellation, throwIfWorkflowCancelled } from '../workflow/runControl';
 
-export type ProviderFreeQaPngLoader = (width: number, height: number) => Promise<Uint8Array>;
-export type ProviderFreeQaScenario = 'success' | 'slow-success' | 'failure' | 'branch-one-failure';
+export type ProviderFreeQaPngLoader = (
+  width: number, height: number, variant: number,
+) => Promise<Uint8Array>;
+export type ProviderFreeQaScenario =
+  | 'success'
+  | 'slow-success'
+  | 'failure'
+  | 'branch-one-failure'
+  | 'format-recovery-checkpoint';
 
 export interface ProviderFreeQaWorkflowExecutorOptions {
   scenario?: ProviderFreeQaScenario;
@@ -18,6 +25,13 @@ export interface ProviderFreeQaWorkflowExecutorOptions {
 function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value)) return fallback;
   return Math.min(maximum, Math.max(minimum, value!));
+}
+
+function candidateFixtureVariant(runId: string, fixture: string): number {
+  if (fixture !== 'square') return 0;
+  const ordinal = /^candidate-(\d+)-[a-f0-9]+-attempt-\d+$/.exec(runId)?.[1];
+  if (!ordinal) return 0;
+  return boundedInteger(Number(ordinal), 0, 1, 4);
 }
 
 export function createProviderFreeQaWorkflowExecutor(
@@ -55,6 +69,11 @@ export function createProviderFreeQaWorkflowExecutor(
       context.reportProgress({ message: 'QA Fake is failing candidate 2 so its retry can be validated.' });
       throw new Error('QA Fake candidate 2 failed safely. Retry this candidate to preserve its siblings.');
     }
+    if (scenario === 'format-recovery-checkpoint'
+      && request.nodeId === 'transform-generate-landscape') {
+      context.reportProgress({ message: 'QA Fake Format recovery checkpoint is active for Landscape.' });
+      throw new Error('QA Fake Landscape recovery checkpoint is active. Reset to Standard checkpoint, then retry Landscape.');
+    }
     if (scenario === 'slow-success') {
       for (let step = 1; step <= progressSteps; step += 1) {
         throwIfWorkflowCancelled(context.signal);
@@ -70,7 +89,11 @@ export function createProviderFreeQaWorkflowExecutor(
       }
       throwIfWorkflowCancelled(context.signal);
     }
-    const bytes = await loadPng(request.output.width, request.output.height);
+    const bytes = await loadPng(
+      request.output.width,
+      request.output.height,
+      candidateFixtureVariant(context.identity.runId, fixture),
+    );
     return {
       kind: 'bytes',
       name: `paintnode-provider-free-qa-${fixture}.png`,

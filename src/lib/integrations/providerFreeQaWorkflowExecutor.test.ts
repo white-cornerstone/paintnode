@@ -3,12 +3,15 @@ import type { WorkflowTransformExecutionRequest } from '../workflow/transformExe
 import { executeCampaignGenerateTransform } from '../workflow/transformExecutor';
 import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from '../workflow/schema';
 import { instantiateWorkflowTemplate } from '../workflow/templates';
+import { workflowSha256Bytes } from '../workflow/provenance';
 import { createProviderFreeQaWorkflowExecutor } from './providerFreeQaWorkflowExecutor';
 
 function request(width = 1024, height = 1024): WorkflowTransformExecutionRequest {
+  const nodeId = width === 1280 ? 'transform-generate-landscape'
+    : height === 1280 ? 'transform-generate-portrait' : 'transform-generate-square';
   return {
     workflowId: 'qa-workflow',
-    nodeId: 'transform-generate-square',
+    nodeId,
     capability: 'generate',
     provider: 'qa-fake',
     projectPath: '/virtual/project',
@@ -50,7 +53,7 @@ describe('provider-free QA workflow executor', () => {
       });
       expect(second).toEqual(first);
       expect(loadPng).toHaveBeenCalledTimes(2);
-      expect(loadPng).toHaveBeenNthCalledWith(1, 1024, 1024);
+      expect(loadPng).toHaveBeenNthCalledWith(1, 1024, 1024, 0);
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
@@ -145,6 +148,75 @@ describe('provider-free QA workflow executor', () => {
     expect(loadPng).toHaveBeenCalledTimes(2);
   });
 
+  it('uses stable, visibly distinct native square fixtures keyed by candidate ordinal', async () => {
+    const loadPng = vi.fn(async (_width: number, _height: number, variant: number) => (
+      new Uint8Array([137, 80, 78, 71, variant, 255 - variant])
+    ));
+    const executor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
+    const context = (runId: string) => ({
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow', runId,
+        nodeId: 'transform-generate-square',
+      },
+      reportProgress: vi.fn(),
+    });
+
+    const first = await executor.execute(
+      request(), context('candidate-1-abcdef0123456789abcd-attempt-1'),
+    );
+    const firstRetry = await executor.execute(
+      request(), context('candidate-1-abcdef0123456789abcd-attempt-2'),
+    );
+    const second = await executor.execute(
+      request(), context('candidate-2-abcdef0123456789abcd-attempt-1'),
+    );
+
+    expect(first.kind).toBe('bytes');
+    expect(firstRetry.kind).toBe('bytes');
+    expect(second.kind).toBe('bytes');
+    if (first.kind !== 'bytes' || firstRetry.kind !== 'bytes' || second.kind !== 'bytes') return;
+    expect(workflowSha256Bytes(first.bytes)).toBe(workflowSha256Bytes(firstRetry.bytes));
+    expect(workflowSha256Bytes(first.bytes)).not.toBe(workflowSha256Bytes(second.bytes));
+    expect(loadPng.mock.calls).toEqual([
+      [1024, 1024, 1], [1024, 1024, 1], [1024, 1024, 2],
+    ]);
+  });
+
+  it('fails Landscape at any historical attempt only while the format recovery checkpoint is active', async () => {
+    const loadPng = vi.fn(async (_width: number, _height: number, variant: number) => (
+      new Uint8Array([137, 80, 78, 71, variant])
+    ));
+    const recoveryExecutor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng, {
+      scenario: 'format-recovery-checkpoint',
+    });
+    const standardExecutor = createProviderFreeQaWorkflowExecutor('provider-free', loadPng);
+    const context = (nodeId: string, attempt: number) => ({
+      identity: {
+        workflowSessionId: 'qa-session', workflowId: 'qa-workflow',
+        runId: `board-run:${nodeId}:${attempt}`, nodeId,
+      },
+      reportProgress: vi.fn(),
+    });
+
+    const square = await recoveryExecutor.execute(request(), context('transform-generate-square', 3));
+    const portrait = await recoveryExecutor.execute(
+      request(1024, 1280), context('transform-generate-portrait', 3),
+    );
+    await expect(recoveryExecutor.execute(
+      request(1280, 720), context('transform-generate-landscape', 3),
+    )).rejects.toThrow(/Landscape recovery checkpoint/i);
+    const retriedLandscape = await standardExecutor.execute(
+      request(1280, 720), context('transform-generate-landscape', 3),
+    );
+
+    expect(square).toMatchObject({ kind: 'bytes', width: 1024, height: 1024 });
+    expect(portrait).toMatchObject({ kind: 'bytes', width: 1024, height: 1280 });
+    expect(retriedLandscape).toMatchObject({ kind: 'bytes', width: 1280, height: 720 });
+    expect(loadPng.mock.calls).toEqual([
+      [1024, 1024, 0], [1024, 1280, 0], [1280, 720, 0],
+    ]);
+  });
+
   it('supports the exact three Campaign Composer shapes through the dimension-aware loader', async () => {
     const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     const loadPng = vi.fn(async () => png);
@@ -159,7 +231,7 @@ describe('provider-free QA workflow executor', () => {
     await expect(executor.execute(request(1280, 720))).resolves.toMatchObject({
       name: 'paintnode-provider-free-qa-landscape.png', width: 1280, height: 720,
     });
-    expect(loadPng.mock.calls).toEqual([[1024, 1024], [1024, 1280], [1280, 720]]);
+    expect(loadPng.mock.calls).toEqual([[1024, 1024, 0], [1024, 1280, 0], [1280, 720, 0]]);
   });
 
   it('rejects any output contract outside the three Campaign Composer fixtures before loading bytes', async () => {

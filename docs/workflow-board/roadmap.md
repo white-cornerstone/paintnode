@@ -91,6 +91,10 @@ Issue #85 supplies the integrated provider-free draft evidence in
 native scenario in `docs/testing/native-qa.md`. The gate remains open until both a configured
 provider run and a moderated walkthrough with 6–8 target creators are recorded;
 passing unit, Rust, or build checks alone must not be reported as milestone exit.
+The walkthrough is executed and audited with the
+[Creative Blueprint moderated creator study protocol](../testing/creative-blueprint-creator-study.md).
+The protocol and empty templates are preparation only; they cannot satisfy the
+gate without 6–8 real valid sessions and a reviewed synthesis.
 
 ## Milestone 3 — Recipes & Portability
 
