@@ -95,7 +95,8 @@ with all of the following:
 - study owner name;
 - the names of every observer who may access raw research evidence;
 - the approved private storage location for recordings and identifiable notes;
-- the milestone decision owner and the planned decision date.
+- the milestone decision owner and the planned decision date;
+- an accessibility support owner, or an explicit `not required` state.
 
 Recruitment and sessions are blocked if the approved private storage location
 is blank, inaccessible to the study owner, or accessible beyond the study owner
@@ -142,6 +143,12 @@ earlier when consent is withdrawn or policy requires it; a longer retention
 period requires a documented approved exception. Repository evidence must
 always be de-identified.
 
+The private study authorization and retention log is the single authoritative
+source for the milestone decision owner/date, retention rule or exception, and
+deletion ledger. Every private session record references that log and verifies
+its current status; session records do not maintain independent copies of those
+dates.
+
 ## Build, materials, and setup
 
 For every session record:
@@ -152,9 +159,11 @@ For every session record:
   `facilitator-hints.json` version, SHA-256, and approved Git change reference;
 - scheduled date, start time, time zone, and delivery mode;
 - assigned facilitator, named session observers, technical session operator,
-  and accommodation setup confirmation;
+  accommodation setup confirmation, and an accessibility support owner with a
+  completed handoff or an explicit `not required` state;
 - exact Git SHA and QA app bundle identity;
-- approved-build decision reference and a passing setup-receipt identity match;
+- approved-build decision reference and a passing technical-only setup-receipt
+  identity match;
 - active build generation and random non-derived approval ID;
 - operating system, display scale, input method, and app window size;
 - whether recording was permitted;
@@ -574,6 +583,8 @@ not commit identifiable raw notes.
 - Named session observers:
 - Technical session operator:
 - Accommodation setup confirmation:
+- Accessibility support owner: [private assignment] / not required
+- Accessibility support handoff: complete / pending / not required
 - Actual start/end time:
 - Build Git SHA and QA bundle identity:
 - Approved-build decision reference:
@@ -586,8 +597,9 @@ not commit identifiable raw notes.
 - Recording status at session start: off / on after opt-in
 - Approved private storage reference (required; never the path itself):
 - Study owner and named observers with evidence access:
-- Milestone decision date / deletion due date / actual deletion date, or not recorded:
-- Session validity: valid / invalid — reason
+- Private authorization/retention log reference:
+- Authorization/retention status verified for this session: yes / no
+- Session validity: valid / invalid — reason category (`withdrawn-consent` / `wrong-or-unusable-build` / `provider-invocation` / `prior-exposure` / `facilitator-deviation`; null when valid)
 
 ## Background
 
@@ -673,9 +685,9 @@ excludes the private fields below.
 - Cohort mix, including AI experience and accessibility coverage:
 - `cohortMix` requirement / approval / rationale-recorded / `CB-DEC-N` reference / applied effect:
 - `keyboardOrAccessibilityCoverage` requirement / approval / rationale-recorded / `CB-DEC-N` reference / applied effect:
-- Evidence location and recording deletion date:
+- Evidence location and recording deletion status:
 - Study owner / named observers / approved private storage reference:
-- Milestone decision date / default deletion due date / actual deletion date:
+- Authoritative private authorization/retention log reference and verified status (read from that log; do not maintain a second source):
 
 ## Executive result
 

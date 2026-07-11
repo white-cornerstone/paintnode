@@ -11,6 +11,8 @@
 - Named session observers:
 - Technical session operator:
 - Accommodation setup confirmation:
+- Accessibility support owner: [private assignment] / not required
+- Accessibility support handoff: complete / pending / not required
 - Actual start/end time:
 - Build Git SHA and QA bundle identity:
 - Approved-build decision reference:
@@ -23,7 +25,9 @@
 - Recording status at start: off / on after explicit opt-in
 - Approved private storage reference:
 - Study owner and named observers:
-- Session validity: valid / invalid — category:
+- Session validity: valid / invalid — reason category (`withdrawn-consent` / `wrong-or-unusable-build` / `provider-invocation` / `prior-exposure` / `facilitator-deviation`; null when valid):
+- Private authorization/retention log reference:
+- Authorization/retention status verified for this session: yes / no
 - Setup receipt profile fingerprint:
 - Native app boot observed / setup evidence consumed / monotonic anchor recorded: yes / no
 - Lifecycle outcome: finalized / aborted before launch / aborted after launch / not yet complete

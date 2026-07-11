@@ -282,7 +282,16 @@ test('the committed Product materials are deterministic, distinct, and assigned 
     studySessionConsumptionAnchor,
   });
 
-  assert.equal(receipt.ready, true);
+  assert.equal(receipt.schemaVersion, 2);
+  assert.equal(receipt.receiptType, 'paintnode-creator-study-technical-setup');
+  assert.equal(receipt.scope, 'technical-setup-only');
+  assert.equal(receipt.technicalSetupReady, true);
+  assert.equal(receipt.studyAuthorizationEvaluated, false);
+  assert.equal('ready' in receipt, false);
+  for (const prohibited of [
+    'recruitmentAuthorized', 'participationConsent', 'recordingConsent',
+    'facilitatorCalibrationAuthorized', 'accessibilitySupportOwner',
+  ]) assert.equal(prohibited in receipt, false);
   assert.deepEqual(receipt.materials.map(({ task }) => task), [1, 6]);
   assert.equal(new Set(receipt.materials.map(({ sha256 }) => sha256)).size, 2);
   assert.equal(receipt.projectState, 'empty');
@@ -333,7 +342,7 @@ test('protected decision commitment rejects build A to build B rewrite under the
     actualExecutableSha256: appBuild.executableSha256,
     now: verificationNow,
   };
-  assert.equal(verifyStudySetup(options).ready, true);
+  assert.equal(verifyStudySetup(options).technicalSetupReady, true);
   const acceptedAnchor = activeBuildAnchor.snapshot();
 
   const buildBIdentity = {
@@ -427,7 +436,7 @@ test('setup requires actual app boot evidence and consumes it exactly once', () 
     version: 3, event: 'app-boot', profileSha256: sessionFixture.profileSha256,
     bootNonceSha256: sessionFixture.bootNonceSha256,
   }));
-  assert.equal(verifyStudySetup(options).ready, true);
+  assert.equal(verifyStudySetup(options).technicalSetupReady, true);
   const secondProject = join(root, 'participant-project-2');
   mkdirSync(secondProject);
   assert.throws(
@@ -553,7 +562,7 @@ test('project and deleted rehearsal paths are canonicalized through symlinks', (
     studySessionStatePath,
     studySessionConsumptionAnchor,
   };
-  assert.equal(verifyStudySetup(options).ready, true);
+  assert.equal(verifyStudySetup(options).technicalSetupReady, true);
 
   const repoLink = join(root, 'repo-link');
   symlinkSync(repoRoot, repoLink);
@@ -755,7 +764,7 @@ test('approval timing is strict, ordered, completed by now, and deterministicall
   });
   const approvedBuildRecordPath = writeApprovedBuildRecord(root, boundary);
   const activeBuildDecisionsPath = writeActiveBuildDecisions(root, [boundary]);
-  assert.equal(verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }).ready, true);
+  assert.equal(verifyStudySetup({ ...options, approvedBuildRecordPath, activeBuildDecisionsPath }).technicalSetupReady, true);
 });
 
 test('protected anchor rejects rewritten prior approval time or reference with the same approval ID', () => {

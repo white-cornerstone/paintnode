@@ -21,6 +21,7 @@
     "participant code mapping to identity",
     "session date, start time, time zone, delivery mode, and private meeting reference",
     "facilitator, observer, technical operator, and accommodation setup assignments",
+    "accessibility support owner assignments and handoff status",
     "study owner and observer names",
     "approved storage path or internal storage reference",
     "private approved-build record and active-ledger paths, approval date, decision references, ledger history, protected Keychain anchor payload, and mid-study change reason",
@@ -33,6 +34,7 @@
     "intervention and session logs with identifying timestamps or paths",
     "participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs",
     "retention and deletion ledger",
+    "private authorization/retention log references",
     "access-control evidence and exceptions"
   ]
 }

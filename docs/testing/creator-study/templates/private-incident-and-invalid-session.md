@@ -5,7 +5,7 @@
 - Participant code:
 - Date/time:
 - Build SHA/bundle identity:
-- Incident category: consent withdrawal / wrong or unusable build / provider invocation / prior exposure / facilitator deviation / other
+- Invalid-session reason category: `withdrawn-consent` / `wrong-or-unusable-build` / `provider-invocation` / `prior-exposure` / `facilitator-deviation`
 - Recording stopped time, if applicable:
 - Immediate containment:
 - Raw evidence affected:
@@ -14,3 +14,8 @@
 - Privacy/security escalation reference:
 - Deletion required and completed date:
 - De-identified finding ID, if approved for synthesis:
+
+Use exactly one closed reason category above when the session is invalid. Do
+not create a free-text category. Record technical context under Immediate
+containment and Raw evidence affected without adding participant-sensitive
+detail to the category.

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { calculateStudySynthesis } from './creator-study-synthesis.mjs';
+import { INVALID_SESSION_REASON_IDS } from './creator-study-contract.mjs';
 
 const outcomes = Array.from({ length: 8 }, (_, index) => ({
   task: index + 1,
@@ -196,6 +197,22 @@ test('critical thresholds, even medians, and invalid-session exclusion are expli
   assert.equal(result.tasks[4].criticalAtMostOneAssist.count, 5);
   assert.equal(result.recommendation, 'block');
 
+});
+
+test('invalid sessions accept only the shared closed privacy-safe reason categories', () => {
+  for (const invalidReasonCategory of INVALID_SESSION_REASON_IDS) {
+    const input = passingInput();
+    input.participants[0].valid = false;
+    input.participants[0].invalidReasonCategory = invalidReasonCategory;
+    assert.equal(calculateStudySynthesis(input).invalidSessions, 1);
+  }
+
+  for (const invalidReasonCategory of ['other', 'participant explained a private circumstance']) {
+    const input = passingInput();
+    input.participants[0].valid = false;
+    input.participants[0].invalidReasonCategory = invalidReasonCategory;
+    assert.throws(() => calculateStudySynthesis(input), /invalid reason category/i);
+  }
 });
 
 test('cohort-mix and keyboard/accessibility gaps require independent closed approvals', () => {
