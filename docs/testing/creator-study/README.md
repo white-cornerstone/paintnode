@@ -55,24 +55,94 @@ study storage.
    current hint instrument version, SHA-256, and approved Git change reference.
 4. Create a different, genuinely empty participant project folder outside the
    repository.
-5. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
-6. Run:
+5. Start a new isolated study profile. This generates a cryptographically random
+   WebKit data-store identifier that has no access to the generic QA profile,
+   rehearsal, or any prior participant profile. The study mechanism requires
+   macOS 14 or newer and fails closed on older systems:
+
+   ```sh
+   npm run qa:native:provider-free -- --fresh-study-session
+   ```
+
+6. Before opening any folder, visibly confirm the Project panel has no open
+   project or imported assets and no workflow is open. Close the app if either
+   is present; do not continue the session.
+7. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle and
+   run the setup verifier only after making that visible check:
 
    ```sh
    npm run qa:creator-study:setup -- \
      --expected-sha "$(git rev-parse HEAD)" \
      --app-bundle "ABSOLUTE_PATH_TO_PROVIDER_FREE_APP" \
      --project-dir "ABSOLUTE_EMPTY_PARTICIPANT_PROJECT" \
-     --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT"
+     --rehearsal-dir "ABSOLUTE_DELETED_REHEARSAL_PROJECT" \
+     --visible-empty-state-attested
    ```
+
+8. To test quit/reopen within this same participant session, relaunch with the
+   same isolated profile:
+
+   ```sh
+   npm run qa:native:provider-free -- --resume-study-session
+   ```
+
+   `--resume-study-session` must never start a new participant. The next
+   participant always begins again at step 5 with `--fresh-study-session`.
 
 The verifier checks a clean source tree, the exact SHA/tree recorded by the
 actual build, bundle identity, executable fingerprint, canonicalized paths,
-empty project, deleted and separate rehearsal path, Product hashes/dimensions,
-and all three QA scenario controls. Stale bundles, modified executables, dirty
+empty project, deleted and separate rehearsal path, a freshly generated
+isolated study profile, Product hashes/dimensions, all three QA scenario
+controls, and the operator's visible-empty-state attestation. Generic Provider
+Free bundles, resumed profiles, stale bundles, modified executables, dirty
 source, broken symlinks, and symlink aliases into the repository fail closed.
-Its receipt deliberately omits local paths. It does not replace the visible
+Its receipt records only the one-way profile fingerprint and deliberately omits
+the raw data-store identifier and local paths. It does not replace the visible
 rehearsal or the private authorization gate.
+
+The setup receipt is single-use. It reports `appBootObserved: true` only after
+the Provider Free executable has actually created the isolated window, and
+`setupEvidenceConsumed: true` when that boot generation is consumed. A
+`--build-only` bundle, missing boot marker, stale marker, or second setup attempt
+for the same generation fails closed; the manual visible-empty attestation is
+recorded separately and is never treated as machine-observed UI evidence.
+Consumption is also recorded create-once in the macOS login Keychain as a
+monotonic single-Mac anchor. Restoring the ignored state and boot-evidence files
+cannot restore that marker or make the same profile consumable again. Do not
+delete those Keychain markers during the study.
+
+`--fresh-study-session --build-only` writes non-live `build-only` provenance but
+does not allocate a profile, nonce, state file, or Keychain marker. It is safe
+for build validation, but the resulting bundle cannot pass participant setup.
+
+## After every session
+
+After Task 8 save/reopen is complete, close PaintNode and run:
+
+```sh
+npm run qa:creator-study:finalize-session
+```
+
+This launches the repo-built Provider Free executable in cleanup-only mode,
+removes the session's persistent macOS WebKit data store, verifies one-time
+native cleanup evidence, deletes the local raw profile handle, and prints a
+path-free receipt containing only its fingerprint and `dataStoreRemoved: true`.
+Copy that receipt to the private session log. A new `--fresh-study-session`
+fails closed until the prior session is finalized. The app profile is transient
+operational state and is never retained as research evidence; apply approved
+retention rules to the participant project/evidence instead.
+
+If the build fails, the first app launch fails, PaintNode is closed before setup,
+or the session is abandoned before setup evidence is consumed, run:
+
+```sh
+npm run qa:creator-study:abort-session
+```
+
+An abort before any launch attempt releases the unused handle without claiming
+a data store existed. Once launch was attempted, abort uses the same native
+WebKit removal and verified cleanup evidence as finalization. Failure retains
+the raw handle and blocks the next fresh session; manual deletion is unsupported.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either

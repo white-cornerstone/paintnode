@@ -14,6 +14,7 @@ coverage
 .vite
 /src-tauri/.tauri.dev.json
 /src-tauri/.tauri.qa.json
+/src-tauri/.provider-free-study-session.json*
 
 # Local AI-agent instructions. Keep the tracked examples as the public baseline.
 /AGENTS.md

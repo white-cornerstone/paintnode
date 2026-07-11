@@ -2,6 +2,7 @@
   "version": 1,
   "repositoryAllowed": [
     "approved build Git SHA and QA bundle identity",
+    "path-free Provider Free profile fingerprint and native cleanup completion status",
     "Product fixture labels, dimensions, licenses, and hashes",
     "participant codes without an identity mapping",
     "eligibility and cohort buckets without raw answers",
@@ -20,6 +21,7 @@
     "facilitator, observer, technical operator, and accommodation setup assignments",
     "study owner and observer names",
     "approved storage path or internal storage reference",
+    "raw Provider Free WebKit data-store identifier, boot nonce, cleanup nonce, lifecycle evidence paths, and macOS Keychain consumption markers",
     "consent answers tied to a person",
     "raw screener answers",
     "accommodation or medical details",
