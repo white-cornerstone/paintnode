@@ -3,7 +3,15 @@
 > PRIVATE ONLY. Never complete this file inside the repository. De-identify
 > findings separately before they enter aggregate repository evidence.
 
-- Date/time and facilitator:
+- Scheduled date:
+- Scheduled start time:
+- Time zone:
+- Delivery mode:
+- Assigned facilitator:
+- Named session observers:
+- Technical session operator:
+- Accommodation setup confirmation:
+- Actual start/end time:
 - Build Git SHA and QA bundle identity:
 - OS/display scale/window size/input method:
 - Eligibility/cohort bucket:
@@ -14,22 +22,48 @@
 - Study owner and named observers:
 - Session validity: valid / invalid — category:
 
-| Task | Outcome | Seconds | Neutral probes | Direct assists | Wrong turns | Repeated actions | Error loops | Recovery attempts | SEQ 1–7 | Raw evidence/time reference |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | | | | | | | | | | |
-| 2 | | | | | | | | | | |
-| 3 | | | | | | | | | | |
-| 4 | | | | | | | | | | |
-| 5 | | | | | | | | | | |
-| 6 | | | | | | | | | | |
-| 7 | | | | | | | | | | |
-| 8 | | | | | | | | | | |
+| Task | Outcome | Seconds | Neutral probes | Direct assists | Wrong turns | Repeated actions | Error loops | Recovery attempts | SEQ 1–7 | `acceptedWorkPreserved` | Raw evidence/time reference |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 1 | | | | | | | | | | null | |
+| 2 | | | | | | | | | | null | |
+| 3 | | | | | | | | | | null | |
+| 4 | | | | | | | | | | null | |
+| 5 | | | | | | | | | | null | |
+| 6 | | | | | | | | | | null | |
+| 7 | | | | | | | | | | null | |
+| 8 | | | | | | | | | | true / false / null | |
+
+For Tasks 1–7, `acceptedWorkPreserved` is always `null`. For Task 8 record
+`true` only when accepted work reopens with no data loss or wrong lineage,
+`false` when it does not, and `null` only when preservation was not observed.
 
 ## Findings and debrief
 
-| Private finding ID | Observation | Task | Proposed severity | Outcome impact | Artifact/time reference |
-| --- | --- | --- | --- | --- | --- |
-| | | | | | |
+For each finding, use participant codes only in `participantIds` and copy one
+exact `category` value from `synthesis-input.schema.json`; free-text category
+variants are forbidden.
+
+### Private finding handoff
+
+- Finding ID:
+- `participantIds`:
+- Task:
+- `category`:
+- Proposed severity: S0 / S1 / S2 / S3 / S4
+- `traceable`: true / false
+- `resolved`: true / false
+- `blocksExit`: true / false
+- `exceptionApproved`: true / false
+- `exceptionRationaleRecorded`: true / false
+- Outcome impact:
+- Private observation:
+- Artifact/time reference:
+- Private exception rationale/decision reference, if applicable:
+
+Set all five decision fields explicitly. `resolved=true` requires
+`blocksExit=false`. Exception fields are `false` unless a single non-integrity
+S1 has the required cross-functional approval; never record
+`exceptionRationaleRecorded=true` without `exceptionApproved=true`.
 
 - Mental model:
 - Least clear state/message:

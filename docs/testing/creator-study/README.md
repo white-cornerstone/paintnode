@@ -29,6 +29,9 @@ study storage.
    participant-code-to-contact mapping there, separately from aggregate data.
 4. Confirm the decision owner/date, retention rule, and any exception before
    consent is requested.
+5. Privately assign each scheduled date/start/time zone, delivery mode,
+   facilitator, observers, technical operator, and accommodation setup. None of
+   these assignments belong in repository-safe evidence.
 
 ## Before every session
 
@@ -70,6 +73,13 @@ Complete private session records first. Create a de-identified JSON input from
 `templates/synthesis-input.blank.json` and validate it against
 `synthesis-input.schema.json`. Never include names, contact details, raw quotes,
 storage paths, or participant-code mappings.
+
+Record `acceptedWorkPreserved=null` for Tasks 1–7. For Task 8 use `true` only
+when accepted work reopens with no data loss or wrong lineage, `false` when it
+does not, and `null` only when preservation was not observed. Every finding must
+carry the complete closed handoff: `participantIds`, `category`, `traceable`,
+`resolved`, `blocksExit`, `exceptionApproved`, and
+`exceptionRationaleRecorded`. Category values come only from the schema enum.
 
 ```sh
 npm run qa:creator-study:synthesize -- --input ABSOLUTE_DEIDENTIFIED_INPUT.json

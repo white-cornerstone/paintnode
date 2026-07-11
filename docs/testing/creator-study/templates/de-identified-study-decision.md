@@ -43,9 +43,17 @@
 
 ## Prioritized de-identified findings
 
-| ID | Paraphrased evidence | Frequency | Severity | Requirement | Owner role | Decision/fix | Re-test reference |
-| --- | --- | ---: | --- | --- | --- | --- | --- |
-| | | | | | | | |
+Use participant codes only in `participantIds`. Copy `category` from the closed
+enum in `synthesis-input.schema.json`; never add private scheduling metadata or
+raw evidence.
+
+| ID | `participantIds` | `category` | Frequency | Severity | `traceable` | `resolved` | `blocksExit` | `exceptionApproved` | `exceptionRationaleRecorded` | Paraphrased evidence | Owner role | Decision/fix | Re-test reference |
+| --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | | | | | | | |
+
+Every boolean is required. `resolved=true` requires `blocksExit=false`.
+Exception fields remain `false` unless a single non-integrity S1 has the
+required cross-functional approval and recorded rationale.
 
 ## Decision audit
 
