@@ -83,12 +83,14 @@ test('study-capable build provenance is static and the build defers its main win
     mode: 'provider-free',
     bundleId: 'com.paintnode.editor.blueprintqa.provider.free',
     studyCapable: true,
+    codeIdentity: { cdHash: 'd'.repeat(40) },
     sourceState: {
       gitSha: 'a'.repeat(40), sourceTreeSha: 'b'.repeat(40), sourceDirty: false,
       sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     },
   });
   assert.equal(provenance.studyCapable, true);
+  assert.equal(provenance.codeIdentity.cdHash, 'd'.repeat(40));
   assert.equal('studySession' in provenance, false);
   assert.match(qaBuildIdentitySha256(provenance), /^[a-f0-9]{64}$/);
 

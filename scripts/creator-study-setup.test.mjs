@@ -51,6 +51,7 @@ const approvedBuildIdentity = {
 const appBuild = {
   ...approvedBuildIdentity,
   studyCapable: true,
+  codeIdentity: { cdHash: 'd'.repeat(40) },
 };
 const lifecycleFixturesByProject = new Map();
 

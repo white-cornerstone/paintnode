@@ -74,6 +74,10 @@ export function studySessionCleanupEvidencePath(statePath) {
   return `${statePath}.cleanup.json`;
 }
 
+export function studySessionCleanupReleasePath(statePath) {
+  return `${statePath}.cleanup.release`;
+}
+
 export function studySessionLaunchEvidencePath(statePath) {
   return `${statePath}.launch.json`;
 }
@@ -160,6 +164,7 @@ export function resolveProviderFreeStudySession({
   statePath,
   randomUUID: randomUUIDOverride,
   randomBytes: randomBytesOverride,
+  beforeFreshStateClaim,
 }) {
   if (fresh && resume) throw new Error('Choose either a fresh or resumed study session, not both.');
   if (!fresh && !resume) return null;
@@ -170,20 +175,26 @@ export function resolveProviderFreeStudySession({
     if (existsSync(statePath)) {
       throw new Error('The prior Provider Free study session must be finalized before a fresh session can start.');
     }
-    rmSync(studySessionBootEvidencePath(statePath), { force: true });
-    rmSync(studySessionCleanupEvidencePath(statePath), { force: true });
-    rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
-    removeInactiveConsumeLock(statePath);
     const session = createFreshProviderFreeStudySession({
       randomUUID: randomUUIDOverride,
       randomBytes: randomBytesOverride,
     });
+    beforeFreshStateClaim?.();
     try {
       writeProviderFreeStudySession(statePath, session, { createOnly: true });
     } catch (error) {
       if (error?.code === 'EEXIST') {
         throw new Error('The prior Provider Free study session must be finalized before a fresh session can start.');
       }
+      throw error;
+    }
+    try {
+      rmSync(studySessionBootEvidencePath(statePath), { force: true });
+      rmSync(studySessionCleanupEvidencePath(statePath), { force: true });
+      rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
+      removeInactiveConsumeLock(statePath);
+    } catch (error) {
+      rmSync(statePath, { force: true });
       throw error;
     }
     return Object.freeze({ session, launchIntent: 'fresh' });
@@ -288,11 +299,13 @@ export function prepareStudySessionCleanup(statePath, options = {}) {
   }
   const cleanupNonce = (options.randomBytes ?? randomBytes)(32).toString('hex');
   rmSync(studySessionCleanupEvidencePath(statePath), { force: true });
+  rmSync(studySessionCleanupReleasePath(statePath), { force: true });
   return Object.freeze({
     session,
     cleanupNonce,
     cleanupNonceSha256: sha256Hex(Buffer.from(cleanupNonce, 'hex')),
     evidencePath: studySessionCleanupEvidencePath(statePath),
+    releasePath: studySessionCleanupReleasePath(statePath),
     intent,
     requiresNativeCleanup: session.launchAttempted,
   });
@@ -302,6 +315,7 @@ function removeStudySessionLifecycleFiles(statePath, evidencePath) {
   rmSync(statePath, { force: true });
   rmSync(studySessionBootEvidencePath(statePath), { force: true });
   rmSync(evidencePath, { force: true });
+  rmSync(studySessionCleanupReleasePath(statePath), { force: true });
   rmSync(studySessionLaunchEvidencePath(statePath), { force: true });
   removeInactiveConsumeLock(statePath);
 }

@@ -242,6 +242,7 @@ pub fn run() {
                     });
                     tauri::async_runtime::spawn(async move {
                         let result = async {
+                            cleanup.wait_for_cleanup_release()?;
                             let identifiers = handle
                                 .fetch_data_store_identifiers()
                                 .await

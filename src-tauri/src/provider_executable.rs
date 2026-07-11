@@ -27,6 +27,8 @@ const PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV: &str =
 const PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_NONCE";
 const PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV: &str =
     "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE";
+const PROVIDER_FREE_STUDY_CLEANUP_RELEASE_ENV: &str =
+    "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_RELEASE";
 const QA_PREFLIGHT_ENV: &str = "PAINTNODE_PROVIDER_QA_PREFLIGHT";
 const QA_PREFLIGHT_MARKER: &str = "provider-doctor-v1";
 /// Keep native discovery aligned with the provider doctor: a version probe may
@@ -1424,6 +1426,34 @@ pub(crate) struct StudyEvidenceRequest {
     nonce: [u8; 32],
     build_identity: Option<[u8; 32]>,
     path: std::path::PathBuf,
+    cleanup_release_path: Option<std::path::PathBuf>,
+}
+
+impl StudyEvidenceRequest {
+    pub(crate) fn wait_for_cleanup_release(&self) -> Result<(), String> {
+        use sha2::Digest;
+        let Some(path) = self.cleanup_release_path.as_ref() else {
+            return Ok(());
+        };
+        let expected = format!("{:x}", sha2::Sha256::digest(self.nonce));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::fs::read_to_string(path) {
+                Ok(value) if value.trim() == expected => return Ok(()),
+                Ok(_) => return Err("Provider Free cleanup release evidence is invalid.".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "Could not read Provider Free cleanup release: {error}"
+                    ));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("Provider Free cleanup dynamic-code verification timed out.".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 fn parse_study_hex<const N: usize>(raw: &std::ffi::OsStr, label: &str) -> Result<[u8; N], String> {
@@ -1453,6 +1483,7 @@ fn study_evidence_request_in_mode(
     raw_nonce: Option<&std::ffi::OsStr>,
     raw_path: Option<&std::ffi::OsStr>,
     raw_build_identity: Option<&std::ffi::OsStr>,
+    raw_cleanup_release_path: Option<&std::ffi::OsStr>,
     profile_only_is_resume: bool,
 ) -> Result<Option<StudyEvidenceRequest>, String> {
     // The study profile is also present for same-session resume launches. Only
@@ -1462,6 +1493,7 @@ fn study_evidence_request_in_mode(
         && raw_nonce.is_none()
         && raw_path.is_none()
         && raw_build_identity.is_none()
+        && raw_cleanup_release_path.is_none()
     {
         return Ok(None);
     }
@@ -1470,6 +1502,7 @@ fn study_evidence_request_in_mode(
         && raw_nonce.is_none()
         && raw_path.is_none()
         && raw_build_identity.is_none()
+        && raw_cleanup_release_path.is_none()
     {
         return Ok(None);
     }
@@ -1498,11 +1531,27 @@ fn study_evidence_request_in_mode(
     } else {
         None
     };
+    let cleanup_release_path = if profile_only_is_resume {
+        if raw_cleanup_release_path.is_some() {
+            return Err("Provider Free boot must not carry a cleanup release path.".into());
+        }
+        None
+    } else {
+        Some(
+            raw_cleanup_release_path
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| {
+                    "Provider Free cleanup release path must be absolute.".to_string()
+                })?,
+        )
+    };
     Ok(Some(StudyEvidenceRequest {
         profile: parse_study_hex::<16>(raw_profile, "Provider Free study profile")?,
         nonce: parse_study_hex::<32>(raw_nonce, "Provider Free study lifecycle nonce")?,
         build_identity,
         path,
+        cleanup_release_path,
     }))
 }
 
@@ -1511,18 +1560,21 @@ fn study_evidence_request(
     nonce_env: &str,
     path_env: &str,
     build_identity_env: Option<&str>,
+    cleanup_release_env: Option<&str>,
     profile_only_is_resume: bool,
 ) -> Result<Option<StudyEvidenceRequest>, String> {
     let raw_profile = std::env::var_os(profile_env);
     let raw_nonce = std::env::var_os(nonce_env);
     let raw_path = std::env::var_os(path_env);
     let raw_build_identity = build_identity_env.and_then(std::env::var_os);
+    let raw_cleanup_release_path = cleanup_release_env.and_then(std::env::var_os);
     study_evidence_request_in_mode(
         &std::env::var(QA_MODE_ENV).unwrap_or_default(),
         raw_profile.as_deref(),
         raw_nonce.as_deref(),
         raw_path.as_deref(),
         raw_build_identity.as_deref(),
+        raw_cleanup_release_path.as_deref(),
         profile_only_is_resume,
     )
 }
@@ -1533,6 +1585,7 @@ pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidence
         PROVIDER_FREE_STUDY_BOOT_NONCE_ENV,
         PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV,
         Some(PROVIDER_FREE_STUDY_BUILD_IDENTITY_ENV),
+        None,
         true,
     )
 }
@@ -1543,6 +1596,7 @@ pub(crate) fn provider_free_study_cleanup() -> Result<Option<StudyEvidenceReques
         PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV,
         PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV,
         None,
+        Some(PROVIDER_FREE_STUDY_CLEANUP_RELEASE_ENV),
         false,
     )
 }
@@ -1683,6 +1737,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true
         )
         .expect("resume launch does not request new boot evidence")
@@ -1694,6 +1749,7 @@ mod tests {
             "provider-free",
             Some(profile),
             Some(nonce),
+            None,
             None,
             None,
             true,
@@ -1712,6 +1768,7 @@ mod tests {
             Some(nonce),
             Some(path),
             Some(build_identity),
+            None,
             true,
         )
         .expect("fresh launch lifecycle request")
@@ -1721,6 +1778,7 @@ mod tests {
         assert!(study_evidence_request_in_mode(
             "provider-free",
             Some(profile),
+            None,
             None,
             None,
             None,
@@ -1743,6 +1801,7 @@ mod tests {
             nonce: [2; 32],
             build_identity: Some([3; 32]),
             path: root.join("boot.json"),
+            cleanup_release_path: None,
         };
         write_study_lifecycle_evidence(&request, "app-boot").expect("write boot evidence");
         let evidence: serde_json::Value =
@@ -1762,6 +1821,37 @@ mod tests {
             .expect_err("evidence must be create-once")
             .contains("Could not create"));
         std::fs::remove_dir_all(root).expect("remove evidence fixture");
+    }
+
+    #[test]
+    fn study_cleanup_waits_for_the_parent_dynamic_code_release() {
+        use sha2::Digest;
+        let root = std::env::temp_dir().join(format!(
+            "paintnode-study-cleanup-release-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create release fixture");
+        let release_path = root.join("release");
+        let request = StudyEvidenceRequest {
+            profile: [1; 16],
+            nonce: [7; 32],
+            build_identity: None,
+            path: root.join("cleanup.json"),
+            cleanup_release_path: Some(release_path.clone()),
+        };
+        std::fs::write(
+            &release_path,
+            format!("{:x}\n", sha2::Sha256::digest(request.nonce)),
+        )
+        .expect("write trusted parent release");
+        request
+            .wait_for_cleanup_release()
+            .expect("matching release permits cleanup");
+        std::fs::write(&release_path, "forged\n").expect("write forged release");
+        assert!(request.wait_for_cleanup_release().is_err());
+        std::fs::remove_dir_all(root).expect("remove release fixture");
     }
 
     #[test]

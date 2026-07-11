@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  accessSync, closeSync, constants, existsSync, lstatSync, openSync, readFileSync,
+  closeSync, existsSync, lstatSync, openSync, readFileSync,
   readdirSync, realpathSync, rmSync, statSync, writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import {
-  captureSourceState, qaBuildIdentitySha256, qaBuildProvenancePath,
-  readQaBuildProvenance, sha256File,
+  captureSourceState, qaBuildIdentitySha256,
 } from './native-qa-build-provenance.mjs';
+import { readStaticQaApp } from './native-qa-static-app.mjs';
 import {
   readProviderFreeStudySession, verifyAndConsumeStudySessionBoot,
 } from './native-qa-session.mjs';
@@ -822,17 +822,16 @@ function valueAfter(args, flag) {
 }
 
 function readAppBundle(appBundle) {
-  if (!isAbsolute(appBundle)) throw new Error('--app-bundle must be an absolute path.');
-  const bundle = realpathSync(appBundle);
-  accessSync(join(bundle, 'Contents/MacOS/PaintNode'), constants.X_OK);
-  const plist = join(bundle, 'Contents/Info.plist');
-  const result = spawnSync('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plist], { encoding: 'utf8' });
-  if (result.status !== 0) throw new Error(`Could not read QA app bundle identity: ${result.stderr || result.error}`);
+  const app = readStaticQaApp({
+    appBundle,
+    expectedBundleId: EXPECTED_BUNDLE_ID,
+    requireStudyCapable: true,
+  });
   return {
-    bundleId: result.stdout.trim(),
-    appBuild: readQaBuildProvenance(bundle),
-    actualProvenanceSha256: sha256File(qaBuildProvenancePath(bundle)),
-    actualExecutableSha256: sha256File(join(bundle, 'Contents/MacOS/PaintNode')),
+    bundleId: app.provenance.bundleId,
+    appBuild: app.provenance,
+    actualProvenanceSha256: app.provenanceSha256,
+    actualExecutableSha256: app.executableSha256,
   };
 }
 

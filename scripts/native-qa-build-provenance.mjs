@@ -109,6 +109,7 @@ export function qaBuildIdentity(provenance) {
     sourceStatusSha256: provenance.sourceStatusSha256,
     executableSha256: provenance.executableSha256,
     studyCapable: provenance.studyCapable === true,
+    codeIdentityCdHash: provenance.studyCapable === true ? provenance.codeIdentity?.cdHash : null,
   });
 }
 
@@ -133,11 +134,15 @@ export function captureCleanSourceState(root) {
 }
 
 export function writeQaBuildProvenance({
-  appBundle, mode, bundleId, sourceState, studyCapable = false, studySession = null,
+  appBundle, mode, bundleId, sourceState, studyCapable = false, codeIdentity = null,
+  studySession = null,
 }) {
   const bundle = realpathSync(appBundle);
   const executable = join(bundle, 'Contents/MacOS/PaintNode');
   accessSync(executable, constants.X_OK);
+  if (studyCapable && !/^[a-f0-9]{40,64}$/.test(codeIdentity?.cdHash ?? '')) {
+    throw new Error('Study-capable QA build provenance requires the approved macOS CDHash.');
+  }
   const provenance = Object.freeze({
     version: 1,
     mode,
@@ -148,6 +153,7 @@ export function writeQaBuildProvenance({
     sourceStatusSha256: sourceState.sourceStatusSha256,
     executableSha256: sha256File(executable),
     ...(studyCapable ? { studyCapable: true } : {}),
+    ...(studyCapable ? { codeIdentity: Object.freeze({ cdHash: codeIdentity.cdHash }) } : {}),
     ...(studySession ? { studySession: Object.freeze({ ...studySession }) } : {}),
   });
   const output = qaBuildProvenancePath(bundle);

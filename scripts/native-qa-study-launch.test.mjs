@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
-  chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,11 +17,27 @@ import {
 import {
   readProviderFreeStudySession,
   studySessionBootEvidencePath,
-  verifyAndConsumeStudySessionBoot,
 } from './native-qa-session.mjs';
-import { createMemoryStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
+import { runStudySessionCleanup } from './native-qa-session-finalize.mjs';
+import { consumeQaOnlyStudySession } from './creator-study-qa-consume.mjs';
+import {
+  createFreshProviderFreeStudySession,
+  markStudySessionLaunchAttempted,
+  studySessionCleanupReleasePath,
+  studySessionLaunchEvidencePath,
+  writeProviderFreeStudySession,
+} from './native-qa-session.mjs';
 
 const FIRST_UUID = '00112233-4455-4677-8899-aabbccddeeff';
+const CODE_HASH = 'd'.repeat(40);
+const fakeAppReads = {
+  readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+  readStaticCodeIdentity: () => ({ cdHash: CODE_HASH }),
+};
+const fakeAttest = (pid, identity) => {
+  assert.equal(pid, 4242);
+  assert.deepEqual(identity, { cdHash: CODE_HASH });
+};
 
 function studyBundle() {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-study-launch-'));
@@ -33,6 +51,7 @@ function studyBundle() {
     mode: 'provider-free',
     bundleId: 'com.paintnode.editor.blueprintqa.provider.free',
     studyCapable: true,
+    codeIdentity: { cdHash: CODE_HASH },
     sourceState: {
       gitSha: 'a'.repeat(40), sourceTreeSha: 'b'.repeat(40), sourceDirty: false,
       sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
@@ -57,7 +76,8 @@ test('launch-existing fresh returns after boot without rebuilding or mutating st
     platform: 'darwin',
     productVersion: '14.6',
     randomUUID: () => FIRST_UUID,
-    readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+    ...fakeAppReads,
+    attestRunningProcess: fakeAttest,
     spawn(executablePath, _args, options) {
       spawnedExecutable = executablePath;
       const profileBytes = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE, 'hex');
@@ -69,7 +89,7 @@ test('launch-existing fresh returns after boot without rebuilding or mutating st
         bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
         buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
       }));
-      return { exitCode: null, unref() { unrefCalled = true; } };
+      return { pid: 4242, exitCode: null, unref() { unrefCalled = true; } };
     },
   });
 
@@ -85,26 +105,25 @@ test('launch-existing fresh returns after boot without rebuilding or mutating st
 
 test('launch-existing rejects generic, dynamic, or executable-drifted bundles', () => {
   const { appBundle, executable } = studyBundle();
-  const readBundleIdentifier = () => 'com.paintnode.editor.blueprintqa.provider.free';
-  assert.equal(readExistingStudyApp({ appBundle, readBundleIdentifier }).provenance.studyCapable, true);
+  assert.equal(readExistingStudyApp({ appBundle, ...fakeAppReads }).provenance.studyCapable, true);
 
   const provenancePath = qaBuildProvenancePath(appBundle);
   const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'));
   writeFileSync(provenancePath, JSON.stringify({ ...provenance, studySession: { launchIntent: 'fresh' } }));
-  assert.throws(() => readExistingStudyApp({ appBundle, readBundleIdentifier }), /static provenance/i);
+  assert.throws(() => readExistingStudyApp({ appBundle, ...fakeAppReads }), /static provenance/i);
   writeFileSync(provenancePath, JSON.stringify(provenance));
   writeFileSync(executable, '#!/bin/sh\nexit 9\n');
-  assert.throws(() => readExistingStudyApp({ appBundle, readBundleIdentifier }), /executable fingerprint/i);
+  assert.throws(() => readExistingStudyApp({ appBundle, ...fakeAppReads }), /executable fingerprint/i);
 
   writeFileSync(executable, '#!/bin/sh\nexit 0\n');
   chmodSync(executable, 0o755);
   const valid = JSON.stringify(provenance);
   writeFileSync(provenancePath, valid.replace('{', '{"studyCapable":false,'));
-  assert.throws(() => readExistingStudyApp({ appBundle, readBundleIdentifier }), /duplicate field studyCapable/i);
+  assert.throws(() => readExistingStudyApp({ appBundle, ...fakeAppReads }), /duplicate field studyCapable/i);
 });
 
-test('fresh launch rejects child exit, hung boot, and executable swap', async () => {
-  for (const failure of ['exit', 'timeout', 'swap']) {
+test('fresh launch rejects child exit, hung boot, executable swap, and swap-restore forgery', async () => {
+  for (const failure of ['exit', 'timeout', 'swap', 'swap-restore']) {
     const { root, appBundle, executable } = studyBundle();
     const statePath = join(root, 'session.json');
     await assert.rejects(() => launchExistingProviderFreeStudyApp({
@@ -114,11 +133,15 @@ test('fresh launch rejects child exit, hung boot, and executable swap', async ()
       platform: 'darwin',
       productVersion: '14.6',
       randomUUID: () => FIRST_UUID,
-      readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+      ...fakeAppReads,
+      attestRunningProcess: failure === 'swap-restore'
+        ? () => { throw new Error('Provider Free running code identity does not match the approved CDHash'); }
+        : fakeAttest,
       bootTimeoutMs: 2,
       bootPollMs: 1,
       spawn(_executablePath, _args, options) {
-        if (failure === 'swap') {
+        if (failure === 'swap' || failure === 'swap-restore') {
+          const approvedBytes = readFileSync(executable);
           const profileBytes = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE, 'hex');
           const bootNonce = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE, 'hex');
           writeFileSync(options.env.PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE, JSON.stringify({
@@ -128,15 +151,18 @@ test('fresh launch rejects child exit, hung boot, and executable swap', async ()
             buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
           }));
           writeFileSync(executable, '#!/bin/sh\nexit 7\n');
+          if (failure === 'swap-restore') writeFileSync(executable, approvedBytes);
         }
         return {
+          pid: failure === 'swap-restore' ? 666 : 4242,
           exitCode: failure === 'exit' ? 9 : null,
           kill() {},
           unref() {},
         };
       },
     }), failure === 'exit' ? /exited before verified boot/i
-      : failure === 'timeout' ? /timed out/i : /fingerprint|changed during launch/i);
+      : failure === 'timeout' ? /timed out/i
+        : failure === 'swap-restore' ? /running code identity/i : /fingerprint|changed during launch/i);
   }
 });
 
@@ -152,36 +178,28 @@ test('resume uses the same preserved bundle without fresh boot evidence', async 
       bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
       buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
     }));
-    return { exitCode: null, unref() {} };
+    return { pid: 4242, exitCode: null, unref() {} };
   };
   const fresh = await launchExistingProviderFreeStudyApp({
     appBundle, statePath, fresh: true, platform: 'darwin', productVersion: '14.6',
     randomUUID: () => FIRST_UUID,
-    readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+    ...fakeAppReads,
+    attestRunningProcess: fakeAttest,
     spawn: spawnFresh,
   });
-  verifyAndConsumeStudySessionBoot({
-    statePath,
-    profileSha256: fresh.profileSha256,
-    buildIdentitySha256: fresh.buildIdentitySha256,
-    provenanceSha256: readExistingStudyApp({
-      appBundle,
-      readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
-    }).provenanceSha256,
-    executableSha256: readExistingStudyApp({
-      appBundle,
-      readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
-    }).executableSha256,
-    consumptionAnchor: createMemoryStudySessionConsumptionAnchor(),
-  });
+  const qaReceipt = consumeQaOnlyStudySession({ appBundle, statePath, ...fakeAppReads });
+  assert.equal(qaReceipt.qaOnly, true);
+  assert.equal(qaReceipt.technicalSetupReady, true);
+  assert.equal(qaReceipt.studyAuthorizationEvaluated, false);
   const bootBefore = readFileSync(studySessionBootEvidencePath(statePath));
   let resumeEnv;
   const resumed = await launchExistingProviderFreeStudyApp({
     appBundle, statePath, resume: true, platform: 'darwin', productVersion: '14.6',
-    readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+    ...fakeAppReads,
+    attestRunningProcess: fakeAttest,
     spawn(_executablePath, _args, options) {
       resumeEnv = options.env;
-      return { exitCode: null, unref() {} };
+      return { pid: 4242, exitCode: null, unref() {} };
     },
   });
   assert.equal(resumed.launchIntent, 'resume');
@@ -202,12 +220,13 @@ test('concurrent fresh launch and symlinked static provenance fail closed', asyn
       bootNonceSha256: createHash('sha256').update(bootNonce).digest('hex'),
       buildIdentitySha256: options.env.PAINTNODE_PROVIDER_FREE_STUDY_BUILD_IDENTITY,
     }));
-    return { exitCode: null, unref() {} };
+    return { pid: 4242, exitCode: null, unref() {} };
   };
   const options = {
     appBundle, statePath, fresh: true, platform: 'darwin', productVersion: '14.6',
     randomUUID: () => FIRST_UUID,
-    readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+    ...fakeAppReads,
+    attestRunningProcess: fakeAttest,
     spawn: spawnBoot,
   };
   const results = await Promise.allSettled([
@@ -227,8 +246,58 @@ test('concurrent fresh launch and symlinked static provenance fail closed', asyn
   symlinkSync(realSidecar, provenancePath);
   assert.throws(() => readExistingStudyApp({
     appBundle,
-    readBundleIdentifier: () => 'com.paintnode.editor.blueprintqa.provider.free',
+    ...fakeAppReads,
   }), /non-symlink/i);
+});
+
+test('cleanup rejects swap-and-restore forged evidence before releasing trusted cleanup', async () => {
+  const { root, appBundle, executable } = studyBundle();
+  const statePath = join(root, 'session.json');
+  const app = readExistingStudyApp({ appBundle, ...fakeAppReads });
+  const session = createFreshProviderFreeStudySession({
+    randomUUID: () => FIRST_UUID,
+    randomBytes: () => Buffer.alloc(32, 3),
+  });
+  writeProviderFreeStudySession(statePath, session);
+  markStudySessionLaunchAttempted(statePath);
+  writeFileSync(studySessionLaunchEvidencePath(statePath), JSON.stringify({
+    version: 1,
+    event: 'study-launch',
+    launchIntent: 'fresh',
+    profileSha256: session.profileSha256,
+    appBundlePath: app.appBundle,
+    provenanceSha256: app.provenanceSha256,
+    executableSha256: app.executableSha256,
+    buildIdentitySha256: app.buildIdentitySha256,
+  }));
+  const approvedBytes = readFileSync(executable);
+  await assert.rejects(() => runStudySessionCleanup({
+    statePath,
+    intent: 'abort',
+    randomBytes: () => Buffer.alloc(32, 9),
+    ...fakeAppReads,
+    attestRunningProcess() {
+      throw new Error('Provider Free running code identity does not match the approved CDHash');
+    },
+    spawn(_executablePath, _args, options) {
+      writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+      const cleanupNonce = Buffer.from(options.env.PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_NONCE, 'hex');
+      writeFileSync(options.env.PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE, JSON.stringify({
+        version: 3,
+        event: 'profile-removed',
+        profileSha256: session.profileSha256,
+        cleanupNonceSha256: createHash('sha256').update(cleanupNonce).digest('hex'),
+      }));
+      writeFileSync(executable, approvedBytes);
+      const child = new EventEmitter();
+      child.pid = 666;
+      child.kill = () => {};
+      return child;
+    },
+  }), /running code identity/i);
+  assert.equal(readProviderFreeStudySession(statePath).profileSha256, session.profileSha256);
+  assert.equal(existsSync(studySessionCleanupReleasePath(statePath)), false);
+  assert.deepEqual(readFileSync(executable), approvedBytes);
 });
 
 test('launch-existing source contains no build tool invocation', () => {
@@ -237,4 +306,8 @@ test('launch-existing source contains no build tool invocation', () => {
   const finalizeSource = readFileSync(new URL('./native-qa-session-finalize.mjs', import.meta.url), 'utf8');
   assert.match(finalizeSource, /readStudySessionLaunchBinding/);
   assert.doesNotMatch(finalizeSource, /target\/debug\/bundle\/macos/);
+  const qaConsumeSource = readFileSync(new URL('./creator-study-qa-consume.mjs', import.meta.url), 'utf8');
+  assert.match(qaConsumeSource, /qaOnly:\s*true/);
+  assert.match(qaConsumeSource, /studyAuthorizationEvaluated:\s*false/);
+  assert.doesNotMatch(qaConsumeSource, /createMacKeychain|security|active-build/i);
 });

@@ -170,6 +170,27 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   assert.equal(resume.session.setupConsumed, true);
 });
 
+test('losing concurrent fresh claim cannot delete winner lifecycle evidence', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-claim-race-'));
+  const statePath = join(root, 'session.json');
+  let winner;
+  assert.throws(() => resolveProviderFreeStudySession({
+    mode: 'provider-free',
+    fresh: true,
+    statePath,
+    randomUUID: () => SECOND_UUID,
+    beforeFreshStateClaim() {
+      winner = resolveProviderFreeStudySession({
+        mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
+      });
+      boot(winner.session, statePath);
+    },
+  }), /prior.*finalized/i);
+  assert.equal(readProviderFreeStudySession(statePath).profileSha256, winner.session.profileSha256);
+  assert.equal(existsSync(studySessionBootEvidencePath(statePath)), true);
+  assert.equal(existsSync(studySessionLaunchEvidencePath(statePath)), true);
+});
+
 test('snapshot rollback cannot replay consumption outside the monotonic single-Mac anchor', () => {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-rollback-'));
   const statePath = join(root, 'session.json');

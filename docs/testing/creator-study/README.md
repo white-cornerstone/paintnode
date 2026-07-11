@@ -67,7 +67,8 @@ study storage.
 
    This allocates no profile or lifecycle state. Preserve the resulting app and
    adjacent static provenance sidecar together; neither is rewritten by study
-   launch, setup, resume, abort, or finalization.
+   launch, setup, resume, abort, or finalization. Static provenance also pins the
+   signed executable's macOS CDHash.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate project. Delete that rehearsal project.
 3. Copy `templates/private-approved-build-record.json` and
@@ -135,7 +136,9 @@ executable identity even when source files appear unchanged.
 
    The launch-existing command performs no Tauri, Vite, Quick Look, or other
    build/configuration step. It returns to this terminal only after current-nonce
-   native boot evidence is verified while PaintNode remains open.
+   native boot evidence and the kernel-backed running-process CDHash are verified
+   while PaintNode remains open. A restored on-disk executable cannot make a
+   swapped interpreter or script satisfy that dynamic code requirement.
 
 6. Before opening any folder, visibly confirm the Project panel has no open
    project or imported assets and no workflow is open. Close the app if either
@@ -201,7 +204,10 @@ static-sidecar hash, executable hash, build-identity hash, and one-way profile
 fingerprint. Native boot evidence repeats the build-identity and current nonce
 fingerprints. Setup requires all three identities to match and rechecks the
 executable; resume and cleanup resolve the same preserved executable through that
-binding.
+binding. Fresh allocation claims its create-only state before clearing stale
+evidence, so a losing concurrent caller cannot delete the winning launch. Cleanup
+waits behind a trusted release barrier until its running PID passes the same
+dynamic CDHash requirement.
 
 The technical setup receipt is single-use. It reports `appBootObserved: true`
 only after the Provider Free executable has actually created the isolated window, and
@@ -219,6 +225,19 @@ provenance without allocating a profile, nonce, state file, launch binding, or
 Keychain marker. In other words, build-only does not allocate live session
 state. The bundle becomes session-capable only when started through
 `qa:creator-study:launch`; build-only by itself cannot pass participant setup.
+
+For exact native lifecycle engineering QA only, consume boot evidence without
+private approvals or production Keychain anchors:
+
+```sh
+npm run qa:creator-study:consume-qa-only -- \
+  --app-bundle "ABSOLUTE_PATH_TO_PRESERVED_PROVIDER_FREE_APP"
+```
+
+Its receipt is loudly marked `qaOnly: true` and
+`studyAuthorizationEvaluated: false`. It exists only to exercise fresh, resume,
+and finalize on disposable QA profiles; it is never participant setup,
+recruitment authorization, consent, or study evidence.
 
 ## After every session
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join } from 'node:path';
 
 import { captureSourceState, writeQaBuildProvenance } from './native-qa-build-provenance.mjs';
+import { readMacosStaticCodeIdentity } from './native-qa-code-identity.mjs';
 import {
   applyStudySessionWindowIsolation,
   assertProviderFreeStudyPlatform,
@@ -154,6 +155,7 @@ writeQaBuildProvenance({
   bundleId: `com.paintnode.editor.blueprintqa.${slug}`,
   sourceState: finalSourceState,
   studyCapable,
+  codeIdentity: studyCapable ? readMacosStaticCodeIdentity(executable) : null,
   studySession: studySessionEvidence,
 });
 

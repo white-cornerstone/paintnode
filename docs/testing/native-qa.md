@@ -56,7 +56,9 @@ npm run qa:creator-study:launch -- \
 The command returns after current-nonce native boot is verified while the app
 remains open, so visible empty-state attestation and setup continue in the same
 terminal. Per-session launch and boot evidence is stored separately and cannot
-rewrite the static sidecar or executable.
+rewrite the static sidecar or executable. Static provenance pins the approved
+macOS CDHash; after spawn, `codesign` dynamically verifies the running PID against
+that exact CDHash before boot evidence is accepted.
 
 The generated raw 16-byte profile identifier remains in an ignored local state
 file. Build provenance and the setup receipt contain only its SHA-256
@@ -92,7 +94,8 @@ from a snapshot; replaying that profile for another participant fails.
 After same-session save/reopen is complete, close the app and remove the custom
 WebKit data store with `npm run qa:creator-study:finalize-session`. The command
 re-resolves the preserved executable through the create-only launch binding,
-rejects sidecar/executable drift, and
+rejects sidecar/executable drift, dynamically verifies the cleanup PID, releases
+the trusted native cleanup barrier only after that verification, and
 verifies cleanup evidence written only after Tauri's `remove_data_store`
 completes, prints a path-free fingerprint receipt, and removes the raw local
 profile handle. A new fresh session is blocked while an earlier handle remains.
@@ -100,6 +103,12 @@ For a failed build or any abandoned pre-setup phase, use
 `npm run qa:creator-study:abort-session`. Never-launched state is released
 without a false removal claim; after a launch attempt, abort requires the same
 verified native data-store removal as normal finalization.
+
+Engineering-only full lifecycle validation may use
+`qa:creator-study:consume-qa-only -- --app-bundle ABSOLUTE_APP`. Its in-memory
+anchor never reads or writes the production study Keychain anchors, and its
+receipt explicitly says `qaOnly: true` and `studyAuthorizationEvaluated: false`.
+It must never be used for a participant or reported as study evidence.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates

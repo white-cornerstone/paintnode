@@ -23,6 +23,7 @@
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "qa:native:provider-free": "node scripts/native-qa-app.mjs --mode provider-free",
     "qa:creator-study:launch": "node scripts/native-qa-study-launch.mjs",
+    "qa:creator-study:consume-qa-only": "node scripts/creator-study-qa-consume.mjs",
     "qa:creator-study:decision-commitment": "node scripts/creator-study-setup.mjs --print-decision-commitment",
     "qa:creator-study:setup": "node scripts/creator-study-setup.mjs",
     "qa:creator-study:abort-session": "node scripts/native-qa-session-finalize.mjs --abort",

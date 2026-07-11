@@ -3,6 +3,7 @@
   "repositoryAllowed": [
     "approved build Git SHA and QA bundle identity",
     "approved build identity match including source provenance and executable fingerprints",
+    "approved static macOS CDHash and successful dynamic running-code identity match",
     "approved build active generation and random non-derived approval ID",
     "path-free Provider Free profile fingerprint and native cleanup completion status",
     "Product fixture labels, dimensions, licenses, and hashes",

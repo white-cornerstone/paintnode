@@ -243,6 +243,8 @@ test('operations require a fresh isolated profile and preserve only same-session
   assert.match(operations, /qa:creator-study:launch[\s\S]*--app-bundle/);
   assert.match(operations, /performs no Tauri, Vite, Quick Look, or other[\s\n]*build/i);
   assert.match(operations, /static provenance[\s\S]*neither is rewritten/i);
+  assert.match(operations, /consume-qa-only[\s\S]*qaOnly: true[\s\S]*studyAuthorizationEvaluated: false/i);
+  assert.match(operations, /running-process CDHash|dynamic CDHash/i);
   assert.match(operations, /--visible-empty-state-attested/);
   assert.match(operations, /must never start a new participant/i);
   assert.match(operations, /qa:creator-study:finalize-session/);

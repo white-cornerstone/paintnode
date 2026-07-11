@@ -1,17 +1,10 @@
-import { createHash } from 'node:crypto';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
-import {
-  accessSync, constants, lstatSync, readFileSync, realpathSync, writeFileSync,
-} from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  qaBuildIdentitySha256,
-  qaBuildProvenancePath,
-  parseJsonWithoutDuplicateKeys,
-  sha256File,
-} from './native-qa-build-provenance.mjs';
+import { verifyMacosRunningCodeIdentity } from './native-qa-code-identity.mjs';
+import { readStaticQaApp } from './native-qa-static-app.mjs';
 import {
   assertProviderFreeStudyPlatform,
   markStudySessionLaunchAttempted,
@@ -27,54 +20,18 @@ const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.free';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultStatePath = join(root, 'src-tauri', '.provider-free-study-session.json');
 
-function sha256Bytes(bytes) {
-  return createHash('sha256').update(bytes).digest('hex');
-}
-
-function defaultBundleIdentifier(appBundle) {
-  const result = spawnSync('plutil', [
-    '-extract', 'CFBundleIdentifier', 'raw', '-o', '-', join(appBundle, 'Contents/Info.plist'),
-  ], { encoding: 'utf8' });
-  if (result.status !== 0) {
-    throw new Error(`Could not read Provider Free app bundle identity: ${result.stderr || result.error}`);
-  }
-  return result.stdout.trim();
-}
-
-function assertRegularNotSymlink(path, label) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file.`);
-}
-
-export function readExistingStudyApp({ appBundle, readBundleIdentifier = defaultBundleIdentifier }) {
-  if (!isAbsolute(appBundle)) throw new Error('--app-bundle must be an absolute path.');
-  const bundle = realpathSync(appBundle);
-  const executable = join(bundle, 'Contents/MacOS/PaintNode');
-  accessSync(executable, constants.X_OK);
-  assertRegularNotSymlink(executable, 'Provider Free executable');
-  const provenancePath = qaBuildProvenancePath(bundle);
-  assertRegularNotSymlink(provenancePath, 'Provider Free static provenance sidecar');
-  const provenanceBytes = readFileSync(provenancePath);
-  const provenance = parseJsonWithoutDuplicateKeys(provenanceBytes.toString('utf8'), 'QA build provenance');
-  if (provenance.studyCapable !== true || Object.hasOwn(provenance, 'studySession')) {
-    throw new Error('Provider Free study launch requires study-capable static provenance without session fields.');
-  }
-  if (provenance.mode !== 'provider-free' || provenance.bundleId !== EXPECTED_BUNDLE_ID
-    || readBundleIdentifier(bundle) !== EXPECTED_BUNDLE_ID) {
-    throw new Error('Provider Free study launch requires the approved Provider Free bundle identity.');
-  }
-  const executableSha256 = sha256File(executable);
-  if (executableSha256 !== provenance.executableSha256) {
-    throw new Error('Provider Free executable fingerprint does not match static provenance.');
-  }
-  return Object.freeze({
-    appBundle: bundle,
-    executable,
-    provenance: Object.freeze({ ...provenance }),
-    provenanceSha256: sha256Bytes(provenanceBytes),
-    executableSha256,
-    buildIdentitySha256: qaBuildIdentitySha256(provenance),
+export function readExistingStudyApp({ appBundle, readBundleIdentifier, readStaticCodeIdentity }) {
+  const app = readStaticQaApp({
+    appBundle,
+    expectedBundleId: EXPECTED_BUNDLE_ID,
+    requireStudyCapable: true,
+    ...(readBundleIdentifier ? { readBundleIdentifier } : {}),
+    ...(readStaticCodeIdentity ? { readStaticCodeIdentity } : {}),
   });
+  if (app.provenance.mode !== 'provider-free') {
+    throw new Error('Provider Free study launch requires Provider Free static provenance.');
+  }
+  return app;
 }
 
 export function sameStaticStudyApp(left, right) {
@@ -87,11 +44,14 @@ export function sameStaticStudyApp(left, right) {
 
 export function readStudySessionLaunchBinding({
   statePath = defaultStatePath,
-  readBundleIdentifier = defaultBundleIdentifier,
+  readBundleIdentifier,
+  readStaticCodeIdentity,
 }) {
   const session = readProviderFreeStudySession(statePath);
   const evidence = readLaunchEvidence(statePath);
-  const app = readExistingStudyApp({ appBundle: evidence.appBundlePath, readBundleIdentifier });
+  const app = readExistingStudyApp({
+    appBundle: evidence.appBundlePath, readBundleIdentifier, readStaticCodeIdentity,
+  });
   if (!evidenceMatchesApp(evidence, app, session)) {
     throw new Error('Provider Free launch binding does not match the preserved approved bundle and session.');
   }
@@ -156,7 +116,9 @@ export async function launchExistingProviderFreeStudyApp({
   productVersion,
   randomUUID,
   randomBytes,
-  readBundleIdentifier = defaultBundleIdentifier,
+  readBundleIdentifier,
+  readStaticCodeIdentity,
+  attestRunningProcess = verifyMacosRunningCodeIdentity,
   spawn = nodeSpawn,
   bootTimeoutMs = 20_000,
   bootPollMs = 50,
@@ -170,7 +132,7 @@ export async function launchExistingProviderFreeStudyApp({
   }
   assertProviderFreeStudyPlatform(platform, version);
 
-  const before = readExistingStudyApp({ appBundle, readBundleIdentifier });
+  const before = readExistingStudyApp({ appBundle, readBundleIdentifier, readStaticCodeIdentity });
   const launch = resolveProviderFreeStudySession({
     mode: 'provider-free', fresh, resume, buildOnly: false, statePath, randomUUID, randomBytes,
   });
@@ -181,7 +143,7 @@ export async function launchExistingProviderFreeStudyApp({
       throw new Error('Resume must use the same preserved approved bundle and fresh-session evidence.');
     }
   }
-  const preSpawn = readExistingStudyApp({ appBundle, readBundleIdentifier });
+  const preSpawn = readExistingStudyApp({ appBundle, readBundleIdentifier, readStaticCodeIdentity });
   if (!sameStaticStudyApp(before, preSpawn)) throw new Error('Provider Free static bundle changed before launch.');
 
   if (fresh) {
@@ -215,14 +177,15 @@ export async function launchExistingProviderFreeStudyApp({
     stdio: 'ignore',
   });
   try {
+    attestRunningProcess(child.pid, before.codeIdentity);
     if (fresh) {
       await waitForCurrentBoot({
         statePath, session, app: before, child, timeoutMs: bootTimeoutMs, pollMs: bootPollMs,
       });
-      const afterBoot = readExistingStudyApp({ appBundle, readBundleIdentifier });
+      const afterBoot = readExistingStudyApp({ appBundle, readBundleIdentifier, readStaticCodeIdentity });
       if (!sameStaticStudyApp(before, afterBoot)) throw new Error('Provider Free static bundle changed during launch.');
     } else {
-      const afterSpawn = readExistingStudyApp({ appBundle, readBundleIdentifier });
+      const afterSpawn = readExistingStudyApp({ appBundle, readBundleIdentifier, readStaticCodeIdentity });
       if (!sameStaticStudyApp(before, afterSpawn)) throw new Error('Provider Free static bundle changed during resume.');
     }
     if (child.exitCode !== null && child.exitCode !== undefined) {
