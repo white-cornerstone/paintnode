@@ -703,6 +703,13 @@ export class EditorStore implements ToolHost {
   toggleLayerLocked(layer: Layer): void {
     this.setLayerLocked(layer, !layer.userLocked);
   }
+  setLayerName(layer: Layer, name: string): void {
+    const next = name.trim();
+    if (!next || layer.name === next) return;
+    layer.name = next;
+    this.bump();
+    this.invalidate();
+  }
   setLayerOpacity(layer: Layer, opacity: number): void {
     const next = Math.max(0, Math.min(1, opacity));
     if (layer.opacity === next) return;
