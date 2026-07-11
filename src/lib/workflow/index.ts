@@ -14,6 +14,8 @@ export * from './transformExecutor';
 export * from './runObserver';
 export * from './runControl';
 export * from './providerQaSelection';
+export * from './directorDraft';
+export * from './directorProposalSession';
 export * from './provenance';
 export * from './candidateBranches';
 export * from './candidatePromotion';

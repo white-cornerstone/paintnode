@@ -2532,7 +2532,9 @@ dependencies = [
  "base64 0.22.1",
  "cap-fs-ext",
  "cap-std",
+ "getrandom 0.4.3",
  "image",
+ "libc",
  "log",
  "reqwest",
  "semver",
@@ -2547,6 +2549,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "trash",
+ "windows-sys 0.61.2",
  "zip 2.4.2",
 ]
 

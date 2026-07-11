@@ -18,7 +18,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::ai::apply_ai_cli_environment;
 use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
 
-const RUNTIME_PROTOCOL_VERSION: u32 = 1;
+const RUNTIME_PROTOCOL_VERSION: u32 = 2;
+const DIRECTOR_ACTION_SCHEMA_FILE: &str = "bridge/director-action-schema.mjs";
+const WORKFLOW_DIRECTOR_SCHEMA_FILE: &str = "bridge/workflow-director-schema.mjs";
 const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/white-cornerstone/paintnode/releases/download/provider-runtimes-latest/runtime-manifest.json";
 
@@ -150,9 +152,13 @@ fn active_package_dir(provider: &str) -> Option<PathBuf> {
     Some(provider_root(provider).ok()?.join("versions").join(version))
 }
 
-pub(crate) fn active_package_manifest(provider: &str) -> Option<RuntimePackageManifest> {
+fn installed_active_package_manifest(provider: &str) -> Option<RuntimePackageManifest> {
     let bytes = fs::read(active_package_dir(provider)?.join("runtime-package.json")).ok()?;
-    let manifest: RuntimePackageManifest = serde_json::from_slice(&bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub(crate) fn active_package_manifest(provider: &str) -> Option<RuntimePackageManifest> {
+    let manifest = installed_active_package_manifest(provider)?;
     package_is_compatible(&manifest).then_some(manifest)
 }
 
@@ -186,6 +192,15 @@ fn package_is_compatible(manifest: &RuntimePackageManifest) -> bool {
             env!("CARGO_PKG_VERSION"),
             &manifest.minimum_paintnode_version,
         )
+}
+
+fn required_package_files(manifest: &RuntimePackageManifest) -> Vec<&str> {
+    let mut required = vec![manifest.runner.as_str(), manifest.executable.as_str()];
+    if manifest.protocol_version >= 2 {
+        required.push(DIRECTOR_ACTION_SCHEMA_FILE);
+        required.push(WORKFLOW_DIRECTOR_SCHEMA_FILE);
+    }
+    required
 }
 
 fn version_at_least(current: &str, minimum: &str) -> bool {
@@ -256,9 +271,17 @@ fn release_for<'a>(
         .find(|package| package.provider == provider)
         .ok_or_else(|| format!("No managed {provider} package is currently published."))?;
     if package.protocol_version != RUNTIME_PROTOCOL_VERSION {
-        return Err(format!(
-            "The available {provider} package requires a newer PaintNode runtime protocol."
-        ));
+        return Err(if package.protocol_version < RUNTIME_PROTOCOL_VERSION {
+            format!(
+                "The published {provider} package uses outdated runtime protocol {}; PaintNode requires protocol {} for workflow drafting.",
+                package.protocol_version, RUNTIME_PROTOCOL_VERSION
+            )
+        } else {
+            format!(
+                "The available {provider} package requires runtime protocol {}; update PaintNode before installing it.",
+                package.protocol_version
+            )
+        });
     }
     if !version_at_least(
         env!("CARGO_PKG_VERSION"),
@@ -279,7 +302,16 @@ fn release_for<'a>(
 }
 
 fn local_status(provider: &str) -> ManagedRuntimeStatus {
+    let installed = installed_active_package_manifest(provider);
     let manifest = active_package_manifest(provider);
+    let incompatible_message = installed.as_ref().and_then(|item| {
+        (item.protocol_version != RUNTIME_PROTOCOL_VERSION).then(|| {
+            format!(
+                "Installed runtime protocol {} must be upgraded to protocol {} for workflow drafting.",
+                item.protocol_version, RUNTIME_PROTOCOL_VERSION
+            )
+        })
+    });
     ManagedRuntimeStatus {
         provider: provider.into(),
         state: if manifest.is_some() {
@@ -288,15 +320,38 @@ fn local_status(provider: &str) -> ManagedRuntimeStatus {
             "notInstalled"
         }
         .into(),
-        installed_version: manifest.as_ref().map(|item| item.package_version.clone()),
+        installed_version: installed.as_ref().map(|item| item.package_version.clone()),
         available_version: None,
-        sdk_version: manifest.as_ref().map(|item| item.sdk_version.clone()),
-        engine_version: manifest.as_ref().map(|item| item.engine_version.clone()),
+        sdk_version: installed.as_ref().map(|item| item.sdk_version.clone()),
+        engine_version: installed.as_ref().map(|item| item.engine_version.clone()),
         download_size: None,
         authenticated: manifest
             .as_ref()
             .and_then(|item| check_auth(provider, item).ok()),
-        message: None,
+        message: incompatible_message,
+    }
+}
+
+fn apply_available_release(
+    status: &mut ManagedRuntimeStatus,
+    package: &RuntimeReleasePackage,
+    artifact: &RuntimeArtifact,
+) {
+    let installed_is_compatible = status.state == "ready";
+    status.available_version = Some(package.package_version.clone());
+    status.download_size = Some(artifact.size);
+    if status.installed_version.is_none() {
+        status.sdk_version = Some(package.sdk_version.clone());
+        status.engine_version = Some(package.engine_version.clone());
+        status.state = "notInstalled".into();
+    } else if !installed_is_compatible
+        || status.installed_version.as_deref() != Some(package.package_version.as_str())
+    {
+        // Protocol compatibility is part of update identity. A protocol-1
+        // package must upgrade even if a publisher accidentally reuses its
+        // packageVersion for the protocol-2 artifact.
+        status.state = "updateAvailable".into();
+        status.authenticated = None;
     }
 }
 
@@ -342,20 +397,7 @@ pub(crate) async fn managed_runtime_status(
             Ok((package.clone(), artifact.clone()))
         }) {
             Ok((package, artifact)) => {
-                status.available_version = Some(package.package_version.clone());
-                status.download_size = Some(artifact.size);
-                if status.installed_version.is_none() {
-                    status.sdk_version = Some(package.sdk_version.clone());
-                    status.engine_version = Some(package.engine_version.clone());
-                }
-                if status.installed_version.as_deref() != Some(package.package_version.as_str()) {
-                    status.state = if status.installed_version.is_some() {
-                        "updateAvailable"
-                    } else {
-                        "notInstalled"
-                    }
-                    .into();
-                }
+                apply_available_release(&mut status, &package, &artifact);
             }
             Err(error) if status.installed_version.is_some() => status.message = Some(error),
             Err(error) => return Err(error),
@@ -490,7 +532,7 @@ fn activate_package(
     if !package_is_compatible(&manifest) {
         return Err("Provider package is not compatible with this PaintNode version.".into());
     }
-    for required in [&manifest.runner, &manifest.executable] {
+    for required in required_package_files(&manifest) {
         if !package_dir.join(required).is_file() {
             return Err(format!(
                 "Provider package is missing required file `{required}`."
@@ -667,8 +709,92 @@ mod tests {
             auth_check_args: vec!["login".into(), "status".into()],
         };
         assert!(package_is_compatible(&manifest));
-        manifest.protocol_version += 1;
+        manifest.protocol_version = 1;
         assert!(!package_is_compatible(&manifest));
+    }
+
+    #[test]
+    fn protocol_two_requires_every_shared_schema_bridge_file() {
+        let manifest = RuntimePackageManifest {
+            provider: "codex".into(),
+            package_version: "2.0.0".into(),
+            sdk_version: "1.0.0".into(),
+            engine_version: "1.0.0".into(),
+            protocol_version: RUNTIME_PROTOCOL_VERSION,
+            minimum_paintnode_version: env!("CARGO_PKG_VERSION").into(),
+            runner: "bridge/codex-sdk-runner.mjs".into(),
+            capabilities_runner: None,
+            node: Some("bin/node".into()),
+            executable: "bin/codex".into(),
+            login_args: vec![],
+            auth_check_args: vec![],
+        };
+        let required = required_package_files(&manifest);
+        assert!(required.contains(&DIRECTOR_ACTION_SCHEMA_FILE));
+        assert!(required.contains(&WORKFLOW_DIRECTOR_SCHEMA_FILE));
+        let mut old = manifest.clone();
+        old.protocol_version = 1;
+        assert!(!package_is_compatible(&old));
+        let old_required = required_package_files(&old);
+        assert!(!old_required.contains(&DIRECTOR_ACTION_SCHEMA_FILE));
+        assert!(!old_required.contains(&WORKFLOW_DIRECTOR_SCHEMA_FILE));
+    }
+
+    #[test]
+    fn published_protocol_mismatch_explains_upgrade_direction() {
+        let release = RuntimeReleaseManifest {
+            schema_version: 1,
+            packages: vec![RuntimeReleasePackage {
+                provider: "codex".into(),
+                package_version: "1.0.0".into(),
+                sdk_version: "1.0.0".into(),
+                engine_version: "1.0.0".into(),
+                protocol_version: 1,
+                minimum_paintnode_version: env!("CARGO_PKG_VERSION").into(),
+                artifacts: vec![],
+            }],
+        };
+        let error = release_for(&release, "codex").unwrap_err();
+        assert!(error.contains("outdated runtime protocol 1"));
+        assert!(error.contains("requires protocol 2"));
+    }
+
+    #[test]
+    fn incompatible_install_requires_update_even_when_package_version_matches() {
+        let mut status = ManagedRuntimeStatus {
+            provider: "codex".into(),
+            state: "notInstalled".into(),
+            installed_version: Some("1.0.0".into()),
+            available_version: None,
+            sdk_version: Some("0.144.0".into()),
+            engine_version: Some("codex-cli 0.144.0".into()),
+            download_size: None,
+            authenticated: None,
+            message: Some("Installed runtime protocol 1 must be upgraded".into()),
+        };
+        let package = RuntimeReleasePackage {
+            provider: "codex".into(),
+            package_version: "1.0.0".into(),
+            sdk_version: "0.144.0".into(),
+            engine_version: "codex-cli 0.144.0".into(),
+            protocol_version: RUNTIME_PROTOCOL_VERSION,
+            minimum_paintnode_version: env!("CARGO_PKG_VERSION").into(),
+            artifacts: vec![],
+        };
+        let (os, arch) = current_target();
+        let artifact = RuntimeArtifact {
+            os: os.into(),
+            arch: arch.into(),
+            url: "https://example.invalid/runtime.zip".into(),
+            sha256: "00".repeat(32),
+            size: 42,
+        };
+
+        apply_available_release(&mut status, &package, &artifact);
+
+        assert_eq!(status.state, "updateAvailable");
+        assert_eq!(status.available_version.as_deref(), Some("1.0.0"));
+        assert_eq!(status.authenticated, None);
     }
 
     #[test]
@@ -699,7 +825,7 @@ mod tests {
               "packageVersion": "1.0.0",
               "sdkVersion": "0.144.0",
               "engineVersion": "codex-cli 0.144.0",
-              "protocolVersion": 1,
+              "protocolVersion": 2,
               "minimumPaintNodeVersion": "0.2.0",
               "runner": "bridge/codex-sdk-runner.mjs",
               "capabilitiesRunner": "bridge/codex-capabilities.mjs",
@@ -718,7 +844,7 @@ mod tests {
                 "packageVersion": "1.0.0",
                 "sdkVersion": "0.144.0",
                 "engineVersion": "codex-cli 0.144.0",
-                "protocolVersion": 1,
+                "protocolVersion": 2,
                 "minimumPaintNodeVersion": "0.2.0",
                 "artifacts": []
               }]

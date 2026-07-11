@@ -22,6 +22,9 @@ import {
   executeCampaignGenerateTransform,
   type ExecuteCampaignGenerateOptions,
   type WorkflowTransformExecutionOutcome,
+  type WorkflowDirectorProposal,
+  type WorkflowDirectorSessionToken,
+  assertFreshWorkflowDirectorProposal,
   WorkflowTransformExecutionError,
   createWorkflowRevision,
   deriveWorkflowNodeRunState,
@@ -346,6 +349,14 @@ export class WorkflowStore {
     return this.graphDomain?.revision ?? 0;
   }
 
+  captureDirectorSession(): WorkflowDirectorSessionToken {
+    return Object.freeze({
+      sessionIdentity: this.workflowSessionIdentity,
+      graphRevision: this.graphRevision,
+      storeRevision: this.rev,
+    });
+  }
+
   newBoard(name = 'Untitled Workflow'): void {
     this.beginWorkflowSession();
     this.active = true;
@@ -427,6 +438,50 @@ export class WorkflowStore {
     this.projectedGraphRevision = this.graphDomain.revision;
     this.syncReactiveGraph(this.graphDomain);
     this.rev = 0;
+    this.savedRev = 0;
+  }
+
+  applyDirectorProposal(
+    proposal: WorkflowDirectorProposal,
+    expectedSession?: WorkflowDirectorSessionToken,
+  ): void {
+    if (expectedSession && (
+      expectedSession.sessionIdentity !== this.workflowSessionIdentity
+      || expectedSession.graphRevision !== this.graphRevision
+      || expectedSession.storeRevision !== this.rev
+    )) {
+      throw new Error('The workflow changed while this AI Director proposal was being reviewed. Draft again before accepting.');
+    }
+    const validatedGraph = assertFreshWorkflowDirectorProposal(proposal);
+    // Build and validate the complete replacement before touching session or
+    // reactive state. A failure therefore leaves the current workflow intact.
+    const nextDomain = new WorkflowGraphDomain(validatedGraph, { idGenerator: this.graphIdGenerator });
+    const primaryArtDirection = nextDomain.graph.nodes.find((node) => node.type === 'art-direction') ?? null;
+
+    this.beginWorkflowSession();
+    this.active = true;
+    ui.showWorkflow();
+    this.name = nextDomain.graph.metadata.name;
+    this.savedPath = null;
+    this.migrationSourcePath = null;
+    this.requiresExplicitSave = false;
+    this.connectionError = null;
+    this.tool = 'hand';
+    this.zoomMode = 'in';
+    this.selection = primaryArtDirection?.id === 'composition'
+      ? { kind: 'composition' }
+      : primaryArtDirection
+        ? { kind: 'creator', id: primaryArtDirection.id }
+        : null;
+    this.storyboardEditing = false;
+    this.storyboardTool = 'brush';
+    this.panX = nextDomain.graph.viewport.panX;
+    this.panY = nextDomain.graph.viewport.panY;
+    this.zoom = nextDomain.graph.viewport.zoom;
+    this.graphDomain = nextDomain;
+    this.projectedGraphRevision = nextDomain.revision;
+    this.syncReactiveGraph(nextDomain);
+    this.rev = 1;
     this.savedRev = 0;
   }
 

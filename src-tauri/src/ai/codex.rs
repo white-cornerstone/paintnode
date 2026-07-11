@@ -57,19 +57,21 @@ use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
     ai_director_restore_contract, ai_director_workflow_contract, ai_job_project_dir,
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_project_agent_job, cleanup_project_job_enabled, clear_ai_run_cancelled,
-    codex_agent_message_text, command_failure, copy_png_candidate, emit_codex_part_progress,
-    emit_codex_progress, emit_kept_job_dir, now_id, optional_project_dir, output_tail,
+    clean_option, cleanup_ai_process_tree_after_bridge_exit, cleanup_project_agent_job,
+    cleanup_project_job_enabled, clear_ai_run_cancelled, codex_agent_message_text, command_failure,
+    configure_ai_process_group, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
+    emit_kept_job_dir, join_output_readers_bounded, now_id, optional_project_dir, output_tail,
     project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
     remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
     safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, unique_child_path, validate_reference_pngs,
-    write_ai_job_prompt, write_reference_pngs, AgentRunResult, AiAutonomyLevel,
-    AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
-    AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult, DecoupleImageResult,
-    DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
-    TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
-    CODEX_RUNS_DIR, POLL_INTERVAL,
+    synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
+    unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
+    AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
+    AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT,
+    POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -441,11 +443,13 @@ fn run_codex_with_progress(
     run_id: String,
 ) -> Result<AgentRunResult, String> {
     ensure_provider_launch_allowed(Provider::Codex)?;
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -475,26 +479,38 @@ fn run_codex_with_progress(
         ));
     }
 
-    let status = loop {
+    let mut stopped = false;
+    let (status, tree_cleanup) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for command: {e}"))?
         {
-            break status;
+            break (
+                Ok(status),
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
+            );
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
+            stopped = true;
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                Ok(()),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);
     };
 
-    for reader in readers {
-        let _ = reader.join();
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    if stopped {
+        clear_ai_run_cancelled(&run_id);
+    }
+    tree_cleanup?;
+    reader_cleanup?;
+    let status = status?;
+    if stopped {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
 
     let stdout = stdout
@@ -543,6 +559,7 @@ pub(crate) fn run_codex_director_request(
         &options,
         session_id,
         Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+        None,
     );
     let run =
         run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
@@ -557,6 +574,46 @@ pub(crate) fn run_codex_director_request(
         Err(format!("Codex Director failed.\n\n{message}"))
     } else {
         Err(command_failure("Codex Director", &run.output))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_workflow_draft_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        &[],
+        &options,
+        None,
+        Some(output_file),
+        Some("workflow-draft"),
+    );
+    let run =
+        run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(|e| {
+            format!(
+                "Failed to run Codex at '{}': {e}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!("Codex workflow Director failed.\n\n{message}"))
+    } else {
+        Err(command_failure("Codex workflow Director", &run.output))
     }
 }
 
@@ -805,9 +862,11 @@ fn build_codex_sdk_command(
         options,
         None,
         None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_codex_sdk_command_with_session(
     codex_bin: &str,
     job_path: &Path,
@@ -816,6 +875,7 @@ fn build_codex_sdk_command_with_session(
     options: &CodexCommandOptions,
     session_id: Option<&str>,
     output_file: Option<&str>,
+    output_schema: Option<&str>,
 ) -> Command {
     let codex_bin = managed_codex_bin_or(codex_bin);
     let mut command = Command::new(codex_sdk_node());
@@ -834,6 +894,9 @@ fn build_codex_sdk_command_with_session(
     }
     if let Some(output_file) = output_file {
         command.arg("--output-file").arg(job_path.join(output_file));
+    }
+    if let Some(output_schema) = output_schema {
+        command.arg("--output-schema").arg(output_schema);
     }
     if !codex_bin.trim().is_empty() {
         command.arg("--codex-path").arg(codex_bin.as_ref());
@@ -2578,6 +2641,7 @@ fn run_director_provider_action_turn(
                 codex_options,
                 session_id,
                 Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                None,
             );
             let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string())
                 .map_err(|e| {
@@ -4988,6 +5052,7 @@ mod tests {
             &CodexCommandOptions::default(),
             Some(session_id),
             Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+            None,
         );
         let args = command
             .get_args()
@@ -5000,6 +5065,29 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
         }));
+    }
+
+    #[test]
+    fn workflow_director_command_uses_strict_draft_schema_without_images() {
+        let job = TempJobDir::new("paintnode-codex-workflow-draft-test").expect("temp dir");
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "draft a workflow",
+            &[],
+            &CodexCommandOptions::default(),
+            None,
+            Some("paintnode-workflow-draft.json"),
+            Some("workflow-draft"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-draft" }));
+        assert!(!args.iter().any(|arg| arg == "--image"));
     }
 
     #[test]

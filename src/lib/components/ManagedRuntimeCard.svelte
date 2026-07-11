@@ -37,7 +37,8 @@
         : `Preparing ${label}...`),
   );
   const percent = $derived(runtimeProgressPercent(progress));
-  const ready = $derived(status?.state === 'ready' || status?.state === 'updateAvailable');
+  const ready = $derived(status?.state === 'ready');
+  const updateAvailable = $derived(status?.state === 'updateAvailable');
   const signedIn = $derived(status?.authenticated !== false);
 
   onMount(() => {
@@ -91,6 +92,8 @@
       <strong>
         {#if busy}
           {busyMessage}
+        {:else if updateAvailable}
+          Update {label} support
         {:else if ready && signedIn}
           {label} is ready
         {:else if ready}
@@ -110,7 +113,7 @@
       </small>
     </div>
     <div class="runtime-actions">
-      {#if !busy && status?.state === 'updateAvailable'}
+      {#if !busy && updateAvailable}
         <button type="button" onclick={install}>
           <Icon svg={ArrowSync} size={14} />
           <span>Update</span>

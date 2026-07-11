@@ -59,18 +59,20 @@ use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
     ai_director_restore_contract, ai_director_workflow_contract, ai_provider_features,
     ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment, clean_option,
-    cleanup_project_agent_job, clear_ai_run_cancelled, command_failure_with_required_output,
-    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
-    emit_provider_progress, image_agent_autonomy_contract, now_id, output_tail,
+    cleanup_ai_process_tree_after_bridge_exit, cleanup_project_agent_job, clear_ai_run_cancelled,
+    command_failure_with_required_output, configure_ai_process_group, emit_codex_part_progress,
+    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, emit_provider_progress,
+    image_agent_autonomy_contract, join_output_readers_bounded, now_id, output_tail,
     project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
     request_ai_director_input, required_png_output_is_ready, safe_job_child_path,
     sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, validate_reference_pngs, watched_job_files,
-    write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
-    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
-    AiProviderCapabilitiesResult, CodexDetectionResult, DecoupleImageResult, DecoupleManifest,
-    DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage,
-    AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
+    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_ai_job_settings,
+    write_reference_pngs, AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode,
+    AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult, CodexDetectionResult,
+    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT,
+    POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -1403,11 +1405,13 @@ fn run_antigravity_with_progress(
     required_output: Option<&str>,
     keep_debug_artifacts: bool,
 ) -> Result<AgentRunResult, String> {
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -1444,7 +1448,8 @@ fn run_antigravity_with_progress(
     let mut wrote_session_reference = false;
     let mut last_transcript_poll = Instant::now();
     let mut required_output_snapshot = None::<(u64, Option<SystemTime>, Instant)>;
-    let (status, satisfied_required_output) = loop {
+    let mut stopped = false;
+    let (status, satisfied_required_output, tree_cleanup) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for command: {e}"))?
@@ -1466,7 +1471,11 @@ fn run_antigravity_with_progress(
                 }
                 emit_antigravity_transcript_progress(&app, &run_id, path, &mut transcript_offset);
             }
-            break (status, false);
+            break (
+                Ok(status),
+                false,
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
+            );
         }
 
         if last_file_poll.elapsed() >= Duration::from_millis(1000) {
@@ -1511,26 +1520,35 @@ fn run_antigravity_with_progress(
                         "Antigravity wrote {required_output}; applying PaintNode post-processing"
                     ),
                 );
-                let _ = child.kill();
-                let status = child.wait().map_err(|e| {
-                    format!("Failed to stop Antigravity after output was ready: {e}")
-                })?;
-                break (status, true);
+                break (
+                    terminate_ai_process_tree(&mut process_tree, &mut child),
+                    true,
+                    Ok(()),
+                );
             }
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
+            stopped = true;
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                false,
+                Ok(()),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);
     };
 
-    for reader in readers {
-        let _ = reader.join();
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    if stopped {
+        clear_ai_run_cancelled(&run_id);
+    }
+    tree_cleanup?;
+    reader_cleanup?;
+    let status = status?;
+    if stopped {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
 
     let stdout = stdout

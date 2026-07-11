@@ -57,6 +57,7 @@ pub fn run() {
             app::set_app_menu_enabled,
             ai::cancel_ai_run,
             ai::submit_ai_director_input,
+            ai::workflow_director::draft_workflow_with_director,
             ai::codex::detect_codex,
             ai::codex::discover_codex_capabilities,
             ai::claude::detect_claude,
@@ -114,4 +115,8 @@ pub fn run() {
                 queue_native_open_paths(app, paths);
             }
         });
+}
+
+pub fn run_ai_provider_wrapper_if_requested() -> Option<i32> {
+    ai::run_provider_process_wrapper_if_requested()
 }
