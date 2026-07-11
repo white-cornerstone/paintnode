@@ -41,3 +41,9 @@ failure/retry, and save/reopen provenance. Focused tests cover migration,
 three-shape native QA output, and keyboard candidate navigation. Native
 configured-provider execution and a moderated 6–8 creator walkthrough remain
 required before the milestone exit gate can be declared met.
+
+The walkthrough must follow the
+[moderated creator study protocol](../testing/creative-blueprint-creator-study.md),
+including its neutral task prompts, blocker rules, de-identified evidence
+templates, and prohibition on fabricated results. Linking the protocol is not
+evidence that recruitment or sessions have occurred.

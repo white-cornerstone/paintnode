@@ -191,10 +191,12 @@ project identity are therefore snapshots of the click that started the run.
 
 The isolated native `provider-free` QA bundle may expose one visibly labelled
 `QA Fake` executor for manual state-path validation. Native mode resolution must
-complete before Generate is enabled. The fake returns only a deterministic
-Square PNG, uses metadata-only inputs, and writes solely through the normal
-project result store. Its Rust command rejects normal and `provider-e2e` modes;
-those modes never construct or advertise the fake executor.
+complete before Generate is enabled. The fake returns deterministic exact-size
+PNG fixtures for Campaign Composer 1:1 (1024 x 1024), 4:5 (1024 x 1280), and
+16:9 (1280 x 720) outputs, uses metadata-only inputs, and writes solely through
+the normal project result store. Its Rust command rejects normal and
+`provider-e2e` modes; those modes never construct or advertise the fake
+executor.
 
 ## WorkflowGraph v2
 

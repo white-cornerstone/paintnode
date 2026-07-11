@@ -56,6 +56,12 @@ cover additional boundary cases. This scenario is draft exit evidence only. Issu
 open for exit purposes until a configured-provider native invocation and a
 moderated 6–8 creator walkthrough are recorded separately.
 
+Execute the walkthrough with the screener, consent language, neutral prompts,
+metrics, severity rubric, templates, and evidence-integrity rules in the
+[Creative Blueprint moderated creator study protocol](creative-blueprint-creator-study.md).
+The protocol does not count as a completed study and no result may be inferred
+from provider-free QA alone.
+
 Editor round-trip checkpoint:
 
 1. Open an accepted Transform result, or the currently promoted verified Review
