@@ -21,6 +21,8 @@ const study = join(root, 'docs/testing/creator-study');
 test('every private operational form is blank and warns to copy outside the repository', () => {
   const templates = [
     'private-study-authorization-log.md',
+    'private-approved-build-record.json',
+    'private-active-build-decisions.json',
     'private-screener-and-recruitment-log.md',
     'private-session-observation.md',
     'private-intervention-log.md',
@@ -33,6 +35,34 @@ test('every private operational form is blank and warns to copy outside the repo
     assert.match(content, /PRIVATE ONLY/);
     assert.doesNotMatch(content, /P(?:0[1-9]|[1-9][0-9])|@|https?:\/\//, `${template} must not contain participant-shaped data`);
   }
+});
+
+test('private active-build ledger starts blank and requires monotonic generations', () => {
+  const ledger = JSON.parse(readFileSync(join(study, 'templates/private-active-build-decisions.json'), 'utf8'));
+  const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert.equal(ledger.schemaVersion, 2);
+  assert.equal(ledger.recordType, 'paintnode-creator-study-active-build-decisions');
+  assert.equal(ledger.activeGeneration, 0);
+  assert.deepEqual(ledger.decisions, []);
+  assert.match(packageJson.scripts['qa:creator-study:decision-commitment'], /print-decision-commitment/);
+});
+
+test('private approved-build template freezes literal identity and change-control fields', () => {
+  const record = JSON.parse(readFileSync(join(study, 'templates/private-approved-build-record.json'), 'utf8'));
+  assert.equal(record.schemaVersion, 1);
+  assert.equal(record.recordType, 'paintnode-creator-study-approved-build');
+  assert.deepEqual(Object.keys(record.approvedBuild), [
+    'version', 'mode', 'bundleId', 'gitSha', 'sourceTreeSha', 'sourceDirty',
+    'sourceStatusSha256', 'executableSha256',
+  ]);
+  assert.equal(record.approvedBuild.gitSha, '');
+  assert.equal(record.approvedBuild.sourceTreeSha, '');
+  assert.equal(record.approvedBuild.executableSha256, '');
+  assert.equal(record.approval.ownerApproved, false);
+  assert.equal(record.approval.decisionReference, '');
+  assert.equal(record.approval.approvalId, '');
+  assert.equal(record.changeControl.rehearsalCompletedAt, '');
+  assert.equal(record.changeControl.comparabilityDecision, '');
 });
 
 test('repository templates contain headers only and no participant results', () => {
@@ -57,6 +87,9 @@ test('privacy contract keeps identifiable and raw evidence out of repository-saf
   assert.ok(fields.privateOnly.some((field) => /participant code mapping/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /session date.*time zone.*delivery mode/i.test(field)));
   assert.ok(fields.privateOnly.some((field) => /facilitator.*observer.*technical operator/i.test(field)));
+  assert.ok(fields.privateOnly.some((field) => /approved-build record.*active-ledger paths.*approval date.*decision references.*ledger history.*change reason/i.test(field)));
+  assert.ok(fields.repositoryAllowed.some((field) => /approved build identity match.*provenance.*executable/i.test(field)));
+  assert.ok(fields.repositoryAllowed.some((field) => /active generation.*random non-derived approval ID/i.test(field)));
   assert.ok(fields.repositoryAllowed.every((field) => !/participant name|contact details|raw or potentially identifying quotes|approved storage path/i.test(field)));
   assert.ok(fields.repositoryAllowed.includes('versioned facilitator instrument, including approved hint and takeover text'));
   assert.ok(fields.privateOnly.includes('participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs'));
@@ -125,6 +158,11 @@ test('private handoff templates capture schema fields and concrete scheduling as
   ]) {
     assert.match(recruitment, new RegExp(label));
   }
+  assert.match(session, /Approved-build decision reference/);
+  assert.match(session, /Active build generation and approval ID/);
+  assert.match(session, /Setup receipt approved identity match/);
+  assert.match(reset, /approved-build decision reference/i);
+  assert.match(reset, /active generation and complete private ledger head.*protected study-Mac anchor/i);
   assert.match(reset, /schedule, roles, delivery mode, and accommodation setup/i);
   assert.match(reset, /--fresh-study-session/);
   assert.match(reset, /Project visibly shows no open project\/imported assets/i);

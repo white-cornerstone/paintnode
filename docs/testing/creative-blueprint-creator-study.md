@@ -154,6 +154,8 @@ For every session record:
 - assigned facilitator, named session observers, technical session operator,
   and accommodation setup confirmation;
 - exact Git SHA and QA app bundle identity;
+- approved-build decision reference and a passing setup-receipt identity match;
+- active build generation and random non-derived approval ID;
 - operating system, display scale, input method, and app window size;
 - whether recording was permitted;
 - a genuinely empty participant-specific project folder;
@@ -175,15 +177,23 @@ separate rehearsal folder. Delete the rehearsal project. Do not pre-import the
 Product, pre-create Campaign Composer, or leave a workflow open in the session
 folder. Start the fresh study profile and, before opening any folder, visibly
 confirm both Project and Workflow are empty. Run
-`npm run qa:creator-study:setup` with the approved SHA, built app bundle, empty
-participant project, deleted rehearsal path, and
+`npm run qa:creator-study:setup` with `--approved-build-record`,
+`--active-build-decisions`, the built app bundle, empty participant project,
+deleted rehearsal path, and
 `--visible-empty-state-attested` as documented in the operations runbook. The
-verifier rejects generic or resumed profiles, dirty source, stale bundles,
-executable fingerprint drift, and symlink aliases into the repository. Its
-receipt carries only the isolated profile's one-way fingerprint, never its raw
-identifier. It requires native app-boot evidence, consumes that generation once,
-records that consumption in a separately protected monotonic macOS Keychain
-anchor, and records the operator's visible-empty attestation separately.
+approved record must freeze the literal SHA/tree/status/bundle/executable
+identity; current HEAD cannot approve itself. The verifier rejects generic or
+resumed profiles, dirty source, stale or superseded approval, duplicate-key JSON,
+non-monotonic/future decisions, executable drift, and repository symlink aliases.
+
+A separate macOS Keychain anchor protects the complete canonical approved-build
+decision and chain at version 3. Advancement requires the prior protected head
+and chain prefix to match the preceding ledger entry exactly, under an exclusive
+process lock with revalidation after writing. Separately, native boot evidence
+is consumed once through a create-only macOS Keychain marker. The receipt exposes only the approved identity match,
+active generation/random approval ID, isolated profile fingerprint, boot
+consumption, and visible-empty attestation; it omits raw identifiers, private
+commitments, dates, references, history, reasons, and paths.
 Restoring local lifecycle-file snapshots cannot replay the Keychain marker.
 Build-only allocates no live session state; unlaunched, stale, and replayed
 generations fail closed. The verifier does not replace the visible rehearsal.
@@ -199,6 +209,17 @@ If a build fails or a session ends before setup consumption, run
 `npm run qa:creator-study:abort-session`. An unlaunched allocation is released
 without claiming native cleanup; after any launch attempt, abort must complete
 the same verified WebKit data-store removal before another fresh session.
+
+All sessions use one approved build. A mid-study build change pauses sessions
+and requires study-owner approval, a recorded reason, a **new rehearsal**, a
+new immutable private approval record, and an explicit comparability decision.
+Append each replacement to the private monotonic active-decision ledger; the
+protected study-Mac anchor advances by exactly one generation from an exact
+previous-head and chain-prefix match, so an old record and matching old build—or
+rewritten build, change control, prior time, or prior reference—must not become
+current again.
+When comparability is `restart-required`, earlier sessions cannot be pooled
+with sessions on the new baseline and replacements must be recorded.
 
 Use committed **Product A** for Task 1. Keep **Product B** hidden until Task 6.
 Their task assignments, dimensions, provenance, and hashes are pinned in
@@ -555,6 +576,9 @@ not commit identifiable raw notes.
 - Accommodation setup confirmation:
 - Actual start/end time:
 - Build Git SHA and QA bundle identity:
+- Approved-build decision reference:
+- Active build generation and approval ID:
+- Setup receipt approved identity match: yes / no
 - OS/display/window/input method:
 - Eligibility summary and cohort bucket:
 - Participation consent: yes / withdrawn

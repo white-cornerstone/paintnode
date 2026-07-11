@@ -16,6 +16,27 @@
 - Recruitment authorization: approved / blocked
 - Authorization date/signature:
 
+## Approved study build
+
+- Current private approved-build record reference:
+- Current private active-build-decisions ledger reference:
+- Current approved-build decision reference:
+- Current active generation and approval ID:
+- Protected study-Mac Keychain anchor verified: yes / no
+- Initial or mid-study approval:
+- Build approval verified before first affected session: yes / no
+
+Every session must use the literal build identity in the current private
+approved-build record, latest contiguous ledger generation, and protected
+study-Mac Keychain anchor. A clean checkout, current branch head, private-file
+rollback, or superseded record/build pair is not approval.
+
+## Mid-study build-change decisions
+
+| Approval date/time | Prior decision reference | New decision reference | Change reason | New rehearsal completed | Comparability decision: comparable / restart-required | Owner approval |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
 ## Facilitator calibration and rehearsal sign-off
 
 Complete this before participant 1 and after every approved instrument change.
