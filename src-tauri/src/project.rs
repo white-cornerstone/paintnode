@@ -1,6 +1,7 @@
 //! Project folders: manifest, assets, documents, thumbnails, and their commands.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -9,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::SystemTime;
 
 use base64::Engine;
@@ -34,6 +36,8 @@ const PROJECT_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PROJECT_MATERIAL_ENVELOPE_MAGIC: &[u8; 8] = b"PNMATRAW";
 const PROJECT_MATERIAL_ENVELOPE_VERSION: u16 = 1;
 const PROJECT_MATERIAL_METADATA_MAX_BYTES: usize = 4 * 1024;
+
+static PROJECT_TRANSACTIONS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -176,6 +180,57 @@ pub(crate) struct SavedDocumentResult {
 
 fn project_manifest_path(project_path: &Path) -> PathBuf {
     project_path.join(PROJECT_MANIFEST)
+}
+
+fn project_transaction(project_path: &Path) -> Result<Arc<Mutex<()>>, String> {
+    ensure_project_dirs(project_path)?;
+    let canonical_path = fs::canonicalize(project_path).map_err(|error| {
+        format!(
+            "Failed to identify the project transaction boundary at {}: {error}",
+            project_path.display()
+        )
+    })?;
+    let transactions = PROJECT_TRANSACTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut transactions = transactions
+        .lock()
+        .map_err(|_| "Project transaction registry is unavailable.".to_string())?;
+    transactions.retain(|_, transaction| transaction.strong_count() > 0);
+    if let Some(transaction) = transactions.get(&canonical_path).and_then(Weak::upgrade) {
+        return Ok(transaction);
+    }
+    let transaction = Arc::new(Mutex::new(()));
+    transactions.insert(canonical_path, Arc::downgrade(&transaction));
+    Ok(transaction)
+}
+
+fn with_project_transaction<T>(
+    project_path: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    with_project_transaction_observed(project_path, || {}, operation)
+}
+
+fn with_project_transaction_observed<T>(
+    project_path: &Path,
+    on_contention: impl FnOnce(),
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let transaction = project_transaction(project_path)?;
+    let _guard = match transaction.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            on_contention();
+            transaction.lock().map_err(|_| {
+                "Project transaction was interrupted and cannot continue safely.".to_string()
+            })?
+        }
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err(
+                "Project transaction was interrupted and cannot continue safely.".to_string(),
+            );
+        }
+    };
+    operation()
 }
 
 pub(crate) fn ensure_project_dirs(project_path: &Path) -> Result<(), String> {
@@ -1000,10 +1055,20 @@ pub(crate) fn add_asset(
     project_path: &Path,
     asset: ProjectAsset,
 ) -> Result<ProjectAssetView, String> {
-    let mut manifest = load_manifest(project_path)?;
-    manifest.assets.retain(|existing| existing.id != asset.id);
-    manifest.assets.push(asset.clone());
-    save_manifest(project_path, &manifest)?;
+    add_asset_with_transaction_observer(project_path, asset, || {})
+}
+
+fn add_asset_with_transaction_observer(
+    project_path: &Path,
+    asset: ProjectAsset,
+    on_contention: impl FnOnce(),
+) -> Result<ProjectAssetView, String> {
+    with_project_transaction_observed(project_path, on_contention, || {
+        let mut manifest = load_manifest(project_path)?;
+        manifest.assets.retain(|existing| existing.id != asset.id);
+        manifest.assets.push(asset.clone());
+        save_manifest(project_path, &manifest)
+    })?;
     Ok(asset_view(project_path, asset))
 }
 
@@ -1088,14 +1153,11 @@ fn workflow_editor_cleanup_token() -> Result<String, String> {
     ))
 }
 
-fn rollback_workflow_editor_return_with(
+fn rollback_workflow_editor_return_unlocked(
     project_dir: &Path,
     cleanup_token: &str,
     persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !valid_editor_revision_id(cleanup_token) {
-        return Err("Workflow editor cleanup token is invalid.".into());
-    }
     let receipt_path = workflow_editor_receipt_path(project_dir, cleanup_token);
     if !receipt_path.exists() {
         return Ok(());
@@ -1194,6 +1256,19 @@ fn rollback_workflow_editor_return_with(
     Ok(())
 }
 
+fn rollback_workflow_editor_return_with(
+    project_dir: &Path,
+    cleanup_token: &str,
+    persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
+) -> Result<(), String> {
+    if !valid_editor_revision_id(cleanup_token) {
+        return Err("Workflow editor cleanup token is invalid.".into());
+    }
+    with_project_transaction(project_dir, || {
+        rollback_workflow_editor_return_unlocked(project_dir, cleanup_token, persist_manifest)
+    })
+}
+
 fn rollback_workflow_editor_return(project_dir: &Path, cleanup_token: &str) -> Result<(), String> {
     rollback_workflow_editor_return_with(project_dir, cleanup_token, &save_manifest_atomic)
 }
@@ -1202,9 +1277,26 @@ fn finalize_workflow_editor_return(
     project_dir: &Path,
     cleanup_token: &str,
 ) -> Result<bool, String> {
+    finalize_workflow_editor_return_observed(project_dir, cleanup_token, || {})
+}
+
+fn finalize_workflow_editor_return_observed(
+    project_dir: &Path,
+    cleanup_token: &str,
+    on_contention: impl FnOnce(),
+) -> Result<bool, String> {
     if !valid_editor_revision_id(cleanup_token) {
         return Err("Workflow editor cleanup token is invalid.".into());
     }
+    with_project_transaction_observed(project_dir, on_contention, || {
+        finalize_workflow_editor_return_unlocked(project_dir, cleanup_token)
+    })
+}
+
+fn finalize_workflow_editor_return_unlocked(
+    project_dir: &Path,
+    cleanup_token: &str,
+) -> Result<bool, String> {
     let receipt_path = workflow_editor_receipt_path(project_dir, cleanup_token);
     if !receipt_path.exists() {
         return Ok(true);
@@ -1265,6 +1357,28 @@ fn commit_workflow_editor_return_with(
     input: WorkflowEditorReturnCommit<'_>,
     persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
 ) -> Result<WorkflowEditorReturnResult, String> {
+    if !valid_editor_revision_id(input.revision_id) {
+        return Err("Workflow editor revision ID is invalid.".into());
+    }
+    if input.document_bytes.is_empty()
+        || !is_png(input.output_bytes)
+        || input.width == 0
+        || input.height == 0
+    {
+        return Err(
+            "Workflow editor return requires a valid OpenRaster document and PNG output.".into(),
+        );
+    }
+    with_project_transaction(project_dir, || {
+        commit_workflow_editor_return_unlocked(project_dir, input, persist_manifest)
+    })
+}
+
+fn commit_workflow_editor_return_unlocked(
+    project_dir: &Path,
+    input: WorkflowEditorReturnCommit<'_>,
+    persist_manifest: &dyn Fn(&Path, &ProjectManifest) -> Result<(), String>,
+) -> Result<WorkflowEditorReturnResult, String> {
     let WorkflowEditorReturnCommit {
         revision_id,
         name,
@@ -1273,14 +1387,6 @@ fn commit_workflow_editor_return_with(
         width,
         height,
     } = input;
-    if !valid_editor_revision_id(revision_id) {
-        return Err("Workflow editor revision ID is invalid.".into());
-    }
-    if document_bytes.is_empty() || !is_png(output_bytes) || width == 0 || height == 0 {
-        return Err(
-            "Workflow editor return requires a valid OpenRaster document and PNG output.".into(),
-        );
-    }
     ensure_project_dirs(project_dir)?;
     let mut manifest = load_manifest(project_dir)?;
     let nonce = now_id();
@@ -1665,23 +1771,25 @@ pub(crate) async fn project_delete_asset(
 ) -> Result<ProjectState, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ProjectState, String> {
         let project_dir = PathBuf::from(project_path.trim());
-        let mut manifest = load_manifest(&project_dir)?;
-        let Some(index) = manifest
-            .assets
-            .iter()
-            .position(|asset| asset.id == asset_id)
-        else {
-            return project_state(&project_dir);
-        };
-        let asset = manifest.assets[index].clone();
-        let source = project_dir.join(&asset.relative_path);
-        if source.exists() {
-            trash::delete(&source)
-                .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
-        }
-        manifest.assets.remove(index);
-        save_manifest(&project_dir, &manifest)?;
-        project_state(&project_dir)
+        with_project_transaction(&project_dir, || {
+            let mut manifest = load_manifest(&project_dir)?;
+            let Some(index) = manifest
+                .assets
+                .iter()
+                .position(|asset| asset.id == asset_id)
+            else {
+                return project_state(&project_dir);
+            };
+            let asset = manifest.assets[index].clone();
+            let source = project_dir.join(&asset.relative_path);
+            if source.exists() {
+                trash::delete(&source)
+                    .map_err(|e| format!("Failed to move asset to system trash: {e}"))?;
+            }
+            manifest.assets.remove(index);
+            save_manifest(&project_dir, &manifest)?;
+            project_state(&project_dir)
+        })
     })
     .await
     .map_err(|e| format!("Task error: {e}"))?
@@ -2038,6 +2146,162 @@ mod tests {
         assert_eq!(manifest.assets.len(), 1);
         assert_eq!(manifest.assets[0].id, "unrelated");
         assert!(!workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_rollback_serializes_concurrent_unrelated_asset_addition() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-concurrent-asset").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-concurrent-asset",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+        let unrelated_relative = "assets/imported/concurrent-unrelated.bin";
+        fs::write(
+            project.path().join(unrelated_relative),
+            b"unrelated material",
+        )
+        .expect("unrelated asset file");
+        let mut unrelated_asset = material_asset("concurrent-unrelated", unrelated_relative);
+        unrelated_asset.mime = None;
+
+        std::thread::scope(|scope| {
+            let project_path = project.path();
+            let cleanup_token = result.cleanup_token.as_str();
+            let (rollback_at_manifest_tx, rollback_at_manifest_rx) = std::sync::mpsc::channel();
+            let (release_rollback_tx, release_rollback_rx) = std::sync::mpsc::channel();
+            let (asset_waiting_tx, asset_waiting_rx) = std::sync::mpsc::channel();
+            let rollback = scope.spawn(move || {
+                rollback_workflow_editor_return_with(
+                    project_path,
+                    cleanup_token,
+                    &|project_dir, manifest| {
+                        rollback_at_manifest_tx
+                            .send(())
+                            .expect("signal rollback manifest transition");
+                        release_rollback_rx
+                            .recv()
+                            .expect("release rollback manifest transition");
+                        save_manifest_atomic(project_dir, manifest)
+                    },
+                )
+            });
+            rollback_at_manifest_rx
+                .recv()
+                .expect("rollback reached manifest transition");
+
+            let add = scope.spawn(move || {
+                add_asset_with_transaction_observer(project_path, unrelated_asset, || {
+                    asset_waiting_tx
+                        .send(())
+                        .expect("signal blocked asset addition")
+                })
+            });
+            asset_waiting_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("asset addition must contend on rollback's project transaction");
+
+            release_rollback_tx.send(()).expect("release rollback");
+            rollback.join().expect("rollback thread").expect("rollback");
+            add.join().expect("asset thread").expect("asset addition");
+        });
+
+        let manifest = load_manifest(project.path()).expect("manifest after concurrent transition");
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].id, "concurrent-unrelated");
+        assert!(project.path().join(unrelated_relative).exists());
+        assert!(!project.path().join(&result.document.relative_path).exists());
+        assert!(!project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
+    }
+
+    #[test]
+    fn workflow_editor_return_rollback_serializes_concurrent_finalize() {
+        let project =
+            TempJobDir::new("paintnode-workflow-editor-concurrent-finalize").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let ora = workflow_editor_ora_bytes();
+        let result = commit_workflow_editor_return_with(
+            project.path(),
+            WorkflowEditorReturnCommit {
+                revision_id: "edit-concurrent-finalize",
+                name: "Edited concept",
+                document_bytes: &ora,
+                output_bytes: ONE_PIXEL_PNG,
+                width: 1,
+                height: 1,
+            },
+            &save_manifest_atomic,
+        )
+        .expect("editor return");
+
+        std::thread::scope(|scope| {
+            let project_path = project.path();
+            let cleanup_token = result.cleanup_token.as_str();
+            let (rollback_at_manifest_tx, rollback_at_manifest_rx) = std::sync::mpsc::channel();
+            let (release_rollback_tx, release_rollback_rx) = std::sync::mpsc::channel();
+            let (finalize_waiting_tx, finalize_waiting_rx) = std::sync::mpsc::channel();
+            let rollback = scope.spawn(move || {
+                rollback_workflow_editor_return_with(
+                    project_path,
+                    cleanup_token,
+                    &|project_dir, manifest| {
+                        rollback_at_manifest_tx
+                            .send(())
+                            .expect("signal rollback manifest transition");
+                        release_rollback_rx
+                            .recv()
+                            .expect("release rollback manifest transition");
+                        save_manifest_atomic(project_dir, manifest)
+                    },
+                )
+            });
+            rollback_at_manifest_rx
+                .recv()
+                .expect("rollback reached manifest transition");
+
+            let finalize = scope.spawn(move || {
+                finalize_workflow_editor_return_observed(project_path, cleanup_token, || {
+                    finalize_waiting_tx
+                        .send(())
+                        .expect("signal blocked finalize")
+                })
+            });
+            finalize_waiting_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("finalization must contend on rollback's project transaction");
+
+            release_rollback_tx.send(()).expect("release rollback");
+            rollback.join().expect("rollback thread").expect("rollback");
+            assert!(finalize
+                .join()
+                .expect("finalize thread")
+                .expect("idempotent finalize after rollback"));
+        });
+
+        assert!(!workflow_editor_receipt_path(project.path(), &result.cleanup_token).exists());
+        assert!(load_manifest(project.path())
+            .expect("manifest after concurrent transition")
+            .assets
+            .is_empty());
+        assert!(!project.path().join(&result.document.relative_path).exists());
+        assert!(!project
+            .path()
+            .join(&result.output.asset.relative_path)
+            .exists());
     }
 
     #[test]
