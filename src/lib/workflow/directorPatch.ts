@@ -119,6 +119,12 @@ export interface WorkflowDirectorPatchProposalResult {
   issues: readonly WorkflowDirectorPatchIssue[];
 }
 
+const trustedWorkflowDirectorPatchProposals = new WeakSet<WorkflowDirectorPatchProposal>();
+const supportedWorkflowGraphKeys = new Set([
+  'version', 'id', 'metadata', 'viewport', 'nodes', 'edges', 'assetReferences', 'runRecords',
+  'reviewPromotions',
+]);
+
 const creatorTypes = new Set<CreatorNodeType>([
   'input', 'brief', 'art-direction', 'transform', 'review', 'output',
 ]);
@@ -800,10 +806,31 @@ function immutableHistorySnapshot(graph: WorkflowGraphV2): string {
   return JSON.stringify({
     assetReferences: graph.assetReferences,
     runRecords: graph.runRecords,
+    reviewPromotions: graph.reviewPromotions,
     survivingRunLinks: graph.nodes
       .filter((node) => node.runRecordIds.length > 0)
       .map((node) => [node.id, node.runRecordIds]),
   });
+}
+
+function unsupportedGraphLedgerIssue(graph: WorkflowGraphV2): WorkflowDirectorPatchIssue | null {
+  try {
+    for (const key of Reflect.ownKeys(graph)) {
+      if (typeof key !== 'string' || supportedWorkflowGraphKeys.has(key)) continue;
+      return {
+        path: key,
+        code: 'UNSUPPORTED_GRAPH_LEDGER',
+        message: `Director patches cannot safely revise a workflow containing the unsupported "${key}" ledger.`,
+      };
+    }
+  } catch {
+    return {
+      path: 'graph',
+      code: 'INVALID_GRAPH',
+      message: 'The workflow graph could not be inspected safely.',
+    };
+  }
+  return null;
 }
 
 function issueFromError(error: unknown, path: string): WorkflowDirectorPatchIssue {
@@ -824,6 +851,10 @@ export function createWorkflowDirectorPatchProposal(
 ): WorkflowDirectorPatchProposalResult {
   const parsed = parseWorkflowDirectorPatch(response);
   if (!parsed.value) return detachedFrozen({ proposal: null, issues: parsed.issues });
+  const unsupportedLedger = unsupportedGraphLedgerIssue(inputGraph);
+  if (unsupportedLedger) {
+    return detachedFrozen({ proposal: null, issues: [unsupportedLedger] });
+  }
   const patch = parsed.value;
   if (
     patch.sourceGraphRevision.graphId !== currentGraphRevision.graphId
@@ -932,7 +963,7 @@ export function createWorkflowDirectorPatchProposal(
   }
   const materialRoots = deriveMaterialRoots(before, after, nodeChanges, edgeChanges);
 
-  return detachedFrozen({
+  const result: WorkflowDirectorPatchProposalResult = detachedFrozen({
     proposal: {
       patch,
       graph: after,
@@ -942,10 +973,21 @@ export function createWorkflowDirectorPatchProposal(
       edgeChanges,
       requirementChanges: requirementChanges(before, after),
       downstreamStaleness: downstreamStaleness(before, after, materialRoots),
-      canAccept: true,
+      canAccept: true as const,
     },
     issues: [],
   });
+  trustedWorkflowDirectorPatchProposals.add(result.proposal!);
+  return result;
+}
+
+export function assertFreshWorkflowDirectorPatchProposal(
+  proposal: WorkflowDirectorPatchProposal,
+): WorkflowGraphV2 {
+  if (!isRecord(proposal) || !trustedWorkflowDirectorPatchProposals.has(proposal)) {
+    throw new Error('This AI Director patch proposal does not have trusted validation identity. Draft again before accepting.');
+  }
+  return proposal.graph;
 }
 
 export function rejectWorkflowDirectorPatchProposal(

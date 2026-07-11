@@ -3,6 +3,7 @@ import { instantiateWorkflowTemplate } from './templates';
 import type { WorkflowGraphV2 } from './schema';
 import {
   createWorkflowDirectorPatchProposal,
+  assertFreshWorkflowDirectorPatchProposal,
   parseWorkflowDirectorPatch,
   rejectWorkflowDirectorPatchProposal,
   type WorkflowDirectorPatchV1,
@@ -397,6 +398,52 @@ describe('Workflow Director patch proposal', () => {
       },
     })).toBe(protectedBefore);
     expect(transformAfter.config.instructions).toBe('Warm revision.');
+  });
+
+  it('preserves the Review promotion ledger exactly instead of normalizing it away', () => {
+    const graph = campaignWithAcceptedHistory();
+    graph.reviewPromotions = [];
+    const result = createWorkflowDirectorPatchProposal(
+      patch([{ op: 'move-node', nodeId: 'output-portrait', position: { x: 1600, y: 240 } }]),
+      graph,
+      SOURCE_REVISION,
+    );
+
+    expect(result.issues).toEqual([]);
+    expect(result.proposal?.graph).toHaveProperty('reviewPromotions');
+    expect(JSON.stringify(result.proposal?.graph.reviewPromotions)).toBe(JSON.stringify(graph.reviewPromotions));
+  });
+
+  it.each(['editorRevisions', 'workflowRoundTrips'] as const)(
+    'fails closed instead of dropping the future %s ledger',
+    (ledger) => {
+      const graph = campaignWithAcceptedHistory() as WorkflowGraphV2 & Record<typeof ledger, unknown[]>;
+      graph[ledger] = [{ id: `protected-${ledger}` }];
+      const result = createWorkflowDirectorPatchProposal(
+        patch([{ op: 'move-node', nodeId: 'output-portrait', position: { x: 1600, y: 240 } }]),
+        graph,
+        SOURCE_REVISION,
+      );
+
+      expect(result.proposal).toBeNull();
+      expect(result.issues).toEqual([expect.objectContaining({
+        path: ledger,
+        code: 'UNSUPPORTED_GRAPH_LEDGER',
+      })]);
+    },
+  );
+
+  it('accepts only the exact canonical patch proposal returned by validation', () => {
+    const graph = campaignWithAcceptedHistory();
+    const proposal = createWorkflowDirectorPatchProposal(
+      patch([{ op: 'move-node', nodeId: 'output-portrait', position: { x: 1600, y: 240 } }]),
+      graph,
+      SOURCE_REVISION,
+    ).proposal!;
+
+    expect(assertFreshWorkflowDirectorPatchProposal(proposal)).toBe(proposal.graph);
+    expect(() => assertFreshWorkflowDirectorPatchProposal({ ...proposal }))
+      .toThrow(/trusted validation identity/i);
   });
 
   it('rejects cross-graph patches even when the numeric content revision matches', () => {

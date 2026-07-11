@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { AiTaskStore } from './aiTasks.svelte';
 import { WorkflowStore } from './workflow.svelte';
 import assetsStoryboard from '../workflow/fixtures/v1/assets-storyboard.json';
 import annotations from '../workflow/fixtures/v1/annotations.json';
@@ -8,6 +9,10 @@ import {
   buildWorkflowDirectorContext,
   createWorkflowDirectorProposal,
   type WorkflowDirectorGraphDraft,
+  deriveWorkflowNodeRunState,
+  isFullWorkflowRunRecord,
+  serializeWorkflowGraphV2,
+  workflowSha256Bytes,
   type WorkflowGraphV2,
   type WorkflowIdGenerator,
 } from '../workflow';
@@ -15,7 +20,17 @@ import { WORKFLOW_TEMPLATES } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
 import type { ProjectAsset } from '../integrations/desktop';
-import { createWorkflowCompositionExecutor } from '../workflow/transformExecutor';
+import {
+  WorkflowTransformExecutionError,
+  createWorkflowCompositionExecutor,
+} from '../workflow/transformExecutor';
+
+const material = (bytes: Uint8Array) => ({
+  assetId: 'product-asset',
+  relativePath: 'assets/product.png',
+  bytes,
+  contentHash: workflowSha256Bytes(bytes),
+});
 
 function ids(): WorkflowIdGenerator {
   let sequence = 0;
@@ -48,23 +63,32 @@ function deferredCampaignRun(store: WorkflowStore, currentProjectIdentity?: () =
           id: 'deferred-result', name: 'Square.png', relativePath: 'generated/Square.png',
           width: 1024, height: 1024, mime: 'image/png',
         },
+        bytes: new Uint8Array([1, 2, 3]),
       };
     })],
     assets: [campaignProduct],
-    readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+    resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
     storeAsset: async () => { throw new Error('unused'); },
     currentProjectIdentity,
   });
   return { finish, run };
 }
 
-function directorProposal() {
-  const context = buildWorkflowDirectorContext({
+function directorContext(options: { assetAvailable?: boolean; generateAvailable?: boolean } = {}) {
+  return buildWorkflowDirectorContext({
     brief: 'Create a square product launch.',
-    assets: [campaignProduct],
+    assets: [{ ...campaignProduct, exists: options.assetAvailable ?? true }],
     requestedOutputs: [{ id: 'square', name: 'Square 1:1', width: 1024, height: 1024 }],
-    capabilities: [{ id: 'generate', available: true, reason: null }],
+    capabilities: [{
+      id: 'generate',
+      available: options.generateAvailable ?? true,
+      reason: options.generateAvailable === false ? 'Generate is currently unavailable.' : null,
+    }],
   });
+}
+
+function directorProposal() {
+  const context = directorContext();
   const draft: WorkflowDirectorGraphDraft = {
     version: 1,
     name: 'Director Square',
@@ -84,6 +108,33 @@ function directorProposal() {
     ],
   };
   return createWorkflowDirectorProposal(draft, context, { graphId: 'director-square' }).proposal!;
+}
+
+function reviewedDirectorProposal() {
+  const base = directorProposal();
+  const draft = structuredClone(base.draft);
+  draft.nodes.push({
+    id: 'review', type: 'review', title: 'Review Candidates', mode: 'human', instructions: 'Choose the strongest direction.',
+  });
+  draft.edges = draft.edges.filter((edge) => edge.id !== 'generate-square');
+  draft.edges.push(
+    {
+      id: 'generate-review',
+      source: { nodeId: 'generate', portId: 'result' },
+      target: { nodeId: 'review', portId: 'candidates' },
+    },
+    {
+      id: 'review-square',
+      source: { nodeId: 'review', portId: 'selected' },
+      target: { nodeId: 'square', portId: 'source' },
+    },
+  );
+  return createWorkflowDirectorProposal(draft, directorContext(), { graphId: 'director-reviewed-square' }).proposal!;
+}
+
+function directorProposalWithContext(options: { assetAvailable?: boolean; generateAvailable?: boolean }) {
+  const draft = directorProposal().draft;
+  return createWorkflowDirectorProposal(draft, directorContext(options), { graphId: 'director-context-check' }).proposal!;
 }
 
 describe('WorkflowStore graph adapter', () => {
@@ -118,11 +169,201 @@ describe('WorkflowStore graph adapter', () => {
     const rev = store.rev;
     const proposal = { ...directorProposal(), canAccept: false };
 
-    expect(() => store.applyDirectorProposal(proposal)).toThrow(/cannot be accepted/i);
+    expect(() => store.applyDirectorProposal(proposal)).toThrow(/trusted validation|cannot be accepted/i);
     expect(store.graphSnapshot()).toBe(before);
     expect(store.name).toBe('Untouched');
     expect(store.rev).toBe(rev);
     expect(store.dirty).toBe(false);
+  });
+
+  it('rejects a Director replacement carrying persisted Review decisions', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposal();
+    const graph = structuredClone(proposal.graph);
+    graph.reviewPromotions = [{
+      version: 1,
+      id: 'director-forged-promotion',
+      reviewNodeId: 'review',
+      sourceNodeId: 'generate',
+      branchGroupId: 'branch-group',
+      candidateId: 'candidate-1',
+      candidateRunId: 'candidate-run-1',
+      assetReferenceId: 'candidate-output-1',
+      assetId: 'candidate-asset-1',
+      relativePath: 'assets/candidate-1.png',
+      contentHash: `sha256:${'a'.repeat(64)}`,
+      materialKey: 'workflow-cache-v1:forged',
+      reviewNodeRevision: `sha256:${'b'.repeat(64)}`,
+      promotedAt: 1,
+    }];
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it.each([
+    ['Input project binding', directorProposal, 'product', {
+      assetId: 'asset-from-another-project', relativePath: 'assets/private-product.png',
+    }],
+    ['Brief history', directorProposal, 'brief', { lastAcceptedPrompt: 'Persisted prior prompt' }],
+    ['Art Direction editor state', directorProposal, 'composition', {
+      storyboardDataUrl: 'data:image/png;base64,cHJpdmF0ZQ==',
+      storyboardOraPath: 'documents/private-storyboard.ora',
+      storyboardAnnotations: ['Persisted annotation'],
+      storyboardAnnotationItems: [{ id: 'persisted-mark' }],
+    }],
+    ['Transform result binding', directorProposal, 'generate', {
+      resultAssetReferenceId: 'prior-result-reference',
+      resultAssetId: 'prior-result-asset',
+      resultRelativePath: 'assets/prior-result.png',
+    }],
+    ['Review selection state', reviewedDirectorProposal, 'review', {
+      promotedCandidateId: 'prior-candidate', promotionId: 'prior-promotion',
+    }],
+    ['Output result binding', directorProposal, 'square', {
+      outputAssetId: 'prior-output-asset',
+      outputRelativePath: 'assets/prior-output.png',
+      assetReferenceId: 'prior-output-reference',
+    }],
+  ] as const)('rejects forged %s config atomically', (_name, proposalFactory, nodeId, forgedConfig) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = proposalFactory();
+    const graph = structuredClone(proposal.graph);
+    const node = graph.nodes.find((candidate) => candidate.id === nodeId)!;
+    node.config = { ...node.config, ...forgedConfig };
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it('rejects future editor and round-trip ledgers not authored by the Director draft', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposal();
+    const graph = structuredClone(proposal.graph) as WorkflowGraphV2 & {
+      editorRevisions: unknown[];
+      workflowRoundTrips: unknown[];
+    };
+    graph.editorRevisions = [{ id: 'private-editor-revision' }];
+    graph.workflowRoundTrips = [{ id: 'private-round-trip' }];
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|fresh Director draft/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it.each([
+    ['unavailable asset', { assetAvailable: false }, 'ASSET_UNAVAILABLE'],
+    ['unsupported capability', { generateAvailable: false }, 'UNSUPPORTED_CAPABILITY'],
+  ] as const)('recomputes %s instead of trusting forged acceptance metadata', (_name, options, issueCode) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposalWithContext(options);
+    expect(proposal.canAccept).toBe(false);
+    expect(proposal.issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: issueCode })]));
+    expect(() => store.applyDirectorProposal(proposal)).toThrow(/recomputed validation issue/i);
+    expect(store.toBytes()).toEqual(before);
+
+    expect(() => store.applyDirectorProposal({
+      ...proposal,
+      canAccept: true,
+      issues: [],
+      unsupportedCapabilities: [],
+    })).toThrow(/trusted validation|cannot be accepted/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it('rejects deleted, changed, or reordered validation issues', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposalWithContext({ assetAvailable: false, generateAvailable: false });
+    expect(proposal.issues.length).toBeGreaterThan(1);
+    for (const issues of [
+      [],
+      proposal.issues.slice(1),
+      proposal.issues.map((issue, index) => index === 0 ? { ...issue, message: 'Changed issue.' } : issue),
+      [...proposal.issues].reverse(),
+    ]) {
+      expect(() => store.applyDirectorProposal({ ...proposal, canAccept: true, issues })).toThrow(/trusted validation|cannot be accepted/i);
+      expect(store.toBytes()).toEqual(before);
+    }
+  });
+
+  it('rejects a canonical semantic draft and graph swapped into another accepted proposal', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const original = directorProposal();
+    const replacement = reviewedDirectorProposal();
+
+    expect(() => store.applyDirectorProposal({
+      ...original,
+      draft: replacement.draft,
+      graph: replacement.graph,
+      summary: replacement.summary,
+      nodes: replacement.nodes,
+      requirements: replacement.requirements,
+      unsupportedCapabilities: replacement.unsupportedCapabilities,
+      issues: replacement.issues,
+      canAccept: replacement.canAccept,
+    })).toThrow(/trusted validation/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it('rejects captured asset or capability context replacement', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposalWithContext({ assetAvailable: false, generateAvailable: false });
+    const contextProposal = proposal as typeof proposal & { validationContext: ReturnType<typeof directorContext> };
+
+    expect(() => store.applyDirectorProposal({
+      ...proposal,
+      validationContext: directorContext(),
+      canAccept: true,
+      issues: [],
+      requirements: contextProposal.requirements.map((requirement) => ({ ...requirement, status: 'ready' as const })),
+      unsupportedCapabilities: [],
+    })).toThrow(/trusted validation/i);
+    expect(store.toBytes()).toEqual(before);
+  });
+
+  it.each(['subclass', 'proxy'] as const)('rejects %s arrays that can inject config after comparison', (kind) => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer', 'Untouched');
+    const before = store.toBytes();
+    const proposal = directorProposal();
+    const graph = structuredClone(proposal.graph);
+    const canonicalNodes = graph.nodes;
+    const inject = () => canonicalNodes.map((node, index) => index === 0
+      ? { ...node, config: { ...node.config, resultAssetId: 'injected-after-comparison' } }
+      : node);
+    if (kind === 'subclass') {
+      class InjectingNodes<T> extends Array<T> {
+        override map<U>(_callback: (value: T, index: number, array: T[]) => U): U[] {
+          return inject() as U[];
+        }
+      }
+      const nodes = new InjectingNodes<WorkflowGraphV2['nodes'][number]>();
+      graph.nodes.forEach((node) => nodes.push(node));
+      graph.nodes = nodes;
+    } else {
+      graph.nodes = new Proxy(graph.nodes, {
+        get(target, property, receiver) {
+          if (property === 'map') return inject;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    }
+
+    expect(() => store.applyDirectorProposal({ ...proposal, graph })).toThrow(/trusted validation|plain data/i);
+    expect(store.toBytes()).toEqual(before);
   });
 
   it('rejects a Director proposal captured from a stale graph revision without changing bytes', () => {
@@ -182,10 +423,11 @@ describe('WorkflowStore graph adapter', () => {
             id: 'result-square', name: 'Square.png', relativePath: 'generated/Square.png',
             width: 1024, height: 1024, mime: 'image/png',
           },
+          bytes: new Uint8Array([4, 5, 6]),
         };
       })],
       assets: [product],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       storeAsset: async () => { throw new Error('bytes store should not run'); },
     });
 
@@ -204,6 +446,215 @@ describe('WorkflowStore graph adapter', () => {
     expect(reopened.outputNode('output-square')).toMatchObject({
       outputAssetId: 'result-square', outputRelativePath: 'generated/Square.png',
     });
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'succeeded', assetId: 'result-square',
+    });
+    reopened.setBriefObjective('brief', 'A materially different campaign objective.');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'stale', assetId: 'result-square',
+    });
+  });
+
+  it('persists a safe failed attempt and restores it after reopen', async () => {
+    const store = campaignStore();
+    await expect(store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => {
+        throw new Error('token=secret at /tmp/provider.jsonl');
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: () => 'failed-run', clock: () => 100,
+    })).rejects.toMatchObject({ code: 'EXECUTOR_ERROR' });
+
+    expect(store.graphSnapshot().runRecords).toEqual([
+      expect.objectContaining({
+        id: 'failed-run', status: 'failed',
+        failure: { code: 'EXECUTOR_ERROR', message: 'The provider could not complete this attempt.' },
+      }),
+    ]);
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'failed', message: 'The provider could not complete this attempt. Retry Generate.', assetId: null,
+    });
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Campaign');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'failed', message: 'The provider could not complete this attempt. Retry Generate.', assetId: null,
+    });
+  });
+
+  it('returns fixed safe errors to Board and task callers when source materialization fails immediately', async () => {
+    const store = campaignStore();
+    const failure = await store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', vi.fn())],
+      assets: [campaignProduct],
+      resolveAsset: async () => { throw new Error('Bearer secret at /Users/alice/private/source.png'); },
+      storeAsset: async () => { throw new Error('unused'); },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(WorkflowTransformExecutionError);
+    expect(failure).toMatchObject({
+      code: 'EXECUTOR_ERROR',
+      message: 'The workflow could not prepare this generation attempt.',
+      nextAction: 'Retry Generate',
+    });
+    expect((failure as Error).message).not.toMatch(/alice|Bearer|private/i);
+
+    const tasks = new AiTaskStore();
+    const task = tasks.create({
+      kind: 'workflow', title: 'Workflow: Square', subtitle: 'fake', progress: 'Preparing',
+      detail: { kind: 'workflow', providerLabel: 'fake', outputName: 'Square' },
+    });
+    tasks.fail(task.id, (failure as Error).message);
+    expect(task.error).toBe('The workflow could not prepare this generation attempt.');
+    expect(task.error).not.toMatch(/alice|Bearer|private/i);
+
+    expect(store.transformExecution('transform-generate-square')).toEqual({
+      state: 'failed',
+      message: 'The workflow could not prepare this generation attempt. Retry Generate.',
+      assetId: null,
+    });
+    expect(store.transformExecution('transform-generate-square').message).not.toMatch(/alice|Bearer|private/i);
+  });
+
+  it('does not persist a failed attempt after the workflow changes while it is running', async () => {
+    const store = campaignStore();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => {
+        await gate;
+        throw new Error('provider failed');
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+    });
+    store.setBriefObjective('brief', 'Edited while failure was pending.');
+    finish();
+    await expect(run).rejects.toMatchObject({ code: 'EXECUTOR_ERROR' });
+    expect(store.graphSnapshot().runRecords).toEqual([]);
+    expect(store.briefNodes[0].objective).toBe('Edited while failure was pending.');
+  });
+
+  it('persists no transient running record and safely detaches a stuck cancellation before late completion', async () => {
+    const store = campaignStore();
+    let finishProvider!: () => void;
+    let providerStarted!: () => void;
+    let reportLateProgress!: () => void;
+    const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { finishProvider = resolve; });
+    const progress = vi.fn();
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async (_request, context) => {
+        reportLateProgress = () => context.reportProgress({ message: 'late provider progress' });
+        providerStarted();
+        await gate;
+        return {
+          kind: 'project-asset' as const,
+          asset: {
+            id: 'late-result', name: 'Late.png', relativePath: 'generated/late.png',
+            width: 1024, height: 1024, mime: 'image/png',
+          },
+          bytes: new Uint8Array([1, 2, 3]),
+        };
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      cancelExecution: () => new Promise(() => undefined),
+      cancellationTimeoutMs: 5,
+      onProgress: progress,
+      runIdGenerator: () => 'cancel-store-run',
+      clock: () => 100,
+    });
+    void run.catch(() => undefined);
+    await started;
+    expect(store.graphSnapshot().runRecords).toEqual([]);
+
+    await expect(store.cancelCampaignGenerate('transform-generate-square')).resolves.toEqual({
+      disposition: 'detached',
+      message: 'Provider termination was not confirmed; late results will be ignored.',
+    });
+    const callsAfterCancel = progress.mock.calls.length;
+    reportLateProgress();
+    finishProvider();
+    await expect(run).rejects.toMatchObject({ code: 'CANCELLED' });
+    await Promise.resolve();
+
+    expect(progress).toHaveBeenCalled();
+    expect(progress.mock.calls).toHaveLength(callsAfterCancel);
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
+    expect(store.graphSnapshot().runRecords).toEqual([
+      expect.objectContaining({ id: 'cancel-store-run', status: 'cancelled' }),
+    ]);
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'cancelled',
+      message: 'Provider termination was not confirmed; late results will be ignored.',
+      assetId: null,
+    });
+  });
+
+  it('normalizes a legacy persisted running attempt to recoverable interrupted history on reopen', async () => {
+    const source = campaignStore();
+    await source.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async () => ({
+        kind: 'project-asset' as const,
+        asset: {
+          id: 'accepted-result', name: 'Accepted.png', relativePath: 'generated/accepted.png',
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([1, 2, 3]),
+      }))],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: () => 'accepted-run', clock: () => 100,
+    });
+    const legacyGraph = structuredClone(source.graphSnapshot());
+    const accepted = legacyGraph.runRecords.find(isFullWorkflowRunRecord)!;
+    const interrupted = {
+      ...structuredClone(accepted),
+      id: 'legacy-running-run',
+      attempt: 2,
+      status: 'running' as const,
+      startedAt: 200,
+      finishedAt: null,
+      outputs: [],
+    };
+    legacyGraph.runRecords.push(interrupted);
+    legacyGraph.nodes.find((node) => node.id === interrupted.nodeId)!.runRecordIds.push(interrupted.id);
+    expect(JSON.parse(serializeWorkflowGraphV2(legacyGraph)).runRecords.at(-1)).toMatchObject({
+      status: 'failed', failure: { code: 'INTERRUPTED' },
+    });
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(legacyGraph)),
+      'workflows/campaign.cxflow.json',
+      'Campaign',
+    );
+    const normalized = reopened.graphSnapshot();
+    expect(normalized.runRecords.at(-1)).toMatchObject({
+      id: 'legacy-running-run', status: 'failed', finishedAt: 200,
+      failure: { code: 'INTERRUPTED', message: 'The attempt was interrupted before it completed.' },
+    });
+    expect(normalized.runRecords.some((record) => record.status === 'running')).toBe(false);
+    expect(reopened.requiresExplicitSave).toBe(true);
+    expect(reopened.savedPath).toBeNull();
+    expect(reopened.migrationSourcePath).toBe('workflows/campaign.cxflow.json');
+    expect(reopened.dirty).toBe(true);
+    expect(reopened.transformExecution(interrupted.nodeId)).toMatchObject({
+      state: 'failed', message: 'The attempt was interrupted before it completed. Retry Generate.',
+    });
+    expect(deriveWorkflowNodeRunState(normalized, interrupted.nodeId).acceptedOutputs).toEqual([
+      expect.objectContaining({ assetId: 'accepted-result' }),
+    ]);
   });
 
   it('keeps the newest overlapping Transform result when an older run finishes late', async () => {
@@ -222,22 +673,154 @@ describe('WorkflowStore graph adapter', () => {
           id: assetId, name: `${assetId}.png`, relativePath: `generated/${assetId}.png`,
           width: 1024, height: 1024, mime: 'image/png',
         },
+        bytes: new Uint8Array([7, 8, 9]),
       }));
     }));
     const options = {
       projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [product],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
       storeAsset: async () => { throw new Error('unused'); },
     };
     const older = store.runCampaignGenerate('output-square', options);
+    void older.catch(() => undefined);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
     const newer = store.runCampaignGenerate('output-square', options);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
     resolvers[1]('newer');
     expect((await newer).committed).toBe(true);
-    resolvers[0]('older');
-    expect((await older).committed).toBe(false);
+    await expect(older).rejects.toMatchObject({ code: 'CANCELLED' });
     expect(store.outputNode('output-square')?.outputAssetId).toBe('newer');
     expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded', assetId: 'newer' });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({ attempt: 2, status: 'succeeded' }),
+    ]);
+    const records = store.serialize().runRecords.filter(isFullWorkflowRunRecord);
+    expect(records[0].retryOfRunId).toBeUndefined();
+    expect(records[1].retryOfRunId).toBe(records[0].id);
+  });
+
+  it('serializes three same-node starts into durable cancelled retry history', async () => {
+    const store = campaignStore();
+    const cancelExecution = vi.fn(() => new Promise<never>(() => undefined));
+    const resolvers: Array<(assetId: string) => void> = [];
+    const executor = createWorkflowCompositionExecutor('fake', () => new Promise((resolve) => {
+      resolvers.push((assetId) => resolve({
+        kind: 'project-asset',
+        asset: {
+          id: assetId, name: `${assetId}.png`, relativePath: `generated/${assetId}.png`,
+          width: 1024, height: 1024, mime: 'image/png',
+        },
+        bytes: new Uint8Array([7, 8, 9]),
+      }));
+    }));
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: (_nodeId: string, attempt: number) => `run-${attempt}`,
+      cancelExecution,
+      cancellationTimeoutMs: 5,
+    };
+
+    const first = store.runCampaignGenerate('output-square', options);
+    void first.catch(() => undefined);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    const second = store.runCampaignGenerate('output-square', options);
+    void second.catch(() => undefined);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    const third = store.runCampaignGenerate('output-square', options);
+    await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+    resolvers[2]('third');
+
+    await expect(first).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(second).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(third).resolves.toMatchObject({ committed: true });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ id: 'run-1', attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({ id: 'run-2', attempt: 2, status: 'cancelled', retryOfRunId: 'run-1' }),
+      expect.objectContaining({ id: 'run-3', attempt: 3, status: 'succeeded', retryOfRunId: 'run-2' }),
+    ]);
+    expect(store.serialize().runRecords.filter(isFullWorkflowRunRecord)[0].retryOfRunId).toBeUndefined();
+    expect(cancelExecution).toHaveBeenCalledTimes(2);
+  });
+
+  it('supersedes a run blocked forever while resolving source material', async () => {
+    const store = campaignStore();
+    let assetReads = 0;
+    const service = vi.fn(async () => ({
+      kind: 'project-asset' as const,
+      asset: {
+        id: 'replacement', name: 'Replacement.png', relativePath: 'generated/replacement.png',
+        width: 1024, height: 1024, mime: 'image/png',
+      },
+      bytes: new Uint8Array([1, 2, 3]),
+    }));
+    const executor = createWorkflowCompositionExecutor('fake', service);
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [campaignProduct],
+      resolveAsset: async () => {
+        assetReads += 1;
+        if (assetReads === 1) return new Promise<never>(() => undefined);
+        return material(new Uint8Array([137, 80, 78, 71]));
+      },
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: (_nodeId: string, attempt: number) => `asset-run-${attempt}`,
+    };
+
+    const blocked = store.runCampaignGenerate('output-square', options);
+    void blocked.catch(() => undefined);
+    await vi.waitFor(() => expect(assetReads).toBe(1));
+    const replacement = store.runCampaignGenerate('output-square', options);
+
+    await expect(blocked).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(replacement).resolves.toMatchObject({ committed: true });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ id: 'asset-run-1', attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({ id: 'asset-run-2', attempt: 2, status: 'succeeded', retryOfRunId: 'asset-run-1' }),
+    ]);
+    expect(service).toHaveBeenCalledOnce();
+  });
+
+  it('supersedes a run blocked forever while materializing the storyboard', async () => {
+    const store = campaignStore();
+    store.setStoryboardDataUrl('data:image/png;base64,AA==');
+    let storyboardReads = 0;
+    const service = vi.fn(async () => ({
+      kind: 'project-asset' as const,
+      asset: {
+        id: 'storyboard-replacement', name: 'Replacement.png',
+        relativePath: 'generated/storyboard-replacement.png', width: 1024, height: 1024, mime: 'image/png',
+      },
+      bytes: new Uint8Array([1, 2, 3]),
+    }));
+    const executor = createWorkflowCompositionExecutor('fake', service);
+    const options = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor], assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      readStoryboard: async () => {
+        storyboardReads += 1;
+        if (storyboardReads === 1) return new Promise<never>(() => undefined);
+        return { bytes: new Uint8Array([137, 80, 78, 71]), relativePath: 'storyboards/campaign.png' };
+      },
+      storeAsset: async () => { throw new Error('unused'); },
+      runIdGenerator: (_nodeId: string, attempt: number) => `storyboard-run-${attempt}`,
+    };
+
+    const blocked = store.runCampaignGenerate('output-square', options);
+    void blocked.catch(() => undefined);
+    await vi.waitFor(() => expect(storyboardReads).toBe(1));
+    const replacement = store.runCampaignGenerate('output-square', options);
+
+    await expect(blocked).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(replacement).resolves.toMatchObject({ committed: true });
+    expect(store.serialize().runRecords).toEqual([
+      expect.objectContaining({ id: 'storyboard-run-1', attempt: 1, status: 'cancelled' }),
+      expect.objectContaining({
+        id: 'storyboard-run-2', attempt: 2, status: 'succeeded', retryOfRunId: 'storyboard-run-1',
+      }),
+    ]);
+    expect(service).toHaveBeenCalledOnce();
   });
 
   it('does not overwrite workflow edits made while a Transform is running', async () => {
@@ -259,17 +842,65 @@ describe('WorkflowStore graph adapter', () => {
     const store = campaignStore();
     const originalBytes = store.toBytes();
     const deferred = deferredCampaignRun(store);
+    void deferred.run.catch(() => undefined);
     if (action === 'new') store.newFromTemplate('campaign-composer', 'New session');
     else if (action === 'open') store.openFromBytes(originalBytes, null, 'Reopened session');
     else store.close();
     deferred.finish();
-    const outcome = await deferred.run;
+    await expect(deferred.run).rejects.toMatchObject({ code: 'CANCELLED' });
 
-    expect(outcome.committed).toBe(false);
-    expect(outcome.commitMessage).toMatch(/session changed/i);
     expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
     if (action === 'new') expect(store.name).toBe('New session');
     if (action === 'close') expect(store.active).toBe(false);
+  });
+
+  it('aborts a session-switched store operation, closes progress, and starts bounded provider cancellation', async () => {
+    const store = campaignStore();
+    let finishStore!: (asset: ProjectAsset) => void;
+    let storeStarted!: () => void;
+    let reportLate!: () => void;
+    const started = new Promise<void>((resolve) => { storeStarted = resolve; });
+    const stored = new Promise<ProjectAsset>((resolve) => { finishStore = resolve; });
+    const progress = vi.fn();
+    const cancelExecution = vi.fn(async () => ({ disposition: 'terminated' as const }));
+    const run = store.runCampaignGenerate('output-square', {
+      projectPath: '/virtual/project', provider: 'fake',
+      executors: [createWorkflowCompositionExecutor('fake', async (_request, context) => {
+        reportLate = () => context.reportProgress({ message: 'late store progress' });
+        return {
+          kind: 'bytes' as const,
+          name: 'pending.png', bytes: new Uint8Array([1, 2, 3]), mime: 'image/png',
+          width: 1024, height: 1024,
+        };
+      })],
+      assets: [campaignProduct],
+      resolveAsset: async () => material(new Uint8Array([137, 80, 78, 71])),
+      storeAsset: async () => {
+        storeStarted();
+        return stored;
+      },
+      cancelExecution,
+      onProgress: progress,
+      runIdGenerator: () => 'session-switch-store',
+      clock: () => 100,
+    });
+    void run.catch(() => undefined);
+    await started;
+    const progressBeforeClose = progress.mock.calls.length;
+
+    store.close();
+    reportLate();
+    finishStore({
+      id: 'late-store-result', kind: 'generated', name: 'Late.png', relativePath: 'generated/late.png',
+      createdAt: 1, exists: true, width: 1024, height: 1024, mime: 'image/png',
+    });
+    await expect(run).rejects.toMatchObject({ code: 'CANCELLED' });
+    await Promise.resolve();
+
+    expect(cancelExecution).toHaveBeenCalledOnce();
+    expect(progress.mock.calls).toHaveLength(progressBeforeClose);
+    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
+    expect(store.active).toBe(false);
   });
 
   it('does not bind a late result after the active project identity changes', async () => {

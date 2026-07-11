@@ -34,8 +34,12 @@ describe('workflow provider QA selection', () => {
   });
 
   it('keeps the visible Board path truthful and conditional on the resolved QA selection', () => {
-    expect(boardSource).toContain("createProviderFreeQaWorkflowExecutor('provider-free')");
+    expect(boardSource).toContain("createProviderFreeQaWorkflowExecutor('provider-free', undefined, { scenario: qaScenario })");
     expect(boardSource).toContain('Deterministic provider-free output. No AI provider or authentication is used.');
+    expect(boardSource).toContain('aria-label="QA Fake scenario"');
+    expect(boardSource).toContain('<option value="slow-success">Slow / cancellable</option>');
+    expect(boardSource).toContain('<option value="failure">Failure / retry</option>');
+    expect(boardSource).toContain("editor.flash(cancelled ? 'Workflow generation cancelled' : 'Workflow generation failed')");
     expect(boardSource).toContain("providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'");
     expect(boardSource).toMatch(/const executors = runSelection\.qaFake\s*\?/);
   });

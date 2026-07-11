@@ -1,6 +1,8 @@
 import { createWorkflowCacheKey, type WorkflowCacheHash } from './execution';
+import { hash as sha256 } from 'fast-sha256';
 import type {
   WorkflowGraphV2,
+  WorkflowCandidateLineageV1,
   WorkflowRunExecutor,
   WorkflowRunOutput,
   WorkflowRunProvider,
@@ -41,6 +43,8 @@ export interface WorkflowRunRecordDraft {
   startedAt: number;
   finishedAt: number | null;
   outputs: WorkflowRunOutput[];
+  candidate?: WorkflowCandidateLineageV1;
+  retryOfRunId?: string;
   failure?: { code: string; message: string };
   projectTaskId?: string;
   debugArtifactReference?: string;
@@ -102,12 +106,36 @@ function digest(hash: WorkflowCacheHash, label: string, value: unknown): string 
   return result;
 }
 
+function persistedMaterialConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const runtimeKeys = new Set([
+    'resultAssetReferenceId', 'resultAssetId', 'resultRelativePath',
+    'assetReferenceId', 'outputAssetId', 'outputRelativePath',
+  ]);
+  return Object.fromEntries(Object.entries(config).filter(([key]) => !runtimeKeys.has(key)));
+}
+
 function graphRevisionMaterial(graph: WorkflowGraphV2): unknown {
   return {
     id: graph.id,
-    nodes: graph.nodes.map((node) => ({ ...node, runRecordIds: [] })),
+    nodes: graph.nodes.map((node) => ({ ...node, config: persistedMaterialConfig(node.config), runRecordIds: [] })),
     edges: graph.edges,
   };
+}
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function workflowSha256Bytes(bytes: Uint8Array): string {
+  return `sha256:${hex(sha256(bytes))}`;
+}
+
+export function workflowSha256Text(value: string): string {
+  return workflowSha256Bytes(new TextEncoder().encode(value));
+}
+
+export function createWorkflowRevision(graph: WorkflowGraphV2, hash: WorkflowCacheHash = workflowSha256Text): string {
+  return digest(hash, 'paintnode-workflow-revision-v1', graphRevisionMaterial(graph));
 }
 
 export function createWorkflowRunRecord(
@@ -161,14 +189,57 @@ export function createWorkflowRunRecord(
     )) throw new Error('Accepted output time must fall within a successful run.');
   }
   if (draft.projectTaskId) safeWorkflowIdentifier(draft.projectTaskId, 'Project task ID');
+  if (draft.retryOfRunId !== undefined) {
+    safeWorkflowIdentifier(draft.retryOfRunId, 'Retry run ID');
+    const prior = draft.graph.runRecords.find((record) => record.id === draft.retryOfRunId);
+    if (!prior || !isFullWorkflowRunRecord(prior)) {
+      throw new Error('Retry run ID must reference an attempt in the current workflow.');
+    }
+    if (prior.nodeId !== draft.nodeId) {
+      throw new Error('Retry run ID must reference an attempt on the same node.');
+    }
+    if (prior.status !== 'failed' && prior.status !== 'cancelled') {
+      throw new Error('Retry run ID must reference a failed or cancelled attempt.');
+    }
+    if (!draft.candidate && prior.candidate) {
+      throw new Error('A normal run cannot retry a candidate branch attempt.');
+    }
+    if (draft.candidate && (
+      !prior.candidate
+      || prior.candidate.candidateId !== draft.candidate.candidateId
+      || prior.candidate.branchGroupId !== draft.candidate.branchGroupId
+    )) throw new Error('Retry run ID must reference the same candidate branch.');
+    if (draft.candidate && draft.candidate.attempt !== prior.candidate!.attempt + 1) {
+      throw new Error('Candidate retry attempt must immediately follow the linked candidate attempt.');
+    }
+    const latestTerminal = draft.graph.nodes.find((candidate) => candidate.id === draft.nodeId)?.runRecordIds
+      .map((id) => draft.graph.runRecords.find((record) => record.id === id))
+      .filter((record): record is WorkflowRunRecordV1 => Boolean(
+        record && isFullWorkflowRunRecord(record) && record.status !== 'running'
+        && (draft.candidate
+          ? record.candidate?.candidateId === draft.candidate.candidateId
+          : !record.candidate),
+      ))
+      .at(-1);
+    if (latestTerminal?.id !== prior.id) {
+      throw new Error('Retry run ID must reference the latest terminal attempt.');
+    }
+    const latestNodeAttempt = draft.graph.nodes.find((candidate) => candidate.id === draft.nodeId)?.runRecordIds
+      .map((id) => draft.graph.runRecords.find((record) => record.id === id))
+      .filter(isFullWorkflowRunRecord)
+      .at(-1)?.attempt ?? 0;
+    if (draft.attempt !== latestNodeAttempt + 1) {
+      throw new Error('Retry attempt must preserve node-global attempt order.');
+    }
+  }
   if (draft.debugArtifactReference) {
     requireProjectRelativeWorkflowReference(draft.debugArtifactReference, 'Debug artifact reference');
   }
-  const workflowRevision = digest(hash, 'paintnode-workflow-revision-v1', graphRevisionMaterial(draft.graph));
+  const workflowRevision = createWorkflowRevision(draft.graph, hash);
   const nodeRevision = digest(hash, 'paintnode-workflow-node-revision-v1', {
     type: node.type,
     ports: node.ports,
-    config: node.config,
+    config: persistedMaterialConfig(node.config),
   });
   const effectivePromptHash = digest(hash, 'paintnode-workflow-prompt-v1', draft.material.prompt.effectivePrompt);
   const materialKey = createWorkflowCacheKey({
@@ -220,6 +291,8 @@ export function createWorkflowRunRecord(
     startedAt: draft.startedAt,
     finishedAt: draft.finishedAt,
     outputs: structuredClone(draft.outputs),
+    ...(draft.candidate ? { candidate: structuredClone(draft.candidate) } : {}),
+    ...(draft.retryOfRunId !== undefined ? { retryOfRunId: draft.retryOfRunId } : {}),
     ...(draft.failure ? { failure: sanitizeWorkflowFailure(draft.failure) } : {}),
     ...(draft.projectTaskId ? { projectTaskId: draft.projectTaskId } : {}),
     ...(draft.debugArtifactReference ? { debugArtifactReference: draft.debugArtifactReference } : {}),
@@ -248,7 +321,9 @@ export function deriveWorkflowNodeRunState(
   if (!node) return deepFreeze({ state: 'idle' as const, latestRun: null, acceptedOutputs: [] });
   const records = node.runRecordIds
     .map((id) => graph.runRecords.find((record) => record.id === id))
-    .filter((record): record is WorkflowRunRecordV1 => Boolean(record && isFullWorkflowRunRecord(record)));
+    .filter((record): record is WorkflowRunRecordV1 => Boolean(
+      record && isFullWorkflowRunRecord(record) && !record.candidate,
+    ));
   const latestRun = records.at(-1) ? structuredClone(records.at(-1)!) : null;
   const acceptedOutputs = records.flatMap((record) => record.outputs
     .filter((output): output is WorkflowRunOutput & { acceptedAt: number } => typeof output.acceptedAt === 'number'))

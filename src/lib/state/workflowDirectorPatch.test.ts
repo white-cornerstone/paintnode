@@ -4,6 +4,7 @@ import { project } from './project.svelte';
 import {
   createWorkflowCompositionExecutor,
   deriveWorkflowNodeRunState,
+  workflowSha256Bytes,
   type WorkflowDirectorPatchV1,
   type WorkflowGraphV2,
   type WorkflowRunRecordV1,
@@ -781,10 +782,16 @@ describe('WorkflowStore Director patch review lifecycle', () => {
             height: 1024,
             mime: 'image/png',
           },
+          bytes: new Uint8Array([1, 2, 3]),
         };
       })],
       assets: [productAsset],
-      readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+      resolveAsset: async () => ({
+        assetId: productAsset.id,
+        relativePath: productAsset.relativePath,
+        bytes: new Uint8Array([137, 80, 78, 71]),
+        contentHash: workflowSha256Bytes(new Uint8Array([137, 80, 78, 71])),
+      }),
       storeAsset: async () => { throw new Error('unused'); },
     });
     store.createDirectorPatchProposal(configureTransformPatch(store));

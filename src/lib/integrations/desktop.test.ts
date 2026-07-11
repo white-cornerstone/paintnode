@@ -1,6 +1,39 @@
-import { describe, expect, it } from 'vitest';
-import { antigravityConfigFromRunOptions, claudeConfigFromRunOptions, codexConfigFromRunOptions } from './desktop';
+import { describe, expect, it, vi } from 'vitest';
+
+const api = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: api.invoke }));
+
+import {
+  antigravityConfigFromRunOptions,
+  claudeConfigFromRunOptions,
+  codexConfigFromRunOptions,
+  parseProjectAssetMaterialEnvelope,
+  resolveProjectAssetMaterial,
+} from './desktop';
 import { defaultAiRunOptions } from '../state/settings';
+
+const MATERIAL_MAGIC = new TextEncoder().encode('PNMATRAW');
+
+function materialEnvelope(
+  bytes: Uint8Array,
+  metadata: Record<string, unknown> = {
+    assetId: 'asset-1',
+    relativePath: 'assets/imported/asset.png',
+    contentHash: `sha256:${'a'.repeat(64)}`,
+  },
+  options: { version?: number; metadataLength?: number; materialLength?: number } = {},
+): Uint8Array {
+  const encodedMetadata = new TextEncoder().encode(JSON.stringify(metadata));
+  const envelope = new Uint8Array(18 + encodedMetadata.length + bytes.length);
+  envelope.set(MATERIAL_MAGIC, 0);
+  const view = new DataView(envelope.buffer);
+  view.setUint16(8, options.version ?? 1, false);
+  view.setUint32(10, options.metadataLength ?? encodedMetadata.length, false);
+  view.setUint32(14, options.materialLength ?? bytes.length, false);
+  envelope.set(encodedMetadata, 18);
+  envelope.set(bytes, 18 + encodedMetadata.length);
+  return envelope;
+}
 
 describe('codexConfigFromRunOptions', () => {
   it('preserves selected image moderation for Codex image generation', () => {
@@ -44,5 +77,62 @@ describe('codexConfigFromRunOptions', () => {
     expect(codexConfigFromRunOptions(custom).bin).toBe('/bin/codex');
     expect(claudeConfigFromRunOptions(custom).bin).toBe('/bin/claude');
     expect(antigravityConfigFromRunOptions(custom).bin).toBe('/bin/agy');
+  });
+});
+
+describe('project asset material boundary', () => {
+  it('requests material by asset ID and preserves exact bytes and hash', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    api.invoke.mockResolvedValueOnce(materialEnvelope(new Uint8Array([1, 2, 3, 4])).buffer);
+    try {
+      await expect(resolveProjectAssetMaterial('/virtual/project', 'asset-1')).resolves.toEqual({
+        assetId: 'asset-1',
+        relativePath: 'assets/imported/asset.png',
+        bytes: new Uint8Array([1, 2, 3, 4]),
+        contentHash: `sha256:${'a'.repeat(64)}`,
+      });
+      expect(api.invoke).toHaveBeenCalledWith('project_resolve_asset_material', {
+        projectPath: '/virtual/project',
+        assetId: 'asset-1',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      api.invoke.mockReset();
+    }
+  });
+
+  it('rejects an invalid magic, version, or inconsistent envelope lengths', () => {
+    const badMagic = materialEnvelope(new Uint8Array([1]));
+    badMagic[0] ^= 0xff;
+    expect(() => parseProjectAssetMaterialEnvelope(badMagic)).toThrow(/invalid header/i);
+    expect(() => parseProjectAssetMaterialEnvelope(materialEnvelope(
+      new Uint8Array([1]), {}, { version: 2 },
+    ))).toThrow(/invalid lengths or version/i);
+    expect(() => parseProjectAssetMaterialEnvelope(materialEnvelope(
+      new Uint8Array([1]), {}, { materialLength: 2 },
+    ))).toThrow(/invalid lengths or version/i);
+    expect(() => parseProjectAssetMaterialEnvelope(materialEnvelope(
+      new Uint8Array([1]), {}, { metadataLength: 4097 },
+    ))).toThrow(/invalid lengths or version/i);
+    expect(() => parseProjectAssetMaterialEnvelope(materialEnvelope(
+      new Uint8Array([1]), {}, { materialLength: 32 * 1024 * 1024 + 1 },
+    ))).toThrow(/invalid lengths or version/i);
+  });
+
+  it.each([
+    { assetId: '../asset', relativePath: 'assets/asset.png', contentHash: `sha256:${'a'.repeat(64)}` },
+    { assetId: 'asset-1', relativePath: '../asset.png', contentHash: `sha256:${'a'.repeat(64)}` },
+    { assetId: 'asset-1', relativePath: 'assets/asset.png', contentHash: 'sha256:not-a-hash' },
+    { assetId: 'asset-1', relativePath: 'assets/asset.png', contentHash: `sha256:${'a'.repeat(64)}`, extra: true },
+  ])('rejects unsafe or non-canonical metadata %#', (metadata) => {
+    expect(() => parseProjectAssetMaterialEnvelope(
+      materialEnvelope(new Uint8Array([1]), metadata),
+    )).toThrow(/identity|metadata/i);
+  });
+
+  it('rejects malformed UTF-8 JSON metadata', () => {
+    const envelope = materialEnvelope(new Uint8Array([1]));
+    envelope[18] = 0xff;
+    expect(() => parseProjectAssetMaterialEnvelope(envelope)).toThrow(/metadata is invalid/i);
   });
 });

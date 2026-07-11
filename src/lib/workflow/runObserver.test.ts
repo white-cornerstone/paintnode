@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { WorkflowStore } from '../state/workflow.svelte';
 import { createWorkflowCompositionExecutor, type WorkflowProjectAsset } from './transformExecutor';
 import { runWithAsyncObserver } from './runObserver';
+import { workflowSha256Bytes } from './provenance';
 
 const product = {
   id: 'product',
@@ -54,6 +55,7 @@ describe('workflow async observer orchestration', () => {
             id: 'original-result', name: 'Square.png', relativePath: 'generated/original-square.png',
             width: 1024, height: 1024, mime: 'image/png',
           },
+          bytes: new Uint8Array([1, 2, 3]),
         };
       });
 
@@ -65,26 +67,39 @@ describe('workflow async observer orchestration', () => {
           provider: 'fake',
           executors: [createWorkflowCompositionExecutor('fake', provider)],
           assets: [product],
-          readAsset: async () => new Uint8Array([137, 80, 78, 71]),
+          resolveAsset: async () => {
+            const bytes = new Uint8Array([137, 80, 78, 71]);
+            return {
+              assetId: product.id,
+              relativePath: product.relativePath,
+              bytes,
+              contentHash: workflowSha256Bytes(bytes),
+            };
+          },
           storeAsset: async () => { throw new Error('unused'); },
         }),
       });
+      void operation.catch(() => undefined);
 
       if (change === 'workflow') store.newFromTemplate('campaign-composer', 'Replacement campaign');
       else projectIdentity = 'project-b:/other/project';
       finishRegistration(dispose);
       finishProvider();
-      const outcome = await operation;
       const flashSuccess = vi.fn();
-      if (outcome.committed) flashSuccess();
-
-      expect(provider).toHaveBeenCalledOnce();
-      expect(provider.mock.calls[0][0]).toMatchObject({
-        workflowId: expect.any(String),
-        brief: 'Build a cohesive campaign family around the product for multiple publishing formats.',
-      });
-      expect(outcome.committed).toBe(false);
-      expect(outcome.commitMessage).toMatch(change === 'workflow' ? /session changed/i : /project changed/i);
+      if (change === 'workflow') {
+        await expect(operation).rejects.toMatchObject({ code: 'CANCELLED' });
+        expect(provider).not.toHaveBeenCalled();
+      } else {
+        const outcome = await operation;
+        if (outcome.committed) flashSuccess();
+        expect(provider).toHaveBeenCalledOnce();
+        expect(provider.mock.calls[0][0]).toMatchObject({
+          workflowId: expect.any(String),
+          brief: 'Build a cohesive campaign family around the product for multiple publishing formats.',
+        });
+        expect(outcome.committed).toBe(false);
+        expect(outcome.commitMessage).toMatch(/project changed/i);
+      }
       expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
       expect(flashSuccess).not.toHaveBeenCalled();
       expect(dispose).toHaveBeenCalledOnce();

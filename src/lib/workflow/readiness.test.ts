@@ -47,6 +47,56 @@ describe('workflow readiness', () => {
     expect(result.items.find((item) => item.code === 'required-assets')).toMatchObject({ status: 'complete' });
   });
 
+  it('honors explicit optional inputs without template metadata and keeps absent required legacy-strict', () => {
+    const graph = bindProduct();
+    const inputs = graph.nodes.filter((node) => node.type === 'input');
+    inputs.forEach((node) => {
+      delete node.config.templateRole;
+    });
+
+    const explicit = workflowReadiness(graph, readyOptions());
+    expect(explicit.ready).toBe(true);
+    expect(explicit.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'complete',
+      message: '1 required visual input is ready.',
+    });
+
+    const legacy = structuredClone(graph);
+    delete legacy.nodes.find((node) => node.id === 'slot-subject')!.config.required;
+    const absent = workflowReadiness(legacy, readyOptions());
+    expect(absent.ready).toBe(false);
+    expect(absent.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'blocked',
+      message: expect.stringMatching(/Subject is required/i),
+    });
+
+    const malformed = structuredClone(graph);
+    malformed.nodes.find((node) => node.id === 'slot-subject')!.config.required = 'false';
+    const invalid = workflowReadiness(malformed, readyOptions());
+    expect(invalid.ready).toBe(false);
+    expect(invalid.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'blocked',
+      message: expect.stringMatching(/Subject is required/i),
+    });
+  });
+
+  it('does not let partial template metadata hide an untagged required Campaign input', () => {
+    const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
+    delete graph.nodes.find((node) => node.id === 'slot-product')!.config.templateRole;
+    delete graph.nodes.find((node) => node.id === 'slot-subject')!.config.templateRole;
+
+    const result = workflowReadiness(graph, {
+      ...readyOptions(),
+      assets: [],
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'blocked',
+      message: expect.stringMatching(/Product is required/i),
+    });
+  });
+
   it('scopes Transform and provider readiness to the requested output', () => {
     const graph = bindProduct();
     const square = workflowReadiness(graph, {

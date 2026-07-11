@@ -907,6 +907,7 @@ fn build_codex_sdk_command(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_codex_sdk_command_with_session(
     codex_bin: &str,
     job_path: &Path,

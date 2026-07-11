@@ -82,6 +82,20 @@ describe('workflow run provenance', () => {
       .not.toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
   });
 
+  it('keeps persisted result pointers out of the next material key', () => {
+    const baseline = draft();
+    const completed = draft();
+    completed.graph.nodes.find((node) => node.id === completed.nodeId)!.config = {
+      ...completed.graph.nodes.find((node) => node.id === completed.nodeId)!.config,
+      resultAssetReferenceId: 'previous-reference',
+      resultAssetId: 'previous-asset',
+      resultRelativePath: 'generated/previous.png',
+    };
+
+    expect(createWorkflowRunRecord(completed, canonicalHash).materialKey)
+      .toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
+  });
+
   it.each([
     ['token', 'secret-or-path'],
     ['apiKey', 'secret-or-path'],
@@ -122,6 +136,58 @@ describe('workflow run provenance', () => {
       .toThrow(/project-relative/i);
   });
 
+  it('accepts only a retry link to the latest failed or cancelled attempt on the same node and workflow', () => {
+    const firstFailure = createWorkflowRunRecord(draft({
+      id: 'run-failed-1', status: 'failed', outputs: [], finishedAt: 120,
+      failure: { code: 'EXECUTOR_ERROR', message: 'failed' },
+    }), canonicalHash);
+    const graph = structuredClone(draft().graph);
+    graph.nodes.find((node) => node.id === firstFailure.nodeId)!.runRecordIds = [firstFailure.id];
+    graph.runRecords = [firstFailure];
+    const retry = createWorkflowRunRecord(draft({
+      id: 'run-retry', attempt: 2, graph, retryOfRunId: firstFailure.id,
+    }), canonicalHash);
+    expect(retry.retryOfRunId).toBe(firstFailure.id);
+
+    const success = createWorkflowRunRecord(draft({ id: 'run-success' }), canonicalHash);
+    const successGraph = structuredClone(draft().graph);
+    successGraph.nodes.find((node) => node.id === success.nodeId)!.runRecordIds = [success.id];
+    successGraph.runRecords = [success];
+    expect(() => createWorkflowRunRecord(draft({
+      id: 'retry-success', attempt: 2, graph: successGraph, retryOfRunId: success.id,
+    }), canonicalHash)).toThrow(/failed or cancelled/i);
+
+    const otherNodeFailure = createWorkflowRunRecord(draft({
+      id: 'other-node-failure', nodeId: 'composition', status: 'failed', outputs: [],
+      failure: { code: 'EXECUTOR_ERROR', message: 'failed' },
+    }), canonicalHash);
+    const otherNodeGraph = structuredClone(draft().graph);
+    otherNodeGraph.nodes.find((node) => node.id === otherNodeFailure.nodeId)!.runRecordIds = [otherNodeFailure.id];
+    otherNodeGraph.runRecords = [otherNodeFailure];
+    expect(() => createWorkflowRunRecord(draft({
+      id: 'retry-other-node', attempt: 2, graph: otherNodeGraph, retryOfRunId: otherNodeFailure.id,
+    }), canonicalHash)).toThrow(/same node/i);
+
+    expect(() => createWorkflowRunRecord(draft({
+      id: 'retry-other-workflow', attempt: 2, graph, retryOfRunId: 'missing-run',
+    }), canonicalHash)).toThrow(/current workflow/i);
+    expect(() => createWorkflowRunRecord(draft({
+      id: 'retry-empty', attempt: 2, graph, retryOfRunId: '',
+    }), canonicalHash)).toThrow(/safe identifier/i);
+
+    const secondFailure = createWorkflowRunRecord(draft({
+      id: 'run-failed-2', attempt: 2, graph, status: 'failed', outputs: [], finishedAt: 220,
+      retryOfRunId: firstFailure.id,
+      failure: { code: 'EXECUTOR_ERROR', message: 'failed again' },
+    }), canonicalHash);
+    const latestGraph = structuredClone(graph);
+    latestGraph.nodes.find((node) => node.id === firstFailure.nodeId)!.runRecordIds.push(secondFailure.id);
+    latestGraph.runRecords.push(secondFailure);
+    expect(() => createWorkflowRunRecord(draft({
+      id: 'retry-nonlatest', attempt: 3, graph: latestGraph, retryOfRunId: firstFailure.id,
+    }), canonicalHash)).toThrow(/latest terminal attempt/i);
+  });
+
   it('fails closed on model secrets and every shared record invariant', () => {
     for (const model of ['/opt/private/model', '/Volumes/Models/private', '{"access_token":"secret"}', 'Bearer secret']) {
       const value = draft();
@@ -148,7 +214,7 @@ describe('workflow run provenance', () => {
     expect(() => canonicalWorkflowProvenanceJson({ unsafe: Number.NaN })).toThrow(/JSON-safe/i);
   });
 
-  it('derives durable failed state while preserving earlier accepted output history', () => {
+  it('derives a linked retry while preserving every accepted output in history', () => {
     const success = createWorkflowRunRecord(draft(), canonicalHash);
     const failure = createWorkflowRunRecord(draft({
       id: 'run-2', attempt: 2, status: 'failed', startedAt: 200, finishedAt: 210, outputs: [],
@@ -157,19 +223,32 @@ describe('workflow run provenance', () => {
     const graph = structuredClone(draft().graph);
     graph.nodes.find((node) => node.id === success.nodeId)!.runRecordIds = [success.id, failure.id];
     graph.runRecords = [success, failure];
+    const retry = createWorkflowRunRecord(draft({
+      id: 'run-3', attempt: 3, graph, retryOfRunId: failure.id,
+      startedAt: 300, finishedAt: 320,
+      outputs: [{
+        assetReferenceId: 'asset-ref-retry', assetId: 'retry-square',
+        relativePath: 'assets/retry-square.png', contentHash: 'sha256:retrysquare', acceptedAt: 320,
+      }],
+    }), canonicalHash);
+    graph.nodes.find((node) => node.id === success.nodeId)!.runRecordIds.push(retry.id);
+    graph.runRecords.push(retry);
 
-    const derived = deriveWorkflowNodeRunState(graph, success.nodeId, failure.materialKey);
+    const derived = deriveWorkflowNodeRunState(graph, success.nodeId, retry.materialKey);
     expect(derived).toMatchObject({
-      state: 'failed',
-      latestRun: { id: 'run-2', attempt: 2 },
-      acceptedOutputs: [{ assetId: 'square', acceptedAt: 120 }],
+      state: 'succeeded',
+      latestRun: { id: 'run-3', attempt: 3, retryOfRunId: 'run-2' },
+      acceptedOutputs: [
+        { assetId: 'square', acceptedAt: 120 },
+        { assetId: 'retry-square', acceptedAt: 320 },
+      ],
     });
     expect(Object.isFrozen(derived)).toBe(true);
     expect(Object.isFrozen(derived.latestRun)).toBe(true);
     expect(Object.isFrozen(derived.acceptedOutputs)).toBe(true);
     expect(() => { derived.latestRun!.provider.effectiveOptions.fixture = 'mutated'; }).toThrow();
     expect(() => { derived.acceptedOutputs[0].assetId = 'mutated'; }).toThrow();
-    expect(graph.runRecords).toEqual([success, failure]);
+    expect(graph.runRecords).toEqual([success, failure, retry]);
   });
 
   it('derives stale only when the latest successful material no longer matches', () => {

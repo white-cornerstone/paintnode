@@ -30,7 +30,8 @@ function request(advanced: Record<string, unknown>): WorkflowTransformExecutionR
     prompt: 'Use the storyboard as the primary spatial plan.',
     sources: [{
       nodeId: 'slot-product', portId: 'asset', name: 'Product', role: 'Hero product',
-      assetId: 'product', relativePath: 'assets/product.png', bytes: new Uint8Array([1]),
+      assetId: 'product', relativePath: 'assets/product.png',
+      contentHash: `sha256:${'6'.repeat(64)}`, bytes: new Uint8Array([1]),
     }],
     storyboard: {
       dataUrl: null,
@@ -67,14 +68,15 @@ describe('desktop workflow composition adapters', () => {
       projectPath: '/virtual/project',
     } satisfies CodexGeneratorConfig;
     const executor = createCodexWorkflowTransformExecutor(config);
-    await executor.execute(request({
+    const runRequest = request({
       provider: 'codex',
       model: 'saved-codex-model',
       options: {
         reasoningEffort: 'high', serviceTier: 'fast', imageQuality: 'high',
         projectPath: '/must-not-override-project', directorMode: 'force',
       },
-    }));
+    });
+    await executor.execute(runRequest);
 
     expect(services.codex).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -88,6 +90,15 @@ describe('desktop workflow composition adapters', () => {
       ],
       expect.objectContaining({ width: 1024, height: 1024 }),
     );
+    expect(executor.executor).toEqual({
+      id: 'paintnode-codex-workflow', version: '1', requestSchemaVersion: '1',
+    });
+    const provenance = executor.describeRun(runRequest);
+    expect(provenance).toEqual({
+      id: 'codex', model: 'saved-codex-model',
+      effectiveOptions: { reasoningEffort: 'high', serviceTier: 'fast', imageQuality: 'high' },
+    });
+    expect(JSON.stringify(provenance)).not.toMatch(/projectPath|codexBin|runId|debug|transcript/i);
   });
 
   it('forwards a persisted Antigravity image model/options and storyboard before visual inputs', async () => {
@@ -96,14 +107,15 @@ describe('desktop workflow composition adapters', () => {
       approvalMode: 'default', projectPath: '/virtual/project',
     } satisfies AntigravityGeneratorConfig;
     const executor = createAntigravityWorkflowTransformExecutor(config);
-    await executor.execute(request({
+    const runRequest = request({
       provider: 'antigravity',
       model: 'gemini-3.1-flash-image',
       options: {
         imageSize: '2K', compressionQuality: 88, safetyFiltering: 'moreRestrictive',
         agentModel: 'saved-agent-model', projectPath: '/must-not-override-project',
       },
-    }));
+    });
+    await executor.execute(runRequest);
 
     expect(services.antigravity).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -119,5 +131,67 @@ describe('desktop workflow composition adapters', () => {
       expect.objectContaining({ width: 1024, height: 1024 }),
     );
     expect(services.codex).not.toHaveBeenCalled();
+    expect(executor.executor).toEqual({
+      id: 'paintnode-antigravity-workflow', version: '1', requestSchemaVersion: '1',
+    });
+    const provenance = executor.describeRun(runRequest);
+    expect(provenance).toEqual({
+      id: 'antigravity', model: 'gemini-3.1-flash-image',
+      effectiveOptions: {
+        approvalMode: 'default', agentModel: 'saved-agent-model', imageSize: '2K',
+        compressionQuality: 88, safetyFiltering: 'moreRestrictive',
+      },
+    });
+    expect(JSON.stringify(provenance)).not.toMatch(/projectPath|antigravityBin|advancedJson|runId|debug|transcript/i);
+  });
+
+  it.each(['codex', 'antigravity'] as const)(
+    'routes matching %s progress through the exact workflow context and disposes the observer',
+    async (provider) => {
+      const dispose = vi.fn();
+      const reportProgress = vi.fn();
+      const observeProgress = vi.fn(async (runId, report) => {
+        expect(runId).toBe('transform-attempt-1');
+        report({ runId: 'other-run', message: 'adapter receives only filtered events' });
+        report({ runId: 'transform-attempt-1', message: '/tmp/private-output.png' });
+        return dispose;
+      });
+      const executor = provider === 'codex'
+        ? createCodexWorkflowTransformExecutor({
+            model: 'codex-model', projectPath: '/virtual/project', runId: 'board-run-base',
+          } satisfies CodexGeneratorConfig, { observeProgress })
+        : createAntigravityWorkflowTransformExecutor({
+            model: 'agent-model', projectPath: '/virtual/project', runId: 'board-run-base',
+          } satisfies AntigravityGeneratorConfig, { observeProgress });
+
+      await executor.execute(request({ provider }), {
+        identity: {
+          workflowSessionId: 'session-1', workflowId: 'workflow-test',
+          runId: 'transform-attempt-1', nodeId: 'transform-generate-square',
+        },
+        reportProgress,
+      });
+
+      expect(reportProgress).not.toHaveBeenCalledWith({ message: 'adapter receives only filtered events' });
+      expect(reportProgress).toHaveBeenCalledWith({ message: '/tmp/private-output.png' });
+      expect(services[provider]).toHaveBeenCalledWith(
+        expect.objectContaining({ runId: 'transform-attempt-1' }),
+        expect.any(String),
+        expect.any(Array),
+        expect.any(Object),
+      );
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['codex', 'antigravity'] as const)('normalizes exact native stop completion for %s', async (provider) => {
+    services[provider].mockRejectedValueOnce(new Error('The task was stopped.'));
+    const executor = provider === 'codex'
+      ? createCodexWorkflowTransformExecutor({ model: 'codex-model', projectPath: '/virtual/project' } satisfies CodexGeneratorConfig)
+      : createAntigravityWorkflowTransformExecutor({ model: 'agent-model', projectPath: '/virtual/project' } satisfies AntigravityGeneratorConfig);
+
+    await expect(executor.execute(request({ provider }))).rejects.toMatchObject({
+      name: 'WorkflowRunCancelledError',
+    });
   });
 });

@@ -1,4 +1,9 @@
 import { WorkflowGraphDomain } from './domain';
+import {
+  resolveWorkflowCampaignPath,
+  resolveWorkflowReviewTopology,
+  type WorkflowReviewTopologyResolution,
+} from './candidatePromotion';
 import type { WorkflowGraphV2, WorkflowNodeV2 } from './schema';
 
 export type WorkflowReadinessCode =
@@ -9,6 +14,7 @@ export type WorkflowReadinessCode =
   | 'art-direction'
   | 'provider'
   | 'transform'
+  | 'review'
   | 'outputs';
 
 export interface WorkflowReadinessAsset {
@@ -24,6 +30,9 @@ export interface WorkflowReadinessOptions {
   provider?: string | null;
   supportedProviders?: readonly string[];
   targetNodeId?: string | null;
+  allowUnpromotedReview?: boolean;
+  requireVerifiedReview?: boolean;
+  reviewResolutions?: Readonly<Record<string, WorkflowReviewTopologyResolution>>;
 }
 
 export interface WorkflowReadinessItem {
@@ -69,14 +78,11 @@ function assetBinding(graph: WorkflowGraphV2, node: WorkflowNodeV2): { assetId: 
 }
 
 function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOptions): WorkflowReadinessItem {
-  const templateSlots = graph.nodes.filter((node) => node.type === 'input' && node.config.templateRole === 'asset-slot');
-  const slots = templateSlots.length > 0
-    ? templateSlots
-    : graph.nodes.filter((node) => node.type === 'input');
+  const slots = graph.nodes.filter((node) => node.type === 'input');
   const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
   for (const slot of slots) {
     const binding = assetBinding(graph, slot);
-    const required = templateSlots.length === 0 || slot.config.required === true;
+    const required = slot.config.required !== false;
     if (required && !binding) {
       return blocked(
         'required-assets',
@@ -112,7 +118,7 @@ function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOption
       );
     }
   }
-  const requiredCount = slots.filter((node) => templateSlots.length === 0 || node.config.required === true).length;
+  const requiredCount = slots.filter((node) => node.config.required !== false).length;
   if (requiredCount === 0 && slots.length === 0) {
     return blocked('required-assets', 'Visual inputs', 'Add at least one visual input before Generate can run.', 'Add a visual input');
   }
@@ -130,8 +136,8 @@ function targetOutputs(graph: WorkflowGraphV2, targetNodeId?: string | null): Wo
 }
 
 function transformForOutput(graph: WorkflowGraphV2, output: WorkflowNodeV2): WorkflowNodeV2 | null {
-  const incoming = graph.edges.find((edge) => edge.target.nodeId === output.id && edge.target.portId === 'source');
-  return graph.nodes.find((node) => node.id === incoming?.source.nodeId && node.type === 'transform') ?? null;
+  const path = resolveWorkflowCampaignPath(graph, { outputNodeId: output.id });
+  return graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform') ?? null;
 }
 
 function outputReadiness(graph: WorkflowGraphV2, targetNodeId?: string | null): WorkflowReadinessItem {
@@ -147,8 +153,8 @@ function outputReadiness(graph: WorkflowGraphV2, targetNodeId?: string | null): 
       return blocked('outputs', 'Outputs', `${output.title} needs valid dimensions.`, `Configure ${output.title}`);
     }
     const transform = transformForOutput(graph, output);
-    const connected = graph.edges.some((edge) => (
-      edge.target.nodeId === output.id && (artDirectionIds.has(edge.source.nodeId) || edge.source.nodeId === transform?.id)
+    const connected = Boolean(resolveWorkflowCampaignPath(graph, { outputNodeId: output.id })) || graph.edges.some((edge) => (
+      edge.target.nodeId === output.id && artDirectionIds.has(edge.source.nodeId)
     ));
     if (!connected) {
       return blocked('outputs', 'Outputs', `${output.title} is not connected to Art Direction.`, `Reconnect ${output.title}`);
@@ -181,11 +187,8 @@ function transformReadiness(
     && artDirectionIds.has(edge.source.nodeId)
   ));
   const hasResult = graph.edges.some((edge) => (
-    edge.source.nodeId === transform.id
-    && edge.source.portId === 'result'
-    && edge.target.nodeId === output.id
-    && edge.target.portId === 'source'
-  ));
+    edge.source.nodeId === transform.id && edge.source.portId === 'result'
+  )) && Boolean(resolveWorkflowCampaignPath(graph, { outputNodeId: output.id, transformNodeId: transform.id }));
   if (textConfig(transform, 'capability') !== 'generate' || !hasSource || !hasResult) {
     return blocked(
       'transform',
@@ -195,6 +198,32 @@ function transformReadiness(
     );
   }
   return complete('transform', 'Generate Transform', `${transform.title} is configured for ${output.title}.`);
+}
+
+function reviewReadiness(
+  graph: WorkflowGraphV2,
+  output: WorkflowNodeV2,
+  options: WorkflowReadinessOptions,
+): WorkflowReadinessItem | null {
+  const path = resolveWorkflowCampaignPath(graph, { outputNodeId: output.id });
+  if (!path?.reviewNodeId || options.allowUnpromotedReview) return null;
+  const resolution = options.reviewResolutions?.[path.reviewNodeId]
+    ?? (options.requireVerifiedReview
+      ? {
+          state: 'blocked' as const,
+          reviewNodeId: path.reviewNodeId,
+          transformNodeId: path.transformNodeId,
+          outputNodeId: path.outputNodeId,
+          reason: {
+            code: 'PROMOTED_OUTPUT_UNAVAILABLE' as const,
+            message: 'The promoted candidate has not been verified against the current workflow and project.',
+            action: 'Wait for Review verification or inspect the Review node',
+          },
+        }
+      : resolveWorkflowReviewTopology(graph, { reviewNodeId: path.reviewNodeId }));
+  return resolution.state === 'ready'
+    ? complete('review', 'Concept review', 'A promoted candidate is ready for downstream use.')
+    : blocked('review', 'Concept review', resolution.reason.message, resolution.reason.action);
 }
 
 function providerReadiness(
@@ -260,6 +289,7 @@ export function workflowReadiness(
     ? transformReadiness(graph, targetOutput, Boolean(options.targetNodeId))
     : null;
   const provider = targetOutput ? providerReadiness(targetOutput, graph, options) : null;
+  const review = targetOutput ? reviewReadiness(graph, targetOutput, options) : null;
   const items: WorkflowReadinessItem[] = [
     options.desktop
       ? complete('desktop', 'Desktop app', 'Workflow generation is available.')
@@ -274,6 +304,7 @@ export function workflowReadiness(
       : blocked('art-direction', 'Art direction', 'Add composition, lighting, colour, or style guidance.', 'Add art-direction guidance'),
     ...(transform ? [transform] : []),
     ...(provider ? [provider] : []),
+    ...(review ? [review] : []),
     outputReadiness(graph, options.targetNodeId),
   ];
   const nextAction = items.find((item) => item.status === 'blocked') ?? null;

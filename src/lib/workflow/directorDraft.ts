@@ -169,6 +169,7 @@ export interface WorkflowDirectorUnsupportedCapability {
 export interface WorkflowDirectorProposal {
   draft: WorkflowDirectorGraphDraft;
   graph: WorkflowGraphV2;
+  readonly validationContext: WorkflowDirectorContext;
   summary: string;
   nodes: readonly { id: string; type: CreatorNodeType; title: string }[];
   requirements: readonly WorkflowDirectorRequirement[];
@@ -195,8 +196,65 @@ const nodeSettings: Readonly<Record<CreatorNodeType, readonly string[]>> = {
   output: ['width', 'height'],
 };
 
+const trustedWorkflowDirectorProposals = new WeakSet<WorkflowDirectorProposal>();
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function snapshotPlainData(
+  value: unknown,
+  path: string,
+  ancestors = new Set<object>(),
+): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error(`${path} must contain finite plain-data numbers.`);
+    return value;
+  }
+  if (typeof value !== 'object') throw new Error(`${path} must contain only plain JSON data.`);
+  if (ancestors.has(value)) throw new Error(`${path} must not contain cycles.`);
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        throw new Error(`${path} must use a plain Array.`);
+      }
+      const keys = Reflect.ownKeys(value);
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+      const length = lengthDescriptor && 'value' in lengthDescriptor ? lengthDescriptor.value : -1;
+      if (!Number.isSafeInteger(length) || length < 0 || length > 10_000) {
+        throw new Error(`${path}.length must be a bounded safe integer.`);
+      }
+      if (keys.some((key) => key !== 'length' && (
+        typeof key !== 'string' || !/^(?:0|[1-9]\d*)$/.test(key)
+      ))) throw new Error(`${path} must not contain extra Array properties.`);
+      const snapshot: unknown[] = [];
+      for (let index = 0; index < length; index += 1) {
+        if (!keys.includes(String(index))) throw new Error(`${path} must not be sparse.`);
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor?.enumerable || !('value' in descriptor)) {
+          throw new Error(`${path}[${index}] must be an own enumerable data field.`);
+        }
+        snapshot.push(snapshotPlainData(descriptor.value, `${path}[${index}]`, ancestors));
+      }
+      return snapshot;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error(`${path} must be a plain object.`);
+    const snapshot = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') throw new Error(`${path} must not contain symbol fields.`);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !('value' in descriptor)) {
+        throw new Error(`${path}.${key} must be an own enumerable data field.`);
+      }
+      snapshot[key] = snapshotPlainData(descriptor.value, `${path}.${key}`, ancestors);
+    }
+    return snapshot;
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function cloneValue<T>(value: T): T {
@@ -564,6 +622,82 @@ function materializeDraft(
   };
 }
 
+function firstPlainDataDifference(actual: unknown, expected: unknown, path: string): string | null {
+  if (Object.is(actual, expected)) return null;
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual)
+      || Object.getPrototypeOf(actual) !== Array.prototype
+      || Object.getPrototypeOf(expected) !== Array.prototype
+      || actual.length !== expected.length) return path;
+    const actualKeys = Reflect.ownKeys(actual).filter((key) => key !== 'length').map(String).sort();
+    const expectedKeys = Reflect.ownKeys(expected).filter((key) => key !== 'length').map(String).sort();
+    if (actualKeys.join('\u0000') !== expectedKeys.join('\u0000')) return path;
+    for (let index = 0; index < expected.length; index += 1) {
+      const actualDescriptor = Object.getOwnPropertyDescriptor(actual, String(index));
+      const expectedDescriptor = Object.getOwnPropertyDescriptor(expected, String(index));
+      if (!actualDescriptor?.enumerable || !('value' in actualDescriptor)
+        || !expectedDescriptor?.enumerable || !('value' in expectedDescriptor)) return `${path}[${index}]`;
+      const difference = firstPlainDataDifference(
+        actualDescriptor.value,
+        expectedDescriptor.value,
+        `${path}[${index}]`,
+      );
+      if (difference) return difference;
+    }
+    return null;
+  }
+  if (!isRecord(expected) || !isRecord(actual)) return path;
+  const actualPrototype = Object.getPrototypeOf(actual);
+  if (actualPrototype !== Object.prototype && actualPrototype !== null) return path;
+  const actualKeys = Reflect.ownKeys(actual);
+  const expectedKeys = Reflect.ownKeys(expected);
+  if (actualKeys.some((key) => typeof key !== 'string') || expectedKeys.some((key) => typeof key !== 'string')) return path;
+  const sortedActualKeys = (actualKeys as string[]).sort();
+  const sortedExpectedKeys = (expectedKeys as string[]).sort();
+  if (sortedActualKeys.join('\u0000') !== sortedExpectedKeys.join('\u0000')) return path;
+  for (const key of sortedExpectedKeys) {
+    const actualDescriptor = Object.getOwnPropertyDescriptor(actual, key);
+    const expectedDescriptor = Object.getOwnPropertyDescriptor(expected, key);
+    if (!actualDescriptor?.enumerable || !('value' in actualDescriptor)
+      || !expectedDescriptor?.enumerable || !('value' in expectedDescriptor)) return `${path}.${key}`;
+    const difference = firstPlainDataDifference(
+      actualDescriptor.value,
+      expectedDescriptor.value,
+      `${path}.${key}`,
+    );
+    if (difference) return difference;
+  }
+  return null;
+}
+
+/**
+ * Rebuilds the only graph shape a validated Director draft is allowed to
+ * author. Comparing the complete plain-data graph, rather than maintaining a
+ * runtime-field blacklist, also fails closed for future editor/history ledgers.
+ */
+export function assertFreshWorkflowDirectorProposal(proposal: WorkflowDirectorProposal): WorkflowGraphV2 {
+  if (!isRecord(proposal) || !trustedWorkflowDirectorProposals.has(proposal)) {
+    throw new Error('This AI Director proposal does not have trusted validation identity. Draft again before accepting.');
+  }
+  const snapshot = deepFreeze(snapshotPlainData(proposal, 'proposal')) as WorkflowDirectorProposal;
+  const parsed = parseWorkflowDirectorGraphDraft(snapshot.draft);
+  if (!parsed.value) {
+    throw new Error('This AI Director proposal no longer contains a valid fresh Director draft. Draft again before accepting.');
+  }
+  const expected = buildWorkflowDirectorProposal(parsed.value, snapshot.validationContext, snapshot.graph.id);
+  const difference = firstPlainDataDifference(snapshot, expected, 'proposal');
+  if (difference) {
+    throw new Error(
+      `This AI Director proposal does not match its trusted validation result at ${difference}. `
+      + 'Draft again before accepting.',
+    );
+  }
+  if (!expected.canAccept || expected.issues.length > 0) {
+    throw new Error('This AI Director proposal cannot be accepted until every recomputed validation issue is resolved.');
+  }
+  return expected.graph;
+}
+
 function missingRequiredInputIssues(graph: WorkflowGraphV2): WorkflowDirectorProposalIssue[] {
   const issues: WorkflowDirectorProposalIssue[] = [];
   for (const node of graph.nodes) {
@@ -689,14 +823,12 @@ function freshDirectorGraphId(): string {
   return `workflow-director-${Date.now()}-${directorGraphSequence}`;
 }
 
-export function createWorkflowDirectorProposal(
-  response: unknown,
+function buildWorkflowDirectorProposal(
+  draft: WorkflowDirectorGraphDraft,
   context: WorkflowDirectorContext,
-  options: { graphId?: string } = {},
-): WorkflowDirectorProposalResult {
-  const parsed = parseWorkflowDirectorGraphDraft(response);
-  if (!parsed.value) return detachedFrozen({ proposal: null, schemaIssues: parsed.issues });
-  const graph = materializeDraft(parsed.value, options.graphId?.trim() || freshDirectorGraphId());
+  graphId: string,
+): WorkflowDirectorProposal {
+  const graph = materializeDraft(draft, graphId);
   const proposalIssues: WorkflowDirectorProposalIssue[] = [];
   let normalizedGraph = graph;
   try {
@@ -716,19 +848,46 @@ export function createWorkflowDirectorProposal(
       });
     }
   }
-  const readiness = draftRequirements(parsed.value, normalizedGraph, context);
+  const readiness = draftRequirements(draft, normalizedGraph, context);
   proposalIssues.push(...readiness.issues);
-  const proposal = detachedFrozen({
-    draft: parsed.value,
+  return detachedFrozen({
+    draft,
     graph: normalizedGraph,
-    summary: parsed.value.summary,
-    nodes: parsed.value.nodes.map((node) => ({ id: node.id, type: node.type, title: node.title })),
+    validationContext: context,
+    summary: draft.summary,
+    nodes: draft.nodes.map((node) => ({ id: node.id, type: node.type, title: node.title })),
     requirements: readiness.requirements,
     unsupportedCapabilities: readiness.unsupported,
     issues: proposalIssues,
     canAccept: proposalIssues.length === 0,
   });
-  return detachedFrozen({ proposal, schemaIssues: [] });
+}
+
+export function createWorkflowDirectorProposal(
+  response: unknown,
+  context: WorkflowDirectorContext,
+  options: { graphId?: string } = {},
+): WorkflowDirectorProposalResult {
+  let responseSnapshot: unknown;
+  let contextSnapshot: WorkflowDirectorContext;
+  try {
+    responseSnapshot = snapshotPlainData(response, 'response');
+    contextSnapshot = snapshotPlainData(context, 'context') as WorkflowDirectorContext;
+  } catch (error) {
+    return detachedFrozen({
+      proposal: null,
+      schemaIssues: [{ path: 'proposal', message: error instanceof Error ? error.message : 'Director proposal data is unsafe.' }],
+    });
+  }
+  const parsed = parseWorkflowDirectorGraphDraft(responseSnapshot);
+  if (!parsed.value) return detachedFrozen({ proposal: null, schemaIssues: parsed.issues });
+  const proposal = buildWorkflowDirectorProposal(
+    parsed.value,
+    contextSnapshot,
+    options.graphId?.trim() || freshDirectorGraphId(),
+  );
+  trustedWorkflowDirectorProposals.add(proposal);
+  return Object.freeze({ proposal, schemaIssues: Object.freeze([]) });
 }
 
 export async function draftWorkflowWithDirector(
