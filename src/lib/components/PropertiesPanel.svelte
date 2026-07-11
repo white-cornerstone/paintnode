@@ -25,20 +25,17 @@
 
   function setOpacity(value: number): void {
     if (!layer || !Number.isFinite(value)) return;
-    layer.opacity = Math.max(0, Math.min(1, Math.round(value) / 100));
-    editor.invalidate();
+    editor.setLayerOpacity(layer, Math.round(value) / 100);
   }
 
   function setBlend(value: string): void {
     if (!layer) return;
-    layer.blendMode = value as BlendMode;
-    editor.invalidate();
+    editor.setLayerBlendMode(layer, value as BlendMode);
   }
 
   function rename(value: string): void {
     if (!layer) return;
-    const name = value.trim();
-    if (name) layer.name = name;
+    editor.setLayerName(layer, value);
   }
 </script>
 

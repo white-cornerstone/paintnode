@@ -161,8 +161,7 @@
     editingId = l.id;
   }
   function commitRename(l: Layer, e: Event) {
-    const v = (e.target as HTMLInputElement).value.trim();
-    if (v) l.name = v;
+    editor.setLayerName(l, (e.target as HTMLInputElement).value);
     editingId = null;
   }
   function rowKey(row: LayerPanelRow): string {
