@@ -3,8 +3,22 @@ import test from 'node:test';
 
 import {
   readMacosStaticCodeIdentity,
+  signMacosQaAppBundle,
   verifyMacosRunningCodeIdentity,
 } from './native-qa-code-identity.mjs';
+
+test('study QA bundle receives a complete local ad-hoc signature before identity capture', () => {
+  const calls = [];
+  const appBundle = '/approved/PaintNode QA.app';
+  assert.deepEqual(signMacosQaAppBundle(appBundle, (command, args) => {
+    calls.push({ command, args });
+    return { status: 0, stdout: '', stderr: '' };
+  }), { appBundle });
+  assert.deepEqual(calls, [{
+    command: '/usr/bin/codesign',
+    args: ['--force', '--deep', '--sign', '-', appBundle],
+  }]);
+});
 
 test('static and dynamic macOS code identity use the exact approved CDHash', () => {
   const calls = [];

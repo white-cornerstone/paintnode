@@ -4,7 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join } from 'node:path';
 
 import { captureSourceState, writeQaBuildProvenance } from './native-qa-build-provenance.mjs';
-import { readMacosStaticCodeIdentity } from './native-qa-code-identity.mjs';
+import {
+  readMacosStaticCodeIdentity,
+  signMacosQaAppBundle,
+} from './native-qa-code-identity.mjs';
 import {
   applyStudySessionWindowIsolation,
   assertProviderFreeStudyPlatform,
@@ -144,6 +147,7 @@ const appBundle = join(
 );
 const executable = join(appBundle, 'Contents', 'MacOS', 'PaintNode');
 accessSync(executable, constants.X_OK);
+if (studyCapable) signMacosQaAppBundle(appBundle);
 
 const finalSourceState = captureSourceState(root);
 if (JSON.stringify(finalSourceState) !== JSON.stringify(buildSourceState)) {

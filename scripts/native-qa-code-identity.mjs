@@ -10,6 +10,16 @@ function validCodeIdentity(value) {
   return Object.freeze({ cdHash: value.cdHash });
 }
 
+export function signMacosQaAppBundle(appBundle, run = spawnSync) {
+  const result = run('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', appBundle], {
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    throw new Error(`Could not apply the complete local QA app signature: ${result.stderr || result.error}`);
+  }
+  return Object.freeze({ appBundle });
+}
+
 export function readMacosStaticCodeIdentity(executable, run = spawnSync) {
   const appBundle = dirname(dirname(dirname(executable)));
   const verify = run('codesign', ['--verify', '--strict', '--verbose=2', appBundle], {

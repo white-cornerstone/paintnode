@@ -98,5 +98,6 @@ test('study-capable build provenance is static and the build defers its main win
   assert.match(source, /args\.includes\('--study-capable'\)/);
   assert.match(source, /studyCapable[\s\S]*applyStudySessionWindowIsolation/);
   assert.match(source, /studyCapable[\s\S]*buildOnly/);
+  assert.ok(source.indexOf('signMacosQaAppBundle(appBundle)') < source.indexOf('writeQaBuildProvenance({'));
   assert.match(source, /live study sessions must launch the existing approved bundle/i);
 });
