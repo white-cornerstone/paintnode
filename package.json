@@ -22,6 +22,8 @@
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "qa:native:provider-free": "node scripts/native-qa-app.mjs --mode provider-free",
+    "qa:creator-study:setup": "node scripts/creator-study-setup.mjs",
+    "qa:creator-study:synthesize": "node scripts/creator-study-synthesis.mjs",
     "qa:provider:doctor": "node scripts/native-provider-e2e.mjs --preflight-only",
     "qa:native:provider-e2e": "node scripts/native-provider-e2e.mjs",
     "tauri:build": "tauri build",

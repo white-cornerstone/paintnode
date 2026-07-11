@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paintnode.com/schemas/creative-blueprint-study-input-v1.json",
+  "title": "De-identified Creative Blueprint study input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "participants", "findings", "recruitmentDecisionDocumented", "configuredProviderEvidenceRecorded", "requiredSignoffsRecorded", "outstandingNonBlockingActions"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "participants": { "type": "array", "maxItems": 99, "items": { "$ref": "#/$defs/participant" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "recruitmentDecisionDocumented": { "type": "boolean" },
+    "configuredProviderEvidenceRecorded": { "type": "boolean" },
+    "requiredSignoffsRecorded": { "type": "boolean" },
+    "outstandingNonBlockingActions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  },
+  "$defs": {
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "valid", "invalidReasonCategory", "multiFormatRegular", "aiExperience", "keyboardOrAccessibilityCoverage", "tasks"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^P(?:0[1-9]|[1-9][0-9])$" },
+        "valid": { "type": "boolean" },
+        "invalidReasonCategory": { "type": ["string", "null"], "enum": [null, "withdrawn-consent", "wrong-or-unusable-build", "provider-invocation", "prior-exposure", "facilitator-deviation"] },
+        "multiFormatRegular": { "type": "boolean" },
+        "aiExperience": { "enum": ["never", "occasional", "monthly", "weekly", "daily"] },
+        "keyboardOrAccessibilityCoverage": { "type": "boolean" },
+        "tasks": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "$ref": "#/$defs/task" } }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "outcome", "seconds", "neutralProbes", "directAssists", "wrongTurns", "repeatedActions", "errorLoops", "recoveryAttempts", "seq", "acceptedWorkPreserved"],
+      "properties": {
+        "task": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "outcome": { "enum": ["unaided success", "assisted success", "failure", "not attempted"] },
+        "seconds": { "type": ["number", "null"], "minimum": 0 },
+        "neutralProbes": { "type": "integer", "minimum": 0 },
+        "directAssists": { "type": "integer", "minimum": 0 },
+        "wrongTurns": { "type": "integer", "minimum": 0 },
+        "repeatedActions": { "type": "integer", "minimum": 0 },
+        "errorLoops": { "type": "integer", "minimum": 0 },
+        "recoveryAttempts": { "type": "integer", "minimum": 0 },
+        "seq": { "type": ["integer", "null"], "minimum": 1, "maximum": 7 },
+        "acceptedWorkPreserved": { "type": ["boolean", "null"] }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "participantIds", "category", "resolved", "traceable"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^CB-[1-9][0-9]*$" },
+        "severity": { "enum": ["S0", "S1", "S2", "S3", "S4"] },
+        "participantIds": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^P(?:0[1-9]|[1-9][0-9])$" }, "uniqueItems": true },
+        "category": { "enum": ["privacy", "data-integrity", "wrong-lineage", "accepted-direction", "editor-return", "save-reopen", "keyboard-accessibility", "provider-invocation", "critical-task-impossible", "required-input-comprehension", "copy-clarity", "navigation-discovery", "recovery-clarity", "repeated-error-burden", "performance"] },
+        "resolved": { "type": "boolean" },
+        "traceable": { "type": "boolean" },
+        "exceptionApproved": { "type": "boolean" },
+        "exceptionRationaleRecorded": { "type": "boolean" },
+        "blocksExit": { "type": "boolean" }
+      }
+    }
+  }
+}

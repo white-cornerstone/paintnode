@@ -12,6 +12,13 @@ This document is an execution package, not study evidence. The study is not
 complete until 6–8 valid sessions have actually occurred and the de-identified
 synthesis has been reviewed. Empty templates, rehearsals, automated tests, AI
 summaries, and facilitator predictions never count as participant results.
+Real sessions remain required; this operational package cannot satisfy the gate.
+
+Use the copyable templates, Product materials, privacy boundary, setup verifier,
+and deterministic synthesis calculator in
+[`creator-study/README.md`](creator-study/README.md). Never complete private
+templates inside the repository: copy them to the approved restricted research
+location first.
 
 ## Research questions
 
@@ -106,7 +113,10 @@ answer is explicitly `yes`. A participant who declines recording may still take
 part with written notes. Stop recording and the session immediately if
 participation consent is withdrawn.
 
-Use participant IDs `P01`–`P08`. Raw recordings and identifiable notes stay in
+Assign participant IDs sequentially from `P01`; replacements and invalid
+sessions continue with `P09` and above rather than reusing a code. The valid
+cohort remains 6–8 sessions even when the total recruitment record is larger.
+Raw recordings and identifiable notes stay in
 the approved restricted research location, never in the Git repository. Access
 is limited to the study owner and the named observers recorded before
 recruitment. De-identify working notes under the participant code as soon as
@@ -143,7 +153,15 @@ invalid plus a severity-0 safety finding.
 Before the participant arrives, verify the build and failure controls in a
 separate rehearsal folder. Delete the rehearsal project. Do not pre-import the
 Product, pre-create Campaign Composer, or leave a workflow open in the session
-folder.
+folder. Run `npm run qa:creator-study:setup` with the approved SHA, built app
+bundle, empty participant project, and deleted rehearsal path as documented in
+the operations runbook. The verifier rejects dirty source, stale bundles,
+executable fingerprint drift, and symlink aliases into the repository. The
+verifier does not replace the visible rehearsal.
+
+Use committed **Product A** for Task 1. Keep **Product B** hidden until Task 6.
+Their task assignments, dimensions, provenance, and hashes are pinned in
+`creator-study/materials/manifest.json`.
 
 ## Session timing
 
@@ -406,6 +424,25 @@ S2 findings may block when frequency or combined burden causes a threshold miss.
 S3/S4 findings normally enter the backlog. Re-test every fixed S0/S1 with affected
 tasks before declaring the gate met.
 
+### Recommendation mapping
+
+- `insufficient evidence`: fewer than six valid sessions, incomplete or
+  untraceable evidence, missing required cohort coverage without a documented
+  recruitment decision, missing values needed for a threshold, missing required
+  role sign-offs, or missing configured-provider evidence;
+- `block`: evidence is sufficient to decide, but any threshold or blocker rule
+  fails;
+- `conditional`: no exit blocker remains, but named non-blocking actions or
+  re-tests remain. A conditional result never closes issue #85;
+- `pass`: 6–8 valid real sessions, complete traceability, cohort coverage or an
+  approved recruitment decision, every threshold, no unresolved blocker,
+  configured-provider evidence, and all required role sign-offs are complete.
+
+Generate calculations from a de-identified schema-valid input with
+`npm run qa:creator-study:synthesize -- --input PATH`. Review the output against
+private source records; the calculator cannot make qualitative or privacy
+decisions for the study team.
+
 ## Per-session observation template
 
 Copy this section for each real session in the approved research location. Do
@@ -467,9 +504,12 @@ not commit identifiable raw notes.
 - Facilitator deviations or technical incidents:
 ```
 
-## Study synthesis template
+## Private working synthesis template
 
-Complete this only from the real session records.
+Complete this only from the real session records and only in approved private
+storage. The repository-safe decision record is
+`creator-study/templates/de-identified-study-decision.md`; it deliberately
+excludes the private fields below.
 
 ```markdown
 # Creative Blueprint creator study synthesis

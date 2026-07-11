@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "repositoryAllowed": [
+    "approved build Git SHA and QA bundle identity",
+    "Product fixture labels, dimensions, licenses, and hashes",
+    "participant codes without an identity mapping",
+    "eligibility and cohort buckets without raw answers",
+    "aggregate task metrics with counts and denominators",
+    "de-identified finding IDs and paraphrased evidence",
+    "severity counts and blocker decisions",
+    "role-based sign-offs without personal names",
+    "retention completion status without storage metadata"
+  ],
+  "privateOnly": [
+    "participant name and contact or scheduling details",
+    "participant code mapping to identity",
+    "study owner and observer names",
+    "approved storage path or internal storage reference",
+    "consent answers tied to a person",
+    "raw screener answers",
+    "accommodation or medical details",
+    "recordings, screens, audio, and raw notes",
+    "raw or potentially identifying quotes",
+    "intervention and session logs with identifying timestamps or paths",
+    "retention and deletion ledger",
+    "access-control evidence and exceptions"
+  ]
+}
