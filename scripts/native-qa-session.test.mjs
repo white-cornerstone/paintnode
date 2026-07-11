@@ -5,26 +5,31 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  abortStudySessionWithoutNativeCleanup,
   applyStudySessionWindowIsolation,
   assertProviderFreeStudyPlatform,
   createFreshProviderFreeStudySession,
+  markStudySessionLaunchAttempted,
   readProviderFreeStudySession,
   resolveProviderFreeStudySession,
   providerFreeStudyProfileEnvironment,
   prepareStudySessionCleanup,
   studySessionBootEvidencePath,
+  studySessionConsumeLockPath,
   verifyAndConsumeStudySessionBoot,
   verifyAndFinalizeStudySessionCleanup,
   studySessionBuildEvidence,
+  studySessionBuildOnlyEvidence,
   writeProviderFreeStudySession,
 } from './native-qa-session.mjs';
+import { createMemoryStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
 
 const FIRST_UUID = '00112233-4455-4677-8899-aabbccddeeff';
 const SECOND_UUID = 'ffeeddcc-bbaa-4988-8776-554433221100';
 
 function boot(session, statePath) {
   writeFileSync(studySessionBootEvidencePath(statePath), JSON.stringify({
-    version: 2,
+    version: 3,
     event: 'app-boot',
     profileSha256: session.profileSha256,
     bootNonceSha256: session.bootNonceSha256,
@@ -60,7 +65,7 @@ test('resume reads the exact profile while build evidence omits the raw identifi
   const freshEvidence = studySessionBuildEvidence(session, 'fresh');
   const resumeEvidence = studySessionBuildEvidence(resumed, 'resume');
   assert.deepEqual(freshEvidence, {
-    version: 2,
+    version: 3,
     isolatedProfile: true,
     launchIntent: 'fresh',
     profileSha256: session.profileSha256,
@@ -81,18 +86,20 @@ test('session state rejects malformed or mismatched profile evidence', () => {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-session-invalid-'));
   const statePath = join(root, 'session.json');
   writeFileSync(statePath, JSON.stringify({
-    version: 2,
+    version: 3,
     dataStoreIdentifier: Array(16).fill(0),
     profileSha256: 'f'.repeat(64),
-    bootNonce: 'a'.repeat(64), bootNonceSha256: 'b'.repeat(64), setupConsumed: false,
+    bootNonce: 'a'.repeat(64), bootNonceSha256: 'b'.repeat(64),
+    launchAttempted: false, setupConsumed: false,
   }));
   assert.throws(() => readProviderFreeStudySession(statePath), /fingerprint/i);
 
   writeFileSync(statePath, JSON.stringify({
-    version: 2,
+    version: 3,
     dataStoreIdentifier: Array(15).fill(0),
     profileSha256: 'f'.repeat(64),
-    bootNonce: 'a'.repeat(64), bootNonceSha256: 'b'.repeat(64), setupConsumed: false,
+    bootNonce: 'a'.repeat(64), bootNonceSha256: 'b'.repeat(64),
+    launchAttempted: false, setupConsumed: false,
   }));
   assert.throws(() => readProviderFreeStudySession(statePath), /16 bytes/i);
 });
@@ -114,6 +121,7 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   const fresh = resolveProviderFreeStudySession({
     mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
   });
+  markStudySessionLaunchAttempted(statePath);
   assert.throws(
     () => resolveProviderFreeStudySession({ mode: 'provider-free', fresh: true, statePath }),
     /prior.*finalized/i,
@@ -121,9 +129,18 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   boot(fresh.session, statePath);
   assert.deepEqual(verifyAndConsumeStudySessionBoot({
     statePath, profileSha256: fresh.session.profileSha256,
-  }), { appBootObserved: true, setupEvidenceConsumed: true });
+    consumptionAnchor: createMemoryStudySessionConsumptionAnchor(),
+  }), {
+    appBootObserved: true,
+    setupEvidenceConsumed: true,
+    monotonicAnchorRecorded: true,
+  });
   assert.throws(
-    () => verifyAndConsumeStudySessionBoot({ statePath, profileSha256: fresh.session.profileSha256 }),
+    () => verifyAndConsumeStudySessionBoot({
+      statePath,
+      profileSha256: fresh.session.profileSha256,
+      consumptionAnchor: createMemoryStudySessionConsumptionAnchor([fresh.session.profileSha256]),
+    }),
     /already been consumed/i,
   );
   const resume = resolveProviderFreeStudySession({ mode: 'provider-free', resume: true, statePath });
@@ -133,34 +150,123 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   assert.equal(resume.session.setupConsumed, true);
 });
 
-test('build-only cannot produce boot evidence and cleanup finalization releases the next session', () => {
+test('snapshot rollback cannot replay consumption outside the monotonic single-Mac anchor', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-rollback-'));
+  const statePath = join(root, 'session.json');
+  const anchor = createMemoryStudySessionConsumptionAnchor();
+  const fresh = resolveProviderFreeStudySession({
+    mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
+  });
+  markStudySessionLaunchAttempted(statePath);
+  boot(fresh.session, statePath);
+  const stateSnapshot = readFileSync(statePath);
+  const bootSnapshot = readFileSync(studySessionBootEvidencePath(statePath));
+  verifyAndConsumeStudySessionBoot({
+    statePath, profileSha256: fresh.session.profileSha256, consumptionAnchor: anchor,
+  });
+  writeFileSync(statePath, stateSnapshot);
+  writeFileSync(studySessionBootEvidencePath(statePath), bootSnapshot);
+  assert.throws(() => verifyAndConsumeStudySessionBoot({
+    statePath, profileSha256: fresh.session.profileSha256, consumptionAnchor: anchor,
+  }), /monotonic single-Mac anchor.*already consumed/i);
+});
+
+test('build-only allocates no live state and unlaunched failure can be aborted', () => {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-lifecycle-'));
+  const statePath = join(root, 'session.json');
+  const buildOnly = resolveProviderFreeStudySession({
+    mode: 'provider-free', fresh: true, buildOnly: true, statePath,
+  });
+  assert.deepEqual(buildOnly, { session: null, launchIntent: 'build-only' });
+  assert.deepEqual(studySessionBuildOnlyEvidence(), {
+    version: 3, isolatedProfile: false, launchIntent: 'build-only',
+  });
+  assert.equal(existsSync(statePath), false);
+
+  const fresh = resolveProviderFreeStudySession({
+    mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
+  });
+  const prepared = prepareStudySessionCleanup(statePath, {
+    intent: 'abort', randomBytes: () => Buffer.alloc(32, 7),
+  });
+  assert.equal(prepared.requiresNativeCleanup, false);
+  assert.deepEqual(abortStudySessionWithoutNativeCleanup(statePath, prepared), {
+    profileSha256: fresh.session.profileSha256,
+    dataStoreRemoved: false,
+    dataStoreCreated: false,
+    aborted: true,
+    finalized: true,
+  });
+  assert.equal(existsSync(statePath), false);
+});
+
+test('pre-setup launch abort requires native data-store cleanup and releases the next session', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-pre-setup-abort-'));
   const statePath = join(root, 'session.json');
   const fresh = resolveProviderFreeStudySession({
     mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
   });
-  assert.equal(studySessionBuildEvidence(fresh.session, 'build-only').launchIntent, 'build-only');
-  assert.throws(
-    () => verifyAndConsumeStudySessionBoot({ statePath, profileSha256: fresh.session.profileSha256 }),
-    /boot evidence is missing/i,
-  );
+  markStudySessionLaunchAttempted(statePath);
   boot(fresh.session, statePath);
-  verifyAndConsumeStudySessionBoot({ statePath, profileSha256: fresh.session.profileSha256 });
-  const cleanup = prepareStudySessionCleanup(statePath, { randomBytes: () => Buffer.alloc(32, 7) });
+  const cleanup = prepareStudySessionCleanup(statePath, {
+    intent: 'abort', randomBytes: () => Buffer.alloc(32, 7),
+  });
+  assert.equal(cleanup.requiresNativeCleanup, true);
+  writeFileSync(studySessionConsumeLockPath(statePath), 'stale setup crash lock');
   writeFileSync(cleanup.evidencePath, JSON.stringify({
-    version: 2,
+    version: 3,
     event: 'profile-removed',
     profileSha256: fresh.session.profileSha256,
     cleanupNonceSha256: cleanup.cleanupNonceSha256,
   }));
   assert.deepEqual(verifyAndFinalizeStudySessionCleanup(statePath, cleanup), {
-    profileSha256: fresh.session.profileSha256, dataStoreRemoved: true, finalized: true,
+    profileSha256: fresh.session.profileSha256,
+    dataStoreRemoved: true,
+    dataStoreRemovalVerified: true,
+    aborted: true,
+    finalized: true,
   });
   assert.equal(existsSync(statePath), false);
+  assert.equal(existsSync(studySessionConsumeLockPath(statePath)), false);
   const next = resolveProviderFreeStudySession({
     mode: 'provider-free', fresh: true, statePath, randomUUID: () => SECOND_UUID,
   });
   assert.notEqual(next.session.profileSha256, fresh.session.profileSha256);
+});
+
+test('consumed same-session resume ends through normal verified finalization', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-finalize-'));
+  const statePath = join(root, 'session.json');
+  const fresh = resolveProviderFreeStudySession({
+    mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
+  });
+  markStudySessionLaunchAttempted(statePath);
+  boot(fresh.session, statePath);
+  verifyAndConsumeStudySessionBoot({
+    statePath,
+    profileSha256: fresh.session.profileSha256,
+    consumptionAnchor: createMemoryStudySessionConsumptionAnchor(),
+  });
+  assert.equal(resolveProviderFreeStudySession({
+    mode: 'provider-free', resume: true, statePath,
+  }).launchIntent, 'resume');
+  const cleanup = prepareStudySessionCleanup(statePath, {
+    intent: 'finalize', randomBytes: () => Buffer.alloc(32, 9),
+  });
+  assert.equal(cleanup.requiresNativeCleanup, true);
+  writeFileSync(cleanup.evidencePath, JSON.stringify({
+    version: 3,
+    event: 'profile-removed',
+    profileSha256: fresh.session.profileSha256,
+    cleanupNonceSha256: cleanup.cleanupNonceSha256,
+  }));
+  assert.deepEqual(verifyAndFinalizeStudySessionCleanup(statePath, cleanup), {
+    profileSha256: fresh.session.profileSha256,
+    dataStoreRemoved: true,
+    dataStoreRemovalVerified: true,
+    aborted: false,
+    finalized: true,
+  });
 });
 
 test('study isolation fails closed where persistent WebKit data stores are unavailable', () => {

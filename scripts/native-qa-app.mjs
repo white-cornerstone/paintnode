@@ -7,10 +7,12 @@ import { captureSourceState, writeQaBuildProvenance } from './native-qa-build-pr
 import {
   applyStudySessionWindowIsolation,
   assertProviderFreeStudyPlatform,
+  markStudySessionLaunchAttempted,
   providerFreeStudyBootEnvironment,
   providerFreeStudyProfileEnvironment,
   resolveProviderFreeStudySession,
   studySessionBuildEvidence,
+  studySessionBuildOnlyEvidence,
 } from './native-qa-session.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,15 +46,15 @@ const studySessionLaunch = resolveProviderFreeStudySession({
   mode,
   fresh: freshStudySession,
   resume: resumeStudySession,
+  buildOnly,
   statePath: studySessionPath,
 });
 const studySession = studySessionLaunch?.session ?? null;
-const studySessionEvidence = studySessionLaunch
-  ? studySessionBuildEvidence(
-    studySessionLaunch.session,
-    buildOnly ? 'build-only' : studySessionLaunch.launchIntent,
-  )
-  : null;
+const studySessionEvidence = studySessionLaunch?.launchIntent === 'build-only'
+  ? studySessionBuildOnlyEvidence()
+  : studySessionLaunch
+    ? studySessionBuildEvidence(studySessionLaunch.session, studySessionLaunch.launchIntent)
+    : null;
 if (studySession) {
   const version = spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8' });
   if (version.status !== 0) throw new Error(`Could not read macOS version: ${version.stderr || version.error}`);
@@ -151,6 +153,9 @@ if (buildOnly) {
 }
 
 console.log(`[native-qa] launching ${executable}`);
+if (studySessionLaunch?.launchIntent === 'fresh') {
+  markStudySessionLaunchAttempted(studySessionPath);
+}
 const app = spawnSync(executable, ['-ApplePersistenceIgnoreState', 'YES'], {
   cwd: root,
   env,

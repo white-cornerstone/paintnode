@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 
 import { captureSourceState, readQaBuildProvenance, sha256File } from './native-qa-build-provenance.mjs';
 import { verifyAndConsumeStudySessionBoot } from './native-qa-session.mjs';
+import { createMacKeychainStudySessionConsumptionAnchor } from './native-qa-session-anchor.mjs';
 
 export const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.free';
 export const EXPECTED_BUNDLE_NAME = 'PaintNode Blueprint QA — Provider Free';
@@ -112,6 +113,7 @@ export function verifyStudySetup({
   visibleEmptyStateAttested,
   macosMajorVersion,
   studySessionStatePath,
+  studySessionConsumptionAnchor,
 }) {
   if (!projectDir || !rehearsalDir) throw new Error('Project and rehearsal paths are required.');
   if (![projectDir, rehearsalDir, fixtureManifest].every(isAbsolute)) {
@@ -142,7 +144,7 @@ export function verifyStudySetup({
     throw new Error('Provider Free app executable fingerprint does not match its build provenance.');
   }
   const studySession = appBuild.studySession;
-  if (!studySession || studySession.version !== 2 || studySession.isolatedProfile !== true
+  if (!studySession || studySession.version !== 3 || studySession.isolatedProfile !== true
     || !/^[a-f0-9]{64}$/.test(studySession.profileSha256 || '')) {
     throw new Error('Provider Free app does not use a valid isolated study profile. Start it with --fresh-study-session.');
   }
@@ -176,6 +178,7 @@ export function verifyStudySetup({
   const launchEvidence = verifyAndConsumeStudySessionBoot({
     statePath: studySessionStatePath,
     profileSha256: studySession.profileSha256,
+    consumptionAnchor: studySessionConsumptionAnchor,
   });
 
   return Object.freeze({
@@ -250,6 +253,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       visibleEmptyStateAttested: args.includes('--visible-empty-state-attested'),
       macosMajorVersion: readMacosMajorVersion(),
       studySessionStatePath: join(scriptRoot, 'src-tauri', '.provider-free-study-session.json'),
+      studySessionConsumptionAnchor: createMacKeychainStudySessionConsumptionAnchor(),
       ...app,
     });
     process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);

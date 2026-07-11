@@ -59,14 +59,20 @@ Neither flag is accepted by Provider E2E, and normal PaintNode is unchanged.
 
 Fresh setup is bound to one native boot nonce. `--build-only` deliberately
 records `launchIntent: build-only` and cannot create boot evidence or a ready
-setup receipt. After setup consumes the real app-boot evidence once, replaying
-that profile for another participant fails.
+setup receipt. It allocates no live profile state. After setup consumes the real
+app-boot evidence once, a create-only marker in the macOS login Keychain keeps
+that consumption monotonic even if the ignored state/evidence files are restored
+from a snapshot; replaying that profile for another participant fails.
 
 After same-session save/reopen is complete, close the app and remove the custom
 WebKit data store with `npm run qa:creator-study:finalize-session`. The command
 verifies cleanup evidence written only after Tauri's `remove_data_store`
 completes, prints a path-free fingerprint receipt, and removes the raw local
 profile handle. A new fresh session is blocked while an earlier handle remains.
+For a failed build or any abandoned pre-setup phase, use
+`npm run qa:creator-study:abort-session`. Never-launched state is released
+without a false removal claim; after a launch attempt, abort requires the same
+verified native data-store removal as normal finalization.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates

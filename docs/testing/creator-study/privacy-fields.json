@@ -21,7 +21,7 @@
     "facilitator, observer, technical operator, and accommodation setup assignments",
     "study owner and observer names",
     "approved storage path or internal storage reference",
-    "raw Provider Free WebKit data-store identifier, boot nonce, cleanup nonce, and lifecycle evidence paths",
+    "raw Provider Free WebKit data-store identifier, boot nonce, cleanup nonce, lifecycle evidence paths, and macOS Keychain consumption markers",
     "consent answers tied to a person",
     "raw screener answers",
     "accommodation or medical details",

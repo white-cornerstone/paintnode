@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  abortStudySessionWithoutNativeCleanup,
   prepareStudySessionCleanup,
   providerFreeStudyProfileEnvironment,
   verifyAndFinalizeStudySessionCleanup,
@@ -11,9 +12,15 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const statePath = join(root, 'src-tauri', '.provider-free-study-session.json');
-const prepared = prepareStudySessionCleanup(statePath);
-if (!prepared.session.setupConsumed) {
-  throw new Error('Only a launched session with consumed setup evidence can be finalized.');
+const intent = process.argv.slice(2).includes('--abort') ? 'abort' : 'finalize';
+const prepared = prepareStudySessionCleanup(statePath, { intent });
+if (!prepared.requiresNativeCleanup) {
+  process.stdout.write(`${JSON.stringify(
+    abortStudySessionWithoutNativeCleanup(statePath, prepared),
+    null,
+    2,
+  )}\n`);
+  process.exit(0);
 }
 const executable = join(
   root,

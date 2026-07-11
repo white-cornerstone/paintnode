@@ -106,6 +106,14 @@ the Provider Free executable has actually created the isolated window, and
 `--build-only` bundle, missing boot marker, stale marker, or second setup attempt
 for the same generation fails closed; the manual visible-empty attestation is
 recorded separately and is never treated as machine-observed UI evidence.
+Consumption is also recorded create-once in the macOS login Keychain as a
+monotonic single-Mac anchor. Restoring the ignored state and boot-evidence files
+cannot restore that marker or make the same profile consumable again. Do not
+delete those Keychain markers during the study.
+
+`--fresh-study-session --build-only` writes non-live `build-only` provenance but
+does not allocate a profile, nonce, state file, or Keychain marker. It is safe
+for build validation, but the resulting bundle cannot pass participant setup.
 
 ## After every session
 
@@ -123,6 +131,18 @@ Copy that receipt to the private session log. A new `--fresh-study-session`
 fails closed until the prior session is finalized. The app profile is transient
 operational state and is never retained as research evidence; apply approved
 retention rules to the participant project/evidence instead.
+
+If the build fails, the first app launch fails, PaintNode is closed before setup,
+or the session is abandoned before setup evidence is consumed, run:
+
+```sh
+npm run qa:creator-study:abort-session
+```
+
+An abort before any launch attempt releases the unused handle without claiming
+a data store existed. Once launch was attempted, abort uses the same native
+WebKit removal and verified cleanup evidence as finalization. Failure retains
+the raw handle and blocks the next fresh session; manual deletion is unsupported.
 
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either

@@ -182,9 +182,11 @@ verifier rejects generic or resumed profiles, dirty source, stale bundles,
 executable fingerprint drift, and symlink aliases into the repository. Its
 receipt carries only the isolated profile's one-way fingerprint, never its raw
 identifier. It requires native app-boot evidence, consumes that generation once,
-and records the operator's visible-empty attestation separately. Build-only,
-unlaunched, stale, and replayed generations fail closed. The verifier does not
-replace the visible rehearsal.
+records that consumption in a separately protected monotonic macOS Keychain
+anchor, and records the operator's visible-empty attestation separately.
+Restoring local lifecycle-file snapshots cannot replay the Keychain marker.
+Build-only allocates no live session state; unlaunched, stale, and replayed
+generations fail closed. The verifier does not replace the visible rehearsal.
 
 After Task 8 and after PaintNode is closed, run
 `npm run qa:creator-study:finalize-session`. Native cleanup must remove the
@@ -193,6 +195,10 @@ path-free cleanup receipt to the private session record. The next participant's
 fresh profile cannot be created until this finalization succeeds. Never retain
 the app profile as research evidence; retain or delete participant projects and
 approved evidence under the study's separate retention rule.
+If a build fails or a session ends before setup consumption, run
+`npm run qa:creator-study:abort-session`. An unlaunched allocation is released
+without claiming native cleanup; after any launch attempt, abort must complete
+the same verified WebKit data-store removal before another fresh session.
 
 Use committed **Product A** for Task 1. Keep **Product B** hidden until Task 6.
 Their task assignments, dimensions, provenance, and hashes are pinned in

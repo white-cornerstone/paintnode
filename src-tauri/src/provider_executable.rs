@@ -792,7 +792,7 @@ pub(crate) fn write_study_lifecycle_evidence(
         "cleanupNonceSha256"
     };
     let mut payload = serde_json::Map::from_iter([
-        ("version".into(), serde_json::json!(2)),
+        ("version".into(), serde_json::json!(3)),
         ("event".into(), serde_json::json!(event)),
         ("profileSha256".into(), serde_json::json!(profile_sha256)),
     ]);
@@ -914,7 +914,7 @@ mod tests {
         let evidence: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&request.path).expect("read boot evidence"))
                 .expect("parse boot evidence");
-        assert_eq!(evidence["version"], 2);
+        assert_eq!(evidence["version"], 3);
         assert_eq!(evidence["event"], "app-boot");
         assert!(evidence["profileSha256"]
             .as_str()
