@@ -81,7 +81,10 @@ Neither flag is accepted by Provider E2E, and normal PaintNode is unchanged.
 
 Fresh setup is bound to one native boot nonce and the immutable static build
 identity. `--study-capable --build-only` cannot create boot evidence or a ready
-setup receipt and allocates no live profile state. After setup consumes the real
+`technicalSetupReady: true` receipt. The technical-only receipt explicitly does
+not evaluate or authorize recruitment, consent, recording, facilitator
+calibration, or accessibility-support handoff. It allocates no live profile
+state. After setup consumes the real
 app-boot evidence once, a create-only marker in the macOS login Keychain keeps
 that consumption monotonic even if the ignored state/evidence files are restored
 from a snapshot; replaying that profile for another participant fails.

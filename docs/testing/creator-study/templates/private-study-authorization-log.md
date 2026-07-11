@@ -4,6 +4,10 @@
 > pull request, chat, or participant project. Copy it to the approved restricted
 > research location first.
 
+This log is the authoritative source for the milestone decision owner and date,
+retention rule or approved exception, and deletion ledger. Session records must
+reference this log and must not independently redefine those dates.
+
 - Study owner:
 - Named raw-evidence observers:
 - Approved private storage path:
@@ -14,6 +18,7 @@
 - Default deletion due date (decision + 30 calendar days):
 - Approved retention exception, reason, approver, disclosed date, deletion date:
 - Recruitment authorization: approved / blocked
+- Accessibility support owner: [private assignment] / not required
 - Authorization date/signature:
 
 ## Approved study build

@@ -41,10 +41,13 @@ study storage.
 2. Verify access is limited to the owner and named observers.
 3. Copy the private screener/recruitment log outside the repo. Maintain any
    participant-code-to-contact mapping there, separately from aggregate data.
-4. Confirm the decision owner/date, retention rule, and any exception before
-   consent is requested.
+4. Confirm the authorization log is the authoritative source for the decision
+   owner/date, retention rule or exception, and deletion ledger before consent
+   is requested. Every session references it instead of copying those dates.
 5. Privately assign each scheduled date/start/time zone, delivery mode,
-   facilitator, observers, technical operator, and accommodation setup. None of
+   facilitator, observers, technical operator, accommodation setup, and
+   accessibility support owner; explicitly record `not required` when no support
+   owner is needed. Complete the support handoff before the session. None of
    these assignments belong in repository-safe evidence.
 6. Verify `facilitator-hints.json` against `facilitator-hints.sha256`. Record its
    version, SHA-256, and approved Git SHA/change reference in the private sign-off.
@@ -182,11 +185,15 @@ whole study; do not delete, reset, export, or restore the
 `com.paintnode.creator-study.active-build` item. The lifecycle-consumption
 Keychain marker is separate and create-once.
 
-The receipt reports the matched approved identity, active generation, random
+The technical-only receipt reports `technicalSetupReady: true`, the matched
+approved identity, active generation, random
 non-derived approval ID, one-way profile fingerprint, native boot consumption,
 and visible-empty attestation. It omits raw profile identifiers, private anchor
 commitments, approval dates/references, paths, change reasons, ledger history,
-and storage data. It does not replace rehearsal or private authorization.
+and storage data. `studyAuthorizationEvaluated: false` is explicit: the receipt
+does not authorize recruitment, participation, recording, facilitator
+calibration, or accessibility-support assignment/handoff and does not replace
+rehearsal or the private authorization log.
 
 Static build provenance never contains participant/session state. A separate
 create-only private launch binding records the canonical preserved bundle,
@@ -196,8 +203,8 @@ fingerprints. Setup requires all three identities to match and rechecks the
 executable; resume and cleanup resolve the same preserved executable through that
 binding.
 
-The setup receipt is single-use. It reports `appBootObserved: true` only after
-the Provider Free executable has actually created the isolated window, and
+The technical setup receipt is single-use. It reports `appBootObserved: true`
+only after the Provider Free executable has actually created the isolated window, and
 `setupEvidenceConsumed: true` when that boot generation is consumed. A
 `--build-only` bundle, missing boot marker, stale marker, or second setup attempt
 for the same generation fails closed; the manual visible-empty attestation is

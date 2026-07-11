@@ -65,6 +65,18 @@ export const RECRUITMENT_EXCEPTION_IDS = Object.freeze(
   RECRUITMENT_EXCEPTION_DEFINITIONS.map(({ id }) => id),
 );
 
+export const INVALID_SESSION_REASON_DEFINITIONS = Object.freeze([
+  Object.freeze({ id: 'withdrawn-consent' }),
+  Object.freeze({ id: 'wrong-or-unusable-build' }),
+  Object.freeze({ id: 'provider-invocation' }),
+  Object.freeze({ id: 'prior-exposure' }),
+  Object.freeze({ id: 'facilitator-deviation' }),
+]);
+
+export const INVALID_SESSION_REASON_IDS = Object.freeze(
+  INVALID_SESSION_REASON_DEFINITIONS.map(({ id }) => id),
+);
+
 export function nextFacilitatorIntervention({
   instrument,
   taskNumber,
