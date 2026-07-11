@@ -9,6 +9,8 @@ use std::time::SystemTime;
 use crate::ai::apply_ai_cli_environment;
 
 const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
+const QA_PREFLIGHT_ENV: &str = "PAINTNODE_PROVIDER_QA_PREFLIGHT";
+const QA_PREFLIGHT_MARKER: &str = "provider-doctor-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Provider {
@@ -39,6 +41,14 @@ impl Provider {
             Self::Codex => "PAINTNODE_QA_CODEX_BIN",
             Self::Antigravity => "PAINTNODE_QA_ANTIGRAVITY_BIN",
             Self::Claude => "PAINTNODE_QA_CLAUDE_BIN",
+        }
+    }
+
+    fn qa_version_env(self) -> &'static str {
+        match self {
+            Self::Codex => "PAINTNODE_QA_CODEX_VERSION",
+            Self::Antigravity => "PAINTNODE_QA_ANTIGRAVITY_VERSION",
+            Self::Claude => "PAINTNODE_QA_CLAUDE_VERSION",
         }
     }
 }
@@ -293,29 +303,85 @@ fn configured_path(value: Option<String>) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn provider_e2e_preflighted_resolution(
+    provider: Provider,
+    path_value: Option<OsString>,
+    version_value: Option<OsString>,
+    marker_value: Option<OsString>,
+) -> Result<ResolvedProviderExecutable, String> {
+    if marker_value.as_deref() != Some(OsStr::new(QA_PREFLIGHT_MARKER)) {
+        return Err(format!(
+            "Provider E2E requires the successful repo provider doctor marker in {QA_PREFLIGHT_ENV}."
+        ));
+    }
+    let path = path_value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            format!(
+                "Provider E2E requires an absolute path in {}.",
+                provider.qa_path_env()
+            )
+        })?;
+    if !path.is_absolute() {
+        return Err(format!(
+            "Provider E2E path in {} must be absolute.",
+            provider.qa_path_env()
+        ));
+    }
+    let path = fs::canonicalize(&path).map_err(|error| {
+        format!(
+            "Provider E2E path in {} is unavailable: {error}",
+            provider.qa_path_env()
+        )
+    })?;
+    if !path.is_file() {
+        return Err(format!(
+            "Provider E2E path in {} must identify a file.",
+            provider.qa_path_env()
+        ));
+    }
+    let version = version_value
+        .and_then(|value| value.into_string().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && !value.chars().any(|character| character.is_control())
+        })
+        .ok_or_else(|| {
+            format!(
+                "Provider E2E requires preflighted version metadata in {}.",
+                provider.qa_version_env()
+            )
+        })?;
+
+    Ok(ResolvedProviderExecutable {
+        path: path.to_string_lossy().into_owned(),
+        version,
+    })
+}
+
 pub(crate) fn resolve_provider_executable(
     provider: Provider,
     configured: Option<String>,
     managed: Option<PathBuf>,
 ) -> Result<ResolvedProviderExecutable, String> {
     let qa_mode = std::env::var(QA_MODE_ENV).unwrap_or_default();
+    if qa_mode == "provider-e2e" {
+        return provider_e2e_preflighted_resolution(
+            provider,
+            std::env::var_os(provider.qa_path_env()),
+            std::env::var_os(provider.qa_version_env()),
+            std::env::var_os(QA_PREFLIGHT_ENV),
+        );
+    }
     let candidates = match qa_mode.as_str() {
         "provider-free" => {
             return Err(format!(
                 "{} launch is disabled in provider-free native QA mode.",
                 provider.label()
             ));
-        }
-        "provider-e2e" => {
-            let variable = provider.qa_path_env();
-            let path = std::env::var_os(variable)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .ok_or_else(|| format!("Provider E2E requires an absolute path in {variable}."))?;
-            if !path.is_absolute() {
-                return Err(format!("Provider E2E path in {variable} must be absolute."));
-            }
-            vec![path]
         }
         "" => candidate_paths(
             provider,
@@ -593,41 +659,70 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "explicit no-cost native provider E2E; run through npm run qa:native:provider-e2e"]
-    fn explicit_provider_e2e_detects_and_checks_no_cost_capabilities() {
+    #[cfg(unix)]
+    fn provider_e2e_accepts_preflighted_metadata_without_executing_the_provider() {
+        let dir = TempJobDir::new("paintnode-provider-preflight-metadata-test").expect("temp dir");
+        let provider = dir.path().join("codex");
+        let sentinel = dir.path().join("executed");
+        executable(
+            &provider,
+            &format!("touch '{}'; echo should-not-run", sentinel.display()),
+        );
+
+        let resolved = provider_e2e_preflighted_resolution(
+            Provider::Codex,
+            Some(provider.into_os_string()),
+            Some(OsString::from("codex-cli 9.8.7")),
+            Some(OsString::from("provider-doctor-v1")),
+        )
+        .expect("preflighted provider metadata");
+
+        assert_eq!(resolved.version, "codex-cli 9.8.7");
+        assert!(
+            !sentinel.exists(),
+            "Rust metadata validation must not execute the provider"
+        );
+    }
+
+    #[test]
+    fn provider_e2e_metadata_fails_closed_without_marker_absolute_path_or_version() {
+        for (path, version, marker) in [
+            (
+                Some(OsString::from("/trusted/codex")),
+                Some(OsString::from("codex-cli 1.0.0")),
+                None,
+            ),
+            (
+                Some(OsString::from("codex")),
+                Some(OsString::from("codex-cli 1.0.0")),
+                Some(OsString::from("provider-doctor-v1")),
+            ),
+            (
+                Some(OsString::from("/trusted/codex")),
+                Some(OsString::from("  ")),
+                Some(OsString::from("provider-doctor-v1")),
+            ),
+        ] {
+            assert!(
+                provider_e2e_preflighted_resolution(Provider::Codex, path, version, marker)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit no-cost provider-doctor metadata handoff; run through npm run qa:native:provider-e2e"]
+    fn explicit_provider_e2e_accepts_provider_doctor_handoff() {
         assert_eq!(std::env::var(QA_MODE_ENV).as_deref(), Ok("provider-e2e"));
 
-        for (provider, capability_args) in [
-            (Provider::Codex, vec!["login", "status"]),
-            (Provider::Antigravity, vec!["models"]),
-        ] {
+        for provider in [Provider::Codex, Provider::Antigravity] {
             let resolved = resolve_provider_executable(provider, None, None)
                 .unwrap_or_else(|error| panic!("{} detection failed: {error}", provider.label()));
             eprintln!(
-                "{} detected at {} ({})",
+                "{} accepted from provider doctor at {} ({})",
                 provider.label(),
                 resolved.path,
                 resolved.version
-            );
-
-            let mut command = Command::new(&resolved.path);
-            apply_ai_cli_environment(&mut command).args(&capability_args);
-            let output = command.output().unwrap_or_else(|error| {
-                panic!(
-                    "{} capability check could not launch: {error}",
-                    provider.label()
-                )
-            });
-            assert!(
-                output.status.success(),
-                "{} no-cost capability/auth check failed: {}",
-                provider.label(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            assert!(
-                version_line(&output).is_some(),
-                "{} capability/auth check returned no usable output",
-                provider.label()
             );
         }
     }
