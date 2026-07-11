@@ -7,6 +7,7 @@ import { captureSourceState, writeQaBuildProvenance } from './native-qa-build-pr
 import {
   applyStudySessionWindowIsolation,
   assertProviderFreeStudyPlatform,
+  providerFreeStudyBootEnvironment,
   providerFreeStudyProfileEnvironment,
   resolveProviderFreeStudySession,
   studySessionBuildEvidence,
@@ -37,6 +38,7 @@ if (!['provider-free', 'provider-e2e'].includes(mode)) {
 
 const freshStudySession = args.includes('--fresh-study-session');
 const resumeStudySession = args.includes('--resume-study-session');
+const buildOnly = args.includes('--build-only');
 const studySessionPath = join(root, 'src-tauri', '.provider-free-study-session.json');
 const studySessionLaunch = resolveProviderFreeStudySession({
   mode,
@@ -46,7 +48,10 @@ const studySessionLaunch = resolveProviderFreeStudySession({
 });
 const studySession = studySessionLaunch?.session ?? null;
 const studySessionEvidence = studySessionLaunch
-  ? studySessionBuildEvidence(studySessionLaunch.session, studySessionLaunch.launchIntent)
+  ? studySessionBuildEvidence(
+    studySessionLaunch.session,
+    buildOnly ? 'build-only' : studySessionLaunch.launchIntent,
+  )
   : null;
 if (studySession) {
   const version = spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8' });
@@ -68,6 +73,9 @@ if (mode === 'provider-e2e') {
 }
 if (studySession) {
   env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE = providerFreeStudyProfileEnvironment(studySession);
+  if (studySessionLaunch?.launchIntent === 'fresh' && !buildOnly) {
+    Object.assign(env, providerFreeStudyBootEnvironment(studySession, studySessionPath));
+  }
 }
 
 const configPath = join(root, 'src-tauri', '.tauri.qa.json');
@@ -137,12 +145,16 @@ writeQaBuildProvenance({
   studySession: studySessionEvidence,
 });
 
-if (args.includes('--build-only')) {
+if (buildOnly) {
   console.log(`[native-qa] built ${appBundle} without launching it`);
   process.exit(0);
 }
 
 console.log(`[native-qa] launching ${executable}`);
-const app = spawnSync(executable, [], { cwd: root, env, stdio: 'inherit' });
+const app = spawnSync(executable, ['-ApplePersistenceIgnoreState', 'YES'], {
+  cwd: root,
+  env,
+  stdio: 'inherit',
+});
 if (app.error) throw app.error;
 process.exit(app.status ?? 0);

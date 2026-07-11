@@ -21,6 +21,9 @@
 - Approved private storage reference:
 - Study owner and named observers:
 - Session validity: valid / invalid — category:
+- Setup receipt profile fingerprint:
+- Native app boot observed / setup evidence consumed: yes / no
+- Final cleanup receipt `dataStoreRemoved`: true / not yet complete
 
 | Task | Outcome | Seconds | Neutral probes | Direct assists | Wrong turns | Repeated actions | Error loops | Recovery attempts | SEQ 1–7 | `acceptedWorkPreserved` | Raw evidence/time reference |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |

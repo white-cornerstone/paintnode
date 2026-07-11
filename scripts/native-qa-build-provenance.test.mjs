@@ -65,4 +65,5 @@ test('native QA build writes provenance before launching the built executable', 
   assert.ok(source.indexOf('writeQaBuildProvenance({') < source.indexOf("console.log(`[native-qa] launching"));
   assert.match(source, /args\.includes\('--build-only'\)/);
   assert.ok(source.indexOf("args.includes('--build-only')") < source.indexOf("console.log(`[native-qa] launching"));
+  assert.match(source, /spawnSync\(executable, \['-ApplePersistenceIgnoreState', 'YES'\]/);
 });

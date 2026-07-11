@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,12 +11,25 @@ import {
   readProviderFreeStudySession,
   resolveProviderFreeStudySession,
   providerFreeStudyProfileEnvironment,
+  prepareStudySessionCleanup,
+  studySessionBootEvidencePath,
+  verifyAndConsumeStudySessionBoot,
+  verifyAndFinalizeStudySessionCleanup,
   studySessionBuildEvidence,
   writeProviderFreeStudySession,
 } from './native-qa-session.mjs';
 
 const FIRST_UUID = '00112233-4455-4677-8899-aabbccddeeff';
 const SECOND_UUID = 'ffeeddcc-bbaa-4988-8776-554433221100';
+
+function boot(session, statePath) {
+  writeFileSync(studySessionBootEvidencePath(statePath), JSON.stringify({
+    version: 2,
+    event: 'app-boot',
+    profileSha256: session.profileSha256,
+    bootNonceSha256: session.bootNonceSha256,
+  }));
+}
 
 test('fresh study sessions receive distinct isolated WebKit profiles', () => {
   const first = createFreshProviderFreeStudySession({ randomUUID: () => FIRST_UUID });
@@ -47,7 +60,7 @@ test('resume reads the exact profile while build evidence omits the raw identifi
   const freshEvidence = studySessionBuildEvidence(session, 'fresh');
   const resumeEvidence = studySessionBuildEvidence(resumed, 'resume');
   assert.deepEqual(freshEvidence, {
-    version: 1,
+    version: 2,
     isolatedProfile: true,
     launchIntent: 'fresh',
     profileSha256: session.profileSha256,
@@ -68,16 +81,18 @@ test('session state rejects malformed or mismatched profile evidence', () => {
   const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-session-invalid-'));
   const statePath = join(root, 'session.json');
   writeFileSync(statePath, JSON.stringify({
-    version: 1,
+    version: 2,
     dataStoreIdentifier: Array(16).fill(0),
     profileSha256: 'f'.repeat(64),
+    bootNonce: 'a'.repeat(64), bootNonceSha256: 'b'.repeat(64), setupConsumed: false,
   }));
   assert.throws(() => readProviderFreeStudySession(statePath), /fingerprint/i);
 
   writeFileSync(statePath, JSON.stringify({
-    version: 1,
+    version: 2,
     dataStoreIdentifier: Array(15).fill(0),
     profileSha256: 'f'.repeat(64),
+    bootNonce: 'a'.repeat(64), bootNonceSha256: 'b'.repeat(64), setupConsumed: false,
   }));
   assert.throws(() => readProviderFreeStudySession(statePath), /16 bytes/i);
 });
@@ -99,10 +114,53 @@ test('study isolation is opt-in for Provider Free and resumed state fails closed
   const fresh = resolveProviderFreeStudySession({
     mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
   });
+  assert.throws(
+    () => resolveProviderFreeStudySession({ mode: 'provider-free', fresh: true, statePath }),
+    /prior.*finalized/i,
+  );
+  boot(fresh.session, statePath);
+  assert.deepEqual(verifyAndConsumeStudySessionBoot({
+    statePath, profileSha256: fresh.session.profileSha256,
+  }), { appBootObserved: true, setupEvidenceConsumed: true });
+  assert.throws(
+    () => verifyAndConsumeStudySessionBoot({ statePath, profileSha256: fresh.session.profileSha256 }),
+    /already been consumed/i,
+  );
   const resume = resolveProviderFreeStudySession({ mode: 'provider-free', resume: true, statePath });
   assert.equal(fresh.launchIntent, 'fresh');
   assert.equal(resume.launchIntent, 'resume');
-  assert.deepEqual(resume.session, fresh.session);
+  assert.equal(resume.session.profileSha256, fresh.session.profileSha256);
+  assert.equal(resume.session.setupConsumed, true);
+});
+
+test('build-only cannot produce boot evidence and cleanup finalization releases the next session', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-provider-free-lifecycle-'));
+  const statePath = join(root, 'session.json');
+  const fresh = resolveProviderFreeStudySession({
+    mode: 'provider-free', fresh: true, statePath, randomUUID: () => FIRST_UUID,
+  });
+  assert.equal(studySessionBuildEvidence(fresh.session, 'build-only').launchIntent, 'build-only');
+  assert.throws(
+    () => verifyAndConsumeStudySessionBoot({ statePath, profileSha256: fresh.session.profileSha256 }),
+    /boot evidence is missing/i,
+  );
+  boot(fresh.session, statePath);
+  verifyAndConsumeStudySessionBoot({ statePath, profileSha256: fresh.session.profileSha256 });
+  const cleanup = prepareStudySessionCleanup(statePath, { randomBytes: () => Buffer.alloc(32, 7) });
+  writeFileSync(cleanup.evidencePath, JSON.stringify({
+    version: 2,
+    event: 'profile-removed',
+    profileSha256: fresh.session.profileSha256,
+    cleanupNonceSha256: cleanup.cleanupNonceSha256,
+  }));
+  assert.deepEqual(verifyAndFinalizeStudySessionCleanup(statePath, cleanup), {
+    profileSha256: fresh.session.profileSha256, dataStoreRemoved: true, finalized: true,
+  });
+  assert.equal(existsSync(statePath), false);
+  const next = resolveProviderFreeStudySession({
+    mode: 'provider-free', fresh: true, statePath, randomUUID: () => SECOND_UUID,
+  });
+  assert.notEqual(next.session.profileSha256, fresh.session.profileSha256);
 });
 
 test('study isolation fails closed where persistent WebKit data stores are unavailable', () => {

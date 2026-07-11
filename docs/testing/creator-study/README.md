@@ -88,6 +88,30 @@ Its receipt records only the one-way profile fingerprint and deliberately omits
 the raw data-store identifier and local paths. It does not replace the visible
 rehearsal or the private authorization gate.
 
+The setup receipt is single-use. It reports `appBootObserved: true` only after
+the Provider Free executable has actually created the isolated window, and
+`setupEvidenceConsumed: true` when that boot generation is consumed. A
+`--build-only` bundle, missing boot marker, stale marker, or second setup attempt
+for the same generation fails closed; the manual visible-empty attestation is
+recorded separately and is never treated as machine-observed UI evidence.
+
+## After every session
+
+After Task 8 save/reopen is complete, close PaintNode and run:
+
+```sh
+npm run qa:creator-study:finalize-session
+```
+
+This launches the repo-built Provider Free executable in cleanup-only mode,
+removes the session's persistent macOS WebKit data store, verifies one-time
+native cleanup evidence, deletes the local raw profile handle, and prints a
+path-free receipt containing only its fingerprint and `dataStoreRemoved: true`.
+Copy that receipt to the private session log. A new `--fresh-study-session`
+fails closed until the prior session is finalized. The app profile is transient
+operational state and is never retained as research evidence; apply approved
+retention rules to the participant project/evidence instead.
+
 Give [Product A](materials/product-a.png) to the participant for Task 1. Keep
 [Product B](materials/product-b.png) hidden until Task 6. Do not copy either
 image into the project folder; the participant imports it through PaintNode.

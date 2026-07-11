@@ -17,6 +17,10 @@ detection, capability discovery, execution, and managed-runtime auth probes are
 disabled. Use this exact bundle identity for routine workflow-board interaction
 and Computer Use validation.
 
+Repository QA launches ignore macOS window-restoration state for that process,
+so an earlier interrupted run cannot block automation with an AppKit restore
+prompt. This does not bypass Gatekeeper or suppress a rejected provider binary.
+
 The build also writes a `.paintnode-qa-build.json` provenance sidecar beside the
 app. It binds the bundle to the source Git SHA/tree, clean-or-dirty build state,
 bundle ID, and actual executable SHA-256 without modifying the signed app.
@@ -52,6 +56,17 @@ npm run qa:native:provider-free -- --resume-study-session
 Never use `--resume-study-session` for the next participant. Start another
 `--fresh-study-session`; the setup verifier rejects a resumed or generic build.
 Neither flag is accepted by Provider E2E, and normal PaintNode is unchanged.
+
+Fresh setup is bound to one native boot nonce. `--build-only` deliberately
+records `launchIntent: build-only` and cannot create boot evidence or a ready
+setup receipt. After setup consumes the real app-boot evidence once, replaying
+that profile for another participant fails.
+
+After same-session save/reopen is complete, close the app and remove the custom
+WebKit data store with `npm run qa:creator-study:finalize-session`. The command
+verifies cleanup evidence written only after Tauri's `remove_data_store`
+completes, prints a path-free fingerprint receipt, and removes the raw local
+profile handle. A new fresh session is blocked while an earlier handle remains.
 
 Inside this bundle only, Campaign Composer exposes a clearly labelled **QA
 Fake** Generate path after native QA mode detection completes. It creates

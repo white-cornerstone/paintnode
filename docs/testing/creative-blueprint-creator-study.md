@@ -179,7 +179,18 @@ participant project, deleted rehearsal path, and
 verifier rejects generic or resumed profiles, dirty source, stale bundles,
 executable fingerprint drift, and symlink aliases into the repository. Its
 receipt carries only the isolated profile's one-way fingerprint, never its raw
-identifier. The verifier does not replace the visible rehearsal.
+identifier. It requires native app-boot evidence, consumes that generation once,
+and records the operator's visible-empty attestation separately. Build-only,
+unlaunched, stale, and replayed generations fail closed. The verifier does not
+replace the visible rehearsal.
+
+After Task 8 and after PaintNode is closed, run
+`npm run qa:creator-study:finalize-session`. Native cleanup must remove the
+persistent WebKit data store before the raw profile handle is deleted. Copy the
+path-free cleanup receipt to the private session record. The next participant's
+fresh profile cannot be created until this finalization succeeds. Never retain
+the app profile as research evidence; retain or delete participant projects and
+approved evidence under the study's separate retention rule.
 
 Use committed **Product A** for Task 1. Keep **Product B** hidden until Task 6.
 Their task assignments, dimensions, provenance, and hashes are pinned in

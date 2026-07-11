@@ -128,6 +128,9 @@ test('operations require a fresh isolated profile and preserve only same-session
   assert.match(operations, /--resume-study-session/);
   assert.match(operations, /--visible-empty-state-attested/);
   assert.match(operations, /must never start a new participant/i);
+  assert.match(operations, /qa:creator-study:finalize-session/);
+  assert.match(operations, /dataStoreRemoved: true/);
+  assert.match(operations, /single-use/);
 });
 
 test('repository-safe decision handoff excludes private scheduling and identity fields', () => {

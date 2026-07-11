@@ -16,6 +16,13 @@ use crate::ai::{
 
 const QA_MODE_ENV: &str = "PAINTNODE_PROVIDER_QA_MODE";
 const PROVIDER_FREE_STUDY_PROFILE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_PROFILE";
+const PROVIDER_FREE_STUDY_BOOT_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_NONCE";
+const PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_BOOT_EVIDENCE";
+const PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV: &str =
+    "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_PROFILE";
+const PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV: &str = "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_NONCE";
+const PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV: &str =
+    "PAINTNODE_PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE";
 const QA_PREFLIGHT_ENV: &str = "PAINTNODE_PROVIDER_QA_PREFLIGHT";
 const QA_PREFLIGHT_MARKER: &str = "provider-doctor-v1";
 /// Keep native discovery aligned with the provider doctor: a version probe may
@@ -703,6 +710,103 @@ pub(crate) fn provider_free_study_profile() -> Result<Option<[u8; 16]>, String> 
     )
 }
 
+pub(crate) struct StudyEvidenceRequest {
+    pub profile: [u8; 16],
+    nonce: [u8; 32],
+    path: std::path::PathBuf,
+}
+
+fn parse_study_hex<const N: usize>(raw: &std::ffi::OsStr, label: &str) -> Result<[u8; N], String> {
+    let raw = raw.to_str().ok_or_else(|| {
+        format!(
+            "{label} must contain exactly {} hexadecimal characters.",
+            N * 2
+        )
+    })?;
+    if raw.len() != N * 2 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{label} must contain exactly {} hexadecimal characters.",
+            N * 2
+        ));
+    }
+    let mut bytes = [0_u8; N];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw[index * 2..index * 2 + 2], 16)
+            .map_err(|_| format!("{label} contains invalid hexadecimal data."))?;
+    }
+    Ok(bytes)
+}
+
+fn study_evidence_request(
+    profile_env: &str,
+    nonce_env: &str,
+    path_env: &str,
+) -> Result<Option<StudyEvidenceRequest>, String> {
+    let Some(raw_profile) = std::env::var_os(profile_env) else {
+        return Ok(None);
+    };
+    if std::env::var(QA_MODE_ENV).as_deref() != Ok("provider-free") {
+        return Err("Study lifecycle evidence is available only in Provider Free mode.".into());
+    }
+    let raw_nonce = std::env::var_os(nonce_env)
+        .ok_or_else(|| "Provider Free study lifecycle nonce is missing.".to_string())?;
+    let path = std::env::var_os(path_env)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            "Provider Free study lifecycle evidence path must be absolute.".to_string()
+        })?;
+    Ok(Some(StudyEvidenceRequest {
+        profile: parse_study_hex::<16>(&raw_profile, "Provider Free study profile")?,
+        nonce: parse_study_hex::<32>(&raw_nonce, "Provider Free study lifecycle nonce")?,
+        path,
+    }))
+}
+
+pub(crate) fn provider_free_study_boot_evidence() -> Result<Option<StudyEvidenceRequest>, String> {
+    study_evidence_request(
+        PROVIDER_FREE_STUDY_PROFILE_ENV,
+        PROVIDER_FREE_STUDY_BOOT_NONCE_ENV,
+        PROVIDER_FREE_STUDY_BOOT_EVIDENCE_ENV,
+    )
+}
+
+pub(crate) fn provider_free_study_cleanup() -> Result<Option<StudyEvidenceRequest>, String> {
+    study_evidence_request(
+        PROVIDER_FREE_STUDY_CLEANUP_PROFILE_ENV,
+        PROVIDER_FREE_STUDY_CLEANUP_NONCE_ENV,
+        PROVIDER_FREE_STUDY_CLEANUP_EVIDENCE_ENV,
+    )
+}
+
+pub(crate) fn write_study_lifecycle_evidence(
+    request: &StudyEvidenceRequest,
+    event: &str,
+) -> Result<(), String> {
+    use sha2::Digest;
+    let profile_sha256 = format!("{:x}", sha2::Sha256::digest(request.profile));
+    let nonce_sha256 = format!("{:x}", sha2::Sha256::digest(request.nonce));
+    let nonce_key = if event == "app-boot" {
+        "bootNonceSha256"
+    } else {
+        "cleanupNonceSha256"
+    };
+    let mut payload = serde_json::Map::from_iter([
+        ("version".into(), serde_json::json!(2)),
+        ("event".into(), serde_json::json!(event)),
+        ("profileSha256".into(), serde_json::json!(profile_sha256)),
+    ]);
+    payload.insert(nonce_key.into(), serde_json::json!(nonce_sha256));
+    let payload = serde_json::Value::Object(payload);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&request.path)
+        .map_err(|error| format!("Could not create Provider Free lifecycle evidence: {error}"))?;
+    std::io::Write::write_all(&mut file, format!("{payload}\n").as_bytes())
+        .map_err(|error| format!("Could not write Provider Free lifecycle evidence: {error}"))
+}
+
 fn provider_free_qa_png_in_mode(
     qa_mode: &str,
     width: u32,
@@ -790,6 +894,39 @@ mod tests {
         )
         .expect_err("malformed study profile must fail closed")
         .contains("32 hexadecimal"));
+    }
+
+    #[test]
+    fn study_lifecycle_evidence_contains_only_fingerprints_and_is_single_create() {
+        let root = std::env::temp_dir().join(format!(
+            "paintnode-study-evidence-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create evidence fixture");
+        let request = StudyEvidenceRequest {
+            profile: [1; 16],
+            nonce: [2; 32],
+            path: root.join("boot.json"),
+        };
+        write_study_lifecycle_evidence(&request, "app-boot").expect("write boot evidence");
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&request.path).expect("read boot evidence"))
+                .expect("parse boot evidence");
+        assert_eq!(evidence["version"], 2);
+        assert_eq!(evidence["event"], "app-boot");
+        assert!(evidence["profileSha256"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64));
+        assert!(evidence["bootNonceSha256"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64));
+        assert!(!evidence.to_string().contains(&"01".repeat(16)));
+        assert!(write_study_lifecycle_evidence(&request, "app-boot")
+            .expect_err("evidence must be create-once")
+            .contains("Could not create"));
+        std::fs::remove_dir_all(root).expect("remove evidence fixture");
     }
 
     #[test]

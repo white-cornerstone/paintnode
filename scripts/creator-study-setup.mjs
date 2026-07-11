@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import { captureSourceState, readQaBuildProvenance, sha256File } from './native-qa-build-provenance.mjs';
+import { verifyAndConsumeStudySessionBoot } from './native-qa-session.mjs';
 
 export const EXPECTED_BUNDLE_ID = 'com.paintnode.editor.blueprintqa.provider.free';
 export const EXPECTED_BUNDLE_NAME = 'PaintNode Blueprint QA — Provider Free';
@@ -110,6 +111,7 @@ export function verifyStudySetup({
   actualExecutableSha256,
   visibleEmptyStateAttested,
   macosMajorVersion,
+  studySessionStatePath,
 }) {
   if (!projectDir || !rehearsalDir) throw new Error('Project and rehearsal paths are required.');
   if (![projectDir, rehearsalDir, fixtureManifest].every(isAbsolute)) {
@@ -140,7 +142,7 @@ export function verifyStudySetup({
     throw new Error('Provider Free app executable fingerprint does not match its build provenance.');
   }
   const studySession = appBuild.studySession;
-  if (!studySession || studySession.version !== 1 || studySession.isolatedProfile !== true
+  if (!studySession || studySession.version !== 2 || studySession.isolatedProfile !== true
     || !/^[a-f0-9]{64}$/.test(studySession.profileSha256 || '')) {
     throw new Error('Provider Free app does not use a valid isolated study profile. Start it with --fresh-study-session.');
   }
@@ -168,6 +170,13 @@ export function verifyStudySetup({
   assertEmptyProject(canonicalProject);
   verifyScenarioControls(canonicalRepo);
   const materials = verifyMaterials(canonicalManifest);
+  if (!studySessionStatePath || !isAbsolute(studySessionStatePath)) {
+    throw new Error('Provider Free study session state path must be absolute.');
+  }
+  const launchEvidence = verifyAndConsumeStudySessionBoot({
+    statePath: studySessionStatePath,
+    profileSha256: studySession.profileSha256,
+  });
 
   return Object.freeze({
     schemaVersion: 1,
@@ -180,9 +189,9 @@ export function verifyStudySetup({
     rehearsalState: 'deleted',
     sessionReset: Object.freeze({
       isolatedProfile: true,
-      freshLaunch: true,
       profileSha256: studySession.profileSha256,
       macosMajorVersion,
+      ...launchEvidence,
     }),
     manualAttestations: Object.freeze({ visibleEmptyProjectAndWorkflow: true }),
     scenarioControls: ['standard', 'branch-recovery', 'format-recovery'],
@@ -240,6 +249,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       sourceDirty: sourceState.sourceDirty,
       visibleEmptyStateAttested: args.includes('--visible-empty-state-attested'),
       macosMajorVersion: readMacosMajorVersion(),
+      studySessionStatePath: join(scriptRoot, 'src-tauri', '.provider-free-study-session.json'),
       ...app,
     });
     process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
