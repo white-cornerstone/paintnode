@@ -132,17 +132,27 @@ matching provider adapter; it never falls back silently. Boundary-owned values
 such as project path, run identity, and Director mode cannot be replaced by a
 saved options object.
 
-### Campaign Composer thin-slice path
+### Campaign Composer accepted-direction family
 
-The first executable path is deliberately narrow:
+The historical first executable thin slice was deliberately narrow:
 
 `Product / optional Subject / optional Style -> Brief -> Art Direction -> Generate Transform -> Square Output`
 
-Only Square Output uses the Generate Transform in this slice. Portrait and
-Landscape remain structurally present for later branches. Saved v2 graphs that
-connect Art Direction directly to an Output continue to validate, serialize,
-and reopen, but that legacy direct edge cannot invoke the new Transform
-executor.
+That Product-to-Square shape and older direct Art Direction-to-Output graphs
+remain valid saved v2 graphs, serialize, and reopen unchanged. A legacy direct
+edge still cannot invoke the Transform executor.
+
+New Campaign Composer instances and equivalent Director drafts use the current
+accepted-direction family topology:
+
+`Art Direction -> Generate Concepts -> Review -> accepted Square`
+
+The same Review decision fans out to `Generate Portrait -> Portrait 4:5` and
+`Generate Landscape -> Landscape 16:9`. Each format Transform materializes the
+exact effective promoted result as its first mandatory source. When the creator
+returns an editor revision, that edited asset identity and content hash replace
+the original promoted raster in downstream material keys without rewriting the
+candidate run or promotion history.
 
 The UI store owns transient queued/running progress and commits terminal
 cancelled, failed, or successful run records atomically. Progress events are
@@ -462,7 +472,8 @@ graph operations, node editing, branch comparison, and reopening a saved
 workflow.
 
 Before browser automation is added, Campaign Composer is covered through
-provider-free integration tests for the full flagship topology: Art Direction
+the integrated `campaignComposerFlagshipAcceptance.test.ts` journey plus focused
+provider-free tests for the full flagship topology: Art Direction
 to Generate Concepts to Review; Review directly supplies the accepted Square
 and fans out to Portrait and Landscape Generate transforms. Format transforms
 must materialize the exact effective Review result first, including an

@@ -26,22 +26,33 @@ the PNG rejects normal and provider-E2E modes.
 
 Manual Creative Blueprint checkpoint:
 
-1. Open a project folder that already contains a Product asset.
-2. Create Campaign Composer and assign Product; leave optional Subject and
-   Style empty.
-3. Generate concept branches, use arrow/Home/End keys to compare them, simulate
+1. Create a genuinely empty local folder outside PaintNode. It must contain no
+   PaintNode manifest, assets, workflows, or copied QA fixture.
+2. Launch the provider-free QA app. In the Project panel choose **Open Project
+   Folder**, select that empty folder, and confirm **Assets / Imported** is empty.
+3. In **Assets / Imported**, choose **Import images** (or the **Import external
+   images** icon), select a Product PNG through the app picker, and wait for the
+   imported Product card to appear. Do not seed the project from the filesystem.
+4. Choose **File > New**, open the **Workflow** tab, select **Campaign Composer**,
+   confirm Product is required while Subject and Style are optional, then choose
+   **Create**.
+5. Assign the Product from **Assets / Imported** to the guided Product slot;
+   leave optional Subject and Style empty.
+6. Generate concept branches, use arrow/Home/End keys to compare them, simulate
    and retry one candidate failure, then promote one direction.
-4. Return an editor revision of the promoted direction, run downstream, and
+7. Return an editor revision of the promoted direction, run downstream, and
    confirm Square, Portrait 4:5, and Landscape 16:9 use that accepted direction.
-5. Run unchanged downstream again and confirm selective preflight schedules no
+8. Run unchanged downstream again and confirm selective preflight schedules no
    provider work. Change Product and confirm only affected descendants stale.
-6. Simulate one format failure, retry it, and confirm completed siblings remain.
-7. Save the workflow, quit the QA app, reopen the project and workflow, and
+9. Simulate one format failure, retry it, and confirm completed siblings remain.
+10. Save the workflow, quit the QA app, reopen the project and workflow, and
    confirm promotion, editor revision, outputs, and retry history remain.
-8. Open or create an image document and use Place; success is valid only when a
+11. Open or create an image document and use Place; success is valid only when a
    real layer is inserted.
 
-This provider-free scenario is automated draft evidence only. Issue #85 remains
+The provider-free automation for this journey is
+`src/lib/workflow/campaignComposerFlagshipAcceptance.test.ts`; focused tests
+cover additional boundary cases. This scenario is draft exit evidence only. Issue #85 remains
 open for exit purposes until a configured-provider native invocation and a
 moderated 6–8 creator walkthrough are recorded separately.
 

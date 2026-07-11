@@ -86,8 +86,9 @@ A new user can complete the flagship workflow without manually constructing a
 technical model graph, and changing an upstream input reruns only affected
 downstream work.
 
-Issue #85 supplies the provider-free automated draft evidence and the manual
-native scenario for this gate. The gate remains open until both a configured
+Issue #85 supplies the integrated provider-free draft evidence in
+`src/lib/workflow/campaignComposerFlagshipAcceptance.test.ts` and the manual
+native scenario in `docs/testing/native-qa.md`. The gate remains open until both a configured
 provider run and a moderated walkthrough with 6–8 target creators are recorded;
 passing unit, Rust, or build checks alone must not be reported as milestone exit.
 

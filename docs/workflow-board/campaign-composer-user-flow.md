@@ -33,8 +33,11 @@ configured delivery formats already connected.
 
 ## Exit evidence
 
-Automated provider-free evidence covers topology, migration and round-trip,
-candidate promotion, editor-return identity, exact format materialization,
-three-shape QA output, selective planning, failure retry, and keyboard candidate
-navigation. Native configured-provider execution and a moderated 6–8 creator
-walkthrough remain required before the milestone exit gate can be declared met.
+The integrated provider-free journey is
+`src/lib/workflow/campaignComposerFlagshipAcceptance.test.ts`. It composes guided
+binding and Director equivalence, branch failure/retry, promotion, editor return,
+all three selected outputs, cache reuse, Product descendant rerun, format
+failure/retry, and save/reopen provenance. Focused tests cover migration,
+three-shape native QA output, and keyboard candidate navigation. Native
+configured-provider execution and a moderated 6–8 creator walkthrough remain
+required before the milestone exit gate can be declared met.
