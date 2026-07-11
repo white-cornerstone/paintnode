@@ -20,6 +20,10 @@ study storage.
   decision template. It contains aggregate counts, de-identified finding IDs,
   and role sign-offs, not names or raw evidence locations.
 - `privacy-fields.json` is the allow/deny contract.
+- `facilitator-hints.json` is the versioned, participant-hidden hint, takeover,
+  assist, and deviation instrument; its approved text is repository-safe.
+  `facilitator-hints.sha256` pins its exact bytes. Participant-linked delivered
+  intervention records remain private-only.
 
 ## Before recruitment
 
@@ -32,6 +36,12 @@ study storage.
 5. Privately assign each scheduled date/start/time zone, delivery mode,
    facilitator, observers, technical operator, and accommodation setup. None of
    these assignments belong in repository-safe evidence.
+6. Verify `facilitator-hints.json` against `facilitator-hints.sha256`. Record its
+   version, SHA-256, and approved Git SHA/change reference in the private sign-off.
+7. Calibrate and rehearse every facilitator against that exact instrument before
+   participant 1 and after every approved instrument change. Any instrument edit
+   requires a new committed hash, approved Git change reference, and renewed
+   sign-off even if the integer version is unchanged.
 
 ## Before every session
 
@@ -41,10 +51,12 @@ study storage.
    and actual executable fingerprint; keep the app and sidecar together.
 2. Rehearse both visible failure checkpoints, editor return, save/reopen, and
    Place in a separate folder. Delete that rehearsal folder.
-3. Create a different, genuinely empty participant project folder outside the
+3. Verify the assigned facilitator's private calibration sign-off matches the
+   current hint instrument version, SHA-256, and approved Git change reference.
+4. Create a different, genuinely empty participant project folder outside the
    repository.
-4. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
-5. Run:
+5. Locate the built **PaintNode Blueprint QA — Provider Free** app bundle.
+6. Run:
 
    ```sh
    npm run qa:creator-study:setup -- \

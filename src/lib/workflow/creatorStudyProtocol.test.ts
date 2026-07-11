@@ -5,6 +5,9 @@ import privacyFields from '../../../docs/testing/creator-study/privacy-fields.js
 import materialManifest from '../../../docs/testing/creator-study/materials/manifest.json';
 import privateSession from '../../../docs/testing/creator-study/templates/private-session-observation.md?raw';
 import privateRecruitment from '../../../docs/testing/creator-study/templates/private-screener-and-recruitment-log.md?raw';
+import privateIntervention from '../../../docs/testing/creator-study/templates/private-intervention-log.md?raw';
+import privateAuthorization from '../../../docs/testing/creator-study/templates/private-study-authorization-log.md?raw';
+import facilitatorHints from '../../../docs/testing/creator-study/facilitator-hints.json';
 
 describe('Creative Blueprint creator study protocol', () => {
   it('reads access, de-identification, retention, and exceptions aloud before recording opt-in', () => {
@@ -99,5 +102,29 @@ describe('Creative Blueprint creator study protocol', () => {
     const perSessionTemplate = /## Per-session observation template[\s\S]*?## Private working synthesis template/
       .exec(protocol)?.[0] ?? '';
     expect(perSessionTemplate.match(/Build Git SHA and QA bundle identity:/g) ?? []).toHaveLength(1);
+  });
+
+  it('standardizes every task hint, assist count, deviation, and calibration gate', () => {
+    expect(facilitatorHints.tasks.map(({ task }) => task)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(protocol).toContain('facilitator-hints.json');
+    expect(protocol).toContain('earliest incomplete checkpoint');
+    expect(protocol).toContain('recompute the earliest incomplete checkpoint');
+    expect(protocol).toContain('90-second interval restarts');
+    expect(protocol).toContain('verbatim-repeat');
+    expect(protocol).toContain('forces the task outcome to `failure`');
+    expect(protocol).toContain('after every approved instrument change');
+    for (const field of [
+      'Hint ID', 'Exact hint used', 'Assist ordinal', 'Assist event type',
+      'Takeover action ID', 'Exact takeover action', 'Deviation ID', 'Session validity effect',
+    ]) {
+      expect(privateIntervention).toContain(field);
+      expect(privateSession).toContain(field);
+    }
+    expect(privateAuthorization).toContain('Facilitator calibration and rehearsal sign-off');
+    expect(privateAuthorization).toContain('Instrument SHA-256');
+    expect(privateAuthorization).toContain('Approved Git SHA/change reference');
+    expect(decisionTemplate).not.toContain('Exact hint used');
+    expect(privacyFields.repositoryAllowed).toContain('versioned facilitator instrument, including approved hint and takeover text');
+    expect(privacyFields.privateOnly).toContain('participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs');
   });
 });
