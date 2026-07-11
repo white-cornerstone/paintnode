@@ -10,8 +10,9 @@ import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from './schema';
 import { instantiateWorkflowTemplate } from './templates';
 import { executeWorkflowCandidateBranches } from './candidateBranches';
 import { createWorkflowCompositionExecutor, type ExecuteCampaignGenerateOptions } from './transformExecutor';
-import { createWorkflowRevision, workflowSha256Bytes } from './provenance';
+import { createWorkflowRevision, isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
 import { planSelectiveWorkflowExecution } from './selectiveExecution';
+import { appendWorkflowEditorRevision, resolveWorkflowEffectiveResult } from './editorRoundTrip';
 import { workflowReadiness } from './readiness';
 
 const bytes = new Uint8Array([137, 80, 78, 71, 81]);
@@ -163,6 +164,81 @@ describe('workflow candidate promotion', () => {
       state: 'blocked', reason: { code: 'NODE_DISABLED', message: expect.stringMatching(/choose a concept/i) },
     });
     expect(unpromoted.executionNodeIds).not.toContain('transform-generate-square');
+  });
+
+  it('uses the promoted editor revision as the downstream selective cache identity', async () => {
+    const graph = await reviewGraph();
+    const candidates = deriveWorkflowReviewCandidates(graph, 'review-concepts');
+    const promoted = promoteWorkflowCandidate(graph, {
+      reviewNodeId: 'review-concepts', candidateId: candidates[0].candidateId,
+      id: 'promotion-edited', promotedAt: 800,
+    });
+    const promotion = promoted.reviewPromotions![0];
+    const run = promoted.runRecords.find((record) => record.id === promotion.candidateRunId)!;
+    expect(isFullWorkflowRunRecord(run)).toBe(true);
+    if (!isFullWorkflowRunRecord(run)) throw new Error('Expected full candidate run');
+    const original = run.outputs[0];
+    const editedOutput = {
+      assetReferenceId: 'ref-promotion-edit', assetId: 'asset-promotion-edit',
+      relativePath: 'assets/generated/promotion-edit.png',
+      contentHash: workflowSha256Bytes(new Uint8Array([2])), width: 1024, height: 1024,
+      mime: 'image/png' as const,
+    };
+    const edited = appendWorkflowEditorRevision(promoted, {
+      version: 1, id: 'revision-promotion-edit', nodeId: run.nodeId, rootRunId: run.id,
+      source: {
+        kind: 'run-output', id: run.id, assetReferenceId: original.assetReferenceId,
+        assetId: original.assetId, relativePath: original.relativePath, contentHash: original.contentHash,
+      },
+      candidate: {
+        branchGroupId: run.candidate!.branchGroupId,
+        candidateId: run.candidate!.candidateId,
+      },
+      promotion: { reviewNodeId: promotion.reviewNodeId, promotionId: promotion.id },
+      document: {
+        relativePath: 'documents/workflow-edits/promotion-edit.ora',
+        contentHash: workflowSha256Bytes(new Uint8Array([1])), mime: 'image/openraster',
+      },
+      output: editedOutput,
+      createdAt: 900,
+    }, {
+      version: 1, id: 'binding-promotion-edit',
+      target: { nodeId: run.nodeId, rootRunId: run.id, promotionId: promotion.id },
+      editorRevisionId: 'revision-promotion-edit', boundAt: 900,
+    });
+    const effective = resolveWorkflowEffectiveResult(edited, {
+      nodeId: run.nodeId, rootRunId: run.id,
+      candidateId: promotion.candidateId, promotionId: promotion.id,
+    })!;
+    const originalPlan = planSelectiveWorkflowExecution(promoted, {
+      mode: 'run-node', nodeId: 'output-square',
+      materialKeys: Object.fromEntries(promoted.nodes.map((node) => [node.id, `material:${node.id}`])),
+      isRunRecordReusable: () => false,
+    });
+    const editedPlan = planSelectiveWorkflowExecution(edited, {
+      mode: 'run-node', nodeId: 'output-square',
+      materialKeys: Object.fromEntries(edited.nodes.map((node) => [node.id, `material:${node.id}`])),
+      reviewEffectiveOutputs: { 'review-concepts': effective.output },
+      isReviewOutputAvailable: () => true,
+      isRunRecordReusable: () => false,
+    });
+
+    expect(editedPlan.cachedResults).toContainEqual(expect.objectContaining({
+      nodeId: 'review-concepts', outputIds: [editedOutput.assetReferenceId],
+    }));
+    expect(editedPlan.cachedResults.find((item) => item.nodeId === 'review-concepts')?.cacheKey)
+      .not.toBe(originalPlan.cachedResults.find((item) => item.nodeId === 'review-concepts')?.cacheKey);
+
+    const replacement = promoteWorkflowCandidate(edited, {
+      reviewNodeId: 'review-concepts', candidateId: candidates[1].candidateId,
+      id: 'promotion-replacement', promotedAt: 1000,
+    });
+    expect(resolveWorkflowEffectiveResult(replacement, {
+      nodeId: candidates[1].sourceNodeId,
+      rootRunId: candidates[1].latestRunId,
+      candidateId: candidates[1].candidateId,
+      promotionId: 'promotion-replacement',
+    })?.editorRevision).toBeNull();
   });
 
   it('loads broken promotion references as recoverable state while rejecting a malformed append chain', async () => {

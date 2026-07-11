@@ -21,4 +21,5 @@ export * from './directorRevisionSession';
 export * from './provenance';
 export * from './candidateBranches';
 export * from './candidatePromotion';
+export * from './editorRoundTrip';
 export * from './storyboardRead';

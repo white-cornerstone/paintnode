@@ -65,6 +65,7 @@
     WorkflowReviewRefreshGate,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
+  import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
@@ -449,6 +450,14 @@
         asset.id === resolution.output.assetId && asset.relativePath === resolution.output.relativePath
       )) ?? null;
     }
+    if (path?.transformNodeId) {
+      const effective = workflow.effectiveAcceptedEditorOutput(path.transformNodeId);
+      if (effective) {
+        return assets.find((asset) => (
+          asset.id === effective.assetId && asset.relativePath === effective.relativePath
+        )) ?? null;
+      }
+    }
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 
@@ -472,6 +481,15 @@
       editor.flash(`Placed ${outputAsset.name}`);
     } catch (e) {
       editor.flash('Place output failed: ' + ((e as Error)?.message ?? String(e)));
+    }
+  }
+
+  async function openResultInEditor(request: OpenWorkflowResultRequest): Promise<void> {
+    try {
+      await openWorkflowResultInEditor(request);
+      editor.flash('Opened workflow result in editor');
+    } catch (cause) {
+      editor.flash('Open in editor failed: ' + ((cause as Error)?.message ?? String(cause)));
     }
   }
 
@@ -2332,6 +2350,7 @@
         {#each workflow.creatorNodes as node (node.id)}
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
+          {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -2435,6 +2454,18 @@
                       ? `Promoted Candidate ${reviewCandidates.find((candidate) => candidate.candidateId === reviewResolution.promotion.candidateId)?.ordinal ?? ''}`
                       : reviewResolution.reason.message}
                   </p>
+                  {#if reviewResolution.state === 'ready'}
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onclick={() => void openResultInEditor({
+                        nodeId: reviewResolution.promotion.sourceNodeId,
+                        rootRunId: reviewResolution.promotion.candidateRunId,
+                        assetReferenceId: reviewResolution.promotion.assetReferenceId,
+                        promotionId: reviewResolution.promotion.id,
+                      })}
+                    >Open promoted result in Editor</button>
+                  {/if}
                   <div
                     class="review-candidate-tabs"
                     role="tablist"
@@ -2501,6 +2532,13 @@
                 </div>
               {/if}
               {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+                {#if acceptedEditorResult}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onclick={() => void openResultInEditor(acceptedEditorResult)}
+                  >Open accepted result in Editor</button>
+                {/if}
                 {@const branchGroups = workflow.candidateBranchGroups(node.id)}
                 {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
                   <p

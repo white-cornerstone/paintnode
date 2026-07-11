@@ -343,6 +343,13 @@ export interface StoredAssetResult {
   asset: ProjectAsset;
 }
 
+export interface WorkflowEditorReturnResult {
+  document: { relativePath: string; contentHash: string; mime: 'image/openraster' };
+  output: ProjectAsset;
+  outputContentHash: string;
+  cleanupToken: string;
+}
+
 export interface ProjectAssetMaterial {
   assetId: string;
   relativePath: string;
@@ -984,6 +991,33 @@ export async function storeProjectAssetBytes(args: {
     ...args,
     bytes: Array.from(args.bytes),
   });
+}
+
+export async function commitWorkflowEditorReturn(args: {
+  projectPath: string;
+  revisionId: string;
+  name: string;
+  documentBytes: Uint8Array;
+  outputBytes: Uint8Array;
+  width: number;
+  height: number;
+}): Promise<WorkflowEditorReturnResult> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  return invoke<WorkflowEditorReturnResult>('project_commit_workflow_editor_return', {
+    ...args,
+    documentBytes: Array.from(args.documentBytes),
+    outputBytes: Array.from(args.outputBytes),
+  });
+}
+
+export async function rollbackWorkflowEditorReturn(projectPath: string, cleanupToken: string): Promise<void> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  await invoke<void>('project_rollback_workflow_editor_return', { projectPath, cleanupToken });
+}
+
+export async function finalizeWorkflowEditorReturn(projectPath: string, cleanupToken: string): Promise<boolean> {
+  if (!isDesktop()) throw new Error('Projects are only available in the desktop app.');
+  return invoke<boolean>('project_finalize_workflow_editor_return', { projectPath, cleanupToken });
 }
 
 export async function readProjectAsset(projectPath: string, assetId: string): Promise<StoredAssetResult> {

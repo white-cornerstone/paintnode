@@ -1,4 +1,5 @@
 import {
+  commitWorkflowEditorReturn,
   deleteProjectAsset,
   isDesktop,
   openProjectFolderAt,
@@ -8,6 +9,8 @@ import {
   refreshProject,
   revealProjectFile,
   revealProjectPath,
+  rollbackWorkflowEditorReturn,
+  finalizeWorkflowEditorReturn,
   saveProjectDocumentAs,
   storeProjectAssetBytes,
   writeProjectDocumentPath,
@@ -17,6 +20,7 @@ import {
   type ProjectState,
 } from '../integrations/desktop';
 import { ui } from './ui.svelte';
+import { hasWorkflowRoundTripSessions } from './workflowEditorSession';
 
 const KEY = 'paintnode.projectPath';
 
@@ -43,6 +47,10 @@ class ProjectStore {
 
   async openFolder(): Promise<boolean> {
     this.error = '';
+    if (hasWorkflowRoundTripSessions()) {
+      this.error = 'Close or discard workflow-linked editor tabs before switching projects.';
+      return false;
+    }
     if (!isDesktop()) {
       this.error = 'Projects are available in the desktop app.';
       return false;
@@ -122,6 +130,27 @@ class ProjectStore {
     });
     await this.refresh(path);
     return result.asset;
+  }
+
+  async commitWorkflowEditorReturn(args: Omit<Parameters<typeof commitWorkflowEditorReturn>[0], 'projectPath'>) {
+    const path = this.path;
+    if (!path) throw new Error('No project is open.');
+    const result = await commitWorkflowEditorReturn({ ...args, projectPath: path });
+    await this.refresh(path);
+    return result;
+  }
+
+  async rollbackWorkflowEditorReturn(cleanupToken: string): Promise<void> {
+    const path = this.path;
+    if (!path) throw new Error('No project is open.');
+    await rollbackWorkflowEditorReturn(path, cleanupToken);
+    await this.refresh(path);
+  }
+
+  async finalizeWorkflowEditorReturn(cleanupToken: string): Promise<boolean> {
+    const path = this.path;
+    if (!path) throw new Error('No project is open.');
+    return finalizeWorkflowEditorReturn(path, cleanupToken);
   }
 
   async readAsset(asset: ProjectAsset) {
@@ -211,10 +240,15 @@ class ProjectStore {
     localStorage.setItem(KEY, state.path);
   }
 
-  clear(): void {
+  clear(): boolean {
+    if (hasWorkflowRoundTripSessions()) {
+      this.error = 'Close or discard workflow-linked editor tabs before closing the project.';
+      return false;
+    }
     if (this.current) this.identityRevision += 1;
     this.current = null;
     localStorage.removeItem(KEY);
+    return true;
   }
 }
 

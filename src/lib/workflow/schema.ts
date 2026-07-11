@@ -159,6 +159,37 @@ export interface WorkflowReviewPromotionV1 {
   supersedesPromotionId?: string;
 }
 
+export interface WorkflowEditorRevisionSourceV1 {
+  kind: 'run-output' | 'editor-revision';
+  id: string;
+  assetReferenceId: string;
+  assetId: string;
+  relativePath: string;
+  contentHash: string;
+}
+
+export interface WorkflowEditorRevisionV1 {
+  version: 1;
+  id: string;
+  nodeId: string;
+  rootRunId: string;
+  source: WorkflowEditorRevisionSourceV1;
+  candidate?: { branchGroupId: string; candidateId: string };
+  promotion?: { reviewNodeId: string; promotionId: string };
+  document: { relativePath: string; contentHash: string; mime: 'image/openraster' };
+  output: WorkflowRunOutput & { width: number; height: number; mime: 'image/png' };
+  createdAt: number;
+}
+
+export interface WorkflowRoundTripBindingV1 {
+  version: 1;
+  id: string;
+  target: { nodeId: string; rootRunId: string; promotionId?: string };
+  editorRevisionId: string;
+  boundAt: number;
+  supersedesRoundTripId?: string;
+}
+
 export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
   recordVersion: 1;
   status: WorkflowRunStatus;
@@ -207,6 +238,10 @@ export interface WorkflowGraphV2 {
   runRecords: WorkflowRunReference[];
   /** Append-only review decisions. Missing in early v2 files and preserved as absent. */
   reviewPromotions?: WorkflowReviewPromotionV1[];
+  /** Append-only manual editor descendants. Missing in early v2 files and preserved as absent. */
+  editorRevisions?: WorkflowEditorRevisionV1[];
+  /** Strict append-only current-head bindings. Missing in early v2 files and preserved as absent. */
+  workflowRoundTrips?: WorkflowRoundTripBindingV1[];
 }
 
 export interface WorkflowValidationIssue {
@@ -990,6 +1025,227 @@ function validateReviewPromotions(graph: WorkflowGraphV2, issues: WorkflowValida
   }
 }
 
+function parseEditorRevisions(value: unknown, issues: WorkflowValidationIssue[]): WorkflowEditorRevisionV1[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    issues.push({ path: 'editorRevisions', message: 'editorRevisions must be an array', severity: 'error' });
+    return [];
+  }
+  return value.map((item, index) => {
+    const path = `editorRevisions[${index}]`;
+    const record = isRecord(item) ? item : {};
+    if (!isRecord(item)) issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+    const sourceRecord = isRecord(record.source) ? record.source : {};
+    const documentRecord = isRecord(record.document) ? record.document : {};
+    const outputRecord = isRecord(record.output) ? record.output : {};
+    const candidateRecord = record.candidate === undefined ? null : isRecord(record.candidate) ? record.candidate : {};
+    const promotionRecord = record.promotion === undefined ? null : isRecord(record.promotion) ? record.promotion : {};
+    if (!isRecord(record.source)) issues.push({ path: `${path}.source`, message: 'source must be an object', severity: 'error' });
+    if (!isRecord(record.document)) issues.push({ path: `${path}.document`, message: 'document must be an object', severity: 'error' });
+    if (!isRecord(record.output)) issues.push({ path: `${path}.output`, message: 'output must be an object', severity: 'error' });
+    if (record.candidate !== undefined && !isRecord(record.candidate)) issues.push({ path: `${path}.candidate`, message: 'candidate must be an object', severity: 'error' });
+    if (record.promotion !== undefined && !isRecord(record.promotion)) issues.push({ path: `${path}.promotion`, message: 'promotion must be an object', severity: 'error' });
+    const sourceKind = sourceRecord.kind === 'editor-revision' ? 'editor-revision' : 'run-output';
+    if (sourceRecord.kind !== 'run-output' && sourceRecord.kind !== 'editor-revision') {
+      issues.push({ path: `${path}.source.kind`, message: 'source kind must be run-output or editor-revision', severity: 'error' });
+    }
+    const revision: WorkflowEditorRevisionV1 = {
+      version: 1,
+      id: readString(record, 'id', `${path}.id`, issues),
+      nodeId: readString(record, 'nodeId', `${path}.nodeId`, issues),
+      rootRunId: readString(record, 'rootRunId', `${path}.rootRunId`, issues),
+      source: {
+        kind: sourceKind,
+        id: readString(sourceRecord, 'id', `${path}.source.id`, issues),
+        assetReferenceId: readString(sourceRecord, 'assetReferenceId', `${path}.source.assetReferenceId`, issues),
+        assetId: readString(sourceRecord, 'assetId', `${path}.source.assetId`, issues),
+        relativePath: readString(sourceRecord, 'relativePath', `${path}.source.relativePath`, issues),
+        contentHash: readString(sourceRecord, 'contentHash', `${path}.source.contentHash`, issues),
+      },
+      ...(candidateRecord ? { candidate: {
+        branchGroupId: readString(candidateRecord, 'branchGroupId', `${path}.candidate.branchGroupId`, issues),
+        candidateId: readString(candidateRecord, 'candidateId', `${path}.candidate.candidateId`, issues),
+      } } : {}),
+      ...(promotionRecord ? { promotion: {
+        reviewNodeId: readString(promotionRecord, 'reviewNodeId', `${path}.promotion.reviewNodeId`, issues),
+        promotionId: readString(promotionRecord, 'promotionId', `${path}.promotion.promotionId`, issues),
+      } } : {}),
+      document: {
+        relativePath: readString(documentRecord, 'relativePath', `${path}.document.relativePath`, issues),
+        contentHash: readString(documentRecord, 'contentHash', `${path}.document.contentHash`, issues),
+        mime: 'image/openraster',
+      },
+      output: {
+        assetReferenceId: readString(outputRecord, 'assetReferenceId', `${path}.output.assetReferenceId`, issues),
+        assetId: readString(outputRecord, 'assetId', `${path}.output.assetId`, issues),
+        relativePath: readString(outputRecord, 'relativePath', `${path}.output.relativePath`, issues),
+        contentHash: readString(outputRecord, 'contentHash', `${path}.output.contentHash`, issues),
+        width: readNonnegativeInteger(outputRecord, 'width', `${path}.output.width`, issues),
+        height: readNonnegativeInteger(outputRecord, 'height', `${path}.output.height`, issues),
+        mime: 'image/png',
+      },
+      createdAt: readNonnegativeInteger(record, 'createdAt', `${path}.createdAt`, issues),
+    };
+    if (record.version !== 1) issues.push({ path: `${path}.version`, message: 'Editor revision version must be 1', severity: 'error' });
+    if (documentRecord.mime !== 'image/openraster') issues.push({ path: `${path}.document.mime`, message: 'Editor document mime must be image/openraster', severity: 'error' });
+    if (outputRecord.mime !== 'image/png') issues.push({ path: `${path}.output.mime`, message: 'Editor output mime must be image/png', severity: 'error' });
+    if (revision.output.width < 1 || revision.output.height < 1) issues.push({ path: `${path}.output`, message: 'Editor output dimensions must be positive', severity: 'error' });
+    for (const [fieldPath, relativePath] of [
+      [`${path}.source.relativePath`, revision.source.relativePath],
+      [`${path}.document.relativePath`, revision.document.relativePath],
+      [`${path}.output.relativePath`, revision.output.relativePath],
+    ] as const) {
+      if (!isProjectRelativeWorkflowReference(relativePath)) issues.push({ path: fieldPath, message: 'Editor revision paths must be project-relative', severity: 'error' });
+    }
+    for (const [fieldPath, hash] of [
+      [`${path}.source.contentHash`, revision.source.contentHash],
+      [`${path}.document.contentHash`, revision.document.contentHash],
+      [`${path}.output.contentHash`, revision.output.contentHash],
+    ] as const) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(hash)) issues.push({ path: fieldPath, message: 'Editor revision hashes must be canonical SHA-256 digests', severity: 'error' });
+    }
+    for (const [fieldPath, id] of [
+      [`${path}.id`, revision.id], [`${path}.nodeId`, revision.nodeId], [`${path}.rootRunId`, revision.rootRunId],
+      [`${path}.source.id`, revision.source.id], [`${path}.source.assetReferenceId`, revision.source.assetReferenceId],
+      [`${path}.source.assetId`, revision.source.assetId], [`${path}.output.assetReferenceId`, revision.output.assetReferenceId],
+      [`${path}.output.assetId`, revision.output.assetId],
+    ] as const) {
+      try { safeWorkflowIdentifier(id, 'Editor revision identifier'); }
+      catch (error) { issues.push({ path: fieldPath, message: (error as Error).message, severity: 'error' }); }
+    }
+    return revision;
+  });
+}
+
+function validateEditorRevisions(graph: WorkflowGraphV2, issues: WorkflowValidationIssue[]): void {
+  const priorById = new Map<string, WorkflowEditorRevisionV1>();
+  for (const [index, revision] of (graph.editorRevisions ?? []).entries()) {
+    const path = `editorRevisions[${index}]`;
+    if (priorById.has(revision.id)) issues.push({ path: `${path}.id`, message: 'Editor revision IDs must be unique', severity: 'error' });
+    const root = graph.runRecords.find((run) => run.id === revision.rootRunId);
+    if (!root || !('recordVersion' in root) || root.recordVersion !== 1 || root.nodeId !== revision.nodeId || root.status !== 'succeeded') {
+      issues.push({ path: `${path}.rootRunId`, message: 'Editor revision root must be a successful run on the same node', severity: 'error' });
+    }
+    const expectedSource = revision.source.kind === 'run-output'
+      ? root && 'recordVersion' in root && root.recordVersion === 1 && revision.source.id === root.id
+        ? root.outputs.find((output) => output.assetReferenceId === revision.source.assetReferenceId)
+        : undefined
+      : priorById.get(revision.source.id)?.output;
+    if (!expectedSource
+      || expectedSource.assetReferenceId !== revision.source.assetReferenceId
+      || expectedSource.assetId !== revision.source.assetId
+      || expectedSource.relativePath !== revision.source.relativePath
+      || expectedSource.contentHash !== revision.source.contentHash) {
+      issues.push({ path: `${path}.source`, message: 'Editor revision source must match an exact prior result', severity: 'error' });
+    }
+    if (revision.source.kind === 'editor-revision') {
+      const parent = priorById.get(revision.source.id);
+      if (!parent || parent.rootRunId !== revision.rootRunId || parent.nodeId !== revision.nodeId
+        || JSON.stringify(parent.candidate) !== JSON.stringify(revision.candidate)
+        || JSON.stringify(parent.promotion) !== JSON.stringify(revision.promotion)
+        || revision.createdAt < parent.createdAt) {
+        issues.push({ path: `${path}.source.id`, message: 'Editor revision chains must append monotonically to the same result', severity: 'error' });
+      }
+    }
+    if (root && 'recordVersion' in root && root.recordVersion === 1) {
+      const lineage = root.candidate;
+      if (Boolean(lineage) !== Boolean(revision.candidate)
+        || (lineage && (lineage.branchGroupId !== revision.candidate?.branchGroupId || lineage.candidateId !== revision.candidate?.candidateId))) {
+        issues.push({ path: `${path}.candidate`, message: 'Editor candidate lineage must match the root run', severity: 'error' });
+      }
+    }
+    if (revision.promotion) {
+      const promotion = (graph.reviewPromotions ?? []).find((item) => item.id === revision.promotion!.promotionId);
+      if (!revision.candidate || !promotion || promotion.reviewNodeId !== revision.promotion.reviewNodeId
+        || promotion.candidateRunId !== revision.rootRunId
+        || promotion.branchGroupId !== revision.candidate.branchGroupId
+        || promotion.candidateId !== revision.candidate.candidateId) {
+        issues.push({ path: `${path}.promotion`, message: 'Editor promotion lineage must match the root run', severity: 'error' });
+      }
+    }
+    if (new Set([revision.source.relativePath, revision.document.relativePath, revision.output.relativePath]).size !== 3) {
+      issues.push({ path, message: 'Editor source, document, and output paths must be distinct immutable files', severity: 'error' });
+    }
+    const reference = graph.assetReferences.find((item) => item.id === revision.output.assetReferenceId);
+    if (!reference || reference.role !== 'output' || reference.assetId !== revision.output.assetId || reference.relativePath !== revision.output.relativePath) {
+      issues.push({ path: `${path}.output.assetReferenceId`, message: 'Editor output must have one exact output asset reference', severity: 'error' });
+    }
+    priorById.set(revision.id, revision);
+  }
+}
+
+function parseWorkflowRoundTrips(value: unknown, issues: WorkflowValidationIssue[]): WorkflowRoundTripBindingV1[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    issues.push({ path: 'workflowRoundTrips', message: 'workflowRoundTrips must be an array', severity: 'error' });
+    return [];
+  }
+  return value.map((item, index) => {
+    const path = `workflowRoundTrips[${index}]`;
+    const record = isRecord(item) ? item : {};
+    const target = isRecord(record.target) ? record.target : {};
+    if (!isRecord(item)) issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+    if (!isRecord(record.target)) issues.push({ path: `${path}.target`, message: 'target must be an object', severity: 'error' });
+    const binding: WorkflowRoundTripBindingV1 = {
+      version: 1,
+      id: readString(record, 'id', `${path}.id`, issues),
+      target: {
+        nodeId: readString(target, 'nodeId', `${path}.target.nodeId`, issues),
+        rootRunId: readString(target, 'rootRunId', `${path}.target.rootRunId`, issues),
+        ...(typeof target.promotionId === 'string' ? { promotionId: target.promotionId } : {}),
+      },
+      editorRevisionId: readString(record, 'editorRevisionId', `${path}.editorRevisionId`, issues),
+      boundAt: readNonnegativeInteger(record, 'boundAt', `${path}.boundAt`, issues),
+      ...(typeof record.supersedesRoundTripId === 'string' ? { supersedesRoundTripId: record.supersedesRoundTripId } : {}),
+    };
+    if (record.version !== 1) issues.push({ path: `${path}.version`, message: 'Workflow round trip version must be 1', severity: 'error' });
+    if (target.promotionId !== undefined && typeof target.promotionId !== 'string') issues.push({ path: `${path}.target.promotionId`, message: 'promotionId must be a string', severity: 'error' });
+    if (record.supersedesRoundTripId !== undefined && typeof record.supersedesRoundTripId !== 'string') issues.push({ path: `${path}.supersedesRoundTripId`, message: 'supersedesRoundTripId must be a string', severity: 'error' });
+    for (const [fieldPath, id] of [
+      [`${path}.id`, binding.id], [`${path}.target.nodeId`, binding.target.nodeId],
+      [`${path}.target.rootRunId`, binding.target.rootRunId], [`${path}.editorRevisionId`, binding.editorRevisionId],
+      ...(binding.target.promotionId ? [[`${path}.target.promotionId`, binding.target.promotionId] as const] : []),
+      ...(binding.supersedesRoundTripId ? [[`${path}.supersedesRoundTripId`, binding.supersedesRoundTripId] as const] : []),
+    ] as const) {
+      try { safeWorkflowIdentifier(id, 'Workflow round-trip identifier'); }
+      catch (error) { issues.push({ path: fieldPath, message: (error as Error).message, severity: 'error' }); }
+    }
+    return binding;
+  });
+}
+
+function roundTripTargetKey(binding: WorkflowRoundTripBindingV1): string {
+  return JSON.stringify([binding.target.nodeId, binding.target.rootRunId, binding.target.promotionId ?? null]);
+}
+
+function validateWorkflowRoundTrips(graph: WorkflowGraphV2, issues: WorkflowValidationIssue[]): void {
+  const ids = new Set<string>();
+  const latestByTarget = new Map<string, WorkflowRoundTripBindingV1>();
+  const revisions = new Map((graph.editorRevisions ?? []).map((revision) => [revision.id, revision]));
+  for (const [index, binding] of (graph.workflowRoundTrips ?? []).entries()) {
+    const path = `workflowRoundTrips[${index}]`;
+    if (ids.has(binding.id)) issues.push({ path: `${path}.id`, message: 'Workflow round-trip IDs must be unique', severity: 'error' });
+    ids.add(binding.id);
+    const key = roundTripTargetKey(binding);
+    const prior = latestByTarget.get(key);
+    if ((prior?.id ?? undefined) !== binding.supersedesRoundTripId) {
+      issues.push({ path: `${path}.supersedesRoundTripId`, message: 'Workflow round-trip bindings must form one strict append-only target chain', severity: 'error' });
+    }
+    const revision = revisions.get(binding.editorRevisionId);
+    if (!revision || revision.nodeId !== binding.target.nodeId || revision.rootRunId !== binding.target.rootRunId
+      || revision.promotion?.promotionId !== binding.target.promotionId) {
+      issues.push({ path: `${path}.editorRevisionId`, message: 'Workflow round-trip binding must reference an exact editor revision for its target', severity: 'error' });
+    }
+    if (binding.target.promotionId) {
+      const promotion = (graph.reviewPromotions ?? []).find((item) => item.id === binding.target.promotionId);
+      if (!promotion || promotion.candidateRunId !== binding.target.rootRunId || revision?.promotion?.reviewNodeId !== promotion.reviewNodeId) {
+        issues.push({ path: `${path}.target.promotionId`, message: 'Workflow round-trip promotion target must match the exact source promotion', severity: 'error' });
+      }
+    }
+    latestByTarget.set(key, binding);
+  }
+}
+
 export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
   const issues: WorkflowValidationIssue[] = [];
   if (!isRecord(input)) {
@@ -1063,11 +1319,19 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
     ...(input.reviewPromotions === undefined
       ? {}
       : { reviewPromotions: parseReviewPromotions(input.reviewPromotions, issues) }),
+    ...(input.editorRevisions === undefined
+      ? {}
+      : { editorRevisions: parseEditorRevisions(input.editorRevisions, issues) }),
+    ...(input.workflowRoundTrips === undefined
+      ? {}
+      : { workflowRoundTrips: parseWorkflowRoundTrips(input.workflowRoundTrips, issues) }),
   };
 
   validateRunRetryLinks(value, issues);
   validateCandidateBranchGroups(value, issues);
   validateReviewPromotions(value, issues);
+  validateEditorRevisions(value, issues);
+  validateWorkflowRoundTrips(value, issues);
 
   if (issues.some((issue) => issue.severity === 'error')) return { ok: false, issues };
   return { ok: true, value, issues };

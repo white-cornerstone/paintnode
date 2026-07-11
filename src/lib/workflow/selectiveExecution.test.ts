@@ -252,6 +252,77 @@ describe('selective workflow planning', () => {
     expect(plan.executionNodeIds).toEqual(['unrelated']);
   });
 
+  it('reuses an edited accepted Transform while invalidating direct downstream cache identity', () => {
+    const input = graph();
+    input.nodes = input.nodes.filter((item) => ['input-a', 'transform-a', 'transform-b'].includes(item.id));
+    input.edges = [
+      edge('input-a-transform-a', 'input-a', 'transform-a'),
+      edge('transform-a-transform-b', 'transform-a', 'transform-b'),
+    ];
+    addRun(input, successfulRun('transform-a', 'key-transform-a', 2));
+    addRun(input, successfulRun('transform-b', 'key-transform-b', 2));
+    const editedOutput = {
+      assetReferenceId: 'ref-transform-a-edit', assetId: 'asset-transform-a-edit',
+      relativePath: 'assets/transform-a-edit.png', contentHash: `sha256:${'a'.repeat(64)}`,
+      width: 64, height: 64, mime: 'image/png' as const,
+    };
+
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node', nodeId: 'transform-b', materialKeys: keys(input),
+      isRunRecordReusable: () => true,
+      effectiveRunResults: {
+        'transform-a': {
+          rootRunId: input.runRecords.find((run) => run.nodeId === 'transform-a')!.id,
+          materialKey: 'workflow-editor-effective-material',
+          output: editedOutput,
+        },
+      },
+    });
+
+    expect(plan.cachedResults).toContainEqual({
+      nodeId: 'transform-a', cacheKey: 'workflow-editor-effective-material',
+      outputIds: ['ref-transform-a-edit'],
+    });
+    expect(plan.preflight).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'transform-a', state: 'cached' }),
+      expect.objectContaining({ nodeId: 'transform-b', state: 'stale', willExecute: true }),
+    ]));
+    expect(plan.executionNodeIds).toEqual(['transform-b']);
+  });
+
+  it('feeds the edited cached result across a direct Transform to Output path', () => {
+    const input = graph();
+    input.nodes = input.nodes.filter((item) => ['input-a', 'transform-a', 'output'].includes(item.id));
+    input.edges = [
+      edge('input-a-transform-a', 'input-a', 'transform-a'),
+      edge('transform-a-output', 'transform-a', 'output'),
+    ];
+    addRun(input, successfulRun('transform-a', 'key-transform-a', 2));
+    addRun(input, successfulRun('output', 'key-output', 2));
+    const rootRunId = input.runRecords.find((run) => run.nodeId === 'transform-a')!.id;
+    const plan = planSelectiveWorkflowExecution(input, {
+      mode: 'run-node', nodeId: 'output', materialKeys: keys(input),
+      isRunRecordReusable: () => true,
+      effectiveRunResults: {
+        'transform-a': {
+          rootRunId,
+          materialKey: 'workflow-editor-direct-output-material',
+          output: {
+            assetReferenceId: 'ref-direct-edit', assetId: 'asset-direct-edit',
+            relativePath: 'assets/direct-edit.png', contentHash: `sha256:${'b'.repeat(64)}`,
+          },
+        },
+      },
+    });
+
+    expect(plan.cachedResults).toContainEqual({
+      nodeId: 'transform-a', cacheKey: 'workflow-editor-direct-output-material',
+      outputIds: ['ref-direct-edit'],
+    });
+    expect(plan.cachedResults.some((result) => result.nodeId === 'output')).toBe(false);
+    expect(plan.executionNodeIds).not.toContain('transform-a');
+  });
+
   it('reports disabled and downstream blockers before execution and never invokes blocked nodes', async () => {
     const input = graph();
     const plan = planSelectiveWorkflowExecution(input, {

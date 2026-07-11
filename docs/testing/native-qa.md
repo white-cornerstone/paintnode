@@ -36,6 +36,35 @@ Manual Creative Blueprint checkpoint:
 5. Open or create an image document and use Place; success is valid only when a
    real layer is inserted.
 
+Editor round-trip checkpoint:
+
+1. Open an accepted Transform result, or the currently promoted verified Review
+   result, with **Open in Editor**. Unpromoted candidates must not expose the
+   action.
+2. Edit the document and choose **Return to Workflow**. Confirm the workflow
+   preview and downstream Output use the edited PNG while the original run and
+   candidate remain unchanged.
+3. Reopen the same result and confirm PaintNode restores the latest layered ORA,
+   not a flattened PNG. Return a second edit and confirm it supersedes the first
+   binding without deleting either revision.
+4. Make another edit, close the tab, and verify the prompt offers **Return to
+   Workflow**, **Discard**, and **Cancel**. Discard must leave the last returned
+   workflow result unchanged.
+5. For a promoted candidate, promote a different candidate while the first is
+   open. Returning the old tab must fail safely and must not link its newly
+   stored artifacts into the workflow.
+
+A missing ORA recovers from its exact-hash PNG as a flattened one-layer repair;
+a missing PNG recovers from its exact-hash ORA so Return can recreate the
+flattened output. If both are missing, or either present file has the wrong
+hash, opening blocks rather than substituting a different project asset.
+
+Workflow close and project switch/close remain blocked while any editor tab is
+linked to that workflow. Return, discard, or close those tabs first so their
+private return authority cannot outlive the workflow or project it belongs to.
+When quitting, a successful Return must also persist the newly dirty workflow;
+if that workflow save fails or is cancelled, quit must stop.
+
 Normal PaintNode and **Provider E2E** never expose this fake executor.
 
 ## Explicit provider E2E

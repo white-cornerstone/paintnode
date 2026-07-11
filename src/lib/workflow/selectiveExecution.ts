@@ -5,7 +5,7 @@ import {
   type WorkflowCachedResult,
   type WorkflowExecutionResult,
 } from './execution';
-import { isFullWorkflowRunRecord } from './provenance';
+import { isFullWorkflowRunRecord, workflowSha256Text } from './provenance';
 import { resolveWorkflowReviewTopology, workflowReviewPromotionMaterialKey } from './candidatePromotion';
 import { creatorNodeDefinition, type CreatorNodeType } from './registry';
 import type {
@@ -13,6 +13,7 @@ import type {
   WorkflowGraphV2,
   WorkflowNodeV2,
   WorkflowRunRecordV1,
+  WorkflowRunOutput,
 } from './schema';
 
 export type WorkflowSelectiveRunMode = 'run-node' | 'run-from-here';
@@ -66,6 +67,12 @@ export interface WorkflowSelectiveExecutionRequest {
   isRunRecordReusable?: (record: Readonly<WorkflowRunRecordV1>) => boolean;
   reviewMaterialKeys?: Readonly<Record<string, string>>;
   isReviewOutputAvailable?: (output: Readonly<WorkflowRunRecordV1['outputs'][number]>) => boolean;
+  reviewEffectiveOutputs?: Readonly<Record<string, WorkflowRunOutput>>;
+  effectiveRunResults?: Readonly<Record<string, {
+    rootRunId: string;
+    materialKey: string;
+    output: WorkflowRunOutput;
+  }>>;
 }
 
 export interface WorkflowSelectiveExecutionPlan {
@@ -150,6 +157,10 @@ function activeEdges(graph: WorkflowGraphV2): WorkflowEdgeV2[] {
 
 function incomingNodeIds(edges: readonly WorkflowEdgeV2[], nodeId: string): string[] {
   return edges.filter((edge) => edge.target.nodeId === nodeId).map((edge) => edge.source.nodeId);
+}
+
+function outgoingNodeIds(edges: readonly WorkflowEdgeV2[], nodeId: string): string[] {
+  return edges.filter((edge) => edge.source.nodeId === nodeId).map((edge) => edge.target.nodeId);
 }
 
 function requireNode(graph: WorkflowGraphV2, nodeId: string): WorkflowNodeV2 {
@@ -433,11 +444,18 @@ export function planSelectiveWorkflowExecution(
         isOutputAvailable: request.isReviewOutputAvailable,
       });
       if (resolution.state === 'ready') {
+        const effectiveOutput = request.reviewEffectiveOutputs?.[node.id] ?? resolution.output;
+        const effectiveAvailable = !request.isReviewOutputAvailable || request.isReviewOutputAvailable(effectiveOutput);
+        if (!effectiveAvailable) {
+          registryDisposition = { kind: 'unavailable', reason: 'The edited promoted result is unavailable.' };
+          dispositions.set(node.id, registryDisposition);
+          continue;
+        }
         registryDisposition = { kind: 'available' };
         promotedReviewResults.set(node.id, {
           nodeId: node.id,
-          cacheKey: workflowReviewPromotionMaterialKey(resolution),
-          outputIds: [resolution.output.assetReferenceId],
+          cacheKey: workflowReviewPromotionMaterialKey({ ...resolution, output: effectiveOutput }),
+          outputIds: [effectiveOutput.assetReferenceId],
         });
       } else {
         registryDisposition = { kind: 'unavailable', reason: resolution.reason.message };
@@ -494,6 +512,24 @@ export function planSelectiveWorkflowExecution(
       node.id,
       promotedReviewResults.get(node.id)?.cacheKey ?? requireMaterialKey(request.materialKeys, node.id),
     ]));
+  for (const [sourceNodeId, effective] of Object.entries(request.effectiveRunResults ?? {})) {
+    const pending = outgoingNodeIds(edges, sourceNodeId);
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const descendantId = pending.shift()!;
+      if (visited.has(descendantId)) continue;
+      visited.add(descendantId);
+      if (materialKeys[descendantId]) {
+        materialKeys[descendantId] = workflowSha256Text(JSON.stringify({
+          schema: 'paintnode-editor-descendant-material-v1',
+          prior: materialKeys[descendantId],
+          sourceNodeId,
+          effectiveMaterialKey: effective.materialKey,
+        }));
+      }
+      pending.push(...outgoingNodeIds(edges, descendantId));
+    }
+  }
 
   const cachedRuns = new Map<string, WorkflowRunRecordV1>();
   const latestSuccessful = new Map<string, WorkflowRunRecordV1>();
@@ -520,11 +556,19 @@ export function planSelectiveWorkflowExecution(
 
   const cachedResults: WorkflowCachedResult[] = graph.nodes
     .filter((node) => needed.has(node.id) && (cachedRuns.has(node.id) || promotedReviewResults.has(node.id)))
-    .map((node) => promotedReviewResults.get(node.id) ?? ({
-      nodeId: node.id,
-      cacheKey: materialKeys[node.id],
-      outputIds: cachedRuns.get(node.id)!.outputs.map((output) => output.assetReferenceId),
-    }));
+    .map((node) => {
+      const promoted = promotedReviewResults.get(node.id);
+      if (promoted) return promoted;
+      const run = cachedRuns.get(node.id)!;
+      const effective = request.effectiveRunResults?.[node.id];
+      return {
+        nodeId: node.id,
+        cacheKey: effective?.rootRunId === run.id ? effective.materialKey : materialKeys[node.id],
+        outputIds: effective?.rootRunId === run.id
+          ? [effective.output.assetReferenceId]
+          : run.outputs.map((output) => output.assetReferenceId),
+      };
+    });
   const executionNodeIds = graph.nodes
     .filter((node) => needed.has(node.id)
       && dispositions.get(node.id)?.kind === 'available'
