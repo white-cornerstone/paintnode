@@ -2,7 +2,10 @@
 import { Codex } from '@openai/codex-sdk';
 import { writeFileSync } from 'node:fs';
 import { directorActionSchema } from './director-action-schema.mjs';
-import { workflowDirectorGraphDraftSchema } from './workflow-director-schema.mjs';
+import {
+  workflowDirectorGraphDraftSchema,
+  workflowDirectorRevisionSchema,
+} from './workflow-director-schema.mjs';
 
 function writeStructuredOutput(path, value, schemaName) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -15,7 +18,7 @@ function writeStructuredOutput(path, value, schemaName) {
 }
 
 function usage() {
-  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
+  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -72,7 +75,7 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--output-schema') {
       options.outputSchema = requireValue(argv, index, arg);
-      if (!['director-action', 'workflow-draft'].includes(options.outputSchema)) {
+      if (!['director-action', 'workflow-draft', 'workflow-revision'].includes(options.outputSchema)) {
         throw new Error(`Unknown output schema: ${options.outputSchema}`);
       }
       index += 2;
@@ -161,10 +164,15 @@ async function main() {
     ...options.images.map((path) => ({ type: 'local_image', path })),
     { type: 'text', text: prompt },
   ];
+  const outputSchemas = {
+    'director-action': directorActionSchema,
+    'workflow-draft': workflowDirectorGraphDraftSchema,
+    'workflow-revision': workflowDirectorRevisionSchema,
+  };
   const { events } = await thread.runStreamed(
     input,
     options.outputFile
-      ? { outputSchema: options.outputSchema === 'workflow-draft' ? workflowDirectorGraphDraftSchema : directorActionSchema }
+      ? { outputSchema: outputSchemas[options.outputSchema] }
       : undefined,
   );
   let failed = false;

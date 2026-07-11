@@ -58,6 +58,7 @@ pub fn run() {
             ai::cancel_ai_run,
             ai::submit_ai_director_input,
             ai::workflow_director::draft_workflow_with_director,
+            ai::workflow_director::revise_workflow_with_director,
             ai::codex::detect_codex,
             ai::codex::discover_codex_capabilities,
             ai::claude::detect_claude,

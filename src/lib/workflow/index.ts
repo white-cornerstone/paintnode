@@ -16,6 +16,8 @@ export * from './runControl';
 export * from './providerQaSelection';
 export * from './directorDraft';
 export * from './directorProposalSession';
+export * from './directorPatch';
+export * from './directorRevisionSession';
 export * from './provenance';
 export * from './candidateBranches';
 export * from './candidatePromotion';

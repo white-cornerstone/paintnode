@@ -81,6 +81,10 @@
     type ProviderFreeQaScenario,
   } from '../integrations/providerFreeQaWorkflowExecutor';
   import WorkflowDirectorDialog from './WorkflowDirectorDialog.svelte';
+  import WorkflowDirectorRevisionDialog from './WorkflowDirectorRevisionDialog.svelte';
+  import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
+  import { createConfiguredWorkflowRevisionRequester } from '../integrations/workflowDirectorRevisionAdapters';
+  import type { WorkflowDirectorRevisionRequester } from '../workflow';
 
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
@@ -132,6 +136,8 @@
   let paletteButton = $state<HTMLButtonElement>();
   let paletteOpen = $state(false);
   let directorOpen = $state(false);
+  let revisionDirectorOpen = $state(false);
+  let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -425,6 +431,13 @@
     } catch (e) {
       editor.flash('Workflow save failed: ' + ((e as Error)?.message ?? String(e)));
     }
+  }
+
+  function openRevisionDirector(): void {
+    revisionDirectorRequester = qaMode === 'provider-free'
+      ? createProviderFreeWorkflowRevisionRequester()
+      : createConfiguredWorkflowRevisionRequester(runOptions);
+    revisionDirectorOpen = true;
   }
 
   function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
@@ -2022,6 +2035,20 @@
       <div class="tray-head node-library">
         <span>Nodes</span>
         <div class="tray-head-actions">
+          {#if qaModeResolved && (qaMode === 'provider-free' || desktop)}
+            <button
+              type="button"
+              aria-label="Revise current workflow"
+              aria-haspopup="dialog"
+              use:tooltip={{
+                text: `Revise current workflow · ${qaMode === 'provider-free' ? 'QA Fake' : runOptions.directorProvider}`,
+                placement: 'right',
+              }}
+              onclick={openRevisionDirector}
+            >
+              <Icon svg={ArrowSync} size={14} />
+            </button>
+          {/if}
           <button
             type="button"
             aria-label="Draft with AI Director"
@@ -2922,6 +2949,16 @@
     imageCapabilityAvailable={providerSelection.ready}
     imageCapabilityReason={providerSelection.ready ? null : providerSelection.label}
     onClose={() => (directorOpen = false)}
+  />
+{/if}
+
+{#if revisionDirectorOpen && revisionDirectorRequester}
+  <WorkflowDirectorRevisionDialog
+    requester={revisionDirectorRequester}
+    onClose={() => {
+      revisionDirectorOpen = false;
+      revisionDirectorRequester = null;
+    }}
   />
 {/if}
 

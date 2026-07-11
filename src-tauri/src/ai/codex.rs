@@ -617,6 +617,47 @@ pub(crate) fn run_codex_workflow_draft_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_workflow_revision_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin);
+    let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        &[],
+        &options,
+        None,
+        Some(output_file),
+        Some("workflow-revision"),
+    );
+    let run = run_codex_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Codex at '{}': {error}",
+                codex_command_label(&codex_bin)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!("Codex workflow revision failed.\n\n{message}"))
+    } else {
+        Err(command_failure("Codex workflow revision", &run.output))
+    }
+}
+
 fn configured_codex_bin(bin: Option<String>) -> Option<String> {
     bin.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -5087,6 +5128,29 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-draft" }));
+        assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_revision_command_uses_dedicated_patch_schema_without_images() {
+        let job = TempJobDir::new("paintnode-codex-workflow-revision-test").expect("temp dir");
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "revise a workflow",
+            &[],
+            &CodexCommandOptions::default(),
+            None,
+            Some("paintnode-workflow-revision.json"),
+            Some("workflow-revision"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-revision" }));
         assert!(!args.iter().any(|arg| arg == "--image"));
     }
 

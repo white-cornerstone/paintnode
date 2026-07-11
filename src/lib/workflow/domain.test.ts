@@ -70,6 +70,16 @@ function deterministicIds(...ids: string[]): WorkflowIdGenerator {
 }
 
 describe('WorkflowGraphDomain', () => {
+  it('exposes a canonical content revision that includes graph identity', () => {
+    const first = new WorkflowGraphDomain(graph(), { initialRevision: 4 });
+    const secondGraph = graph();
+    secondGraph.id = 'different-graph';
+    const second = new WorkflowGraphDomain(secondGraph, { initialRevision: 4 });
+
+    expect(first.contentRevision).toEqual({ graphId: 'workflow-domain-test', revision: 4 });
+    expect(second.contentRevision).toEqual({ graphId: 'different-graph', revision: 4 });
+    expect(Object.isFrozen(first.contentRevision)).toBe(true);
+  });
   it('adds nodes and edges with injected deterministic IDs and revisions', () => {
     const original = graph();
     const domain = new WorkflowGraphDomain(original, {

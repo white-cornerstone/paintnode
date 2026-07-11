@@ -6,7 +6,7 @@ on:
       package_version:
         description: PaintNode provider package version
         required: true
-        default: "2.0.0"
+        default: "3.0.0"
       codex_sdk_version:
         description: Codex SDK version
         required: true
