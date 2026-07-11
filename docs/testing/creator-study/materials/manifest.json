@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "license": "CC0-1.0",
+  "provenance": "Deterministically generated in this repository by scripts/generate-creator-study-materials.mjs; no external or client source material.",
+  "taskRule": "Use Product A for Task 1. Do not reveal or import Product B until Task 6.",
+  "materials": [
+    {
+      "task": 1,
+      "label": "Product A",
+      "relativePath": "product-a.png",
+      "purpose": "Initial Product supplied for Task 1.",
+      "width": 512,
+      "height": 512,
+      "sha256": "5d033e38cdbb5acd7aea727c25aa729752c42bc5b4d1a5c999b5412a3ab3a101",
+      "mime": "image/png",
+      "nonConfidential": true
+    },
+    {
+      "task": 6,
+      "label": "Product B",
+      "relativePath": "product-b.png",
+      "purpose": "Updated Product supplied only when Task 6 begins.",
+      "width": 512,
+      "height": 512,
+      "sha256": "104bf96cec59147d6a23a5613e2311c76cfaaab8a1808e29d48c62fea6e1b858",
+      "mime": "image/png",
+      "nonConfidential": true
+    }
+  ]
+}
