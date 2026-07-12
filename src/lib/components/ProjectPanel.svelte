@@ -578,9 +578,9 @@
         </div>
         <div class="head-actions">
           <button
-            aria-label="Refresh project"
-            use:tooltip={{ text: 'Refresh project', placement: 'left' }}
-            onclick={() => void ui.withLoading('Refreshing project…', () => project.refresh())}
+            aria-label="Refresh project files and assets"
+            use:tooltip={{ text: 'Refresh project files and assets', placement: 'left' }}
+            onclick={() => void ui.withLoading('Refreshing project files and assets…', () => project.refresh())}
           >
             <Icon svg={ArrowSync} size={15} />
           </button>
