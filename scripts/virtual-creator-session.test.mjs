@@ -176,6 +176,12 @@ test('prepares owner-only, isolated session materials and an empty separate proj
 
     const participant = readFileSync(result.participantStartPath, 'utf8');
     assert.match(participant, /already-open native \*\*PaintNode Blueprint QA — Provider Free\*\*/);
+    assert.match(participant, /Do not invoke Computer Use yet/);
+    assert.match(participant, /Never open or launch PaintNode yourself/);
+    assert.match(participant, /APP READY/);
+    assert.match(participant, /running-app discovery/);
+    assert.match(participant, /BLOCKED — APP NOT RUNNING/);
+    assert.match(participant, /READY — WAITING FOR APP READY/);
     assert.match(participant, /Do not use Terminal/);
     assert.match(participant, /keyboard-only/);
     assert.match(participant, new RegExp(result.projectDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
@@ -200,10 +206,17 @@ test('prepares owner-only, isolated session materials and an empty separate proj
     assert.match(operator, /I am setting the test checkpoint for this task/);
     assert.match(operator, /SOURCE_STATUS_SHA256/);
     assert.ok(operator.indexOf('git rev-parse HEAD') < operator.indexOf('--fresh-study-session'));
-    assert.match(operator, /run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "\$APP" --resume-study-session`/);
+    assert.match(operator, /Run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "\$APP" --resume-study-session`/);
     assert.match(operator, /attest_checkout finalize/);
     assert.match(operator, /setup-receipt\.json/);
     assert.match(operator, /cleanup-receipt\.json/);
+    assert.match(operator, /Do not create the virtual creator task before native setup/);
+    assert.match(operator, /## Participant handoff — only after setup/);
+    assert.match(operator, /APP READY/);
+    assert.match(operator, /READY — WAITING FOR APP READY/);
+    assert.ok(operator.indexOf('creator-study:setup') < operator.indexOf('## Participant handoff — only after setup'));
+    assert.ok(operator.indexOf('## Participant handoff — only after setup') < operator.indexOf('## Task 1'));
+    assert.match(operator, /APP RESUMED/);
   } finally {
     rmSync(env.base, { recursive: true, force: true });
   }
