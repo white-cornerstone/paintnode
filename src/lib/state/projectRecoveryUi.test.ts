@@ -8,6 +8,10 @@ describe('project restart recovery UX', () => {
     expect(projectStoreSource).toContain('async reopenLastProject(): Promise<boolean>');
     expect(projectPanelSource).toContain('Reopen Last Project');
     expect(projectPanelSource).toContain('project.reopenLastProject()');
+    expect(projectPanelSource).toContain('Keyboard: Alt+W opens the first saved workflow.');
+    expect(projectPanelSource).toContain('aria-keyshortcuts="Alt+W"');
+    expect(projectPanelSource).toContain('projectKeyboardShortcut(event)');
+    expect(projectPanelSource).toContain('openFirstWorkflow()');
   });
 
   it('distinguishes layer placement from candidate inspection and requires an image document', () => {

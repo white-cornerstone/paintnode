@@ -303,6 +303,18 @@
     collapsedGroups[id] = !collapsedGroups[id];
   }
 
+  function openFirstWorkflow(): void {
+    const file = workflowFiles[0];
+    if (file) void openFile(file);
+  }
+
+  function projectKeyboardShortcut(event: KeyboardEvent): void {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.key.toLowerCase() !== 'w') return;
+    if (!workflowFiles.length) return;
+    event.preventDefault();
+    openFirstWorkflow();
+  }
+
   async function importExternalImages(): Promise<void> {
     if (!project.path) return;
     closeFileMenu();
@@ -430,6 +442,16 @@
         >
           <Icon svg={ImageAdd} size={13} />
         </button>
+      {:else if id === 'workflows' && groupFiles.length > 0}
+        <button
+          class="group-action"
+          aria-label="Open first workflow (Alt+W)"
+          aria-keyshortcuts="Alt+W"
+          use:tooltip={{ text: 'Open first workflow (Alt+W)', placement: 'left' }}
+          onclick={openFirstWorkflow}
+        >
+          <Icon svg={Open} size={13} />
+        </button>
       {/if}
       <small>{groupFiles.length}</small>
     </div>
@@ -475,6 +497,7 @@
   onpointerdown={closeFileMenu}
   onkeydown={(event) => {
     if (event.key === 'Escape') closeFileMenu();
+    projectKeyboardShortcut(event);
   }}
 />
 
@@ -554,6 +577,7 @@
       {/if}
 
       <div class="browser">
+        {#if workflowFiles.length > 0}<p class="project-keyboard-hint">Keyboard: Alt+W opens the first saved workflow.</p>{/if}
         {@render fileGroup('documents', 'Documents', documentFiles, 'Open', false, 'Saved .ora files appear here.')}
         {@render fileGroup('storyboards', 'Storyboards', storyboardFiles, 'Open', false, 'Composition storyboard .ora files appear here.')}
         {@render fileGroup('workflows', 'Workflows', workflowFiles, 'Open', false, 'Saved composition boards appear here.')}
