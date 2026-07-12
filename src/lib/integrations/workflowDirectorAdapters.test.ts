@@ -18,7 +18,7 @@ const context = buildWorkflowDirectorContext({
 });
 
 describe('workflow Director adapters', () => {
-  it.each(['codex', 'claude', 'antigravity'] as const)('invokes exactly the configured %s Director without discovery or image options', async (provider) => {
+  it.each(['codex', 'claude', 'antigravity', 'grok'] as const)('invokes exactly the configured %s Director without discovery or image options', async (provider) => {
     const invoke = vi.fn<InvokeWorkflowDirector>().mockResolvedValue({ version: 1 });
     const runOptions = {
       ...defaultAiRunOptions(),
@@ -29,6 +29,8 @@ describe('workflow Director adapters', () => {
       claudeBin: '/safe/claude',
       antigravityExecutableMode: 'custom' as const,
       antigravityBin: '/safe/agy',
+      grokExecutableMode: 'custom' as const,
+      grokBin: '/safe/grok',
     };
     const director = createConfiguredWorkflowDirector(runOptions, invoke, () => 'director-run-fixed');
 
@@ -42,12 +44,14 @@ describe('workflow Director adapters', () => {
       codexBin: provider === 'codex' ? '/safe/codex' : null,
       claudeBin: provider === 'claude' ? '/safe/claude' : null,
       antigravityBin: provider === 'antigravity' ? '/safe/agy' : null,
+      grokBin: provider === 'grok' ? '/safe/grok' : null,
     }));
     const payload = invoke.mock.calls[0][0];
     expect(Object.keys(payload).sort()).toEqual([
       'antigravityApprovalMode', 'antigravityBin', 'antigravityModel',
       'claudeBin', 'claudeEffort', 'claudeModel',
       'codexBin', 'codexModel', 'codexReasoningEffort', 'codexServiceTier',
+      'grokBin', 'grokModel', 'grokReasoningEffort',
       'context', 'provider', 'runId',
       'timeoutMs',
     ].sort());

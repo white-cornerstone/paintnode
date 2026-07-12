@@ -65,7 +65,7 @@ function codexNativePath(packageRoot, platform, arch) {
 }
 
 export function resolveProviderLaunch(provider, requestedPath, host = {}) {
-  if (provider !== 'codex' && provider !== 'antigravity') {
+  if (!['codex', 'antigravity', 'grok'].includes(provider)) {
     throw new Error(`Unsupported provider ${provider}.`);
   }
   if (!isAbsolute(requestedPath)) {
@@ -106,6 +106,7 @@ export function resolveProviderLaunch(provider, requestedPath, host = {}) {
 export function providerCapabilityArgs(provider) {
   if (provider === 'codex') return ['login', 'status'];
   if (provider === 'antigravity') return ['models'];
+  if (provider === 'grok') return ['models'];
   throw new Error(`Unsupported provider ${provider}.`);
 }
 
@@ -253,6 +254,18 @@ export function assertProviderCapabilityOutput(provider, output) {
       .some((line) => /^[\p{L}\p{N}][^()\r\n]{0,160}\([^)]+\)$/u.test(line.trim()));
     if (negative || !modelEntry) {
       throw new Error('Antigravity returned no available models for provider E2E.');
+    }
+    return;
+  }
+  if (provider === 'grok') {
+    const negative = /\bauthentication required\b|\bunauthenticated\b|\bnot logged in\b|\bfailed\b|\bfailure\b|\berror\b|\bwarning\b|\bunavailable\b|\bunable to\b|\bno (?:available )?models?\b/i.test(
+      normalized,
+    );
+    const modelEntry = normalized
+      .split(/\r?\n/)
+      .some((line) => /^\s*[*-]\s+grok[\w.-]*(?:\s+\(default\))?\s*$/i.test(line));
+    if (negative || !modelEntry) {
+      throw new Error('Grok returned no available models for provider E2E.');
     }
     return;
   }

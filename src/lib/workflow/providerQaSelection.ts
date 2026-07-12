@@ -11,7 +11,7 @@ export interface WorkflowProviderSelection {
 export function workflowProviderSelection(
   resolved: boolean,
   qaMode: WorkflowQaMode,
-  defaultProvider: 'codex' | 'antigravity',
+  defaultProvider: 'codex' | 'antigravity' | 'grok',
 ): WorkflowProviderSelection {
   if (!resolved) {
     return {
@@ -34,8 +34,12 @@ export function workflowProviderSelection(
   return {
     ready: true,
     provider: defaultProvider,
-    supportedProviders: ['codex', 'antigravity'],
+    supportedProviders: ['codex', 'antigravity', 'grok'],
     qaFake: false,
-    label: defaultProvider === 'codex' ? 'Codex' : 'Antigravity',
+    label: defaultProvider === 'codex'
+      ? 'Codex'
+      : defaultProvider === 'antigravity'
+        ? 'Antigravity'
+        : 'Grok',
   };
 }

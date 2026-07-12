@@ -18,10 +18,13 @@ function executablePath(flag) {
 console.log('[provider-e2e] fail-closed signature, version, auth, and capability preflight');
 const codex = await preflightProvider('codex', executablePath('--codex-path'));
 const antigravity = await preflightProvider('antigravity', executablePath('--antigravity-path'));
+const grok = await preflightProvider('grok', executablePath('--grok-path'));
 const codexPath = codex.launchPath;
 const antigravityPath = antigravity.launchPath;
+const grokPath = grok.launchPath;
 console.log(`[provider-e2e] Codex ready: ${codex.version} (${codexPath})`);
 console.log(`[provider-e2e] Antigravity ready: ${antigravity.version} (${antigravityPath})`);
+console.log(`[provider-e2e] Grok ready: ${grok.version} (${grokPath})`);
 
 const env = {
   ...process.env,
@@ -31,6 +34,8 @@ const env = {
   PAINTNODE_QA_CODEX_VERSION: codex.version,
   PAINTNODE_QA_ANTIGRAVITY_BIN: antigravityPath,
   PAINTNODE_QA_ANTIGRAVITY_VERSION: antigravity.version,
+  PAINTNODE_QA_GROK_BIN: grokPath,
+  PAINTNODE_QA_GROK_VERSION: grok.version,
 };
 
 console.log('[provider-e2e] validating PaintNode resolver with the preflighted native executables');
@@ -67,6 +72,8 @@ const app = spawnSync(
     codexPath,
     '--antigravity-path',
     antigravityPath,
+    '--grok-path',
+    grokPath,
   ],
   { cwd: root, env, stdio: 'inherit' },
 );

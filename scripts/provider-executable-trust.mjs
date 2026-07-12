@@ -5,6 +5,7 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 const PROVIDER_TEAMS = {
   codex: '2DC432GLL2',
   antigravity: 'EQHXZ8M8AV',
+  grok: '5Y6N3AJ54S',
 };
 
 function structuredGatekeeperPair(raw, key, value) {

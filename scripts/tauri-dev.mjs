@@ -41,6 +41,7 @@ if (providerFree) {
     PAINTNODE_PROVIDER_QA_MODE: 'provider-e2e',
     PAINTNODE_QA_CODEX_BIN: executablePath(args, '--codex-path'),
     PAINTNODE_QA_ANTIGRAVITY_BIN: executablePath(args, '--antigravity-path'),
+    PAINTNODE_QA_GROK_BIN: executablePath(args, '--grok-path'),
   };
 }
 

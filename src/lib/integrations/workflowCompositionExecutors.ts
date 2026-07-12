@@ -1,9 +1,11 @@
 import {
   composeAntigravityWorkflow,
   composeCodexWorkflow,
+  composeGrokWorkflow,
   type AntigravityGeneratorConfig,
   type CodexGeneratorConfig,
   type GeneratedImageResult,
+  type GrokGeneratorConfig,
 } from './desktop';
 import { listen } from '@tauri-apps/api/event';
 import {
@@ -139,6 +141,20 @@ function antigravityConfigForRequest(
   };
 }
 
+function grokConfigForRequest(
+  config: GrokGeneratorConfig,
+  request: Readonly<WorkflowTransformExecutionRequest>,
+): GrokGeneratorConfig {
+  const advanced = request.transform.advanced;
+  const options = record(advanced.options);
+  return {
+    ...config,
+    imageModel: stringOverride(advanced.model, config.imageModel),
+    imageResolution: stringOverride(options.imageResolution, config.imageResolution),
+    editChecksLevel: numberOverride(options.editChecksLevel, config.editChecksLevel),
+  };
+}
+
 function providerSources(request: Readonly<WorkflowTransformExecutionRequest>) {
   return [
     ...(request.storyboard?.source ? [{
@@ -237,6 +253,33 @@ export function createAntigravityWorkflowTransformExecutor(
           ['safetySexuallyExplicit', effective.safetySexuallyExplicit],
           ['safetyDangerousContent', effective.safetyDangerousContent],
           ['autonomyLevel', effective.autonomyLevel],
+          ['editChecksLevel', effective.editChecksLevel],
+        ]),
+      };
+    },
+  });
+}
+
+export function createGrokWorkflowTransformExecutor(
+  config: GrokGeneratorConfig,
+  dependencies: WorkflowCompositionAdapterDependencies = {},
+): WorkflowNodeExecutor {
+  return createWorkflowCompositionExecutor('grok', async (request, context) => {
+    const runId = providerRunId(config.runId, context);
+    return resultAsset(await executeObservedProvider(runId, context, () => composeGrokWorkflow(
+      grokConfigForRequest({ ...config, runId }, request),
+      request.prompt,
+      providerSources(request),
+    ), dependencies));
+  }, {
+    executor: { id: 'paintnode-grok-workflow', version: '1', requestSchemaVersion: '1' },
+    describeRun: (request) => {
+      const effective = grokConfigForRequest(config, request);
+      return {
+        id: 'grok',
+        model: effective.imageModel ?? null,
+        effectiveOptions: definedOptions([
+          ['imageResolution', effective.imageResolution],
           ['editChecksLevel', effective.editChecksLevel],
         ]),
       };

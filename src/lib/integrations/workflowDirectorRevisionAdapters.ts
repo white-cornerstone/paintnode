@@ -88,6 +88,11 @@ export function createConfiguredWorkflowRevisionRequester(
           antigravityBin: options.directorProvider === 'antigravity' ? configuredBin(options.antigravityExecutableMode, options.antigravityBin) : null,
           antigravityModel: options.directorProvider === 'antigravity' && options.antigravityModel !== 'auto' ? options.antigravityModel : null,
           antigravityApprovalMode: options.directorProvider === 'antigravity' ? options.antigravityApprovalMode || null : null,
+          grokBin: options.directorProvider === 'grok' ? configuredBin(options.grokExecutableMode, options.grokBin) : null,
+          grokModel: options.directorProvider === 'grok' && options.grokModel !== 'auto' ? options.grokModel : null,
+          grokReasoningEffort: options.directorProvider === 'grok' && options.grokReasoningEffort !== 'auto'
+            ? options.grokReasoningEffort
+            : null,
           timeoutMs: 180_000,
         });
       } catch (error) {

@@ -7,7 +7,7 @@
 <h1 align="center">PaintNode</h1>
 
 <p align="center">
-  <strong>Put Codex, Claude, and Antigravity to work inside a real image editor.</strong>
+  <strong>Put Codex, Claude, Antigravity, and Grok to work inside a real image editor.</strong>
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
 PaintNode is a free, open-source, backend-free raster image editor with AI
 agents built in. Start from a blank canvas, an image, a mask, or a layered
 project, mark the exact areas that need attention, then optionally let an AI
-Director plan the job while OpenAI Codex or Antigravity generates the pixels —
+Director plan the job while OpenAI Codex, Antigravity, or Grok generates the pixels —
 directly into an editable document.
 
 The point is simple: AI image output should land as layers, masks, selections,
@@ -46,8 +46,8 @@ instructions.
 
 No hosted PaintNode model. No extra API-key billing layer. PaintNode installs
 and manages the Codex and Claude runtimes without Terminal setup, using your
-provider sign-ins, subscriptions, limits, and local files. Antigravity uses
-your existing installation and sign-in.
+provider sign-ins, subscriptions, limits, and local files. Antigravity and Grok
+use your existing installations and sign-ins.
 
 <p align="center">
   <a href="https://paintnode.com">
@@ -66,7 +66,7 @@ The 0.2 line rebuilds the AI workflow from the ground up:
   the supported Codex and Claude runtimes without requiring any Terminal
   setup. Existing local installations remain available as an advanced option.
 - **The AI Director, decoupled.** Planning is now separate from image
-  generation: choose Codex, Claude, or Antigravity as the Director
+  generation: choose Codex, Claude, Antigravity, or Grok as the Director
   independently of the image provider, with reusable profiles and structured
   Director actions.
 - **Smarter, more transparent runs.** Persistent Director sessions, review
@@ -89,6 +89,7 @@ Full release notes: [0.2.0](docs/release-notes/0.2.0.md) ·
 | OpenAI Codex | Yes — GPT image models | Yes | Managed runtime, installed and signed in from inside the app |
 | Claude | — | Yes | Managed runtime, installed and signed in from inside the app |
 | Antigravity | Yes — Gemini image models | Yes | Your existing Antigravity installation |
+| Grok | Yes — Grok Imagine models | Yes | Your existing Grok CLI installation and sign-in |
 
 When enabled, the AI Director is the planning brain of a run. It breaks your
 request into structured actions and drives PaintNode's image-generation tools.
@@ -134,11 +135,11 @@ model paints, PaintNode handles the pixels around it.
   </tr>
   <tr>
     <td width="50%">
-      <img src="https://paintnode.com/assets/provider-fragment.png" alt="PaintNode provider settings for Codex, Claude, and Antigravity">
+      <img src="https://paintnode.com/assets/provider-fragment.png" alt="PaintNode AI provider settings">
       <br>
-      <strong>Codex, Claude, and Antigravity</strong>
+      <strong>Codex, Claude, Antigravity, and Grok</strong>
       <br>
-      Managed Codex and Claude runtimes are set up inside the app; Antigravity connects through your existing install.
+      Managed Codex and Claude runtimes are set up inside the app; Antigravity and Grok connect through your existing installs.
     </td>
     <td width="50%">
       <img src="https://paintnode.com/assets/paintnode-editor.png" alt="PaintNode full editor with canvas, panels, layers, and project tasks">
@@ -201,7 +202,7 @@ composition instead of rerolling prompts.
 | Direct the run | Choose the AI Director provider and involvement per job, review candidate results, and save setups as reusable profiles. |
 | Extract assets | Pull foreground objects or reusable visual elements into standalone project files. |
 | Compose on the node board | Wire extracted assets into a composition, sketch a storyboard for placement, and render an output that follows your layout. |
-| Mix provider runs | Use Codex and Antigravity on the same project through separate tasks, assets, and layers. |
+| Mix provider runs | Use Codex, Antigravity, and Grok on the same project through separate tasks, assets, and layers. |
 | Keep layered files | Save portable OpenRaster (`.ora`) documents, then export to PNG or PSD when needed. |
 
 ## How It Works
@@ -215,7 +216,7 @@ composition instead of rerolling prompts.
    show exactly which regions need attention and what should happen there.
 
 3. **Run with or without the AI Director**
-   When enabled, your chosen Director — Codex, Claude, or Antigravity — plans
+   When enabled, your chosen Director — Codex, Claude, Antigravity, or Grok — plans
    structured actions and drives PaintNode's image-generation tools under your
    existing sign-in. You can also skip the Director. Visible annotations are
    included as direct user instructions for the regions they point to.
@@ -227,10 +228,10 @@ composition instead of rerolling prompts.
 
 ## Who It Is For
 
-- **Codex, Claude, and Antigravity subscribers** who want AI image work to land
+- **Codex, Claude, Antigravity, and Grok subscribers** who want AI image work to land
   in an editable project instead of a folder of one-off images — with no extra
   API-key billing. Managed Codex and Claude setup stays inside PaintNode;
-  Antigravity uses your existing installation.
+  Antigravity and Grok use your existing installations.
 - **Developers and designers** making app mockups, product visuals, game
   assets, storyboards, thumbnails, marketing images, or UI concepts.
 - **Local-first creators** who want open project files, readable source, and AI
@@ -254,6 +255,8 @@ export.
   inside the app, with existing local installations as an advanced option.
 - Antigravity support through your existing installation, for both image
   generation and Director work.
+- Grok support through your existing CLI installation and sign-in, for Grok
+  Imagine generation, editing, workflow composition, and Director work.
 - PaintNode-owned image tools: deterministic resizing, masking,
   protected-pixel restoration, validation, and import around every model call.
 - Editable annotation overlays for arrows, memos, callouts, badges, and dividers

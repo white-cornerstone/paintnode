@@ -50,6 +50,7 @@
     loadAntigravityCapabilities,
     providerModelOptions,
   } from '../ai/providerCapabilities';
+  import { directorProviderLabel, providerLabel } from '../ai/taskSupport';
   import { Bot, Checkmark, ChevronDown, ChevronRight } from '../icons';
 
   type AntigravityModelScope = 'all' | 'image';
@@ -92,11 +93,13 @@
   const providers: { value: AiProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
+    { value: 'grok', label: 'Grok' },
   ];
   const directorProviders: { value: AiDirectorProvider; label: string }[] = [
     { value: 'codex', label: 'Codex' },
     { value: 'antigravity', label: 'Antigravity' },
     { value: 'claude', label: 'Claude' },
+    { value: 'grok', label: 'Grok' },
   ];
   let open = $state(false);
   let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
@@ -208,32 +211,28 @@
   );
 
   const summary = $derived.by(() => {
-    const imageName = providerName(imageProvider);
+    const imageName = providerLabel(imageProvider);
     if (!directorEnabled) return `Director: Off · Image: ${imageName}`;
-    const directorName = directorProviderName(directorProvider);
+    const directorName = directorProviderLabel(directorProvider);
     if (directorProvider === imageProvider) return `Director: ${directorModeShort}, ${directorInvolvementShort} · Image: ${imageName}`;
     return `Director: ${directorModeShort} ${directorName}, ${directorInvolvementShort} · Image: ${imageName}`;
   });
   const detailedSummary = $derived.by(() => {
     const imageDetail = imageProvider === 'codex'
       ? `Image: Codex, ${imageQualityShort} quality`
-      : `Image: Antigravity, ${antigravityImageSizeLabel}`;
+      : imageProvider === 'grok'
+        ? 'Image: Grok'
+        : `Image: Antigravity, ${antigravityImageSizeLabel}`;
     if (!directorEnabled) return `Director: Off. ${imageDetail}`;
     const directorDetail = directorProvider === 'codex'
       ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Codex, ${reasoningShort} reasoning`
       : directorProvider === 'claude'
         ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Claude, ${claudeModelLabel}, ${claudeEffortLabel} effort`
-      : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
+      : directorProvider === 'grok'
+        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Grok`
+        : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
     return `${directorDetail}. ${imageDetail}`;
   });
-
-  function providerName(provider: AiProvider): string {
-    return provider === 'antigravity' ? 'Antigravity' : 'Codex';
-  }
-
-  function directorProviderName(provider: AiDirectorProvider): string {
-    return provider === 'claude' ? 'Claude' : providerName(provider);
-  }
 
   function activeDirectorMode(): 'auto' | 'force' {
     if (directorMode === 'force' || directorMode === 'auto') return directorMode;
@@ -242,7 +241,14 @@
 
   function setDirectorProvider(provider: AiDirectorProvider): void {
     options = { ...options, directorMode: activeDirectorMode(), directorProvider: provider, directorInvolvement };
-    submenu = provider === 'codex' ? 'reasoning' : provider === 'claude' ? 'claudeModel' : 'antigravityModel';
+    submenu =
+      provider === 'codex'
+        ? 'reasoning'
+        : provider === 'claude'
+          ? 'claudeModel'
+          : provider === 'grok'
+            ? null
+            : 'antigravityModel';
   }
 
   function skipDirector(): void {
@@ -256,7 +262,7 @@
 
   function setImageProvider(provider: AiProvider): void {
     options = { ...options, provider, imageProvider: provider };
-    submenu = provider === 'codex' ? 'quality' : 'antigravityImageModel';
+    submenu = provider === 'codex' ? 'quality' : provider === 'grok' ? null : 'antigravityImageModel';
   }
 
   function applyProfile(profileId: string): void {
@@ -290,8 +296,8 @@
       ? aiProfileRunOptionsFromSettings(settings.value, profileId)
       : aiProviderDefaultsFromSettings(settings.value);
     const profileImageProvider = profileOptions.imageProvider ?? profileOptions.provider ?? 'codex';
-    if (profileOptions.directorMode === 'skip') return `Director: Off · Image: ${providerName(profileImageProvider)}`;
-    return `Director: ${directorProviderName(profileOptions.directorProvider)} · Image: ${providerName(profileImageProvider)}`;
+    if (profileOptions.directorMode === 'skip') return `Director: Off · Image: ${providerLabel(profileImageProvider)}`;
+    return `Director: ${directorProviderLabel(profileOptions.directorProvider)} · Image: ${providerLabel(profileImageProvider)}`;
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {

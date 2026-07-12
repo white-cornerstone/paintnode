@@ -11,7 +11,12 @@
   import { isDesktop } from '../integrations/desktop';
   import { tooltip } from '../actions/tooltip';
   import { Board, FolderAdd, ImageAdd } from '../icons';
-  import { isAntigravityImageRatio, isCodexImageSize } from '../ai/imageModelCapabilities';
+  import {
+    imageModelCapabilities,
+    isAntigravityImageRatio,
+    isCodexImageSize,
+    isGrokImageRatio,
+  } from '../ai/imageModelCapabilities';
   import { WORKFLOW_TEMPLATES, type WorkflowTemplateDefinition } from '../workflow';
   import { restoreExternalDialogTrigger } from '../state/workflowFocus';
 
@@ -19,7 +24,7 @@
 
   type Tab = NewDialogTab;
   type Background = 'white' | 'transparent';
-  type PresetFilter = 'all' | 'codex' | 'agy' | 'shared';
+  type PresetFilter = 'all' | 'codex' | 'agy' | 'grok' | 'shared';
   interface ImagePreset {
     id: string;
     name: string;
@@ -37,7 +42,7 @@
     {
       id: 'shared',
       label: 'Shared',
-      tooltip: 'Show ratios and dimensions that best fit both Codex and Antigravity image models.',
+      tooltip: 'Show ratios and dimensions that best fit Codex, Antigravity, and Grok image models.',
     },
     {
       id: 'codex',
@@ -49,6 +54,11 @@
       label: 'Antigravity',
       tooltip: 'Show aspect ratios that best fit Antigravity image generation.',
     },
+    {
+      id: 'grok',
+      label: 'Grok',
+      tooltip: 'Show aspect ratios that best fit Grok image generation.',
+    },
   ];
 
   function isAgyFriendly(width: number, height: number): boolean {
@@ -57,6 +67,10 @@
 
   function isCodexFriendly(width: number, height: number): boolean {
     return isCodexImageSize(width, height);
+  }
+
+  function isGrokFriendly(width: number, height: number): boolean {
+    return isGrokImageRatio(width, height);
   }
 
   function normalizedDimension(value: number): number {
@@ -86,6 +100,31 @@
     });
   }
 
+  const grokPresetNames: Record<string, string> = {
+    '1:1': 'Grok Square',
+    '2:3': 'Grok Photo Portrait',
+    '3:2': 'Grok Photo Landscape',
+    '3:4': 'Grok Portrait',
+    '4:3': 'Grok Classic Landscape',
+    '1:2': 'Grok Tall Banner',
+    '2:1': 'Grok Wide Banner',
+    '9:16': 'Grok Mobile Story',
+    '16:9': 'Grok Widescreen',
+    '9:19.5': 'Grok Smartphone Portrait',
+    '19.5:9': 'Grok Smartphone Wide',
+    '9:20': 'Grok Ultra-tall',
+    '20:9': 'Grok Ultra-wide',
+  };
+
+  const grokImagePresets: ImagePreset[] = imageModelCapabilities.providers.grok.aspectRatios.map((ratio) => ({
+    id: `grok-${ratio.label.replaceAll('.', '-')}`,
+    name: grokPresetNames[ratio.label] ?? `Grok ${ratio.label}`,
+    meta: presetMeta(ratio.width, ratio.height),
+    width: ratio.width,
+    height: ratio.height,
+    bg: 'transparent',
+  }));
+
   const imagePresets: ImagePreset[] = uniqueImagePresets([
     {
       id: 'default',
@@ -110,6 +149,7 @@
     { id: 'ai-9-16', name: 'AI Story', meta: presetMeta(768, 1376), width: 768, height: 1376, bg: 'transparent' },
     { id: 'ai-16-9', name: 'AI Wide Screen', meta: presetMeta(1376, 768), width: 1376, height: 768, bg: 'transparent' },
     { id: 'ai-21-9', name: 'AI Cinema', meta: presetMeta(1584, 672), width: 1584, height: 672, bg: 'transparent' },
+    ...grokImagePresets,
     { id: 'social', name: 'Social Post', meta: presetMeta(1080, 1350), width: 1080, height: 1350, bg: 'white' },
     { id: 'icon', name: 'Icon Asset', meta: presetMeta(512, 512), width: 512, height: 512, bg: 'transparent' },
     { id: 'banner', name: 'Web Banner', meta: presetMeta(1600, 600), width: 1600, height: 600, bg: 'white' },
@@ -136,15 +176,18 @@
     const badges: string[] = [];
     if (isCodexFriendly(preset.width, preset.height)) badges.push('Codex');
     if (isAgyFriendly(preset.width, preset.height)) badges.push('Antigravity');
+    if (isGrokFriendly(preset.width, preset.height)) badges.push('Grok');
     return badges;
   }
 
   function presetMatchesFilter(preset: ImagePreset, filter: PresetFilter): boolean {
     const codex = isCodexFriendly(preset.width, preset.height);
     const agy = isAgyFriendly(preset.width, preset.height);
+    const grok = isGrokFriendly(preset.width, preset.height);
     if (filter === 'codex') return codex;
     if (filter === 'agy') return agy;
-    if (filter === 'shared') return codex && agy;
+    if (filter === 'grok') return grok;
+    if (filter === 'shared') return codex && agy && grok;
     return true;
   }
 

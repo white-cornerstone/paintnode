@@ -7,6 +7,7 @@
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
+    grokConfigFromRunOptions,
     cancelAiRun,
     isDesktop,
     providerQaMode,
@@ -84,6 +85,7 @@
   import {
     createAntigravityWorkflowTransformExecutor,
     createCodexWorkflowTransformExecutor,
+    createGrokWorkflowTransformExecutor,
   } from '../integrations/workflowCompositionExecutors';
   import {
     createProviderFreeQaWorkflowExecutor,
@@ -1680,6 +1682,9 @@
             runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
           )),
           createAntigravityWorkflowTransformExecutor(antigravityConfigFromRunOptions(
+            runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
+          )),
+          createGrokWorkflowTransformExecutor(grokConfigFromRunOptions(
             runOptions, runProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts,
           )),
         ];

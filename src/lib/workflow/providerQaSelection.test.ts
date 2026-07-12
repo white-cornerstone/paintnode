@@ -27,9 +27,19 @@ describe('workflow provider QA selection', () => {
     expect(workflowProviderSelection(true, mode, 'antigravity')).toEqual({
       ready: true,
       provider: 'antigravity',
-      supportedProviders: ['codex', 'antigravity'],
+      supportedProviders: ['codex', 'antigravity', 'grok'],
       qaFake: false,
       label: 'Antigravity',
+    });
+  });
+
+  it('exposes Grok as a truthful native workflow provider', () => {
+    expect(workflowProviderSelection(true, null, 'grok')).toEqual({
+      ready: true,
+      provider: 'grok',
+      supportedProviders: ['codex', 'antigravity', 'grok'],
+      qaFake: false,
+      label: 'Grok',
     });
   });
 

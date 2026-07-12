@@ -1,20 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AntigravityGeneratorConfig, CodexGeneratorConfig } from './desktop';
+import type { AntigravityGeneratorConfig, CodexGeneratorConfig, GrokGeneratorConfig } from './desktop';
 import type { WorkflowTransformExecutionRequest } from '../workflow/transformExecutor';
 
 const services = vi.hoisted(() => ({
   codex: vi.fn(),
   antigravity: vi.fn(),
+  grok: vi.fn(),
 }));
 
 vi.mock('./desktop', () => ({
   composeCodexWorkflow: services.codex,
   composeAntigravityWorkflow: services.antigravity,
+  composeGrokWorkflow: services.grok,
 }));
 
 import {
   createAntigravityWorkflowTransformExecutor,
   createCodexWorkflowTransformExecutor,
+  createGrokWorkflowTransformExecutor,
 } from './workflowCompositionExecutors';
 
 function request(advanced: Record<string, unknown>): WorkflowTransformExecutionRequest {
@@ -60,6 +63,7 @@ describe('desktop workflow composition adapters', () => {
   beforeEach(() => {
     services.codex.mockReset().mockResolvedValue(storedResult);
     services.antigravity.mockReset().mockResolvedValue(storedResult);
+    services.grok.mockReset().mockResolvedValue(storedResult);
   });
 
   it('uses persisted Codex model/options over global defaults without allowing boundary overrides', async () => {
@@ -143,6 +147,38 @@ describe('desktop workflow composition adapters', () => {
       },
     });
     expect(JSON.stringify(provenance)).not.toMatch(/projectPath|antigravityBin|advancedJson|runId|debug|transcript/i);
+  });
+
+  it('routes persisted Grok image options through the provider-neutral workflow executor', async () => {
+    const config = {
+      imageModel: 'grok-imagine-image', imageResolution: 'auto', projectPath: '/virtual/project',
+    } satisfies GrokGeneratorConfig;
+    const executor = createGrokWorkflowTransformExecutor(config);
+    const runRequest = request({
+      provider: 'grok',
+      model: 'grok-imagine-image-quality',
+      options: { imageResolution: '2k', editChecksLevel: 2, projectPath: '/must-not-override-project' },
+    });
+    await executor.execute(runRequest);
+
+    expect(services.grok).toHaveBeenCalledWith(
+      expect.objectContaining({
+        imageModel: 'grok-imagine-image-quality', imageResolution: '2k', editChecksLevel: 2,
+        projectPath: '/virtual/project',
+      }),
+      'Use the storyboard as the primary spatial plan.',
+      [
+        { name: 'Storyboard sketch - mandatory layout guide', bytes: new Uint8Array([2]) },
+        { name: 'Product', role: 'Hero product', bytes: new Uint8Array([1]) },
+      ],
+    );
+    expect(executor.executor).toEqual({
+      id: 'paintnode-grok-workflow', version: '1', requestSchemaVersion: '1',
+    });
+    expect(executor.describeRun(runRequest)).toEqual({
+      id: 'grok', model: 'grok-imagine-image-quality',
+      effectiveOptions: { imageResolution: '2k', editChecksLevel: 2 },
+    });
   });
 
   it.each(['codex', 'antigravity'] as const)(

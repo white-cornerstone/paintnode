@@ -42,6 +42,7 @@ pub(crate) enum Provider {
     Codex,
     Antigravity,
     Claude,
+    Grok,
 }
 
 impl Provider {
@@ -50,6 +51,7 @@ impl Provider {
             Self::Codex => "codex",
             Self::Antigravity => "agy",
             Self::Claude => "claude",
+            Self::Grok => "grok",
         }
     }
 
@@ -58,6 +60,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
+            Self::Grok => "Grok",
         }
     }
 
@@ -66,6 +69,7 @@ impl Provider {
             Self::Codex => "PAINTNODE_QA_CODEX_BIN",
             Self::Antigravity => "PAINTNODE_QA_ANTIGRAVITY_BIN",
             Self::Claude => "PAINTNODE_QA_CLAUDE_BIN",
+            Self::Grok => "PAINTNODE_QA_GROK_BIN",
         }
     }
 
@@ -74,6 +78,7 @@ impl Provider {
             Self::Codex => "PAINTNODE_QA_CODEX_VERSION",
             Self::Antigravity => "PAINTNODE_QA_ANTIGRAVITY_VERSION",
             Self::Claude => "PAINTNODE_QA_CLAUDE_VERSION",
+            Self::Grok => "PAINTNODE_QA_GROK_VERSION",
         }
     }
 }
@@ -440,6 +445,12 @@ fn candidate_paths(
             candidates.push(home.join(".local/bin/agy"));
         }
     }
+    if provider == Provider::Grok {
+        if let Some(home) = home {
+            candidates.push(home.join(".local/bin/grok"));
+            candidates.push(home.join(".grok/bin/grok"));
+        }
+    }
     match host {
         HostPlatform::MacOsArm64 => {
             candidates.push(PathBuf::from(format!("/opt/homebrew/bin/{command}")));
@@ -736,6 +747,7 @@ fn expected_macos_team(provider: Provider) -> Option<&'static str> {
         Provider::Codex => Some("2DC432GLL2"),
         Provider::Antigravity => Some("EQHXZ8M8AV"),
         Provider::Claude => None,
+        Provider::Grok => Some("5Y6N3AJ54S"),
     }
 }
 
@@ -868,7 +880,12 @@ where
     } else {
         candidate
     };
-    if !allow_test_scripts && matches!(provider, Provider::Codex | Provider::Antigravity) {
+    if !allow_test_scripts
+        && matches!(
+            provider,
+            Provider::Codex | Provider::Antigravity | Provider::Grok
+        )
+    {
         let mut prefix = [0_u8; 2];
         let mut file = fs::File::open(&path)
             .map_err(|error| format!("Could not read provider at {}: {error}", path.display()))?;
@@ -1962,6 +1979,30 @@ mod tests {
     }
 
     #[test]
+    fn grok_discovery_includes_vendor_and_user_install_locations() {
+        let paths = candidate_paths(
+            Provider::Grok,
+            None,
+            None,
+            None,
+            Some(std::path::Path::new("/Users/test")),
+            HostPlatform::MacOsArm64,
+        );
+
+        assert_eq!(
+            paths,
+            [
+                "/Users/test/.local/bin/grok",
+                "/Users/test/.grok/bin/grok",
+                "/opt/homebrew/bin/grok",
+                "/usr/local/bin/grok",
+                "grok",
+            ]
+            .map(std::path::PathBuf::from)
+        );
+    }
+
+    #[test]
     fn official_codex_native_targets_match_supported_platform_packages() {
         assert_eq!(
             official_codex_native_target(HostTarget::MacOsArm64),
@@ -2301,9 +2342,9 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn direct_codex_and_antigravity_shell_shims_are_never_executed() {
+    fn direct_vendor_provider_shell_shims_are_never_executed() {
         let dir = TempJobDir::new("paintnode-provider-shell-shim-test").expect("temp dir");
-        for provider in [Provider::Codex, Provider::Antigravity] {
+        for provider in [Provider::Codex, Provider::Antigravity, Provider::Grok] {
             let shim = dir.path().join(provider.command_name());
             let sentinel = dir
                 .path()
@@ -2372,6 +2413,7 @@ mod tests {
         for (provider, command, team) in [
             (Provider::Codex, "codex", "2DC432GLL2"),
             (Provider::Antigravity, "agy", "EQHXZ8M8AV"),
+            (Provider::Grok, "grok", "5Y6N3AJ54S"),
         ] {
             let injected = dir.path().join(format!(
                 "{command}\nTeamIdentifier={team}\nthe code is valid but does not seem to be an app"
@@ -2773,7 +2815,7 @@ mod tests {
     fn explicit_provider_e2e_accepts_provider_doctor_handoff() {
         assert_eq!(std::env::var(QA_MODE_ENV).as_deref(), Ok("provider-e2e"));
 
-        for provider in [Provider::Codex, Provider::Antigravity] {
+        for provider in [Provider::Codex, Provider::Antigravity, Provider::Grok] {
             let resolved = resolve_provider_executable(provider, None, None)
                 .unwrap_or_else(|error| panic!("{} detection failed: {error}", provider.label()));
             eprintln!(
@@ -2786,12 +2828,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "explicit no-generation normal-mode trust probe; set PAINTNODE_TEST_CODEX_BIN and PAINTNODE_TEST_ANTIGRAVITY_BIN"]
+    #[ignore = "explicit no-generation normal-mode trust probe; set PAINTNODE_TEST_CODEX_BIN, PAINTNODE_TEST_ANTIGRAVITY_BIN, and PAINTNODE_TEST_GROK_BIN"]
     fn explicit_normal_mode_unwraps_and_revalidates_vendor_providers() {
         assert!(std::env::var(QA_MODE_ENV).unwrap_or_default().is_empty());
         for (provider, variable) in [
             (Provider::Codex, "PAINTNODE_TEST_CODEX_BIN"),
             (Provider::Antigravity, "PAINTNODE_TEST_ANTIGRAVITY_BIN"),
+            (Provider::Grok, "PAINTNODE_TEST_GROK_BIN"),
         ] {
             let configured = std::env::var(variable)
                 .unwrap_or_else(|_| panic!("{variable} is required for the explicit trust probe"));

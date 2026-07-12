@@ -25,8 +25,10 @@
   import {
     antigravityConfigFromRunOptions,
     codexConfigFromRunOptions,
+    grokConfigFromRunOptions,
     generateAntigravityRetouchImage,
     generateCodexRetouchImage,
+    generateGrokRetouchImage,
     isDesktop,
   } from '../integrations/desktop';
   import { ui, type AiAutoAdjustKind } from '../state/ui.svelte';
@@ -170,7 +172,17 @@
         const sourcePng = await canvasToPngBytes(source);
         const maskPng = await canvasToPngBytes(mask);
         const generated =
-          imageProvider === 'antigravity'
+          imageProvider === 'grok'
+            ? await generateGrokRetouchImage(
+                grokConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
+                sourcePng,
+                sourcePng,
+                maskPng,
+                null,
+                null,
+                prompt.trim(),
+              )
+            : imageProvider === 'antigravity'
             ? await generateAntigravityRetouchImage(
                 antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, keepJobDir, keepDebugArtifacts),
                 sourcePng,

@@ -34,9 +34,9 @@ use crate::ai::claude::{
 };
 use crate::ai::codex::{final_codex_agent_message, run_codex_director_request};
 use crate::ai::director::{
-    director_candidate_file, director_uses_agentic_loop, image_request_prompt,
-    run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorLoopSpec,
-    PAINTNODE_DIRECTOR_ACTION_FILE, PAINTNODE_DIRECTOR_OBSERVATION_FILE,
+    director_candidate_file, director_prompt_with_image_paths, director_uses_agentic_loop,
+    image_request_prompt, run_candidate_director_loop, workflow_review_criteria, DirectorCandidate,
+    DirectorLoopSpec, PAINTNODE_DIRECTOR_ACTION_FILE, PAINTNODE_DIRECTOR_OBSERVATION_FILE,
 };
 use crate::ai::fill_storyboard::{
     fallback_fill_storyboard, fill_storyboard_antigravity_draft_aspect_label,
@@ -45,15 +45,17 @@ use crate::ai::fill_storyboard::{
     FILL_STORYBOARD_DRAFT_CANVAS_FILE, FILL_STORYBOARD_DRAFT_FILE, FILL_STORYBOARD_DRAFT_MASK_FILE,
     FILL_STORYBOARD_OVERVIEW_FILE,
 };
+use crate::ai::grok::{final_grok_agent_message, run_grok_director_request};
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
-    ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
-    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
-    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, plan_ai_upscale_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, storyboard_draft_canvas_png,
-    storyboard_draft_mask_png, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_part_prompt_context, ai_upscale_part_geometry_note, ai_upscale_target_dimensions,
+    correct_part_result_drift, cover_crop_png_to_dimensions, fill_part_needs_overview,
+    fill_placement_returns_layer_results, normalize_storyboard_draft_png, plan_ai_edit_placement,
+    plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
+    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result,
+    storyboard_draft_canvas_png, storyboard_draft_mask_png, validate_upscale_part_structure,
+    AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod, AiFillRedundancy,
+    AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
@@ -71,8 +73,8 @@ use crate::ai::{
     write_reference_pngs, AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode,
     AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult, CodexDetectionResult,
     DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT,
-    POLL_INTERVAL,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR,
+    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -2912,12 +2914,16 @@ fn antigravity_restore_image_details(
             let _ = fs::remove_file(part_path.join("result.png"));
         }
         let job_dir = antigravity_job_dir_label(workspace_path, &part_path);
-        let inputs = composer.part_inputs(part, label)?;
+        let inputs = if upscale_layers {
+            composer.part_inputs_from_original(part, label)?
+        } else {
+            composer.part_inputs(part, label)?
+        };
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
-        let has_overview = placement.is_split();
+        let has_overview = placement.is_split() && !upscale_layers;
         if has_overview {
             fs::write(
                 part_path.join("overview.png"),
@@ -2925,7 +2931,11 @@ fn antigravity_restore_image_details(
             )
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
-        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let geometry_note = if upscale_layers {
+            ai_upscale_part_geometry_note()
+        } else {
+            ai_part_geometry_note(&placement, part_index)
+        };
         let prompt_text = antigravity_restore_director_prompt(
             &job_dir,
             autonomy,
@@ -2973,6 +2983,9 @@ fn antigravity_restore_image_details(
                 .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
         let _ = fs::remove_file(&result_path);
         let unaligned_bytes = bytes.clone();
+        if upscale_layers {
+            validate_upscale_part_structure(&inputs.source_png, &bytes, label)?;
+        }
         let (bytes, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &bytes, label)?;
         if let Some(correction) = drift_correction {
@@ -3052,6 +3065,9 @@ pub(crate) async fn generate_antigravity_image(
     claude_bin: Option<String>,
     claude_model: Option<String>,
     claude_effort: Option<String>,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
     target_width: Option<u32>,
     target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
@@ -3097,7 +3113,7 @@ pub(crate) async fn generate_antigravity_image(
         clear_ai_run_cancelled(&run_id);
         let keep_job_dir = should_keep_job_dir(keep_job_dir);
         let (project_dir, job_project_dir, job_path, cleanup_project_job, _temp_job) =
-            project_or_temp_job_path(&app, &project_path, "antigravity", &run_id, keep_job_dir)?;
+            project_or_temp_job_path(&app, &project_path, ANTIGRAVITY_RUNS_DIR, "antigravity", &run_id, keep_job_dir)?;
         let workspace_path = project_dir.as_deref()
             .or(job_project_dir.as_deref())
             .unwrap_or(job_path.as_path())
@@ -3252,16 +3268,38 @@ pub(crate) async fn generate_antigravity_image(
                                     Err(claude_command_failure("Claude Director", &run.output))
                                 }
                             }
+                            // Antigravity and Grok CLIs take no image-attachment
+                            // flag; list the review/reference image paths in the
+                            // prompt so their file tools can open them.
                             AiDirectorProvider::Antigravity => run_antigravity(
                                 &antigravity_bin,
                                 &workspace_path,
                                 &job_path,
-                                turn_prompt_text,
+                                &director_prompt_with_image_paths(
+                                    turn_prompt_text,
+                                    &turn_image_paths,
+                                    &job_path,
+                                ),
                                 &options,
                                 true,
                                 app.clone(),
                                 run_id.clone(),
                                 Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+                                session_id,
+                            ),
+                            AiDirectorProvider::Grok => run_grok_director_request(
+                                &app,
+                                &run_id,
+                                grok_bin.clone(),
+                                grok_model.clone(),
+                                grok_reasoning_effort.clone(),
+                                options.keep_debug_artifacts,
+                                &job_path,
+                                &director_prompt_with_image_paths(
+                                    turn_prompt_text,
+                                    &turn_image_paths,
+                                    &job_path,
+                                ),
                                 session_id,
                             ),
                         }
@@ -3270,6 +3308,7 @@ pub(crate) async fn generate_antigravity_image(
                         AiDirectorProvider::Codex => final_codex_agent_message(&run.output),
                         AiDirectorProvider::Claude => final_claude_agent_message(&run.output),
                         AiDirectorProvider::Antigravity => None,
+                        AiDirectorProvider::Grok => final_grok_agent_message(&run.output),
                     },
                     |turn, question, options, allow_custom| {
                         request_ai_director_input(
@@ -3509,6 +3548,7 @@ pub(crate) async fn generate_antigravity_fill_image(
             project_or_temp_job_path(
                 &app,
                 &project_path,
+                ANTIGRAVITY_RUNS_DIR,
                 "antigravity-fill",
                 &run_id,
                 keep_job_dir,
@@ -4003,6 +4043,7 @@ pub(crate) async fn generate_antigravity_retouch_image(
             project_or_temp_job_path(
                 &app,
                 &project_path,
+                ANTIGRAVITY_RUNS_DIR,
                 "antigravity-retouch",
                 &run_id,
                 keep_job_dir,
@@ -4367,6 +4408,7 @@ pub(crate) async fn upscale_antigravity_image(
             project_or_temp_job_path(
                 &app,
                 &project_path,
+                ANTIGRAVITY_RUNS_DIR,
                 "antigravity-upscale",
                 &run_id,
                 keep_job_dir,
@@ -4494,6 +4536,7 @@ pub(crate) async fn decouple_antigravity_image(
             project_or_temp_job_path(
                 &app,
                 &project_path,
+                ANTIGRAVITY_RUNS_DIR,
                 "antigravity-decouple",
                 &now_id().to_string(),
                 keep_job_dir,
@@ -4748,6 +4791,7 @@ pub(crate) async fn compose_antigravity_workflow(
             project_or_temp_job_path(
                 &app,
                 &project_path,
+                ANTIGRAVITY_RUNS_DIR,
                 "antigravity-workflow",
                 &now_id().to_string(),
                 keep_job_dir,

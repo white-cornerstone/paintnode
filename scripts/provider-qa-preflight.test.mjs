@@ -68,6 +68,14 @@ test('direct provider executables remain direct and relative paths fail closed',
     versionHint: null,
     unwrapped: false,
   });
+  assert.deepEqual(resolveProviderLaunch('grok', agy), {
+    provider: 'grok',
+    requestedPath: agy,
+    resolvedPath: canonicalAgy,
+    launchPath: canonicalAgy,
+    versionHint: null,
+    unwrapped: false,
+  });
   assert.throws(() => resolveProviderLaunch('codex', 'codex'), /absolute path/i);
 });
 
@@ -112,8 +120,10 @@ test('macOS signature validation uses pinned requirement status and structured G
 test('provider doctor uses no-cost auth and capability commands only', () => {
   assert.deepEqual(providerCapabilityArgs('codex'), ['login', 'status']);
   assert.deepEqual(providerCapabilityArgs('antigravity'), ['models']);
+  assert.deepEqual(providerCapabilityArgs('grok'), ['models']);
   assert.doesNotThrow(() => assertProviderCapabilityOutput('codex', 'Logged in using ChatGPT'));
   assert.doesNotThrow(() => assertProviderCapabilityOutput('antigravity', 'Gemini 3.1 Pro (High)'));
+  assert.doesNotThrow(() => assertProviderCapabilityOutput('grok', '  * grok-4.5 (default)'));
   assert.throws(() => assertProviderCapabilityOutput('codex', 'Not logged in'), /not authenticated/i);
   assert.throws(() => assertProviderCapabilityOutput('codex', 'No longer logged in.'), /not authenticated/i);
   assert.throws(() => assertProviderCapabilityOutput('codex', 'Last logged in: yesterday'), /not authenticated/i);
@@ -126,6 +136,7 @@ test('provider doctor uses no-cost auth and capability commands only', () => {
     /no available models/i,
   );
   assert.throws(() => assertProviderCapabilityOutput('antigravity', '  '), /no available models/i);
+  assert.throws(() => assertProviderCapabilityOutput('grok', 'No models available'), /no available models/i);
 });
 
 test('Windows tree termination falls back and surfaces taskkill failure', () => {

@@ -19,6 +19,7 @@ use tauri::AppHandle;
 use crate::ai::antigravity::run_antigravity_director_request;
 use crate::ai::claude::{run_claude_workflow_draft_request, run_claude_workflow_revision_request};
 use crate::ai::codex::{run_codex_workflow_draft_request, run_codex_workflow_revision_request};
+use crate::ai::grok::run_grok_director_request;
 use crate::ai::{
     ai_run_cancelled, clear_ai_run_cancelled, request_ai_run_cancel, TempJobDir,
     AI_RUN_STOPPED_MESSAGE,
@@ -506,6 +507,9 @@ fn run_workflow_director_revision(
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
     timeout: Duration,
 ) -> Result<Value, String> {
     validate_identifier(run_id, "Workflow Director revision run id")?;
@@ -557,6 +561,19 @@ fn run_workflow_director_revision(
                     return Err("Antigravity workflow revision failed.".into());
                 }
             }
+            "grok" => {
+                run_grok_director_request(
+                    app,
+                    run_id,
+                    grok_bin,
+                    grok_model,
+                    grok_reasoning_effort,
+                    false,
+                    job.path(),
+                    &prompt,
+                    None,
+                )?;
+            }
             _ => return Err("Unsupported workflow Director revision provider.".into()),
         }
         Ok(())
@@ -590,6 +607,9 @@ fn run_workflow_director(
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
     timeout: Duration,
 ) -> Result<Value, String> {
     validate_identifier(run_id, "Workflow Director run id")?;
@@ -642,6 +662,19 @@ fn run_workflow_director(
                     return Err("Antigravity workflow Director failed. Review the provider progress for details.".into());
                 }
             }
+            "grok" => {
+                run_grok_director_request(
+                    app,
+                    run_id,
+                    grok_bin,
+                    grok_model,
+                    grok_reasoning_effort,
+                    false,
+                    job.path(),
+                    &prompt,
+                    None,
+                )?;
+            }
             other => {
                 return Err(format!(
                     "Unsupported workflow Director provider: {}.",
@@ -671,6 +704,9 @@ pub(crate) async fn draft_workflow_with_director(
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
     timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
     let timeout = workflow_director_timeout(timeout_ms);
@@ -690,6 +726,9 @@ pub(crate) async fn draft_workflow_with_director(
             antigravity_bin,
             antigravity_model,
             antigravity_approval_mode,
+            grok_bin,
+            grok_model,
+            grok_reasoning_effort,
             timeout,
         )
     })
@@ -714,6 +753,9 @@ pub(crate) async fn revise_workflow_with_director(
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
     timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
     let timeout = workflow_director_timeout(timeout_ms);
@@ -733,6 +775,9 @@ pub(crate) async fn revise_workflow_with_director(
             antigravity_bin,
             antigravity_model,
             antigravity_approval_mode,
+            grok_bin,
+            grok_model,
+            grok_reasoning_effort,
             timeout,
         )
     })

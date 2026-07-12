@@ -23,7 +23,7 @@ describe('configured workflow Director revision adapter', () => {
     ))).toBe(false);
   });
 
-  it.each(['codex', 'claude', 'antigravity'] as const)('invokes only configured %s with constrained graph state', async (provider) => {
+  it.each(['codex', 'claude', 'antigravity', 'grok'] as const)('invokes only configured %s with constrained graph state', async (provider) => {
     const store = new WorkflowStore();
     store.newFromTemplate('campaign-composer');
     const graph = structuredClone(store.graphSnapshot());
@@ -42,6 +42,7 @@ describe('configured workflow Director revision adapter', () => {
     expect(run).toHaveBeenCalledOnce();
     const call = run.mock.calls[0][0];
     expect(call.provider).toBe(provider);
+    expect(call.grokBin).toBeNull();
     expect(JSON.stringify(call.context)).not.toContain('runRecords');
     expect(JSON.stringify(call.context)).not.toContain('/Users/alice');
     expect(call.context.graph).toEqual(expect.objectContaining({ id: graph.id, nodes: expect.any(Array), edges: expect.any(Array) }));

@@ -88,6 +88,7 @@ if (runtimeManifestUrl) env.PAINTNODE_RUNTIME_MANIFEST_URL = runtimeManifestUrl;
 if (mode === 'provider-e2e') {
   env.PAINTNODE_QA_CODEX_BIN = executablePath('--codex-path');
   env.PAINTNODE_QA_ANTIGRAVITY_BIN = executablePath('--antigravity-path');
+  env.PAINTNODE_QA_GROK_BIN = executablePath('--grok-path');
 }
 if (studySession) {
   env.PAINTNODE_PROVIDER_FREE_STUDY_PROFILE = providerFreeStudyProfileEnvironment(studySession);

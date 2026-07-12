@@ -3,6 +3,7 @@ import {
   FALLBACK_CODEX_CAPABILITIES,
   FALLBACK_CLAUDE_CAPABILITIES,
   FALLBACK_ANTIGRAVITY_CAPABILITIES,
+  FALLBACK_GROK_CAPABILITIES,
   claudeEffortForModel,
   claudeReasoningOptions,
   codexEffortForModel,
@@ -56,6 +57,15 @@ describe('Codex capabilities', () => {
     expect(FALLBACK_CLAUDE_CAPABILITIES.features.managedSubagents).toBe(true);
     expect(FALLBACK_ANTIGRAVITY_CAPABILITIES.features.transport).toBe('cli');
     expect(FALLBACK_ANTIGRAVITY_CAPABILITIES.features.structuredOutput).toBe(false);
+  });
+
+  it('provides Grok model fallbacks with the first option as default', () => {
+    expect(FALLBACK_GROK_CAPABILITIES.source).toBe('fallback');
+    expect(FALLBACK_GROK_CAPABILITIES.models[0].id).toBe('auto');
+    expect(FALLBACK_GROK_CAPABILITIES.models[0].isDefault).toBe(true);
+    expect(FALLBACK_GROK_CAPABILITIES.models.map((model) => model.id)).toContain('grok-4.5');
+    expect(FALLBACK_GROK_CAPABILITIES.features.transport).toBe('cli');
+    expect(FALLBACK_GROK_CAPABILITIES.features.structuredProgress).toBe(true);
   });
 
   it('shows only automatic effort when a discovered Claude model has no effort support', () => {

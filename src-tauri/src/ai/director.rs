@@ -403,6 +403,32 @@ pub(crate) fn write_director_final(
     append_director_timeline_event(part_path, payload)
 }
 
+/// CLI directors without an image-attachment flag (Antigravity, Grok) run in
+/// the job folder with file tools; list the turn's review/reference images in
+/// the prompt so the agent can open them instead of reviewing blind.
+pub(crate) fn director_prompt_with_image_paths(
+    prompt: &str,
+    image_paths: &[std::path::PathBuf],
+    job_path: &std::path::Path,
+) -> String {
+    if image_paths.is_empty() {
+        return prompt.to_string();
+    }
+    let listed = image_paths
+        .iter()
+        .map(|path| {
+            path.strip_prefix(job_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<Vec<_>>()
+        .join("\n- ");
+    format!(
+        "{prompt}\n\nAttached images for this turn (open these files with your image tools to inspect them before deciding):\n- {listed}"
+    )
+}
+
 pub(crate) fn director_turn_prompt(
     turn: usize,
     involvement: AiDirectorInvolvement,

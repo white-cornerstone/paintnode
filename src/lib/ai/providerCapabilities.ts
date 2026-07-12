@@ -2,6 +2,7 @@ import {
   discoverAntigravityCapabilities,
   discoverClaudeCapabilities,
   discoverCodexCapabilities,
+  discoverGrokCapabilities,
   isDesktop,
   type AiProviderCapabilitiesResult,
   type AiModelCapability,
@@ -11,6 +12,7 @@ import {
   ANTIGRAVITY_MODEL_OPTIONS,
   CLAUDE_MODEL_OPTIONS,
   CODEX_MODEL_OPTIONS,
+  GROK_MODEL_OPTIONS,
   type ClaudeEffort,
   type ReasoningEffort,
 } from '../state/settings';
@@ -97,6 +99,28 @@ export const FALLBACK_ANTIGRAVITY_CAPABILITIES: AiProviderCapabilitiesResult = {
   },
 };
 
+export const FALLBACK_GROK_CAPABILITIES: AiProviderCapabilitiesResult = {
+  models: GROK_MODEL_OPTIONS.map((model, index) => ({
+    id: model.id,
+    label: model.label,
+    description: null,
+    supportedReasoningEfforts: [],
+    defaultReasoningEffort: null,
+    isDefault: index === 0,
+  })),
+  source: 'fallback',
+  warning: null,
+  features: {
+    transport: 'cli',
+    sessionReuse: true,
+    structuredOutput: true,
+    appMediatedUserInput: false,
+    autonomousSubagents: true,
+    managedSubagents: false,
+    structuredProgress: true,
+  },
+};
+
 const cache = new Map<string, Promise<AiProviderCapabilitiesResult>>();
 
 export function loadCodexCapabilities(bin = '', refresh = false): Promise<AiProviderCapabilitiesResult> {
@@ -111,19 +135,28 @@ export function loadCodexCapabilities(bin = '', refresh = false): Promise<AiProv
 }
 
 function loadCapabilities(
-  provider: 'claude' | 'antigravity',
+  provider: 'claude' | 'antigravity' | 'grok',
   bin: string,
   refresh: boolean,
 ): Promise<AiProviderCapabilitiesResult> {
-  const fallback = provider === 'claude' ? FALLBACK_CLAUDE_CAPABILITIES : FALLBACK_ANTIGRAVITY_CAPABILITIES;
+  const fallback =
+    provider === 'claude'
+      ? FALLBACK_CLAUDE_CAPABILITIES
+      : provider === 'grok'
+        ? FALLBACK_GROK_CAPABILITIES
+        : FALLBACK_ANTIGRAVITY_CAPABILITIES;
   if (!isDesktop()) return Promise.resolve(fallback);
   const key = `${provider}:${bin.trim()}`;
   if (refresh) cache.delete(key);
   const existing = cache.get(key);
   if (existing) return existing;
-  const request = (provider === 'claude' ? discoverClaudeCapabilities(bin) : discoverAntigravityCapabilities(bin)).catch(
-    () => fallback,
-  );
+  const discover =
+    provider === 'claude'
+      ? discoverClaudeCapabilities(bin)
+      : provider === 'grok'
+        ? discoverGrokCapabilities(bin)
+        : discoverAntigravityCapabilities(bin);
+  const request = discover.catch(() => fallback);
   cache.set(key, request);
   return request;
 }
@@ -134,6 +167,10 @@ export function loadClaudeCapabilities(bin = '', refresh = false): Promise<AiPro
 
 export function loadAntigravityCapabilities(bin = '', refresh = false): Promise<AiProviderCapabilitiesResult> {
   return loadCapabilities('antigravity', bin, refresh);
+}
+
+export function loadGrokCapabilities(bin = '', refresh = false): Promise<AiProviderCapabilitiesResult> {
+  return loadCapabilities('grok', bin, refresh);
 }
 
 export function providerModelOptions(

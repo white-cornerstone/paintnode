@@ -215,7 +215,8 @@ Pass canonical, trusted executables rather than relying on the GUI process
 ```sh
 npm run qa:native:provider-e2e -- \
   --codex-path /opt/homebrew/bin/codex \
-  --antigravity-path "$HOME/.local/bin/agy"
+  --antigravity-path "$HOME/.local/bin/agy" \
+  --grok-path "$HOME/.local/bin/grok"
 ```
 
 Run the same fail-closed checks without building or launching PaintNode:
@@ -223,7 +224,8 @@ Run the same fail-closed checks without building or launching PaintNode:
 ```sh
 npm run qa:provider:doctor -- \
   --codex-path /opt/homebrew/bin/codex \
-  --antigravity-path "$HOME/.local/bin/agy"
+  --antigravity-path "$HOME/.local/bin/agy" \
+  --grok-path "$HOME/.local/bin/grok"
 ```
 
 The doctor resolves npm-installed Codex launchers to their native executable,
@@ -231,12 +233,12 @@ so the repo QA app never depends on a stale Node shim or a different `codex`
 earlier on `PATH`. On macOS it verifies the provider's code signature and
 expected vendor Team ID, rejects revoked or malware-blocked identities before
 execution, and applies bounded timeouts with whole-process-tree cleanup to
-`--version`, `codex login status`, and `agy models`. It requires an affirmative
-Codex login status and at least one available Antigravity model. These checks
+`--version`, `codex login status`, `agy models`, and `grok models`. It requires an affirmative
+Codex login status and at least one available Antigravity and Grok model. These checks
 do not submit a prompt or image request.
 
-Normal native discovery also bounds each Rust-side Codex, Antigravity, or
-Claude `--version` probe to 15 seconds. PaintNode isolates the probe in the same
+Normal native discovery also bounds each Rust-side Codex, Antigravity, Claude, or
+Grok `--version` probe to 15 seconds. PaintNode isolates the probe in the same
 owned Unix process group or Windows kill-on-close Job Object used for provider
 runs, terminates and reaps that tree on timeout, and returns one cached
 fail-closed reason to every caller waiting on the same executable. Timeout is a

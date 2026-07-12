@@ -15,8 +15,9 @@ use serde::Serialize;
 
 use crate::ai::canvas::{
     ai_antigravity_image_capability, ai_codex_image_capability, ai_exact_working_canvas,
-    ai_working_canvas_accepts_result_dimensions, antigravity_output_target, mask_pixel_coverage,
-    AiWorkingCanvas, PixelRect, SupportedAspectRatio,
+    ai_grok_image_capability, ai_working_canvas_accepts_result_dimensions,
+    antigravity_output_target, grok_output_target, mask_pixel_coverage, AiWorkingCanvas,
+    AntigravityImageCapability, PixelRect, SupportedAspectRatio,
 };
 use crate::png::{decode_png_rgba, encode_rgba_png, is_png, png_dimensions_from_bytes};
 
@@ -77,6 +78,21 @@ const AI_PART_DRIFT_MIN_EDGE_SAMPLES: u64 = 256;
 pub(crate) enum AiEditProvider {
     Codex,
     Antigravity,
+    Grok,
+}
+
+/// Resolution tier + output grid for a submitted crop's aspect label.
+type OutputTargetFn = fn(&str, (u32, u32)) -> Option<(&'static str, (u32, u32))>;
+
+/// Placement configuration for providers whose models render fixed
+/// aspect-ratio output grids at scaled resolution tiers (Antigravity, Grok).
+/// Codex accepts free-form dimensions and dispatches to its own helpers.
+struct RatioGridProvider {
+    capability: &'static AntigravityImageCapability,
+    /// Largest multiple of the 1K ratio-unit step a crop may span — the top
+    /// resolution tier (Antigravity's 4K is x4 the 1K grid, Grok's 2k is x2).
+    max_units_scale: u32,
+    output_target: OutputTargetFn,
 }
 
 impl AiEditProvider {
@@ -84,6 +100,24 @@ impl AiEditProvider {
         match self {
             AiEditProvider::Codex => "codex",
             AiEditProvider::Antigravity => "antigravity",
+            AiEditProvider::Grok => "grok",
+        }
+    }
+
+    /// Ratio-grid configuration, or `None` for the free-form Codex provider.
+    fn ratio_grid(self) -> Option<RatioGridProvider> {
+        match self {
+            AiEditProvider::Codex => None,
+            AiEditProvider::Antigravity => Some(RatioGridProvider {
+                capability: ai_antigravity_image_capability(),
+                max_units_scale: 4,
+                output_target: antigravity_output_target,
+            }),
+            AiEditProvider::Grok => Some(RatioGridProvider {
+                capability: ai_grok_image_capability(),
+                max_units_scale: 2,
+                output_target: grok_output_target,
+            }),
         }
     }
 }
@@ -442,30 +476,36 @@ fn ratio_unit(ratio: &SupportedAspectRatio) -> ((u32, u32), u32) {
     ((ratio.width / step, ratio.height / step), step)
 }
 
-/// Antigravity crops must match the model's REAL output grid ratio (e.g.
-/// "21:9" outputs 1584x672 = 33:14, not 7:3): a crop the model cannot map
-/// onto its output grid forces it to reframe the scene instead of editing
-/// in place. Crops are also capped at the 4K output grid (4x the 1K step)
-/// so results only ever downscale back onto the document — upscaling a
-/// model result would smear protected pixels; larger documents split into
-/// parts instead.
-fn ratio_crop_candidates(document: (u32, u32)) -> Vec<(u32, u32, String)> {
-    ai_antigravity_image_capability()
+/// Ratio-grid crops must match the model's REAL output grid ratio (e.g.
+/// Antigravity's "21:9" outputs 1584x672 = 33:14, not 7:3): a crop the model
+/// cannot map onto its output grid forces it to reframe the scene instead of
+/// editing in place. Crops are also capped at the top output grid (the
+/// provider's largest resolution tier times the 1K step) so results only
+/// ever downscale back onto the document — upscaling a model result would
+/// smear protected pixels; larger documents split into parts instead.
+fn ratio_crop_candidates(
+    grid: &RatioGridProvider,
+    document: (u32, u32),
+) -> Vec<(u32, u32, String)> {
+    grid.capability
         .aspect_ratios
         .iter()
         .filter_map(|ratio| {
             let (unit, step) = ratio_unit(ratio);
-            let units = (document.0 / unit.0).min(document.1 / unit.1).min(step * 4);
+            let units = (document.0 / unit.0)
+                .min(document.1 / unit.1)
+                .min(step * grid.max_units_scale);
             (units > 0).then(|| (unit.0 * units, unit.1 * units, ratio.label.clone()))
         })
         .collect()
 }
 
 fn ratio_crop_dimensions(
+    grid: &RatioGridProvider,
     document: (u32, u32),
     min_dimensions: Option<(u32, u32)>,
 ) -> Option<(u32, u32, String)> {
-    ratio_crop_candidates(document)
+    ratio_crop_candidates(grid, document)
         .into_iter()
         .filter(|(width, height, _)| covers(min_dimensions, (*width, *height)))
         .max_by_key(|(width, height, _)| {
@@ -476,19 +516,20 @@ fn ratio_crop_dimensions(
         })
 }
 
-fn antigravity_fill_source_frame_dimensions(
+fn ratio_grid_fill_source_frame_dimensions(
+    grid: &RatioGridProvider,
     min_dimensions: (u32, u32),
     forced_label: Option<&str>,
 ) -> Option<(u32, u32, String)> {
-    let capability = ai_antigravity_image_capability();
     let candidate_for_ratio =
-        |ratio: &SupportedAspectRatio| antigravity_frame_for_ratio(ratio, min_dimensions);
+        |ratio: &SupportedAspectRatio| ratio_grid_frame_for_ratio(grid, ratio, min_dimensions);
 
     if let Some(label) = forced_label
         .map(str::trim)
         .filter(|label| !label.is_empty())
     {
-        if let Some(candidate) = capability
+        if let Some(candidate) = grid
+            .capability
             .aspect_ratios
             .iter()
             .find(|ratio| ratio.label == label)
@@ -498,7 +539,7 @@ fn antigravity_fill_source_frame_dimensions(
         }
     }
 
-    capability
+    grid.capability
         .aspect_ratios
         .iter()
         .filter_map(candidate_for_ratio)
@@ -540,11 +581,9 @@ fn fill_source_frame_dimensions(
     min_dimensions: (u32, u32),
     forced_label: Option<&str>,
 ) -> Option<(u32, u32, String)> {
-    match provider {
-        AiEditProvider::Codex => codex_fill_source_frame_dimensions(min_dimensions),
-        AiEditProvider::Antigravity => {
-            antigravity_fill_source_frame_dimensions(min_dimensions, forced_label)
-        }
+    match provider.ratio_grid() {
+        None => codex_fill_source_frame_dimensions(min_dimensions),
+        Some(grid) => ratio_grid_fill_source_frame_dimensions(&grid, min_dimensions, forced_label),
     }
 }
 
@@ -553,9 +592,9 @@ fn single_crop_dimensions(
     document: (u32, u32),
     min_dimensions: (u32, u32),
 ) -> Option<(u32, u32, String)> {
-    match provider {
-        AiEditProvider::Codex => codex_crop_dimensions(document, Some(min_dimensions)),
-        AiEditProvider::Antigravity => ratio_crop_dimensions(document, Some(min_dimensions)),
+    match provider.ratio_grid() {
+        None => codex_crop_dimensions(document, Some(min_dimensions)),
+        Some(grid) => ratio_crop_dimensions(&grid, document, Some(min_dimensions)),
     }
 }
 
@@ -604,9 +643,9 @@ fn split_tile_candidates(
     provider: AiEditProvider,
     document: (u32, u32),
 ) -> Vec<(u32, u32, String)> {
-    match provider {
-        AiEditProvider::Codex => codex_split_tile_candidates(document),
-        AiEditProvider::Antigravity => ratio_crop_candidates(document),
+    match provider.ratio_grid() {
+        None => codex_split_tile_candidates(document),
+        Some(grid) => ratio_crop_candidates(&grid, document),
     }
 }
 
@@ -935,8 +974,8 @@ fn restore_tile_candidates(
     provider: AiEditProvider,
     document: (u32, u32),
 ) -> Vec<(u32, u32, String)> {
-    match provider {
-        AiEditProvider::Codex => {
+    match provider.ratio_grid() {
+        None => {
             let codex = ai_codex_image_capability();
             let cap = codex.restore_tile_side.max(1);
             let tile = aspect_clamped(
@@ -949,12 +988,11 @@ fn restore_tile_candidates(
                 .into_iter()
                 .collect()
         }
-        AiEditProvider::Antigravity => {
-            let capability = ai_antigravity_image_capability();
-            let cap = capability.restore_tile_side.max(1);
+        Some(grid) => {
+            let cap = grid.capability.restore_tile_side.max(1);
             // Restore tiles must also land on the model's real output grids,
             // or every regenerated tile drifts off its frame.
-            capability
+            grid.capability
                 .aspect_ratios
                 .iter()
                 .filter_map(|ratio| {
@@ -1344,13 +1382,14 @@ fn plan_ai_wide_cover_placement(
     .ok_or_else(|| "No supported AI source frame fits this generative fill.".into())
 }
 
-fn antigravity_frame_for_ratio(
+fn ratio_grid_frame_for_ratio(
+    grid: &RatioGridProvider,
     ratio: &SupportedAspectRatio,
     min_dimensions: (u32, u32),
 ) -> Option<(u32, u32, String)> {
     let (unit, _) = ratio_unit(ratio);
     let dimensions = cover_frame_for_ratio(min_dimensions, unit);
-    let (_, output) = antigravity_output_target(&ratio.label, dimensions)?;
+    let (_, output) = (grid.output_target)(&ratio.label, dimensions)?;
     (output.0 >= dimensions.0 && output.1 >= dimensions.1)
         .then(|| (dimensions.0, dimensions.1, ratio.label.clone()))
 }
@@ -1735,6 +1774,56 @@ pub(crate) fn correct_part_result_drift(
     Ok((encode_rgba_png(shifted, label)?, Some(correction)))
 }
 
+/// Reject an upscale result that changed the crop's low-frequency structure
+/// instead of restoring detail. Downsampling suppresses legitimate new texture
+/// while retaining composition, subject placement, and large color regions.
+pub(crate) fn validate_upscale_part_structure(
+    source_png: &[u8],
+    result_png: &[u8],
+    label: &str,
+) -> Result<(), String> {
+    const CHECK_SIDE: u32 = 32;
+    const MAX_MEAN_CHANNEL_DELTA: f64 = 0.18;
+    let source = decode_png_rgba(source_png, label)?;
+    let result = decode_png_rgba(result_png, label)?;
+    if source.dimensions() != result.dimensions() {
+        return Err(format!(
+            "{label} structure-check inputs must have identical dimensions."
+        ));
+    }
+    let source = image::imageops::resize(
+        &source,
+        CHECK_SIDE,
+        CHECK_SIDE,
+        image::imageops::FilterType::Triangle,
+    );
+    let result = image::imageops::resize(
+        &result,
+        CHECK_SIDE,
+        CHECK_SIDE,
+        image::imageops::FilterType::Triangle,
+    );
+    let total_delta = source
+        .pixels()
+        .zip(result.pixels())
+        .map(|(a, b)| {
+            a.0[..3]
+                .iter()
+                .zip(&b.0[..3])
+                .map(|(x, y)| u64::from(x.abs_diff(*y)))
+                .sum::<u64>()
+        })
+        .sum::<u64>();
+    let samples = u64::from(CHECK_SIDE) * u64::from(CHECK_SIDE) * 3;
+    let mean_delta = total_delta as f64 / samples as f64 / 255.0;
+    if mean_delta > MAX_MEAN_CHANNEL_DELTA {
+        return Err(format!(
+            "{label} changed the crop composition instead of restoring detail (structural delta {mean_delta:.3})."
+        ));
+    }
+    Ok(())
+}
+
 /// Width of the cross-fade band between a part and previously generated
 /// content: matches the per-axis tiling overlap so it always sits inside the
 /// region both parts actually rendered.
@@ -1805,6 +1894,9 @@ fn mix_rgba(old: image::Rgba<u8>, new: image::Rgba<u8>, weight: u8) -> image::Rg
 /// to edit the mask after import. The mask still shapes the per-part agent
 /// inputs (`part_inputs`).
 pub(crate) struct AiEditComposer {
+    /// Immutable source used when every part must refine the same deterministic
+    /// base image (not progressively generated neighboring output).
+    original_source: image::RgbaImage,
     source: image::RgbaImage,
     edit_target: image::RgbaImage,
     /// `None` means every pixel is editable (detail-restoration passes).
@@ -1843,6 +1935,7 @@ impl AiEditComposer {
         let editable = CoverageGrid::from_mask(&mask);
         let (width, height) = source.dimensions();
         Ok(Self {
+            original_source: source.clone(),
             source,
             edit_target,
             mask: Some(mask),
@@ -1858,6 +1951,7 @@ impl AiEditComposer {
         let source = decode_png_rgba(source_png, label)?;
         let (width, height) = source.dimensions();
         Ok(Self {
+            original_source: source.clone(),
             edit_target: source.clone(),
             editable: CoverageGrid::full(width, height),
             painted: CoverageGrid::empty(width, height),
@@ -2017,6 +2111,22 @@ impl AiEditComposer {
         label: &str,
     ) -> Result<AiEditPartInputs, String> {
         self.part_inputs_with_padding_rule(part, label, false, false)
+    }
+
+    /// Inputs for independent restoration/upscale parts. Every crop comes from
+    /// the same immutable base image even after earlier results are composed.
+    pub(crate) fn part_inputs_from_original(
+        &self,
+        part: &AiEditPart,
+        label: &str,
+    ) -> Result<AiEditPartInputs, String> {
+        self.part_inputs_from_images(
+            part,
+            label,
+            false,
+            &self.original_source,
+            &self.original_source,
+        )
     }
 
     pub(crate) fn part_inputs_hiding_unpainted_editable(
@@ -2543,6 +2653,18 @@ pub(crate) fn ai_part_geometry_note(placement: &AiEditPlacement, part_index: usi
         .into()
 }
 
+/// Geometry contract for deterministic upscale parts. Each provider receives
+/// an independent crop from the same enlarged original; no progressively
+/// generated neighboring pixels or full-document overview are input context.
+pub(crate) fn ai_upscale_part_geometry_note() -> String {
+    r#"PaintNode upscale geometry:
+- The attached source image is one fixed crop from PaintNode's deterministic enlarged original.
+- Refine only this exact crop. PaintNode will blend and paste it back into the document automatically.
+- Do not infer or recreate the wider composition, and do not add, remove, move, or rescale content.
+- Treat the attached frame as fixed: do not crop, zoom, pan, rotate, reframe, or change camera geometry."#
+        .into()
+}
+
 /// Prompt block for split parts after the first: the agent must translate the
 /// whole-edit user prompt into a continuation of the already-finished content
 /// instead of forwarding the full scene description to the image model. A
@@ -2688,13 +2810,9 @@ struct PlacementManifestJson {
 }
 
 fn part_output_tier(provider: AiEditProvider, part: &AiEditPart) -> Option<String> {
-    match provider {
-        AiEditProvider::Antigravity => {
-            antigravity_output_target(&part.working.aspect_label, part.working.original_dimensions)
-                .map(|(tier, _)| tier.to_string())
-        }
-        AiEditProvider::Codex => None,
-    }
+    let grid = provider.ratio_grid()?;
+    (grid.output_target)(&part.working.aspect_label, part.working.original_dimensions)
+        .map(|(tier, _)| tier.to_string())
 }
 
 fn placement_manifest_json(placement: &AiEditPlacement, label: &str) -> Result<String, String> {
@@ -4187,6 +4305,13 @@ mod tests {
         let second_source =
             decode_png_rgba(&second_inputs.source_png, "source").expect("decode source");
         assert_eq!(second_source.get_pixel(0, 0).0, [200, 0, 0, 255]);
+
+        let independent_inputs = composer
+            .part_inputs_from_original(&second, "AI upscale")
+            .expect("independent upscale inputs");
+        let independent_source = decode_png_rgba(&independent_inputs.source_png, "source")
+            .expect("decode independent source");
+        assert_eq!(independent_source.get_pixel(0, 0).0, [0, 0, 200, 255]);
     }
 
     #[test]
@@ -4201,6 +4326,16 @@ mod tests {
         );
         assert!(ai_upscale_target_dimensions((1600, 600), 99).is_err());
         assert!(ai_upscale_target_dimensions((1600, 600), 1001).is_err());
+    }
+
+    #[test]
+    fn upscale_structure_gate_rejects_recomposition() {
+        let source = solid_png(64, 64, [20, 80, 180, 255]);
+        assert!(validate_upscale_part_structure(&source, &source, "AI upscale").is_ok());
+        let unrelated = solid_png(64, 64, [220, 30, 20, 255]);
+        let error = validate_upscale_part_structure(&source, &unrelated, "AI upscale")
+            .expect_err("unrelated composition must fail");
+        assert!(error.contains("changed the crop composition"));
     }
 
     #[test]

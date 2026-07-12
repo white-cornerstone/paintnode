@@ -21,6 +21,9 @@ export interface InvokeWorkflowDirectorOptions {
   antigravityBin: string | null;
   antigravityModel: string | null;
   antigravityApprovalMode: string | null;
+  grokBin: string | null;
+  grokModel: string | null;
+  grokReasoningEffort: string | null;
   timeoutMs: number;
 }
 
@@ -67,6 +70,13 @@ export function createConfiguredWorkflowDirector(
       ? options.antigravityModel
       : null,
     antigravityApprovalMode: options.directorProvider === 'antigravity' ? options.antigravityApprovalMode || null : null,
+    grokBin: options.directorProvider === 'grok'
+      ? configuredBin(options.grokExecutableMode, options.grokBin)
+      : null,
+    grokModel: options.directorProvider === 'grok' && options.grokModel !== 'auto' ? options.grokModel : null,
+    grokReasoningEffort: options.directorProvider === 'grok' && options.grokReasoningEffort !== 'auto'
+      ? options.grokReasoningEffort
+      : null,
     timeoutMs: 180_000,
   };
   let activeRunId: string | null = null;

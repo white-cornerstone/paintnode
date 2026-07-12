@@ -3,10 +3,20 @@
   import ManagedRuntimeCard from './ManagedRuntimeCard.svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { detectCodex, detectAntigravity, detectClaude, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
+  import {
+    detectCodex,
+    detectAntigravity,
+    detectClaude,
+    detectGrok,
+    isDesktop,
+    type CodexDetectionResult,
+  } from '../integrations/desktop';
   import { ChevronDown, ChevronRight, Delete, Edit } from '../icons';
   import {
     AUTOSAVE_INTERVAL_OPTIONS,
+    GROK_IMAGE_MODEL_OPTIONS,
+    GROK_IMAGE_RESOLUTION_OPTIONS,
+    GROK_REASONING_EFFORT_OPTIONS,
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
     ANTIGRAVITY_PERSON_GENERATION_OPTIONS,
@@ -36,6 +46,10 @@
     type AntigravitySafetyCategorySetting,
     type AntigravitySafetyFiltering,
     type AntigravitySafetyThreshold,
+    type GrokImageModelId,
+    type GrokImageResolution,
+    type GrokReasoningEffort,
+    type GrokModelId,
     type ReasoningEffort,
     type ServiceTier,
     aiProfileOptionsFromRunOptions,
@@ -48,6 +62,7 @@
     FALLBACK_CODEX_CAPABILITIES,
     FALLBACK_CLAUDE_CAPABILITIES,
     FALLBACK_ANTIGRAVITY_CAPABILITIES,
+    FALLBACK_GROK_CAPABILITIES,
     claudeEffortForModel,
     claudeReasoningOptions,
     codexEffortForModel,
@@ -56,9 +71,11 @@
     loadCodexCapabilities,
     loadClaudeCapabilities,
     loadAntigravityCapabilities,
+    loadGrokCapabilities,
     providerModelOptions,
   } from '../ai/providerCapabilities';
   import { providerDetectionSuccessMessage } from '../ai/providerDetectionMessage';
+  import { directorProviderLabel, providerLabel } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -72,6 +89,7 @@
     | 'ai-provider-codex'
     | 'ai-provider-claude'
     | 'ai-provider-antigravity'
+    | 'ai-provider-grok'
     | 'ai-profiles'
     | 'ai-artifacts';
 
@@ -140,6 +158,11 @@
           description: 'Antigravity Director, image-generation, safety, and local connection defaults.',
         },
         {
+          id: 'ai-provider-grok',
+          label: 'Grok',
+          description: 'Grok Director, image-generation, and local connection defaults.',
+        },
+        {
           id: 'ai-profiles',
           label: 'Profiles',
           description: 'Saved AI defaults for recurring generation and editing workflows.',
@@ -187,12 +210,15 @@
   let detectBusy = $state(false);
   let claudeDetectBusy = $state(false);
   let antigravityDetectBusy = $state(false);
+  let grokDetectBusy = $state(false);
   let codexDetection = $state<CodexDetectionResult | null>(null);
   let claudeDetection = $state<CodexDetectionResult | null>(null);
   let antigravityDetection = $state<CodexDetectionResult | null>(null);
+  let grokDetection = $state<CodexDetectionResult | null>(null);
   let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
   let claudeCapabilities = $state(FALLBACK_CLAUDE_CAPABILITIES);
   let antigravityCapabilities = $state(FALLBACK_ANTIGRAVITY_CAPABILITIES);
+  let grokCapabilities = $state(FALLBACK_GROK_CAPABILITIES);
   const initialProfileId = settings.value.ai.defaultProfileId ?? settings.value.ai.profiles[0]?.id ?? '';
   let profileEditorMode = $state<'none' | 'new' | 'existing'>('none');
   let selectedProfileId = $state(initialProfileId);
@@ -218,6 +244,7 @@
   const availableAntigravityModels = $derived(
     providerModelOptions(antigravityCapabilities, settings.value.ai.antigravityModel),
   );
+  const availableGrokModels = $derived(providerModelOptions(grokCapabilities, settings.value.ai.grokModel));
   const profileClaudeModels = $derived(providerModelOptions(claudeCapabilities, profileDraftOptions.claudeModel));
   const profileClaudeEfforts = $derived(
     claudeReasoningOptions(claudeCapabilities, profileDraftOptions.claudeModel, profileDraftOptions.claudeEffort),
@@ -225,6 +252,7 @@
   const profileAntigravityModels = $derived(
     providerModelOptions(antigravityCapabilities, profileDraftOptions.antigravityModel),
   );
+  const profileGrokModels = $derived(providerModelOptions(grokCapabilities, profileDraftOptions.grokModel));
   const profileDeleteTarget = $derived(
     settings.value.ai.profiles.find((profile) => profile.id === profileDeleteTargetId) ?? null,
   );
@@ -243,6 +271,11 @@
     settings.value.ai.antigravityExecutableMode === 'custom' ? settings.value.ai.antigravityBin : '',
   ).then((capabilities) => {
     antigravityCapabilities = capabilities;
+  });
+  void loadGrokCapabilities(
+    settings.value.ai.grokExecutableMode === 'custom' ? settings.value.ai.grokBin : '',
+  ).then((capabilities) => {
+    grokCapabilities = capabilities;
   });
 
   function sectionMeta(id: SettingsSectionId): SettingsSection {
@@ -286,28 +319,22 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  function providerUsesCustomExecutable(provider: 'codex' | 'claude' | 'antigravity'): boolean {
+  function providerUsesCustomExecutable(provider: 'codex' | 'claude' | 'antigravity' | 'grok'): boolean {
     if (provider === 'codex') return settings.value.ai.codexExecutableMode === 'custom';
     if (provider === 'claude') return settings.value.ai.claudeExecutableMode === 'custom';
+    if (provider === 'grok') return settings.value.ai.grokExecutableMode === 'custom';
     return settings.value.ai.antigravityExecutableMode === 'custom';
   }
 
-  function setExecutableMode(provider: 'codex' | 'claude' | 'antigravity', mode: AiExecutableMode): void {
+  function setExecutableMode(provider: 'codex' | 'claude' | 'antigravity' | 'grok', mode: AiExecutableMode): void {
     if (provider === 'codex') settings.update({ ai: { codexExecutableMode: mode } });
     else if (provider === 'claude') settings.update({ ai: { claudeExecutableMode: mode } });
+    else if (provider === 'grok') settings.update({ ai: { grokExecutableMode: mode } });
     else settings.update({ ai: { antigravityExecutableMode: mode } });
   }
 
   function newProfileId(): string {
     return globalThis.crypto?.randomUUID?.() ?? `ai-profile-${Date.now()}`;
-  }
-
-  function providerLabel(provider: AiProvider): string {
-    return provider === 'antigravity' ? 'Antigravity' : 'Codex';
-  }
-
-  function directorProviderLabel(provider: AiDirectorProvider): string {
-    return provider === 'claude' ? 'Claude' : providerLabel(provider);
   }
 
   function profileSummary(options: AiRunOptions): string {
@@ -321,7 +348,9 @@
     const imageDetail =
       imageProvider === 'codex'
         ? `${imageQualities.find((option) => option.value === options.imageQuality)?.label ?? 'Auto'} quality`
-        : `${ANTIGRAVITY_IMAGE_SIZE_OPTIONS.find((option) => option.id === options.antigravityImageSize)?.label ?? 'Auto'} size`;
+        : imageProvider === 'grok'
+          ? `${GROK_IMAGE_RESOLUTION_OPTIONS.find((option) => option.id === options.grokImageResolution)?.label ?? 'Auto'} resolution`
+          : `${ANTIGRAVITY_IMAGE_SIZE_OPTIONS.find((option) => option.id === options.antigravityImageSize)?.label ?? 'Auto'} size`;
     if (options.directorMode === 'skip') return `No Director. ${providerLabel(imageProvider)} image generator, ${imageDetail}.`;
     const mode = options.directorMode === 'force' ? 'Always direct' : 'Auto direct';
     return `${mode} with ${directorProviderLabel(options.directorProvider)}. ${providerLabel(imageProvider)} image generator, ${imageDetail}.`;
@@ -633,6 +662,42 @@
     }
   }
 
+  async function runGrokDetection(): Promise<void> {
+    grokDetection = null;
+    if (!desktop) {
+      grokDetection = {
+        found: false,
+        path: null,
+        version: null,
+        error: 'Grok detection is available only in the desktop app.',
+      };
+      return;
+    }
+    grokDetectBusy = true;
+    try {
+      const result = await detectGrok(providerUsesCustomExecutable('grok') ? settings.value.ai.grokBin : '');
+      grokDetection = result;
+      if (providerUsesCustomExecutable('grok') && result.found && result.path) {
+        settings.update({ ai: { grokBin: result.path } });
+      }
+      if (result.found) {
+        grokCapabilities = await loadGrokCapabilities(
+          providerUsesCustomExecutable('grok') ? (result.path ?? settings.value.ai.grokBin) : '',
+          true,
+        );
+      }
+    } catch (error) {
+      grokDetection = {
+        found: false,
+        path: null,
+        version: null,
+        error: (error as Error)?.message ?? String(error),
+      };
+    } finally {
+      grokDetectBusy = false;
+    }
+  }
+
   $effect(() => {
     if (profileEditorMode !== 'existing') return;
     if (settings.value.ai.profiles.some((profile) => profile.id === selectedProfileId)) return;
@@ -772,6 +837,7 @@
               <option value="codex">Codex</option>
               <option value="antigravity">Antigravity</option>
               <option value="claude">Claude</option>
+              <option value="grok">Grok</option>
             </select>
           </label>
 
@@ -799,6 +865,7 @@
             >
               <option value="codex">Codex image generator</option>
               <option value="antigravity">Antigravity image generator</option>
+              <option value="grok">Grok image generator</option>
             </select>
           </label>
         </div>
@@ -1280,6 +1347,142 @@
           </label>
         </details>
 
+      {:else if selectedSection === 'ai-provider-grok'}
+        <div class="subsection-title">
+          <h3>Local Connection</h3>
+        </div>
+        <div class="choice-group" role="radiogroup" aria-label="Grok executable source">
+          <label class="choice-row">
+            <input
+              type="radio"
+              name="grok-executable-mode"
+              value="builtin"
+              checked={settings.value.ai.grokExecutableMode === 'builtin'}
+              onchange={() => setExecutableMode('grok', 'builtin')}
+            />
+            <span>
+              <strong>Use local Grok CLI sign-in</strong>
+              <small>Default for PaintNode. Finds <code>grok</code> in standard install locations and reuses its sign-in for the Director and image generation.</small>
+            </span>
+          </label>
+          <label class="choice-row">
+            <input
+              type="radio"
+              name="grok-executable-mode"
+              value="custom"
+              checked={settings.value.ai.grokExecutableMode === 'custom'}
+              onchange={() => setExecutableMode('grok', 'custom')}
+            />
+            <span>
+              <strong>Use custom Grok executable</strong>
+              <small>Choose this only when you need PaintNode to run a specific local <code>grok</code> binary.</small>
+            </span>
+          </label>
+        </div>
+
+        {#if settings.value.ai.grokExecutableMode === 'custom'}
+          <div class="detect-row">
+            <label class="field">
+              <span>Grok executable path</span>
+              <input
+                type="text"
+                value={settings.value.ai.grokBin}
+                placeholder="grok, ~/.grok/bin/grok, /opt/homebrew/bin/grok, or /usr/local/bin/grok"
+                spellcheck="false"
+                oninput={(event) => settings.update({ ai: { grokBin: textValue(event) } })}
+              />
+            </label>
+            <button type="button" onclick={runGrokDetection} disabled={grokDetectBusy}>
+              {grokDetectBusy ? 'Detecting...' : 'Detect'}
+            </button>
+          </div>
+        {:else}
+          <button type="button" class="secondary" onclick={runGrokDetection} disabled={grokDetectBusy}>
+            {grokDetectBusy ? 'Checking...' : 'Check Grok'}
+          </button>
+        {/if}
+
+        {#if grokDetection}
+          <p class:ok={grokDetection.found} class:error={!grokDetection.found} class="status-line">
+            {#if grokDetection.found}
+              {providerDetectionSuccessMessage('grok', grokDetection, settings.value.ai.grokExecutableMode)}
+            {:else}
+              {grokDetection.error || 'Grok CLI was not found.'}
+            {/if}
+          </p>
+        {/if}
+
+        <div class="subsection-title">
+          <h3>AI Director</h3>
+          <span>Used only when Grok is selected as the Director provider.</span>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Director model</span>
+            <select
+              value={settings.value.ai.grokModel}
+              onchange={(event) => settings.update({ ai: { grokModel: textValue(event) as GrokModelId } })}
+            >
+              {#each availableGrokModels as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Reasoning effort</span>
+            <select
+              value={settings.value.ai.grokReasoningEffort}
+              onchange={(event) =>
+                settings.update({ ai: { grokReasoningEffort: textValue(event) as GrokReasoningEffort } })}
+            >
+              {#each GROK_REASONING_EFFORT_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+            <small>Override how deeply supported Grok reasoning models think.</small>
+          </label>
+        </div>
+
+        <div class="subsection-title">
+          <h3>Image Generator</h3>
+          <span>Used only when Grok is selected as the image generator.</span>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span>Image model</span>
+            <select
+              value={settings.value.ai.grokImageModel}
+              onchange={(event) => settings.update({ ai: { grokImageModel: textValue(event) as GrokImageModelId } })}
+            >
+              {#each GROK_IMAGE_MODEL_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Image resolution</span>
+            <select
+              value={settings.value.ai.grokImageResolution}
+              onchange={(event) =>
+                settings.update({ ai: { grokImageResolution: textValue(event) as GrokImageResolution } })}
+            >
+              {#each GROK_IMAGE_RESOLUTION_OPTIONS as option (option.id)}
+                <option value={option.id}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+
+        <p class="section-note">
+          Grok generates and edits images through the xAI Images API using the local <code>grok</code> sign-in.
+          Generation, generative fill, retouch, auto-adjust, upscale, and multi-asset compose (up to 3 sources) are
+          supported; asset extraction is coming soon. 'Auto' resolution picks the 1k or 2k tier from the target size.
+        </p>
+
       {:else if selectedSection === 'ai-profiles'}
         <div class="profiles-page">
           <div class="profile-list-head">
@@ -1428,6 +1631,16 @@
                         />
                         <span>Claude</span>
                       </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="profile-director-provider"
+                          value="grok"
+                          checked={profileDraftOptions.directorProvider === 'grok'}
+                          onchange={() => updateProfileDraftOptions({ directorProvider: 'grok' })}
+                        />
+                        <span>Grok</span>
+                      </label>
                     </div>
 
                     <label class="field">
@@ -1543,6 +1756,34 @@
                         </select>
                         <small>{autonomyLevels.find((option) => option.value === profileDraftOptions.autonomyLevel)?.hint}</small>
                       </label>
+                    {:else if profileDraftOptions.directorProvider === 'grok'}
+                      <div class="grid-2">
+                        <label class="field">
+                          <span>Director model</span>
+                          <select
+                            value={profileDraftOptions.grokModel}
+                            onchange={(event) => updateProfileDraftOptions({ grokModel: textValue(event) as GrokModelId })}
+                          >
+                            {#each profileGrokModels as option (option.id)}
+                              <option value={option.id}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                        <label class="field">
+                          <span>Reasoning effort</span>
+                          <select
+                            value={profileDraftOptions.grokReasoningEffort}
+                            onchange={(event) =>
+                              updateProfileDraftOptions({
+                                grokReasoningEffort: textValue(event) as GrokReasoningEffort,
+                              })}
+                          >
+                            {#each GROK_REASONING_EFFORT_OPTIONS as option (option.id)}
+                              <option value={option.id}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                      </div>
                     {:else}
                       <div class="grid-2">
                         <label class="field">
@@ -1600,6 +1841,16 @@
                           updateProfileDraftOptions({ provider: 'antigravity', imageProvider: 'antigravity' })}
                       />
                       <span>Antigravity</span>
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="profile-image-provider"
+                        value="grok"
+                        checked={profileDraftOptions.imageProvider === 'grok'}
+                        onchange={() => updateProfileDraftOptions({ provider: 'grok', imageProvider: 'grok' })}
+                      />
+                      <span>Grok</span>
                     </label>
                   </div>
 

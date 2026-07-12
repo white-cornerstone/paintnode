@@ -271,6 +271,38 @@ describe('settings normalization', () => {
     expect(normalized.ai.antigravityApprovalMode).toBe('default');
   });
 
+  it('normalizes Grok provider settings and the xai alias', () => {
+    const normalized = normalizeSettings({
+      ai: {
+        provider: 'xai',
+        directorProvider: 'grok',
+        grokExecutableMode: 'custom',
+        grokBin: '/opt/grok/bin/grok',
+        grokModel: 'grok-4.5',
+        grokReasoningEffort: 'high',
+        grokImageModel: 'grok-imagine-image-quality',
+        grokImageResolution: '2k',
+      },
+    });
+
+    expect(normalized.ai.provider).toBe('grok');
+    expect(normalized.ai.directorProvider).toBe('grok');
+    expect(normalized.ai.grokExecutableMode).toBe('custom');
+    expect(normalized.ai.grokBin).toBe('/opt/grok/bin/grok');
+    expect(normalized.ai.grokModel).toBe('grok-4.5');
+    expect(normalized.ai.grokReasoningEffort).toBe('high');
+    expect(normalized.ai.grokImageModel).toBe('grok-imagine-image-quality');
+    expect(normalized.ai.grokImageResolution).toBe('2k');
+    expect(normalizeSettings({ ai: { grokImageModel: 'unknown-model' } }).ai.grokImageModel).toBe(
+      'grok-imagine-image',
+    );
+    expect(normalizeSettings({ ai: { grokImageModel: 'grok-imagine-image' } }).ai.grokImageModel).toBe(
+      'grok-imagine-image',
+    );
+    expect(normalizeSettings({ ai: { grokImageResolution: '8k' } }).ai.grokImageResolution).toBe('auto');
+    expect(normalizeSettings({ ai: { grokReasoningEffort: 'extreme' } }).ai.grokReasoningEffort).toBe('auto');
+  });
+
   it('normalizes split Director and image providers independently', () => {
     const normalized = normalizeSettings({
       ai: {

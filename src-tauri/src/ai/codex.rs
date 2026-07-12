@@ -34,9 +34,10 @@ use crate::ai::claude::{
     run_claude_with_progress, ClaudeCommandOptions,
 };
 use crate::ai::director::{
-    director_candidate_file, director_uses_agentic_loop, image_request_prompt,
-    run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorImageRequest,
-    DirectorLoopSpec, PAINTNODE_DIRECTOR_ACTION_FILE, PAINTNODE_DIRECTOR_OBSERVATION_FILE,
+    director_candidate_file, director_prompt_with_image_paths, director_uses_agentic_loop,
+    image_request_prompt, run_candidate_director_loop, workflow_review_criteria, DirectorCandidate,
+    DirectorImageRequest, DirectorLoopSpec, PAINTNODE_DIRECTOR_ACTION_FILE,
+    PAINTNODE_DIRECTOR_OBSERVATION_FILE,
 };
 use crate::ai::fill_storyboard::{
     fill_storyboard_master_prompt, fill_storyboard_part_is_anchor, fill_storyboard_part_prompt,
@@ -44,14 +45,18 @@ use crate::ai::fill_storyboard::{
     record_fill_storyboard_failure, should_storyboard_fill, FillStoryboard,
     FILL_STORYBOARD_DRAFT_FILE, FILL_STORYBOARD_FILE, FILL_STORYBOARD_OVERVIEW_FILE,
 };
+use crate::ai::grok::{
+    final_grok_agent_message, run_grok_director_request, run_grok_owned_image_edit,
+};
 use crate::ai::placement::{
     ai_orchestrated_part_prompt_context, ai_part_geometry_note, ai_part_progress_message,
-    ai_part_prompt_context, ai_upscale_target_dimensions, correct_part_result_drift,
-    cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
-    normalize_storyboard_draft_png, plan_ai_edit_placement, plan_ai_fill_placement,
-    plan_ai_restore_placement, plan_ai_upscale_placement, prepare_ai_job_dir_for_placement,
-    resize_png_to_dimensions, reuse_part_result, AiEditComposer, AiEditPlacement, AiEditProvider,
-    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    ai_part_prompt_context, ai_upscale_part_geometry_note, ai_upscale_target_dimensions,
+    correct_part_result_drift, cover_crop_png_to_dimensions, fill_part_needs_overview,
+    fill_placement_returns_layer_results, normalize_storyboard_draft_png, plan_ai_edit_placement,
+    plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
+    prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result,
+    validate_upscale_part_structure, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
@@ -70,8 +75,8 @@ use crate::ai::{
     AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
     DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
     GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT,
-    POLL_INTERVAL,
+    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, GROK_RUNS_DIR,
+    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -109,6 +114,7 @@ struct CodexCommandOptions {
 enum PaintNodeImageProvider {
     Codex,
     Antigravity,
+    Grok,
 }
 
 impl PaintNodeImageProvider {
@@ -120,6 +126,7 @@ impl PaintNodeImageProvider {
             .as_deref()
         {
             Some("antigravity") | Some("agy") | Some("gemini") => Self::Antigravity,
+            Some("grok") | Some("xai") => Self::Grok,
             _ => Self::Codex,
         }
     }
@@ -130,6 +137,7 @@ enum PaintNodeDirectorProvider {
     Codex,
     Antigravity,
     Claude,
+    Grok,
 }
 
 impl PaintNodeDirectorProvider {
@@ -143,6 +151,7 @@ impl PaintNodeDirectorProvider {
             AiDirectorProvider::Codex => Self::Codex,
             AiDirectorProvider::Antigravity => Self::Antigravity,
             AiDirectorProvider::Claude => Self::Claude,
+            AiDirectorProvider::Grok => Self::Grok,
         }
     }
 
@@ -151,6 +160,7 @@ impl PaintNodeDirectorProvider {
             Self::Codex => AiDirectorProvider::Codex,
             Self::Antigravity => AiDirectorProvider::Antigravity,
             Self::Claude => AiDirectorProvider::Claude,
+            Self::Grok => AiDirectorProvider::Grok,
         }
     }
 
@@ -159,6 +169,7 @@ impl PaintNodeDirectorProvider {
             Self::Codex => "Codex",
             Self::Antigravity => "Antigravity",
             Self::Claude => "Claude",
+            Self::Grok => "Grok",
         }
     }
 
@@ -167,6 +178,7 @@ impl PaintNodeDirectorProvider {
             Self::Codex => CODEX_RUNS_DIR,
             Self::Antigravity => ANTIGRAVITY_RUNS_DIR,
             Self::Claude => CLAUDE_RUNS_DIR,
+            Self::Grok => GROK_RUNS_DIR,
         }
     }
 }
@@ -175,6 +187,11 @@ impl PaintNodeDirectorProvider {
 struct PaintNodeImageProviderOptions {
     provider: PaintNodeImageProvider,
     keep_debug_artifacts: bool,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
+    grok_image_model: Option<String>,
+    grok_image_resolution: Option<String>,
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
     antigravity_approval_mode: Option<String>,
@@ -195,6 +212,11 @@ fn codex_image_provider_options(keep_debug_artifacts: bool) -> PaintNodeImagePro
     PaintNodeImageProviderOptions {
         provider: PaintNodeImageProvider::Codex,
         keep_debug_artifacts,
+        grok_bin: None,
+        grok_model: None,
+        grok_reasoning_effort: None,
+        grok_image_model: None,
+        grok_image_resolution: None,
         antigravity_bin: None,
         antigravity_model: None,
         antigravity_approval_mode: None,
@@ -2596,6 +2618,28 @@ fn run_paintnode_owned_fill_image_request(
                 image_options.keep_debug_artifacts,
             )?
         }
+        PaintNodeImageProvider::Grok => {
+            emit_codex_progress(
+                app,
+                run_id,
+                format!(
+                    "Requesting PaintNode Grok image fill at {}x{}",
+                    working.original_dimensions.0, working.original_dimensions.1
+                ),
+            );
+            run_grok_owned_image_edit(
+                app,
+                run_id,
+                image_options.grok_bin.clone(),
+                part_path,
+                prompt.to_string(),
+                vec![base_path],
+                working,
+                image_options.grok_image_model.clone(),
+                image_options.grok_image_resolution.clone(),
+                image_options.keep_debug_artifacts,
+            )?
+        }
         PaintNodeImageProvider::Codex => {
             emit_codex_progress(
                 app,
@@ -2664,6 +2708,7 @@ fn director_final_agent_message(
 ) -> Option<String> {
     match provider {
         PaintNodeDirectorProvider::Claude => final_claude_agent_message(output),
+        PaintNodeDirectorProvider::Grok => final_grok_agent_message(output),
         PaintNodeDirectorProvider::Codex | PaintNodeDirectorProvider::Antigravity => {
             final_codex_agent_message(output)
         }
@@ -2735,6 +2780,9 @@ fn run_director_provider_action_turn(
                 Err(claude_command_failure("Claude Director", &run.output))
             }
         }
+        // Antigravity and Grok CLIs take no image-attachment flag; list the
+        // review/reference image paths in the prompt so their file tools can
+        // open them.
         PaintNodeDirectorProvider::Antigravity => run_antigravity_director_request(
             app,
             run_id,
@@ -2744,9 +2792,22 @@ fn run_director_provider_action_turn(
             image_options.keep_debug_artifacts,
             part_path,
             part_path,
-            prompt_text,
+            &director_prompt_with_image_paths(prompt_text, image_paths, part_path),
             true,
             PAINTNODE_DIRECTOR_ACTION_FILE,
+            session_id,
+        ),
+        // Grok Director drives the local `grok` CLI, which writes the shared
+        // director-action file from the job folder.
+        PaintNodeDirectorProvider::Grok => run_grok_director_request(
+            app,
+            run_id,
+            image_options.grok_bin.clone(),
+            image_options.grok_model.clone(),
+            image_options.grok_reasoning_effort.clone(),
+            image_options.keep_debug_artifacts,
+            part_path,
+            &director_prompt_with_image_paths(prompt_text, image_paths, part_path),
             session_id,
         ),
     }
@@ -3251,12 +3312,16 @@ fn codex_restore_image_details(
             let _ = fs::remove_file(part_path.join("part_result.png"));
             let _ = fs::remove_file(part_path.join("result.png"));
         }
-        let inputs = composer.part_inputs(part, label)?;
+        let inputs = if upscale_layers {
+            composer.part_inputs_from_original(part, label)?
+        } else {
+            composer.part_inputs(part, label)?
+        };
         fs::write(part_path.join("source.png"), &inputs.source_png)
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
-        let has_overview = placement.is_split();
+        let has_overview = placement.is_split() && !upscale_layers;
         if has_overview {
             fs::write(
                 part_path.join("overview.png"),
@@ -3265,7 +3330,11 @@ fn codex_restore_image_details(
             .map_err(|e| format!("Failed to write {label} overview image: {e}"))?;
         }
         write_codex_imagegen_options(&part_path, part.working.original_dimensions, options)?;
-        let geometry_note = ai_part_geometry_note(&placement, part_index);
+        let geometry_note = if upscale_layers {
+            ai_upscale_part_geometry_note()
+        } else {
+            ai_part_geometry_note(&placement, part_index)
+        };
         let prompt_text = codex_direct_restore_director_prompt(
             &geometry_note,
             director_provider,
@@ -3368,6 +3437,9 @@ fn codex_restore_image_details(
         };
         let _ = fs::remove_file(&part_run.recovered_source_path);
         let unaligned_bytes = part_run.normalized_png.clone();
+        if upscale_layers {
+            validate_upscale_part_structure(&inputs.source_png, &part_run.normalized_png, label)?;
+        }
         let (part_result_png, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &part_run.normalized_png, label)?;
         if let Some(correction) = drift_correction {
@@ -3443,6 +3515,11 @@ pub(crate) async fn generate_codex_fill_image(
     claude_bin: Option<String>,
     claude_model: Option<String>,
     claude_effort: Option<String>,
+    grok_bin: Option<String>,
+    grok_model: Option<String>,
+    grok_reasoning_effort: Option<String>,
+    grok_image_model: Option<String>,
+    grok_image_resolution: Option<String>,
     image_provider: Option<String>,
     antigravity_bin: Option<String>,
     antigravity_model: Option<String>,
@@ -3507,6 +3584,11 @@ pub(crate) async fn generate_codex_fill_image(
         let image_options = PaintNodeImageProviderOptions {
             provider: PaintNodeImageProvider::from_option(image_provider),
             keep_debug_artifacts: codex_options.keep_debug_artifacts,
+            grok_bin,
+            grok_model,
+            grok_reasoning_effort,
+            grok_image_model,
+            grok_image_resolution,
             antigravity_bin,
             antigravity_model,
             antigravity_approval_mode,
@@ -3556,6 +3638,7 @@ pub(crate) async fn generate_codex_fill_image(
         let placement = plan_ai_fill_placement(
             match image_options.provider {
                 PaintNodeImageProvider::Antigravity => AiEditProvider::Antigravity,
+                PaintNodeImageProvider::Grok => AiEditProvider::Grok,
                 PaintNodeImageProvider::Codex => AiEditProvider::Codex,
             },
             AiFillMethod::Auto,
@@ -3587,7 +3670,9 @@ pub(crate) async fn generate_codex_fill_image(
                     prompt.trim(),
                     &reference_pngs,
                 )?,
-                PaintNodeDirectorProvider::Antigravity | PaintNodeDirectorProvider::Claude => {
+                PaintNodeDirectorProvider::Antigravity
+                | PaintNodeDirectorProvider::Claude
+                | PaintNodeDirectorProvider::Grok => {
                     emit_codex_progress(
                         &app,
                         &run_id,
@@ -3854,6 +3939,12 @@ pub(crate) async fn generate_codex_fill_image(
                         has_overview,
                         &reference_paths,
                         &part.working,
+                    ),
+                    // Grok-directed generative fill needs the Grok image-edit path
+                    // (see docs/grok-future-expansion.md); not yet implemented.
+                    PaintNodeDirectorProvider::Grok => Err(
+                        "Grok Director for generative fill is coming soon. Use Codex, Antigravity, or Claude as the fill Director for now."
+                            .to_string(),
                     ),
                 }
             }
