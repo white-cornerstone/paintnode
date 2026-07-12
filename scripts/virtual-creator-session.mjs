@@ -215,7 +215,7 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
     + '2. At 180 total seconds, recompute the earliest incomplete checkpoint and deliver only its H1 verbatim.\n'
     + '3. Whenever a checkpoint completes, restart the 90-second interval from observed completion and recompute the earliest incomplete checkpoint before any later intervention. If the checkpoint changed, its H1 is next; never deliver a stale H2.\n'
     + '4. Only when the same checkpoint remains incomplete for another 90 seconds may H2 be delivered. Only after a further 90 seconds on that same checkpoint may its exact takeover occur. A takeover forces task failure.\n'
-    + '5. Record every intervention object with checkpoint, event type, exact delivered text, elapsed time, and assist increment. Record every deviation from the closed instrument.\n\n'
+    + '5. Record every checkpoint completion in `checkpointEvents` at the observed elapsed time. Record every intervention object with checkpoint, event type, exact delivered text, elapsed time, and assist increment. The validator replays the merged timeline and rejects stale-checkpoint interventions. Record every deviation from the closed instrument.\n\n'
     + tasks.map((task) => {
       const setup = task.task === 2
         ? '\nBefore selection, send exactly: “I am setting the test checkpoint for this task”. Then visibly select Branch recovery checkpoint and record a setup scenario event. When the planned branch failure appears, stop the creator task, send exactly “I am resetting the test checkpoint”, visibly reset to Standard checkpoint, record the reset event, then send: “Continue the same task.”\n'
@@ -230,7 +230,7 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
       const creatorMessage = addendum ? `${task.prompt}\n\n${addendum}` : task.prompt;
       return `## Task ${task.task} — ${task.title}\n${setup}\nPaste exactly:\n\n> ${creatorMessage.replaceAll('\n', '\n> ')}\n\nOperator stop condition: ${task.stopCondition}\n`;
     }).join('\n')
-    + '\n## End and owner decision\n\n1. Save a nonempty native UI evidence reference for every task and fill the distinct external AI task ID/new-task/no-fork confirmations.\n2. Close PaintNode.\n3. Capture final attestation and cleanup without retaining a partial receipt:\n\n```sh\nattest_checkout finalize\nCLEANUP_TMP="$CLEANUP_RECEIPT.tmp"\ntest ! -e "$CLEANUP_RECEIPT" && test ! -e "$CLEANUP_TMP"\nif (umask 077; npm run --silent qa:creator-study:finalize-session > "$CLEANUP_TMP"); then mv "$CLEANUP_TMP" "$CLEANUP_RECEIPT"; else rm -f "$CLEANUP_TMP"; exit 1; fi\nchmod 600 "$CLEANUP_RECEIPT"\ncat "$CLEANUP_RECEIPT"\n```\n\n4. Copy the attestation rows plus receipt hashes/fields into lifecycle; require matching setup/cleanup profile hashes and verified finalization. Complete ownerReview only after live observation and evidence review. Accepted and rejected decisions both require a written rationale; accepted requires all eight tasks completed with traceable evidence. Mark exactly one terminal attempt per profile `selectedForAggregate: true`; superseded rejected attempts stay false.\n5. Validate from the exact clean kit checkout captured during packet preparation:\n\n```sh\ncd "$KIT_CHECKOUT"\ntest "$(git rev-parse HEAD)" = "$KIT_GIT_SHA"\ntest -z "$(git status --porcelain --untracked-files=all)"\nnpm run qa:virtual-creators:validate -- --validate-observation "$OBSERVATION"\n```\n\n6. Keep accepted and rejected virtual sessions in the synthetic aggregate; never copy them into real participant rows.\n\n'
+    + '\n## End and owner decision\n\n1. Save a nonempty native UI evidence reference for every task and fill the distinct external AI task ID/new-task/no-fork confirmations.\n2. Close PaintNode.\n3. Capture final attestation and cleanup without retaining a partial receipt:\n\n```sh\nattest_checkout finalize\nCLEANUP_TMP="$CLEANUP_RECEIPT.tmp"\ntest ! -e "$CLEANUP_RECEIPT" && test ! -e "$CLEANUP_TMP"\nif (umask 077; npm run --silent qa:creator-study:finalize-session > "$CLEANUP_TMP"); then mv "$CLEANUP_TMP" "$CLEANUP_RECEIPT"; else rm -f "$CLEANUP_TMP"; exit 1; fi\nchmod 600 "$CLEANUP_RECEIPT"\ncat "$CLEANUP_RECEIPT"\nshasum -a 256 "$ATTESTATIONS" "$SETUP_RECEIPT" "$CLEANUP_RECEIPT"\n```\n\nIf fresh launch or setup failed, close PaintNode, run `attest_checkout finalize`, capture `npm run --silent qa:creator-study:abort-session` through the same temporary-file/rename pattern, and reject the finalized attempt. Never start the next profile while native cleanup is unresolved.\n\n4. Copy the attestation rows plus receipt hashes/fields into lifecycle; require matching setup/cleanup profile hashes and verified finalization. Complete ownerReview only after live observation and evidence review. Accepted and rejected decisions both require a written rationale; accepted requires all eight tasks completed with traceable evidence. Mark exactly one terminal attempt per profile `selectedForAggregate: true`; superseded rejected attempts stay false.\n5. Validate from the exact clean kit checkout captured during packet preparation:\n\n```sh\ncd "$KIT_CHECKOUT"\ntest "$(git rev-parse HEAD)" = "$KIT_GIT_SHA"\ntest -z "$(git status --porcelain --untracked-files=all)"\nnpm run qa:virtual-creators:validate -- --validate-observation "$OBSERVATION"\n```\n\n6. Keep accepted and rejected virtual sessions in the synthetic aggregate; never copy them into real participant rows.\n\n'
     + renderHintAppendix(instrument) + '\n';
 }
 
@@ -268,6 +268,7 @@ function blankObservation({ profile, sessionId, build }) {
       task: index + 1,
       outcome: 'not-run',
       elapsedWallMs: null,
+      checkpointEvents: [],
       interventions: [],
       scenarioEvents: [],
       deviationIds: [],
@@ -309,6 +310,7 @@ function verifyLifecycleEvidence(observation, observationPath) {
   const lifecycle = observation.lifecycle;
   if (lifecycle.attemptStage === 'prelaunch') {
     if (observation.ownerReview.decision !== 'rejected'
+      || observation.ownerReview.selectedForAggregate
       || lifecycle.checkoutAttestations.length !== 0
       || lifecycle.checkoutAttestationReceiptSha256 !== null
       || lifecycle.setupReceiptSha256 !== null || lifecycle.cleanupReceiptSha256 !== null
@@ -364,10 +366,15 @@ function verifyLifecycleEvidence(observation, observationPath) {
     if (sha256File(setupPath) !== lifecycle.setupReceiptSha256
       || setupReceipt.schemaVersion !== 2
       || setupReceipt.receiptType !== 'paintnode-creator-study-technical-setup'
+      || setupReceipt.scope !== 'technical-setup-only'
       || setupReceipt.technicalSetupReady !== true
+      || setupReceipt.studyAuthorizationEvaluated !== false
       || setupReceipt.gitSha !== observation.build.gitSha
       || setupReceipt.bundleId !== observation.build.bundleId
+      || setupReceipt.approvedBuildIdentity?.matched !== true
+      || setupReceipt.approvalRecord?.validated !== true
       || setupReceipt.projectState !== 'empty' || setupReceipt.rehearsalState !== 'deleted'
+      || setupReceipt.sessionReset?.isolatedProfile !== true
       || setupReceipt.sessionReset?.appBootObserved !== true
       || setupReceipt.sessionReset?.setupEvidenceConsumed !== true
       || setupReceipt.sessionReset?.profileSha256 !== lifecycle.setupProfileSha256) {
@@ -413,10 +420,11 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
     throw new Error('Owner rationale must contain non-whitespace text.');
   }
   if (observation.lifecycle.attemptStage === 'finalized'
+    && observation.ownerReview.selectedForAggregate
     && (!observation.agentTask.externalTaskId?.trim()
       || observation.agentTask.externalTaskId !== observation.agentTask.externalTaskId.trim()
       || !observation.agentTask.newTaskConfirmed || !observation.agentTask.noForkConfirmed)) {
-    throw new Error('Finalized attempt requires a distinct, confirmed external AI task ID.');
+    throw new Error('Selected finalized attempt requires a distinct, confirmed external AI task ID.');
   }
   if (observation.lifecycle.attemptStage === 'finalized'
     && (!observation.ownerReview.observedLive || !observation.ownerReview.evidenceReviewed)) {
@@ -430,6 +438,13 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
     'instrument-version-mismatch', 'instrument-hash-mismatch', 'instrument-change-unapproved',
   ]);
   const instrument = readJson(hintsPath, 'Facilitator instrument');
+  const taskDeck = loadTaskDeck();
+  const creatorMessages = new Map(taskDeck.map((task) => {
+    const addendum = task.creatorFacingAddendum === 'UPDATED_PRODUCT_PATH'
+      ? `The updated Product image for this task is: ${join(materialRoot, 'product-b.png')}`
+      : task.creatorFacingAddendum;
+    return [task.task, addendum ? `${task.prompt}\n\n${addendum}` : task.prompt];
+  }));
   const hints = new Map(instrument.tasks.flatMap(({ checkpoints }) => checkpoints.flatMap((checkpoint) => [
     [`${checkpoint.id}-H1`, checkpoint.firstHint],
     [`${checkpoint.id}-H2`, checkpoint.secondHint],
@@ -485,6 +500,68 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
           throw new Error(`Task ${task.task} takeover order or timing drifted from the closed instrument.`);
         }
       }
+      if (intervention.eventType === 'verbatim-repeat') {
+        const earlierText = task.interventions.some((candidate) => candidate.elapsedWallMs < intervention.elapsedWallMs
+          && candidate.exactText === intervention.exactText);
+        if (intervention.assistIncrement !== 0
+          || (intervention.exactText !== creatorMessages.get(task.task) && !earlierText)) {
+          throw new Error(`Task ${task.task} verbatim repeat added new or assisted information.`);
+        }
+      }
+    }
+    const checkpointIds = instrument.tasks.find(({ task: number }) => number === task.task)
+      .checkpoints.map(({ id }) => id);
+    let checkpointIndex = 0;
+    let intervalStartedAt = 0;
+    let moderatorStage = 'none';
+    let stageStartedAt = 0;
+    let priorTimelineTime = -1;
+    const timeline = [
+      ...task.checkpointEvents.map((event) => ({ ...event, kind: 'checkpoint' })),
+      ...task.interventions.map((event) => ({ ...event, kind: 'intervention' })),
+    ].sort((left, right) => left.elapsedWallMs - right.elapsedWallMs);
+    for (const event of timeline) {
+      if (event.elapsedWallMs <= priorTimelineTime) {
+        throw new Error(`Task ${task.task} moderator timeline must be strictly ordered.`);
+      }
+      priorTimelineTime = event.elapsedWallMs;
+      const currentCheckpoint = checkpointIds[checkpointIndex];
+      if (event.checkpointId !== currentCheckpoint) {
+        throw new Error(`Task ${task.task} moderator event targeted a stale or out-of-order checkpoint.`);
+      }
+      if (event.kind === 'checkpoint') {
+        checkpointIndex += 1;
+        intervalStartedAt = event.elapsedWallMs;
+        moderatorStage = 'none';
+        stageStartedAt = event.elapsedWallMs;
+      } else if (event.eventType === 'neutral-probe') {
+        if (moderatorStage !== 'none' || event.elapsedWallMs < intervalStartedAt + 90_000) {
+          throw new Error(`Task ${task.task} neutral probe order or timing drifted from the facilitator algorithm.`);
+        }
+        moderatorStage = 'probe';
+        stageStartedAt = event.elapsedWallMs;
+      } else if (event.eventType === 'standard-hint' && event.id.endsWith('-H1')) {
+        if (moderatorStage !== 'probe' || event.elapsedWallMs < intervalStartedAt + 180_000) {
+          throw new Error(`Task ${task.task} H1 order or timing drifted from the facilitator algorithm.`);
+        }
+        moderatorStage = 'h1';
+        stageStartedAt = event.elapsedWallMs;
+      } else if (event.eventType === 'standard-hint' && event.id.endsWith('-H2')) {
+        if (moderatorStage !== 'h1' || event.elapsedWallMs < stageStartedAt + 90_000) {
+          throw new Error(`Task ${task.task} H2 order or timing drifted from the facilitator algorithm.`);
+        }
+        moderatorStage = 'h2';
+        stageStartedAt = event.elapsedWallMs;
+      } else if (event.eventType === 'takeover') {
+        if (moderatorStage !== 'h2' || event.elapsedWallMs < stageStartedAt + 90_000) {
+          throw new Error(`Task ${task.task} takeover order or timing drifted from the facilitator algorithm.`);
+        }
+        moderatorStage = 'takeover';
+        stageStartedAt = event.elapsedWallMs;
+      }
+    }
+    if (task.elapsedWallMs !== null && task.elapsedWallMs < priorTimelineTime) {
+      throw new Error(`Task ${task.task} elapsed time ends before its moderator timeline.`);
     }
     const assist = task.interventions.reduce((sum, intervention) => sum + intervention.assistIncrement, 0);
     if ((task.outcome === 'completed-unaided' && assist !== 0)
@@ -492,6 +569,9 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
       throw new Error(`Task ${task.task} outcome does not match its recorded assistance.`);
     }
     let priorScenarioTime = -1;
+    if (![2, 7].includes(task.task) && task.scenarioEvents.length > 0) {
+      throw new Error(`Task ${task.task} cannot contain operator scenario changes.`);
+    }
     for (const event of task.scenarioEvents) {
       const expectedSpokenText = event.action === 'setup'
         ? 'I am setting the test checkpoint for this task'
@@ -513,6 +593,10 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
       }
       const invalid = task.deviationIds.find((id) => invalidatingDeviations.has(id));
       if (invalid) throw new Error(`Accepted session has invalidating deviation ${invalid} on Task ${task.task}.`);
+      const requiredCheckpointCount = instrument.tasks.find(({ task: number }) => number === task.task).checkpoints.length;
+      if (task.checkpointEvents.length !== requiredCheckpointCount) {
+        throw new Error(`Accepted session requires every checkpoint completion for Task ${task.task}.`);
+      }
     }
     for (const taskNumber of [2, 7]) {
       const scenarioEvents = observation.tasks[taskNumber - 1].scenarioEvents;
@@ -533,6 +617,11 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
 }
 
 export function validateVirtualCreatorObservation({ observationPath, requireDecision = true }) {
+  const observationMetadata = statSync(observationPath);
+  if (lstatSync(observationPath).isSymbolicLink() || !observationMetadata.isFile()
+    || (observationMetadata.mode & 0o077) !== 0) {
+    throw new Error('Virtual creator observation must be an owner-only regular non-symlink file.');
+  }
   const observation = readJson(observationPath, 'Virtual creator observation');
   const schema = readJson(observationSchemaPath, 'Virtual creator observation schema');
   const ajv = new Ajv2020({ strict: false, validateFormats: false });

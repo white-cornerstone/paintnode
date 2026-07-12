@@ -124,7 +124,9 @@ eight sessions even if `feature/creative-blueprint` advances.
 8. Apply the committed facilitator algorithm exactly: neutral probe at 90
    seconds without progress, H1 at 180 seconds, then recompute the earliest
    incomplete checkpoint and restart timing whenever progress occurs. Deliver
-   H2 and takeover only after the additional same-checkpoint intervals.
+   H2 and takeover only after the additional same-checkpoint intervals. Record
+   every observed checkpoint completion so the validator can replay the merged
+   progress/intervention timeline and reject stale hints.
 9. Complete `observation.blank.json` with the distinct external AI task ID,
    three checkout attestations, receipt hashes/fields, exact interventions,
    scenario events, synthetic task outcomes, visible evidence, and findings.
@@ -141,19 +143,27 @@ eight sessions even if `feature/creative-blueprint` advances.
 
 An accepted virtual run requires all eight tasks completed, elapsed time and
 traceable native UI evidence for every task, the planned Task 2 and Task 7
-setup/reset events, only permitted deviations, matching setup/cleanup profile
+setup/reset events, every checkpoint completion, only permitted deviations,
+matching setup/cleanup profile
 hashes from validated native receipts, verified data-store removal and
 finalization, and the owner’s written explicit decision. A failed or incomplete
 run must be rejected.
 
-A packet rejected before launch uses `attemptStage: prelaunch` and must not
-invent an external task, attestation, setup, or cleanup evidence. A launched
+A packet rejected before launch uses `attemptStage: prelaunch`, must keep
+`selectedForAggregate: false`, and must not invent an external task,
+attestation, setup, or cleanup evidence. A launched
 attempt is retained after verified finalization even when rejected. Prepare a
 new packet to retry that profile; keep the rejected attempt with
 `selectedForAggregate: false`, and mark exactly one terminal attempt for each
 V01–V08 profile `selectedForAggregate: true`. The set validator permits retained
 rejected attempts while rejecting missing, duplicate-selected, or reused-task-ID
 records.
+
+If fresh launch or technical setup fails after a native profile is allocated,
+close PaintNode, add the `finalize` checkout attestation, run
+`qa:creator-study:abort-session`, and capture its cleanup receipt through the
+temporary-file/atomic-rename pattern in the operator deck. Record the attempt as
+rejected and finalized; do not allocate the next profile until cleanup verifies.
 
 ## Synthesis
 

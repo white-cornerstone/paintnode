@@ -18,8 +18,9 @@ Generate per-session private materials outside the repository with
 validate all eight with `--validate-control-root <path>`. The validators require
 the owner decision and fail closed on missing task evidence, lifecycle proof,
 instrument drift, invalidating deviations, altered native receipts, unsafe
-attestation order, duplicate-selected profile attempts, or reused external AI
-task IDs. Retain rejected attempts and select exactly one terminal attempt per
+attestation order, stale-checkpoint hints, non-verbatim repeats, unauthorized
+scenario changes, selected prelaunch attempts, duplicate-selected profile
+attempts, or reused external AI task IDs. Retain rejected attempts and select exactly one terminal attempt per
 profile for the aggregate.
 Never commit generated session plans, prompts, observations, screenshots, or
 results.

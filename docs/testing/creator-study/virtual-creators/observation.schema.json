@@ -182,11 +182,15 @@
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task", "outcome", "elapsedWallMs", "interventions", "scenarioEvents", "deviationIds", "frictionFlags", "uiEvidence", "notes"],
+      "required": ["task", "outcome", "elapsedWallMs", "checkpointEvents", "interventions", "scenarioEvents", "deviationIds", "frictionFlags", "uiEvidence", "notes"],
       "properties": {
         "task": { "type": "integer", "minimum": 1, "maximum": 8 },
         "outcome": { "enum": ["not-run", "completed-unaided", "completed-assisted", "failed"] },
         "elapsedWallMs": { "type": ["integer", "null"], "minimum": 0 },
+        "checkpointEvents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/checkpointEvent" }
+        },
         "interventions": {
           "type": "array",
           "items": { "$ref": "#/$defs/intervention" }
@@ -220,6 +224,16 @@
         "exactText": { "type": "string", "minLength": 1 },
         "elapsedWallMs": { "type": "integer", "minimum": 0 },
         "assistIncrement": { "enum": [0, 1] }
+      }
+    },
+    "checkpointEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkpointId", "eventType", "elapsedWallMs"],
+      "properties": {
+        "checkpointId": { "type": "string", "pattern": "^T[1-8]-C[1-9][0-9]*$" },
+        "eventType": { "const": "completed" },
+        "elapsedWallMs": { "type": "integer", "minimum": 0 }
       }
     },
     "scenarioEvent": {
