@@ -1573,6 +1573,8 @@ describe('WorkflowStore graph adapter', () => {
     });
     const driftSession = { doc: {} };
     bindWorkflowRoundTripAuthority(driftSession, driftDescriptor.authority);
+    store.panBy(12, 8);
+    expect(() => store.assertWorkflowEditorReturnAuthority(driftSession)).not.toThrow();
     store.setBriefObjective('brief', 'Changed after editor open');
     expect(() => store.commitWorkflowEditorReturn(driftSession, {
       revisionId: 'store-edit-drift', bindingId: 'store-binding-drift', outputAssetReferenceId: 'store-edit-ref-drift',

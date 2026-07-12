@@ -12,7 +12,7 @@ const hash = `sha256:${'a'.repeat(64)}`;
 const authority: WorkflowRoundTripAuthorityInput = {
   id: 'session-authority', workflowId: 'workflow-proxy', workflowSavedPath: 'workflows/proxy.cxflow.json',
   projectIdentity: '1:/project', sessionIdentity: 1, mutationIdentity: 1, storeRevision: 1,
-  graphRevision: 1, materialKey: 'material-proxy',
+  graphRevision: 1, contextKey: 'context-proxy', materialKey: 'material-proxy',
   identity: { nodeId: 'transform', rootRunId: 'run' },
   source: {
     kind: 'run-output', id: 'run', assetReferenceId: 'ref', assetId: 'asset',

@@ -44,6 +44,7 @@ import {
   createWorkflowExecutionRestrictions,
   prepareCampaignGenerateTransform,
   workflowSha256Bytes,
+  workflowSha256Text,
   isFullWorkflowRunRecord,
   type WorkflowSelectiveRunMode,
   type WorkflowSelectiveExecutionPlan,
@@ -76,6 +77,37 @@ import {
   workflowRoundTripSessionsForWorkflow,
   type WorkflowRoundTripAuthorityInput,
 } from './workflowEditorSession';
+
+function workflowEditorContextKey(graph: WorkflowGraphV2, nodeId: string): string {
+  const relevantIds = new Set([nodeId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const edge of graph.edges) {
+      if (!relevantIds.has(edge.target.nodeId) || relevantIds.has(edge.source.nodeId)) continue;
+      relevantIds.add(edge.source.nodeId);
+      changed = true;
+    }
+  }
+  const runtimeConfigKeys = new Set([
+    'resultAssetReferenceId', 'resultAssetId', 'resultRelativePath',
+    'assetReferenceId', 'outputAssetId', 'outputRelativePath',
+  ]);
+  const nodes = graph.nodes
+    .filter((node) => relevantIds.has(node.id))
+    .map((node) => ({
+      id: node.id,
+      type: node.type,
+      ports: node.ports,
+      config: Object.fromEntries(Object.entries(node.config).filter(([key]) => !runtimeConfigKeys.has(key))),
+    }))
+    .toSorted((left, right) => left.id.localeCompare(right.id));
+  const edges = graph.edges
+    .filter((edge) => relevantIds.has(edge.source.nodeId) && relevantIds.has(edge.target.nodeId))
+    .map((edge) => ({ source: edge.source, target: edge.target }))
+    .toSorted((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return workflowSha256Text(JSON.stringify({ nodeId, nodes, edges }));
+}
 
 export interface WorkflowTransformExecutionState {
   state: 'idle' | 'queued' | 'running' | 'cancelling' | 'cancelled' | 'succeeded' | 'failed' | 'stale';
@@ -1385,6 +1417,7 @@ export class WorkflowStore {
       mutationIdentity: this.workflowMutationIdentity,
       storeRevision: this.rev,
       graphRevision: this.graphRevision,
+      contextKey: workflowEditorContextKey(graph, run.nodeId),
       materialKey: effective.materialKey,
       identity,
       source,
@@ -1467,6 +1500,7 @@ export class WorkflowStore {
       mutationIdentity: this.workflowMutationIdentity,
       storeRevision: this.rev,
       graphRevision: this.graphRevision,
+      contextKey: workflowEditorContextKey(next, authority.identity.nodeId),
       materialKey: nextEffective.materialKey,
       source: {
         kind: 'editor-revision',
@@ -1485,13 +1519,13 @@ export class WorkflowStore {
     if (!authority) throw new Error('This document is not linked to a workflow result.');
     if (authority.workflowId !== this.serialize().id
       || authority.projectIdentity !== project.identity
-      || authority.sessionIdentity !== this.workflowSessionIdentity
-      || authority.mutationIdentity !== this.workflowMutationIdentity
-      || authority.storeRevision !== this.rev
-      || authority.graphRevision !== this.graphRevision) {
+      || authority.sessionIdentity !== this.workflowSessionIdentity) {
       throw new Error('The workflow or project changed while this result was being edited. The stored artifacts were not linked.');
     }
     const graph = this.serialize();
+    if (workflowEditorContextKey(graph, authority.identity.nodeId) !== authority.contextKey) {
+      throw new Error('The workflow or project changed its source context while this result was being edited. The stored artifacts were not linked.');
+    }
     const effective = resolveWorkflowEffectiveResult(graph, authority.identity);
     if (!effective || effective.materialKey !== authority.materialKey
       || effective.output.assetReferenceId !== authority.source.assetReferenceId

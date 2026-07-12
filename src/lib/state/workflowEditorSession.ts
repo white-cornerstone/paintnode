@@ -13,6 +13,7 @@ export interface WorkflowRoundTripAuthorityInput {
   mutationIdentity: number;
   storeRevision: number;
   graphRevision: number;
+  contextKey: string;
   materialKey: string;
   identity: WorkflowEditableResultIdentity;
   source: WorkflowEditorRevisionSourceV1;
