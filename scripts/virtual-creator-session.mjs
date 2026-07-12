@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 
@@ -175,7 +175,7 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
     + 'npm run qa:creator-study:launch -- --app-bundle "$APP" --fresh-study-session\n'
     + '# Use Computer Use to verify: no document, no project, no workflow, no imported asset.\n'
     + 'npm run qa:creator-study:setup -- --approved-build-record "$RECORD" --active-build-decisions "$LEDGER" --app-bundle "$APP" --project-dir "$PROJECT" --rehearsal-dir "$REHEARSAL" --visible-empty-state-attested\n'
-    + '```\n\nDo not open the empty project before setup verification. Task 1 opens it.\n\n'
+    + '```\n\nKeep this terminal open because `attest_checkout` is reused before resume and finalization. Do not open the empty project before setup verification. Task 1 opens it.\n\n'
     + '## Moderator timing\n\nFollow the committed instrument algorithm, not a flat ladder:\n\n'
     + '1. After 90 seconds without progress, ask exactly “What are you looking for?” Record a `neutral-probe` ID from the current task and checkpoint (for example `T1-C2-NP1`) with zero assist.\n'
     + '2. At 180 total seconds, recompute the earliest incomplete checkpoint and deliver only its H1 verbatim.\n'
@@ -273,7 +273,9 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
   if (observation.sessionId.slice(3, 6) !== observation.profileId) {
     throw new Error('Session ID and profile ID do not match.');
   }
-  if (!observation.agentTask.externalTaskId.trim() || !observation.ownerReview.notes.trim()) {
+  if (!observation.agentTask.externalTaskId.trim()
+    || observation.agentTask.externalTaskId !== observation.agentTask.externalTaskId.trim()
+    || !observation.ownerReview.notes.trim()) {
     throw new Error('External AI task ID and owner rationale must contain non-whitespace text.');
   }
   const { checkoutAttestation } = observation.lifecycle;
@@ -301,6 +303,10 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
       throw new Error(`Task ${task.task} cannot combine the none deviation with another deviation.`);
     }
     for (const intervention of task.interventions) {
+      if (!intervention.checkpointId.startsWith(`T${task.task}-`)
+        || !intervention.id.startsWith(`${intervention.checkpointId}-`)) {
+        throw new Error(`Task ${task.task} intervention identity does not match its checkpoint.`);
+      }
       if (intervention.eventType === 'neutral-probe'
         && (intervention.exactText !== 'What are you looking for?' || intervention.assistIncrement !== 0)) {
         throw new Error(`Task ${task.task} has an invalid neutral probe.`);
@@ -320,6 +326,11 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
         && takeovers.get(intervention.id) !== intervention.exactText) {
         throw new Error(`Task ${task.task} has a takeover that drifted from the closed instrument.`);
       }
+    }
+    const assist = task.interventions.reduce((sum, intervention) => sum + intervention.assistIncrement, 0);
+    if ((task.outcome === 'completed-unaided' && assist !== 0)
+      || (task.outcome === 'completed-assisted' && assist === 0)) {
+      throw new Error(`Task ${task.task} outcome does not match its recorded assistance.`);
     }
   }
 
@@ -375,6 +386,11 @@ export function validateVirtualCreatorObservationSet({ controlRoot }) {
   const results = sessionDirs.map((name) => validateVirtualCreatorObservation({
     observationPath: join(canonicalRoot, name, 'observation.blank.json'),
   }));
+  for (let index = 0; index < results.length; index += 1) {
+    if (basename(sessionDirs[index]) !== results[index].sessionId) {
+      throw new Error('Observation session ID must match its control directory.');
+    }
+  }
   const expectedProfiles = loadProfiles().map(({ id }) => id).sort();
   const actualProfiles = results.map(({ profileId }) => profileId).sort();
   if (JSON.stringify(actualProfiles) !== JSON.stringify(expectedProfiles)) {
