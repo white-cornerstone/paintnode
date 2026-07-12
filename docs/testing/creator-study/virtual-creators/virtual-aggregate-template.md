@@ -7,22 +7,24 @@
 - Evaluation dates:
 - Planned / run / owner-accepted / owner-rejected sessions:
 - Distinct AI task IDs verified:
+- Runtime checkout attestations verified:
 - Distinct native profile fingerprints verified:
+- Matching setup / cleanup profile hashes verified:
 - Cleanup receipts verified:
 - Product owner review standard:
 
 ## Session disposition
 
-| Virtual ID | Behavioral lens | Tasks completed | Owner decision | Rejection reason, if any | Cleanup verified |
-| --- | --- | ---: | --- | --- | --- |
-| V01 | | | pending / accepted / rejected | | |
-| V02 | | | pending / accepted / rejected | | |
-| V03 | | | pending / accepted / rejected | | |
-| V04 | | | pending / accepted / rejected | | |
-| V05 | | | pending / accepted / rejected | | |
-| V06 | | | pending / accepted / rejected | | |
-| V07 | | | pending / accepted / rejected | | |
-| V08 | | | pending / accepted / rejected | | |
+| Virtual ID | Behavioral lens | External task ID | Tasks completed | Checkout attested | Profile hashes match | Cleanup verified | Owner decision | Owner rationale / rejection reason |
+| --- | --- | --- | ---: | --- | --- | --- | --- | --- |
+| V01 | | | | | | | pending / accepted / rejected | |
+| V02 | | | | | | | pending / accepted / rejected | |
+| V03 | | | | | | | pending / accepted / rejected | |
+| V04 | | | | | | | pending / accepted / rejected | |
+| V05 | | | | | | | pending / accepted / rejected | |
+| V06 | | | | | | | pending / accepted / rejected | |
+| V07 | | | | | | | pending / accepted / rejected | |
+| V08 | | | | | | | pending / accepted / rejected | |
 
 ## Cross-session observations
 

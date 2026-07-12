@@ -45,7 +45,8 @@ Each profile receives:
 3. a unique empty project folder outside the repository;
 4. a cryptographically fresh isolated PaintNode profile;
 5. only its own participant-start prompt and the current task prompt;
-6. standardized hints only when the committed timing ladder allows them;
+6. a neutral probe and standardized hints only when the committed facilitator
+   algorithm allows them;
 7. final owner observation and acceptance or rejection;
 8. verified native profile cleanup before the next profile begins.
 
@@ -100,7 +101,9 @@ The command creates one owner-only control directory and one separate, empty,
 owner-only project. It fails when roots are inside the repository, nested,
 symlinked, or when the preserved study-capable bundle/records are absent.
 It also rejects an approved checkout whose HEAD differs from the frozen build
-or whose tracked source is dirty. Keep that detached checkout unchanged for all
+or whose source tree, including untracked files, is dirty. The generated deck
+repeats that attestation immediately before fresh launch, resume, and finalization.
+Keep that detached checkout unchanged for all
 eight sessions even if `feature/creative-blueprint` advances.
 
 ## Run one session
@@ -114,17 +117,31 @@ eight sessions even if `feature/creative-blueprint` advances.
 6. Send Task 1, observe the live native run, and record visible evidence.
 7. Continue one task at a time. Perform Task 2 and Task 7 checkpoint changes
    from the operator lane, and Task 8 resume from the same native profile.
-8. Apply standardized interventions only at the committed timing thresholds.
-9. Complete `observation.blank.json` with synthetic task outcomes and findings.
+8. Apply the committed facilitator algorithm exactly: neutral probe at 90
+   seconds without progress, H1 at 180 seconds, then recompute the earliest
+   incomplete checkpoint and restart timing whenever progress occurs. Deliver
+   H2 and takeover only after the additional same-checkpoint intervals.
+9. Complete `observation.blank.json` with the distinct external AI task ID,
+   checkout attestation, exact interventions, scenario events, synthetic task
+   outcomes, visible evidence, and findings.
 10. Close PaintNode and require successful `qa:creator-study:finalize-session`
     cleanup before starting the next profile.
 11. Complete `ownerReview`: observed live, evidence reviewed, accepted/rejected,
     written standard, notes, and UTC review timestamp.
+12. Run the fail-closed record validator:
 
-An accepted virtual run requires traceable visible evidence, all required tasks
-or an honestly recorded failure, verified cleanup, and the owner’s explicit
-decision. Rejecting a run does not erase it; retain the reason so automation
-failures are not mistaken for product findings.
+    ```sh
+    npm run qa:virtual-creators:validate -- \
+      --validate-observation "/absolute/path/to/observation.blank.json"
+    ```
+
+An accepted virtual run requires all eight tasks completed, elapsed time and
+traceable native UI evidence for every task, the planned Task 2 and Task 7
+setup/reset events, only permitted deviations, matching setup/cleanup profile
+hashes, verified data-store removal and finalization, and the owner’s written
+explicit decision. A failed or incomplete run must be rejected. Rejecting a run
+does not erase it; retain the reason so automation failures are not mistaken
+for product findings.
 
 ## Synthesis
 
@@ -148,8 +165,17 @@ impact and always set `requiresHumanValidation: true`.
 - [ ] V05 Traditional layer-editor lens
 - [ ] V06 Prompt-first AI creator lens
 - [ ] V07 Multi-format social creator lens
-- [ ] V08 Provenance and recovery skeptic lens
+- [ ] V08 Deliberate verification lens
 - [ ] Every session used a distinct AI task, profile, project, and session ID
+- [ ] Every session passed its fail-closed observation validator
 - [ ] Every profile was finalized before the next allocation
 - [ ] Every record has an owner accept/reject decision
 - [ ] Aggregate report keeps synthetic findings outside real study evidence
+
+After all eight owner decisions, validate the complete set and task-ID
+uniqueness:
+
+```sh
+npm run qa:virtual-creators:validate -- \
+  --validate-control-root "/absolute/path/to/control"
+```

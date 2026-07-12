@@ -11,6 +11,8 @@
     "sessionId",
     "profileId",
     "build",
+    "agentTask",
+    "lifecycle",
     "tasks",
     "findings",
     "ownerReview",
@@ -30,6 +32,40 @@
         "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
         "bundleId": { "const": "com.paintnode.editor.blueprintqa.provider.free" },
         "executableSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "agentTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["externalTaskId", "newTaskConfirmed", "noForkConfirmed"],
+      "properties": {
+        "externalTaskId": { "type": ["string", "null"], "minLength": 1 },
+        "newTaskConfirmed": { "type": "boolean" },
+        "noForkConfirmed": { "type": "boolean" }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkoutAttestation", "setupProfileSha256", "cleanupProfileSha256", "dataStoreRemoved", "dataStoreRemovalVerified", "finalized", "cleanupReceiptRecordedAt"],
+      "properties": {
+        "checkoutAttestation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expectedGitSha", "actualGitSha", "sourceStatusSha256", "attestedAt"],
+          "properties": {
+            "expectedGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+            "actualGitSha": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40}$" },
+            "sourceStatusSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+            "attestedAt": { "type": ["string", "null"], "format": "date-time" }
+          }
+        },
+        "setupProfileSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "cleanupProfileSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "dataStoreRemoved": { "type": "boolean" },
+        "dataStoreRemovalVerified": { "type": "boolean" },
+        "finalized": { "type": "boolean" },
+        "cleanupReceiptRecordedAt": { "type": ["string", "null"], "format": "date-time" }
       }
     },
     "tasks": {
@@ -71,6 +107,7 @@
             "properties": {
               "observedLive": { "const": true },
               "evidenceReviewed": { "const": true },
+              "notes": { "type": "string", "minLength": 1 },
               "reviewedAt": { "type": "string", "format": "date-time" }
             }
           },
@@ -84,16 +121,80 @@
       "items": { "type": "string", "minLength": 1 }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "ownerReview": { "properties": { "decision": { "enum": ["accepted", "rejected"] } }, "required": ["decision"] } },
+        "required": ["ownerReview"]
+      },
+      "then": {
+        "properties": {
+          "agentTask": {
+            "properties": {
+              "externalTaskId": { "type": "string", "minLength": 1 },
+              "newTaskConfirmed": { "const": true },
+              "noForkConfirmed": { "const": true }
+            }
+          },
+          "lifecycle": {
+            "properties": {
+              "checkoutAttestation": {
+                "properties": {
+                  "actualGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+                  "sourceStatusSha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+                  "attestedAt": { "type": "string", "format": "date-time" }
+                }
+              },
+              "setupProfileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "cleanupProfileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "dataStoreRemoved": { "const": true },
+              "dataStoreRemovalVerified": { "const": true },
+              "finalized": { "const": true },
+              "cleanupReceiptRecordedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "ownerReview": { "properties": { "decision": { "const": "accepted" } }, "required": ["decision"] } },
+        "required": ["ownerReview"]
+      },
+      "then": {
+        "properties": {
+          "tasks": {
+            "allOf": [
+              { "not": { "contains": { "properties": { "outcome": { "enum": ["not-run", "failed"] } }, "required": ["outcome"] } } },
+              { "not": { "contains": { "properties": { "uiEvidence": { "maxItems": 0 } }, "required": ["uiEvidence"] } } }
+            ]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task", "outcome", "elapsedWallMs", "interventionIds", "frictionFlags", "uiEvidence", "notes"],
+      "required": ["task", "outcome", "elapsedWallMs", "interventions", "scenarioEvents", "deviationIds", "frictionFlags", "uiEvidence", "notes"],
       "properties": {
         "task": { "type": "integer", "minimum": 1, "maximum": 8 },
         "outcome": { "enum": ["not-run", "completed-unaided", "completed-assisted", "failed"] },
         "elapsedWallMs": { "type": ["integer", "null"], "minimum": 0 },
-        "interventionIds": { "type": "array", "items": { "type": "string", "pattern": "^T[1-8]-C[1-9][0-9]*-(?:H[12]|TO)$" }, "uniqueItems": true },
+        "interventions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/intervention" }
+        },
+        "scenarioEvents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scenarioEvent" }
+        },
+        "deviationIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["none", "late-timing", "verbatim-repeat", "approved-accommodation", "early-hint", "out-of-order-hint", "wording-changed", "unlogged-assist", "silent-app-state-change", "unauthorized-takeover", "calibration-missing", "instrument-version-mismatch", "instrument-hash-mismatch", "instrument-change-unapproved"] }
+        },
         "frictionFlags": {
           "type": "array",
           "uniqueItems": true,
@@ -101,6 +202,32 @@
         },
         "uiEvidence": { "type": "array", "items": { "type": "string", "minLength": 1 } },
         "notes": { "type": "string" }
+      }
+    },
+    "intervention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "checkpointId", "eventType", "exactText", "elapsedWallMs", "assistIncrement"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^T[1-8]-C[1-9][0-9]*-(?:NP[1-9][0-9]*|H[12]|TO|VR[1-9][0-9]*)$" },
+        "checkpointId": { "type": "string", "pattern": "^T[1-8]-C[1-9][0-9]*$" },
+        "eventType": { "enum": ["neutral-probe", "standard-hint", "takeover", "verbatim-repeat"] },
+        "exactText": { "type": "string", "minLength": 1 },
+        "elapsedWallMs": { "type": "integer", "minimum": 0 },
+        "assistIncrement": { "enum": [0, 1] }
+      }
+    },
+    "scenarioEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "scenario", "spokenText", "expectedTrigger", "observedTrigger", "elapsedWallMs"],
+      "properties": {
+        "action": { "enum": ["setup", "reset"] },
+        "scenario": { "enum": ["Branch recovery checkpoint", "Format recovery checkpoint", "Standard checkpoint"] },
+        "spokenText": { "enum": ["I am setting the test checkpoint for this task", "I am resetting the test checkpoint"] },
+        "expectedTrigger": { "type": "string", "minLength": 1 },
+        "observedTrigger": { "type": ["string", "null"] },
+        "elapsedWallMs": { "type": "integer", "minimum": 0 }
       }
     },
     "finding": {

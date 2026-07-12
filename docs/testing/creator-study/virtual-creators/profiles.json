@@ -41,7 +41,7 @@
       "multiFormatHabit": "regular",
       "interactionConstraint": "pointer-first",
       "mentalModel": "Prioritize recognisable product identity, repeatability, and efficient multi-format adaptation.",
-      "behavioralConstraint": "Choose actions that appear reusable and inspect whether accepted work survives recovery."
+      "behavioralConstraint": "Choose actions that appear efficient and report visible outcomes without deliberately seeking a particular failure or recovery result."
     },
     {
       "id": "V05",
@@ -71,17 +71,17 @@
       "multiFormatHabit": "regular",
       "interactionConstraint": "pointer-first",
       "mentalModel": "Think in a coordinated family of square, portrait, and landscape deliverables.",
-      "behavioralConstraint": "Check whether format identity and completion state remain understandable without opening implementation details."
+      "behavioralConstraint": "Use the terminology visible in the app and report what you notice without deliberately seeking a particular state or format problem."
     },
     {
       "id": "V08",
-      "label": "Provenance and recovery skeptic lens",
+      "label": "Deliberate verification lens",
       "creativeToolFamiliarity": "advanced",
       "aiWorkflowFamiliarity": "frequent",
       "multiFormatHabit": "regular",
       "interactionConstraint": "pointer-first",
-      "mentalModel": "Distrust silent replacement and look for evidence of accepted direction, reuse, stale work, and recovery scope.",
-      "behavioralConstraint": "Inspect visible provenance and state before continuing, but do not inspect files, source, logs, or prior evaluations."
+      "mentalModel": "Prefer to confirm visible context before consequential choices and expect the interface to explain what will continue.",
+      "behavioralConstraint": "Pause to inspect available visible context before key choices without seeking a predetermined failure; do not inspect files, source, logs, or prior evaluations."
     }
   ]
 }

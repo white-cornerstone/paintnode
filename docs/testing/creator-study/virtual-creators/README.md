@@ -13,5 +13,10 @@ It contains definitions and schemas only, never completed results.
   interpretation, owner decisions, and hypotheses requiring human validation.
 
 Generate per-session private materials outside the repository with
-`npm run qa:virtual-creators:prepare`. Never commit generated session plans,
-prompts, observations, screenshots, or results.
+`npm run qa:virtual-creators:prepare`. Validate each completed record with
+`npm run qa:virtual-creators:validate -- --validate-observation <path>`, then
+validate all eight with `--validate-control-root <path>`. The validators require
+the owner decision and fail closed on missing task evidence, lifecycle proof,
+instrument drift, invalidating deviations, or reused external AI task IDs.
+Never commit generated session plans, prompts, observations, screenshots, or
+results.
