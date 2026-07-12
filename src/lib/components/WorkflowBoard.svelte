@@ -63,12 +63,14 @@
     workflowCandidateBranchResultSummary,
     workflowCandidateProgressLabel,
     resolveWorkflowCampaignPath,
+    shouldRetryReviewVerificationAfterRefresh,
     type CreatorNodeType,
     type WorkflowNodePort,
     type WorkflowSelectiveExecutionOutcome,
     type WorkflowSelectiveRunMode,
     type WorkflowStoryboardDescriptor,
-    WorkflowReviewRefreshGate,
+    type WorkflowReviewVerificationState,
+    WorkflowReviewVerificationCoordinator,
   } from '../workflow';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
@@ -126,8 +128,19 @@
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
   let selectedReviewCandidates = $state<Record<string, string>>({});
-  let reviewVerificationEpoch = 0;
-  const reviewRefreshGate = new WorkflowReviewRefreshGate();
+  let reviewVerificationState = $state<WorkflowReviewVerificationState>({
+    status: 'idle', identity: null, message: '', canRetry: false,
+  });
+  const reviewVerificationCoordinator = new WorkflowReviewVerificationCoordinator((state) => {
+    if (boardDestroyed) return;
+    reviewVerificationState = { ...state };
+    if (state.status === 'failed') {
+      const reviewNodeIds = untrack(() => workflow.graphSnapshot().nodes
+        .filter((node) => node.type === 'review')
+        .map((node) => node.id));
+      untrack(() => workflow.invalidateReviewState(reviewNodeIds));
+    }
+  });
   let activeCandidateController: AbortController | null = null;
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
@@ -195,25 +208,32 @@
   );
   const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
-  function verifiedReviewResolutions() {
-    return Object.fromEntries(workflow.graphSnapshot().nodes
+  const reviewReadinessSnapshot = $derived.by(() => {
+    workflow.rev;
+    project.current;
+    reviewVerificationState.status;
+    const graph = workflow.graphSnapshot();
+    const readinessAssets = assets.map((asset) => ({
+      id: asset.id, relativePath: asset.relativePath, exists: asset.exists,
+    }));
+    const reviewResolutions = Object.fromEntries(graph.nodes
       .filter((node) => node.type === 'review')
       .map((node) => [
         node.id,
         workflow.reviewResolution(node.id, assets, true, project.identity),
       ]));
-  }
+    return { graph, readinessAssets, reviewResolutions };
+  });
   const readiness = $derived.by(() => {
-    workflow.rev;
-    project.current;
-    return workflowReadiness(workflow.graphSnapshot(), {
+    const snapshot = reviewReadinessSnapshot;
+    return workflowReadiness(snapshot.graph, {
       desktop,
       projectPath: project.path,
-      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+      assets: snapshot.readinessAssets,
       provider: providerSelection.provider,
       supportedProviders: providerSelection.supportedProviders,
       requireVerifiedReview: true,
-      reviewResolutions: verifiedReviewResolutions(),
+      reviewResolutions: snapshot.reviewResolutions,
     });
   });
 
@@ -224,15 +244,16 @@
   });
 
   function outputReadiness(outputNodeId: string) {
-    return workflowReadiness(workflow.graphSnapshot(), {
+    const snapshot = reviewReadinessSnapshot;
+    return workflowReadiness(snapshot.graph, {
       desktop,
       projectPath: project.path,
-      assets: assets.map((asset) => ({ id: asset.id, relativePath: asset.relativePath, exists: asset.exists })),
+      assets: snapshot.readinessAssets,
       provider: providerSelection.provider,
       supportedProviders: providerSelection.supportedProviders,
       targetNodeId: outputNodeId,
       requireVerifiedReview: true,
-      reviewResolutions: verifiedReviewResolutions(),
+      reviewResolutions: snapshot.reviewResolutions,
     });
   }
 
@@ -277,6 +298,7 @@
 
   onDestroy(() => {
     boardDestroyed = true;
+    reviewVerificationCoordinator.reset();
     endStoryboardEditSession();
     if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
     if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
@@ -1719,13 +1741,11 @@
     const ready = providerSelection.ready && Boolean(providerSelection.provider);
     if (!ready) {
       untrack(() => workflow.invalidateReviewState(reviewNodeIds));
-      reviewRefreshGate.reset();
-      reviewVerificationEpoch += 1;
+      reviewVerificationCoordinator.reset();
       return;
     }
     if (reviewNodeIds.length === 0) {
-      reviewRefreshGate.reset();
-      reviewVerificationEpoch += 1;
+      reviewVerificationCoordinator.reset();
       return;
     }
     const refreshIdentity = createWorkflowReviewRefreshIdentity({
@@ -1735,21 +1755,25 @@
       executionOptionsIdentity,
       assetIdentity,
     });
-    if (!reviewRefreshGate.shouldRefresh(refreshIdentity)) return;
-    const epoch = ++reviewVerificationEpoch;
-    void (async () => {
+    untrack(() => reviewVerificationCoordinator.request(refreshIdentity, async () => {
       const context = untrack(() => createWorkflowExecutionContext(createRunId()));
       void assetIdentity;
       for (const reviewNodeId of reviewNodeIds) {
-        try {
-          await untrack(() => workflow.refreshReviewState(reviewNodeId, context.options));
-        } catch {
-          // The node remains recoverably stale/unavailable until a current snapshot verifies.
-        }
-        if (epoch !== reviewVerificationEpoch || boardDestroyed) return;
+        await untrack(() => workflow.refreshReviewState(reviewNodeId, context.options));
+        if (boardDestroyed) return;
       }
-    })();
+    }));
   });
+
+  async function refreshWorkflowAssetsAndReview(): Promise<void> {
+    const verificationBeforeRefresh = reviewVerificationCoordinator.state;
+    await ui.withLoading('Refreshing workflow assets…', () => project.refresh());
+    await tick();
+    const verificationAfterRefresh = reviewVerificationCoordinator.state;
+    if (shouldRetryReviewVerificationAfterRefresh(verificationBeforeRefresh, verificationAfterRefresh)) {
+      reviewVerificationCoordinator.retry();
+    }
+  }
 
   async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
     invalidateSelectivePreview();
@@ -2178,9 +2202,9 @@
       <div class="tray-head">
         <span>Assets</span>
         <button
-          aria-label="Refresh project"
-          use:tooltip={{ text: 'Refresh project', placement: 'right' }}
-          onclick={() => void ui.withLoading('Refreshing project…', () => project.refresh())}
+          aria-label="Refresh workflow assets and Review verification"
+          use:tooltip={{ text: 'Refresh workflow assets and Review verification', placement: 'right' }}
+          onclick={() => void refreshWorkflowAssetsAndReview()}
         >
           <Icon svg={ArrowSync} size={14} />
         </button>
@@ -2971,6 +2995,22 @@
               <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveUiState.busy || !providerSelection.ready} />
             {/if}
           </div>
+          {#if reviewVerificationState.status === 'verifying' || reviewVerificationState.status === 'failed'}
+            <div
+              class:failed={reviewVerificationState.status === 'failed'}
+              class="review-verification-status"
+              role={reviewVerificationState.status === 'failed' ? 'alert' : 'status'}
+              aria-live={reviewVerificationState.status === 'failed' ? 'assertive' : 'polite'}
+              data-review-verification-state={reviewVerificationState.status}
+            >
+              <span>{reviewVerificationState.message}</span>
+              {#if reviewVerificationState.canRetry}
+                <button type="button" onclick={() => reviewVerificationCoordinator.retry()}>
+                  Retry Review verification
+                </button>
+              {/if}
+            </div>
+          {/if}
           <div class="readiness-checklist" role="group" aria-label="Generate checklist" tabindex="-1" data-workflow-checklist onpointerdown={(event) => event.stopPropagation()}>
             <div class="checklist-head">
               <strong>Before Generate</strong>
@@ -3933,6 +3973,27 @@
     border: 1px solid #4b4d52;
     border-radius: 4px;
     background: #252629;
+    font-size: 10px;
+  }
+  .review-verification-status {
+    display: grid;
+    gap: 5px;
+    margin: 0 8px 8px;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 8%, #252629);
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+  .review-verification-status.failed {
+    border-color: color-mix(in srgb, #ffb0b0 45%, var(--border));
+    color: #ffcccc;
+  }
+  .review-verification-status button {
+    justify-self: start;
+    padding: 3px 6px;
     font-size: 10px;
   }
   .checklist-head,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import boardSource from '../components/WorkflowBoard.svelte?raw';
+import projectPanelSource from '../components/ProjectPanel.svelte?raw';
 
 describe('Workflow Board selective execution UX contract', () => {
   it('exposes preview-first actions and visible per-node preflight without bypassing the store', () => {
@@ -90,10 +91,15 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('reviewResolutions');
     expect(boardSource).toContain('untrack(() => workflow.refreshReviewState');
     expect(boardSource).toContain('const executionOptionsIdentity = workflowExecutionOptionsIdentity();');
-    expect(boardSource).toContain('reviewRefreshGate.shouldRefresh');
+    expect(boardSource).toContain('WorkflowReviewVerificationCoordinator');
+    expect(boardSource).toContain('reviewVerificationCoordinator.request');
+    expect(boardSource).toContain('reviewVerificationCoordinator.retry()');
+    expect(boardSource).toContain('data-review-verification-state');
+    expect(boardSource).toContain('Retry Review verification');
     expect(boardSource).toContain('workflow.invalidateReviewState(reviewNodeIds)');
-    expect(boardSource).toContain('reviewRefreshGate.reset()');
-    expect(boardSource.indexOf('reviewRefreshGate.shouldRefresh'))
-      .toBeLessThan(boardSource.indexOf('const epoch = ++reviewVerificationEpoch'));
+    expect(boardSource).toContain('reviewVerificationCoordinator.reset()');
+    expect(boardSource).toContain('aria-label="Refresh workflow assets and Review verification"');
+    expect(boardSource).not.toContain('aria-label="Refresh project"');
+    expect(projectPanelSource).toContain('aria-label="Refresh project files and assets"');
   });
 });
