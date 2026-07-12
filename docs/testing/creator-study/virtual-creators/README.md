@@ -17,6 +17,9 @@ Generate per-session private materials outside the repository with
 `npm run qa:virtual-creators:validate -- --validate-observation <path>`, then
 validate all eight with `--validate-control-root <path>`. The validators require
 the owner decision and fail closed on missing task evidence, lifecycle proof,
-instrument drift, invalidating deviations, or reused external AI task IDs.
+instrument drift, invalidating deviations, altered native receipts, unsafe
+attestation order, duplicate-selected profile attempts, or reused external AI
+task IDs. Retain rejected attempts and select exactly one terminal attempt per
+profile for the aggregate.
 Never commit generated session plans, prompts, observations, screenshots, or
 results.

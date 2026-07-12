@@ -101,8 +101,12 @@ The command creates one owner-only control directory and one separate, empty,
 owner-only project. It fails when roots are inside the repository, nested,
 symlinked, or when the preserved study-capable bundle/records are absent.
 It also rejects an approved checkout whose HEAD differs from the frozen build
-or whose source tree, including untracked files, is dirty. The generated deck
-repeats that attestation immediately before fresh launch, resume, and finalization.
+or whose source tree, including untracked files, is dirty. Packet generation
+also requires a clean virtual-creator kit checkout and pins its Git SHA so the
+final validator cannot silently drift. The generated deck
+captures hashed `fresh`, `resume`, and `finalize` attestation rows and native
+setup/cleanup receipts. The validator reopens those private receipt files and
+binds their build, profile, cleanup, phase, and time fields to the observation.
 Keep that detached checkout unchanged for all
 eight sessions even if `feature/creative-blueprint` advances.
 
@@ -122,8 +126,8 @@ eight sessions even if `feature/creative-blueprint` advances.
    incomplete checkpoint and restart timing whenever progress occurs. Deliver
    H2 and takeover only after the additional same-checkpoint intervals.
 9. Complete `observation.blank.json` with the distinct external AI task ID,
-   checkout attestation, exact interventions, scenario events, synthetic task
-   outcomes, visible evidence, and findings.
+   three checkout attestations, receipt hashes/fields, exact interventions,
+   scenario events, synthetic task outcomes, visible evidence, and findings.
 10. Close PaintNode and require successful `qa:creator-study:finalize-session`
     cleanup before starting the next profile.
 11. Complete `ownerReview`: observed live, evidence reviewed, accepted/rejected,
@@ -138,10 +142,18 @@ eight sessions even if `feature/creative-blueprint` advances.
 An accepted virtual run requires all eight tasks completed, elapsed time and
 traceable native UI evidence for every task, the planned Task 2 and Task 7
 setup/reset events, only permitted deviations, matching setup/cleanup profile
-hashes, verified data-store removal and finalization, and the owner’s written
-explicit decision. A failed or incomplete run must be rejected. Rejecting a run
-does not erase it; retain the reason so automation failures are not mistaken
-for product findings.
+hashes from validated native receipts, verified data-store removal and
+finalization, and the owner’s written explicit decision. A failed or incomplete
+run must be rejected.
+
+A packet rejected before launch uses `attemptStage: prelaunch` and must not
+invent an external task, attestation, setup, or cleanup evidence. A launched
+attempt is retained after verified finalization even when rejected. Prepare a
+new packet to retry that profile; keep the rejected attempt with
+`selectedForAggregate: false`, and mark exactly one terminal attempt for each
+V01–V08 profile `selectedForAggregate: true`. The set validator permits retained
+rejected attempts while rejecting missing, duplicate-selected, or reused-task-ID
+records.
 
 ## Synthesis
 
@@ -166,10 +178,11 @@ impact and always set `requiresHumanValidation: true`.
 - [ ] V06 Prompt-first AI creator lens
 - [ ] V07 Multi-format social creator lens
 - [ ] V08 Deliberate verification lens
-- [ ] Every session used a distinct AI task, profile, project, and session ID
+- [ ] Every launched attempt used a distinct AI task, project, and session ID
 - [ ] Every session passed its fail-closed observation validator
 - [ ] Every profile was finalized before the next allocation
 - [ ] Every record has an owner accept/reject decision
+- [ ] Exactly one terminal attempt per V01–V08 is selected for the aggregate
 - [ ] Aggregate report keeps synthetic findings outside real study evidence
 
 After all eight owner decisions, validate the complete set and task-ID

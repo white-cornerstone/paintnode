@@ -47,19 +47,13 @@
     "lifecycle": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["checkoutAttestation", "setupProfileSha256", "cleanupProfileSha256", "dataStoreRemoved", "dataStoreRemovalVerified", "finalized", "cleanupReceiptRecordedAt"],
+      "required": ["attemptStage", "checkoutAttestations", "checkoutAttestationReceiptSha256", "setupReceiptSha256", "cleanupReceiptSha256", "setupProfileSha256", "cleanupProfileSha256", "dataStoreRemoved", "dataStoreRemovalVerified", "finalized", "cleanupReceiptRecordedAt"],
       "properties": {
-        "checkoutAttestation": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["expectedGitSha", "actualGitSha", "sourceStatusSha256", "attestedAt"],
-          "properties": {
-            "expectedGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
-            "actualGitSha": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40}$" },
-            "sourceStatusSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
-            "attestedAt": { "type": ["string", "null"], "format": "date-time" }
-          }
-        },
+        "attemptStage": { "enum": ["pending", "prelaunch", "finalized"] },
+        "checkoutAttestations": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/checkoutAttestation" } },
+        "checkoutAttestationReceiptSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "setupReceiptSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "cleanupReceiptSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
         "setupProfileSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
         "cleanupProfileSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
         "dataStoreRemoved": { "type": "boolean" },
@@ -91,18 +85,19 @@
     "ownerReview": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observedLive", "evidenceReviewed", "decision", "standard", "notes", "reviewedAt"],
+      "required": ["observedLive", "evidenceReviewed", "decision", "selectedForAggregate", "standard", "notes", "reviewedAt"],
       "properties": {
         "observedLive": { "type": "boolean" },
         "evidenceReviewed": { "type": "boolean" },
         "decision": { "enum": ["pending", "accepted", "rejected"] },
+        "selectedForAggregate": { "type": "boolean" },
         "standard": { "type": "string", "minLength": 1 },
         "notes": { "type": "string" },
         "reviewedAt": { "type": ["string", "null"], "format": "date-time" }
       },
       "allOf": [
         {
-          "if": { "properties": { "decision": { "enum": ["accepted", "rejected"] } }, "required": ["decision"] },
+          "if": { "properties": { "decision": { "const": "accepted" } }, "required": ["decision"] },
           "then": {
             "properties": {
               "observedLive": { "const": true },
@@ -111,7 +106,16 @@
               "reviewedAt": { "type": "string", "format": "date-time" }
             }
           },
-          "else": { "properties": { "reviewedAt": { "const": null } } }
+          "else": {
+            "if": { "properties": { "decision": { "const": "rejected" } }, "required": ["decision"] },
+            "then": {
+              "properties": {
+                "notes": { "type": "string", "minLength": 1 },
+                "reviewedAt": { "type": "string", "format": "date-time" }
+              }
+            },
+            "else": { "properties": { "reviewedAt": { "const": null }, "selectedForAggregate": { "const": false } } }
+          }
         }
       ]
     },
@@ -124,7 +128,7 @@
   "allOf": [
     {
       "if": {
-        "properties": { "ownerReview": { "properties": { "decision": { "enum": ["accepted", "rejected"] } }, "required": ["decision"] } },
+        "properties": { "ownerReview": { "properties": { "decision": { "const": "accepted" } }, "required": ["decision"] } },
         "required": ["ownerReview"]
       },
       "then": {
@@ -138,13 +142,11 @@
           },
           "lifecycle": {
             "properties": {
-              "checkoutAttestation": {
-                "properties": {
-                  "actualGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
-                  "sourceStatusSha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
-                  "attestedAt": { "type": "string", "format": "date-time" }
-                }
-              },
+              "attemptStage": { "const": "finalized" },
+              "checkoutAttestations": { "minItems": 3, "maxItems": 3 },
+              "checkoutAttestationReceiptSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "setupReceiptSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "cleanupReceiptSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
               "setupProfileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
               "cleanupProfileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
               "dataStoreRemoved": { "const": true },
@@ -152,17 +154,8 @@
               "finalized": { "const": true },
               "cleanupReceiptRecordedAt": { "type": "string", "format": "date-time" }
             }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": { "ownerReview": { "properties": { "decision": { "const": "accepted" } }, "required": ["decision"] } },
-        "required": ["ownerReview"]
-      },
-      "then": {
-        "properties": {
+          },
+          "ownerReview": { "properties": { "selectedForAggregate": { "const": true } } },
           "tasks": {
             "allOf": [
               { "not": { "contains": { "properties": { "outcome": { "enum": ["not-run", "failed"] } }, "required": ["outcome"] } } },
@@ -174,6 +167,18 @@
     }
   ],
   "$defs": {
+    "checkoutAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "expectedGitSha", "actualGitSha", "sourceStatusSha256", "attestedAt"],
+      "properties": {
+        "phase": { "enum": ["fresh", "resume", "finalize"] },
+        "expectedGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "actualGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "sourceStatusSha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+        "attestedAt": { "type": "string", "format": "date-time" }
+      }
+    },
     "task": {
       "type": "object",
       "additionalProperties": false,

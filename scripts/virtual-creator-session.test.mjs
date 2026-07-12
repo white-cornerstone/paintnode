@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -18,6 +20,10 @@ const kit = join(root, 'docs/testing/creator-study/virtual-creators');
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function hashFile(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 function fixture() {
@@ -49,22 +55,47 @@ function fixture() {
     buildControlRoot,
     approvedCheckout: root,
     checkoutCapture: () => root,
+    kitCheckoutCapture: () => ({ path: root, gitSha: 'b'.repeat(40) }),
   };
 }
 
 function completeAcceptedObservation(path, externalTaskId) {
   const observation = JSON.parse(readFileSync(path, 'utf8'));
+  const controlDir = join(path, '..');
+  const clean = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  const attestations = ['fresh', 'resume', 'finalize'].map((phase, index) => ({
+    phase,
+    expectedGitSha: observation.build.gitSha,
+    actualGitSha: observation.build.gitSha,
+    sourceStatusSha256: clean,
+    attestedAt: `2026-07-12T00:${String(index * 10).padStart(2, '0')}:00.000Z`,
+  }));
+  const attestationPath = join(controlDir, 'checkout-attestations.jsonl');
+  writeFileSync(attestationPath, `${attestations.map((row) => JSON.stringify(row)).join('\n')}\n`);
+  chmodSync(attestationPath, 0o600);
+  const profileSha256 = 'a'.repeat(64);
+  const setupPath = join(controlDir, 'setup-receipt.json');
+  writeJson(setupPath, {
+    schemaVersion: 2, receiptType: 'paintnode-creator-study-technical-setup',
+    technicalSetupReady: true, gitSha: observation.build.gitSha, bundleId: observation.build.bundleId,
+    projectState: 'empty', rehearsalState: 'deleted',
+    sessionReset: { profileSha256, appBootObserved: true, setupEvidenceConsumed: true },
+  });
+  chmodSync(setupPath, 0o600);
+  const cleanupPath = join(controlDir, 'cleanup-receipt.json');
+  writeJson(cleanupPath, {
+    profileSha256, dataStoreRemoved: true, dataStoreRemovalVerified: true,
+    aborted: false, finalized: true,
+  });
+  chmodSync(cleanupPath, 0o600);
   observation.agentTask = { externalTaskId, newTaskConfirmed: true, noForkConfirmed: true };
   observation.lifecycle = {
-    checkoutAttestation: {
-      expectedGitSha: observation.build.gitSha,
-      actualGitSha: observation.build.gitSha,
-      sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-      attestedAt: '2026-07-12T00:00:00.000Z',
-    },
-    setupProfileSha256: 'a'.repeat(64), cleanupProfileSha256: 'a'.repeat(64),
+    attemptStage: 'finalized', checkoutAttestations: attestations,
+    checkoutAttestationReceiptSha256: hashFile(attestationPath),
+    setupReceiptSha256: hashFile(setupPath), cleanupReceiptSha256: hashFile(cleanupPath),
+    setupProfileSha256: profileSha256, cleanupProfileSha256: profileSha256,
     dataStoreRemoved: true, dataStoreRemovalVerified: true, finalized: true,
-    cleanupReceiptRecordedAt: '2026-07-12T01:01:00.000Z',
+    cleanupReceiptRecordedAt: '2026-07-12T00:30:00.000Z',
   };
   for (const task of observation.tasks) {
     Object.assign(task, {
@@ -87,9 +118,9 @@ function completeAcceptedObservation(path, externalTaskId) {
   }
   observation.ownerReview = {
     ...observation.ownerReview,
-    observedLive: true, evidenceReviewed: true, decision: 'accepted',
+    observedLive: true, evidenceReviewed: true, decision: 'accepted', selectedForAggregate: true,
     notes: 'Owner observed the complete run and accepted the evidence.',
-    reviewedAt: '2026-07-12T01:02:03.000Z',
+    reviewedAt: '2026-07-12T00:40:00.000Z',
   };
   writeJson(path, observation);
   return observation;
@@ -154,14 +185,17 @@ test('prepares owner-only, isolated session materials and an empty separate proj
     assert.match(operator, /ownerReview/);
     assert.match(operator, /product-b\.png/i);
     assert.match(operator, /APPROVED_CHECKOUT=/);
+    assert.match(operator, /KIT_CHECKOUT=/);
     assert.match(operator, /What are you looking for\?/);
     assert.match(operator, /restart the 90-second interval/);
     assert.match(operator, /rename the active workflow-result layer to Virtual Accepted Direction and set its opacity to 96 percent/);
     assert.match(operator, /I am setting the test checkpoint for this task/);
     assert.match(operator, /SOURCE_STATUS_SHA256/);
     assert.ok(operator.indexOf('git rev-parse HEAD') < operator.indexOf('--fresh-study-session'));
-    assert.match(operator, /run `attest_checkout` immediately before `npm run qa:creator-study:launch -- --app-bundle "\$APP" --resume-study-session`/);
-    assert.match(operator, /Run `attest_checkout` immediately before `npm run qa:creator-study:finalize-session`/);
+    assert.match(operator, /run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "\$APP" --resume-study-session`/);
+    assert.match(operator, /attest_checkout finalize/);
+    assert.match(operator, /setup-receipt\.json/);
+    assert.match(operator, /cleanup-receipt\.json/);
   } finally {
     rmSync(env.base, { recursive: true, force: true });
   }
@@ -175,7 +209,7 @@ test('virtual observation validates only as synthetic evidence and requires comp
       ...env,
       randomUUID: () => '22222222-2222-4222-8222-222222222222',
     });
-    const observation = JSON.parse(readFileSync(result.observationPath, 'utf8'));
+    let observation = JSON.parse(readFileSync(result.observationPath, 'utf8'));
     const virtualSchema = JSON.parse(readFileSync(join(kit, 'observation.schema.json'), 'utf8'));
     const humanSchema = JSON.parse(readFileSync(join(root, 'docs/testing/creator-study/synthesis-input.schema.json'), 'utf8'));
     const ajv = new Ajv2020({ strict: false, validateFormats: false });
@@ -198,53 +232,28 @@ test('virtual observation validates only as synthetic evidence and requires comp
     observation.ownerReview.reviewedAt = '2026-07-12T01:02:03.000Z';
     observation.ownerReview.notes = 'Owner observed the complete run and accepted the evidence.';
     assert.equal(validateVirtual(observation), false, 'Owner toggles alone must never accept an incomplete session');
-
-    observation.agentTask = {
-      externalTaskId: 'codex-task-v01',
-      newTaskConfirmed: true,
-      noForkConfirmed: true,
-    };
-    observation.lifecycle = {
-      checkoutAttestation: {
-        expectedGitSha: observation.build.gitSha,
-        actualGitSha: observation.build.gitSha,
-        sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-        attestedAt: '2026-07-12T00:00:00.000Z',
-      },
-      setupProfileSha256: 'a'.repeat(64),
-      cleanupProfileSha256: 'a'.repeat(64),
-      dataStoreRemoved: true,
-      dataStoreRemovalVerified: true,
-      finalized: true,
-      cleanupReceiptRecordedAt: '2026-07-12T01:01:00.000Z',
-    };
-    for (const task of observation.tasks) {
-      task.outcome = 'completed-unaided';
-      task.elapsedWallMs = 12_000;
-      task.uiEvidence = [`native-ui-task-${task.task}`];
-      task.deviationIds = ['none'];
-    }
-    for (const taskNumber of [2, 7]) {
-      observation.tasks[taskNumber - 1].scenarioEvents = [
-        {
-          action: 'setup',
-          scenario: taskNumber === 2 ? 'Branch recovery checkpoint' : 'Format recovery checkpoint',
-          spokenText: 'I am setting the test checkpoint for this task',
-          expectedTrigger: 'Planned failure',
-          observedTrigger: 'Planned failure was visible',
-          elapsedWallMs: 1_000,
-        },
-        {
-          action: 'reset', scenario: 'Standard checkpoint',
-          spokenText: 'I am resetting the test checkpoint',
-          expectedTrigger: 'Standard behavior', observedTrigger: 'Standard behavior resumed',
-          elapsedWallMs: 2_000,
-        },
-      ];
-    }
-    writeJson(result.observationPath, observation);
+    observation = completeAcceptedObservation(result.observationPath, 'codex-task-v01');
     assert.equal(validateVirtual(observation), true, JSON.stringify(validateVirtual.errors));
     assert.equal(validateVirtualCreatorObservation({ observationPath: result.observationPath }).valid, true);
+
+    const setupPath = join(result.controlDir, 'setup-receipt.json');
+    const setupReceipt = JSON.parse(readFileSync(setupPath, 'utf8'));
+    setupReceipt.technicalSetupReady = false;
+    writeJson(setupPath, setupReceipt);
+    assert.throws(
+      () => validateVirtualCreatorObservation({ observationPath: result.observationPath }),
+      /setup receipt is missing, mismatched|receipt hash/,
+    );
+    observation = completeAcceptedObservation(result.observationPath, 'codex-task-v01');
+
+    observation.tasks[1].scenarioEvents[0].spokenText = 'I am resetting the test checkpoint';
+    observation.tasks[1].scenarioEvents[1].elapsedWallMs = 1;
+    writeJson(result.observationPath, observation);
+    assert.throws(
+      () => validateVirtualCreatorObservation({ observationPath: result.observationPath }),
+      /scenario events/,
+    );
+    observation = completeAcceptedObservation(result.observationPath, 'codex-task-v01');
 
     observation.tasks[0].interventions.push({
       id: 'T1-C1-NP1', checkpointId: 'T1-C1', eventType: 'neutral-probe',
@@ -255,6 +264,59 @@ test('virtual observation validates only as synthetic evidence and requires comp
       () => validateVirtualCreatorObservation({ observationPath: result.observationPath }),
       /invalid neutral probe/,
     );
+
+    observation.tasks[0].interventions = [{
+      id: 'T1-C1-H2', checkpointId: 'T1-C1', eventType: 'standard-hint',
+      exactText: 'Use Open Project Folder and choose the supplied empty folder.',
+      elapsedWallMs: 0, assistIncrement: 1,
+    }];
+    observation.tasks[0].outcome = 'completed-assisted';
+    writeJson(result.observationPath, observation);
+    assert.throws(
+      () => validateVirtualCreatorObservation({ observationPath: result.observationPath }),
+      /hint order or timing/,
+    );
+  } finally {
+    rmSync(env.base, { recursive: true, force: true });
+  }
+});
+
+test('retains a prelaunch rejected attempt without inventing runtime evidence', () => {
+  const env = fixture();
+  try {
+    const result = prepareVirtualCreatorSession({
+      profileId: 'V03', ...env,
+      randomUUID: () => '99999999-9999-4999-8999-999999999999',
+    });
+    const observation = JSON.parse(readFileSync(result.observationPath, 'utf8'));
+    observation.lifecycle.attemptStage = 'prelaunch';
+    observation.ownerReview = {
+      ...observation.ownerReview,
+      decision: 'rejected', selectedForAggregate: false,
+      notes: 'The attempt was rejected before any app launch or external AI task was started.',
+      reviewedAt: '2026-07-12T00:00:00.000Z',
+    };
+    writeJson(result.observationPath, observation);
+    assert.equal(validateVirtualCreatorObservation({ observationPath: result.observationPath }).ownerDecision, 'rejected');
+  } finally {
+    rmSync(env.base, { recursive: true, force: true });
+  }
+});
+
+test('shell-quotes adversarial external paths without command or variable expansion', () => {
+  const env = fixture();
+  const adversarialRoot = join(env.base, "projects $(id) `uname` $HOME quote' spaces");
+  mkdirSync(adversarialRoot);
+  try {
+    const result = prepareVirtualCreatorSession({
+      profileId: 'V08', ...env, projectRoot: adversarialRoot,
+      randomUUID: () => '88888888-8888-4888-8888-888888888888',
+    });
+    const operator = readFileSync(result.operatorDeckPath, 'utf8');
+    const assignment = operator.split('\n').find((line) => line.startsWith('PROJECT='));
+    const shell = spawnSync('/bin/sh', ['-c', `${assignment}\nprintf '%s' "$PROJECT"`], { encoding: 'utf8' });
+    assert.equal(shell.status, 0, shell.stderr);
+    assert.equal(shell.stdout, result.projectDir);
   } finally {
     rmSync(env.base, { recursive: true, force: true });
   }
@@ -316,6 +378,21 @@ test('validates exactly one of every profile and rejects reused external AI task
       observations.push(result.observationPath);
     }
     assert.equal(validateVirtualCreatorObservationSet({ controlRoot: env.controlRoot }).sessionCount, 8);
+    const rejected = prepareVirtualCreatorSession({
+      profileId: 'V01', ...env,
+      randomUUID: () => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const rejectedObservation = JSON.parse(readFileSync(rejected.observationPath, 'utf8'));
+    rejectedObservation.lifecycle.attemptStage = 'prelaunch';
+    rejectedObservation.ownerReview = {
+      ...rejectedObservation.ownerReview, decision: 'rejected', selectedForAggregate: false,
+      notes: 'Superseded prelaunch attempt retained for the audit trail.',
+      reviewedAt: '2026-07-12T00:00:00.000Z',
+    };
+    writeJson(rejected.observationPath, rejectedObservation);
+    const replacementSet = validateVirtualCreatorObservationSet({ controlRoot: env.controlRoot });
+    assert.equal(replacementSet.attemptCount, 9);
+    assert.equal(replacementSet.sessionCount, 8);
     completeAcceptedObservation(observations[7], 'codex-task-v01');
     assert.throws(
       () => validateVirtualCreatorObservationSet({ controlRoot: env.controlRoot }),

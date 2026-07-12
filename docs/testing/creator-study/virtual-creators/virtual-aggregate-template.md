@@ -5,7 +5,7 @@
 
 - Approved build Git SHA:
 - Evaluation dates:
-- Planned / run / owner-accepted / owner-rejected sessions:
+- Planned / launched / retained rejected / selected terminal attempts:
 - Distinct AI task IDs verified:
 - Runtime checkout attestations verified:
 - Distinct native profile fingerprints verified:
@@ -15,16 +15,16 @@
 
 ## Session disposition
 
-| Virtual ID | Behavioral lens | External task ID | Tasks completed | Checkout attested | Profile hashes match | Cleanup verified | Owner decision | Owner rationale / rejection reason |
+| Virtual ID | Attempt / behavioral lens | External task ID | Tasks completed | Checkout and receipt proof | Cleanup verified | Selected | Owner decision | Owner rationale / rejection reason |
 | --- | --- | --- | ---: | --- | --- | --- | --- | --- |
-| V01 | | | | | | | pending / accepted / rejected | |
-| V02 | | | | | | | pending / accepted / rejected | |
-| V03 | | | | | | | pending / accepted / rejected | |
-| V04 | | | | | | | pending / accepted / rejected | |
-| V05 | | | | | | | pending / accepted / rejected | |
-| V06 | | | | | | | pending / accepted / rejected | |
-| V07 | | | | | | | pending / accepted / rejected | |
-| V08 | | | | | | | pending / accepted / rejected | |
+| V01 | | | | | | yes / no | pending / accepted / rejected | |
+| V02 | | | | | | yes / no | pending / accepted / rejected | |
+| V03 | | | | | | yes / no | pending / accepted / rejected | |
+| V04 | | | | | | yes / no | pending / accepted / rejected | |
+| V05 | | | | | | yes / no | pending / accepted / rejected | |
+| V06 | | | | | | yes / no | pending / accepted / rejected | |
+| V07 | | | | | | yes / no | pending / accepted / rejected | |
+| V08 | | | | | | yes / no | pending / accepted / rejected | |
 
 ## Cross-session observations
 

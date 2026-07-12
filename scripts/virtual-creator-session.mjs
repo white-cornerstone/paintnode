@@ -1,4 +1,4 @@
-import { randomUUID as nodeRandomUUID } from 'node:crypto';
+import { createHash, randomUUID as nodeRandomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   lstatSync,
@@ -55,6 +55,23 @@ function privateFile(path, value) {
   writeFileSync(path, value, { flag: 'wx', mode: 0o600 });
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function strictUtcTimestamp(value, label) {
+  const milliseconds = Date.parse(value ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value ?? '')
+    || !Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+    throw new Error(`${label} must be a real UTC timestamp with millisecond precision.`);
+  }
+  return milliseconds;
+}
+
 function loadProfiles() {
   const document = readJson(profilesPath, 'Virtual creator profiles');
   if (document.schemaVersion !== 1 || document.recordType !== 'paintnode-virtual-creator-profiles'
@@ -107,6 +124,16 @@ function captureApprovedCheckout(approvedCheckout, expectedGitSha) {
   return canonical;
 }
 
+function captureKitCheckout(repoRoot) {
+  const canonical = existingDirectory(repoRoot, 'Virtual creator kit checkout');
+  const gitSha = spawnSync('git', ['-C', canonical, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  const status = spawnSync('git', ['-C', canonical, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+  if (gitSha.status !== 0 || status.status !== 0 || status.stdout !== '') {
+    throw new Error('Virtual creator kit checkout must be a clean Git worktree.');
+  }
+  return Object.freeze({ path: canonical, gitSha: gitSha.stdout.trim() });
+}
+
 function participantPrompt({ profile, projectDir, sessionId }) {
   const productA = join(materialRoot, 'product-a.png');
   return `# Virtual creator session ${profile.id}\n\n`
@@ -143,10 +170,13 @@ function renderHintAppendix(instrument) {
   return lines.join('\n');
 }
 
-function operatorDeck({ profile, sessionId, controlDir, projectDir, build, approvedCheckout, tasks, instrument }) {
+function operatorDeck({ profile, sessionId, controlDir, projectDir, build, approvedCheckout, kitCheckout, tasks, instrument }) {
   const record = join(build.canonicalRoot, 'private-approved-build-record.json');
   const ledger = join(build.canonicalRoot, 'private-active-build-decisions.json');
   const deletedRehearsal = join(controlDir, 'deleted-rehearsal');
+  const attestations = join(controlDir, 'checkout-attestations.jsonl');
+  const setupReceipt = join(controlDir, 'setup-receipt.json');
+  const cleanupReceipt = join(controlDir, 'cleanup-receipt.json');
   return `# Operator deck — ${sessionId}\n\n`
     + '> OPERATOR ONLY. Never paste this whole file into the virtual creator task. Send only participant-start.md, then one task prompt or approved intervention at a time.\n\n'
     + '## Validity boundary\n\nThis is owner-observed synthetic evaluation. It is not recruitment, consented participant research, accessibility representation, or #85 exit evidence. '
@@ -159,22 +189,26 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
     + '## Native setup\n\nRun from the exact feature checkout at the approved Git SHA. Do not rebuild the app.\n\n'
     + '```sh\n'
     + 'set -euo pipefail\n'
-    + `APPROVED_CHECKOUT=${JSON.stringify(approvedCheckout)}\nCONTROL=${JSON.stringify(controlDir)}\nOBSERVATION=${JSON.stringify(join(controlDir, 'observation.blank.json'))}\nEXPECTED_GIT_SHA=${JSON.stringify(build.provenance.gitSha)}\nAPP=${JSON.stringify(build.appBundle)}\nRECORD=${JSON.stringify(record)}\nLEDGER=${JSON.stringify(ledger)}\nPROJECT=${JSON.stringify(projectDir)}\nREHEARSAL=${JSON.stringify(deletedRehearsal)}\n`
+    + `APPROVED_CHECKOUT=${shellQuote(approvedCheckout)}\nKIT_CHECKOUT=${shellQuote(kitCheckout.path)}\nKIT_GIT_SHA=${shellQuote(kitCheckout.gitSha)}\nCONTROL=${shellQuote(controlDir)}\nOBSERVATION=${shellQuote(join(controlDir, 'observation.blank.json'))}\nATTESTATIONS=${shellQuote(attestations)}\nSETUP_RECEIPT=${shellQuote(setupReceipt)}\nCLEANUP_RECEIPT=${shellQuote(cleanupReceipt)}\nEXPECTED_GIT_SHA=${shellQuote(build.provenance.gitSha)}\nAPP=${shellQuote(build.appBundle)}\nRECORD=${shellQuote(record)}\nLEDGER=${shellQuote(ledger)}\nPROJECT=${shellQuote(projectDir)}\nREHEARSAL=${shellQuote(deletedRehearsal)}\n`
+    + 'test ! -e "$ATTESTATIONS"\n(umask 077; : > "$ATTESTATIONS")\n'
     + 'attest_checkout() {\n'
+    + 'PHASE=$1\ncase "$PHASE" in fresh|resume|finalize) ;; *) return 64 ;; esac\n'
     + 'cd "$APPROVED_CHECKOUT"\n'
     + 'ACTUAL_GIT_SHA=$(git rev-parse HEAD)\n'
     + 'SOURCE_STATUS=$(git status --porcelain --untracked-files=all)\n'
     + 'SOURCE_STATUS_SHA256=$(printf %s "$SOURCE_STATUS" | shasum -a 256 | awk \'{print $1}\')\n'
     + 'test "$ACTUAL_GIT_SHA" = "$EXPECTED_GIT_SHA"\n'
     + 'test -z "$SOURCE_STATUS"\n'
-    + `test "$SOURCE_STATUS_SHA256" = ${JSON.stringify(cleanStatusSha256)}\n`
+    + `test "$SOURCE_STATUS_SHA256" = ${shellQuote(cleanStatusSha256)}\n`
     + 'ATTESTED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\n'
-    + 'printf \'Record checkout attestation in %s: actualGitSha=%s sourceStatusSha256=%s attestedAt=%s\\n\' "$OBSERVATION" "$ACTUAL_GIT_SHA" "$SOURCE_STATUS_SHA256" "$ATTESTED_AT"\n'
+    + 'printf \'{"phase":"%s","expectedGitSha":"%s","actualGitSha":"%s","sourceStatusSha256":"%s","attestedAt":"%s"}\\n\' "$PHASE" "$EXPECTED_GIT_SHA" "$ACTUAL_GIT_SHA" "$SOURCE_STATUS_SHA256" "$ATTESTED_AT" >> "$ATTESTATIONS"\n'
     + '}\n'
-    + 'attest_checkout\n'
+    + 'attest_checkout fresh\n'
     + 'npm run qa:creator-study:launch -- --app-bundle "$APP" --fresh-study-session\n'
     + '# Use Computer Use to verify: no document, no project, no workflow, no imported asset.\n'
-    + 'npm run qa:creator-study:setup -- --approved-build-record "$RECORD" --active-build-decisions "$LEDGER" --app-bundle "$APP" --project-dir "$PROJECT" --rehearsal-dir "$REHEARSAL" --visible-empty-state-attested\n'
+    + 'SETUP_TMP="$SETUP_RECEIPT.tmp"\ntest ! -e "$SETUP_RECEIPT" && test ! -e "$SETUP_TMP"\n'
+    + 'if (umask 077; npm run --silent qa:creator-study:setup -- --approved-build-record "$RECORD" --active-build-decisions "$LEDGER" --app-bundle "$APP" --project-dir "$PROJECT" --rehearsal-dir "$REHEARSAL" --visible-empty-state-attested > "$SETUP_TMP"); then mv "$SETUP_TMP" "$SETUP_RECEIPT"; else rm -f "$SETUP_TMP"; exit 1; fi\n'
+    + 'chmod 600 "$SETUP_RECEIPT"\ncat "$SETUP_RECEIPT"\n'
     + '```\n\nKeep this terminal open because `attest_checkout` is reused before resume and finalization. Do not open the empty project before setup verification. Task 1 opens it.\n\n'
     + '## Moderator timing\n\nFollow the committed instrument algorithm, not a flat ladder:\n\n'
     + '1. After 90 seconds without progress, ask exactly “What are you looking for?” Record a `neutral-probe` ID from the current task and checkpoint (for example `T1-C2-NP1`) with zero assist.\n'
@@ -188,7 +222,7 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
         : task.task === 7
           ? '\nConfirm Square and Portrait are complete. Before selection, send exactly: “I am setting the test checkpoint for this task”. Then visibly select Format recovery checkpoint and record a setup scenario event. When Landscape fails, stop the creator task, send exactly “I am resetting the test checkpoint”, visibly reset to Standard checkpoint, record the reset event, then send: “Continue the same task.”\n'
           : task.task === 8
-            ? '\nWhen PaintNode quits, run `attest_checkout` immediately before `npm run qa:creator-study:launch -- --app-bundle "$APP" --resume-study-session`, verify the same profile resumes, then send: “PaintNode has reopened in the same session. Continue the same task.”\n'
+            ? '\nWhen PaintNode quits, run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "$APP" --resume-study-session`, verify the same profile resumes, then send: “PaintNode has reopened in the same session. Continue the same task.”\n'
             : '';
       const addendum = task.creatorFacingAddendum === 'UPDATED_PRODUCT_PATH'
         ? `The updated Product image for this task is: ${join(materialRoot, 'product-b.png')}`
@@ -196,7 +230,7 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
       const creatorMessage = addendum ? `${task.prompt}\n\n${addendum}` : task.prompt;
       return `## Task ${task.task} — ${task.title}\n${setup}\nPaste exactly:\n\n> ${creatorMessage.replaceAll('\n', '\n> ')}\n\nOperator stop condition: ${task.stopCondition}\n`;
     }).join('\n')
-    + '\n## End and owner decision\n\n1. Save a nonempty native UI evidence reference for every task and fill the distinct external AI task ID/new-task/no-fork confirmations.\n2. Close PaintNode.\n3. Run `attest_checkout` immediately before `npm run qa:creator-study:finalize-session`; require matching setup/cleanup profile hashes plus `dataStoreRemoved`, `dataStoreRemovalVerified`, and `finalized` all true.\n4. Complete ownerReview only after live observation and evidence review. Accepted and rejected decisions both require a written rationale; accepted requires all eight tasks completed with traceable evidence.\n5. Run `npm run qa:virtual-creators:validate -- --validate-observation "$OBSERVATION"`.\n6. Keep accepted and rejected virtual sessions in the synthetic aggregate; never copy them into real participant rows.\n\n'
+    + '\n## End and owner decision\n\n1. Save a nonempty native UI evidence reference for every task and fill the distinct external AI task ID/new-task/no-fork confirmations.\n2. Close PaintNode.\n3. Capture final attestation and cleanup without retaining a partial receipt:\n\n```sh\nattest_checkout finalize\nCLEANUP_TMP="$CLEANUP_RECEIPT.tmp"\ntest ! -e "$CLEANUP_RECEIPT" && test ! -e "$CLEANUP_TMP"\nif (umask 077; npm run --silent qa:creator-study:finalize-session > "$CLEANUP_TMP"); then mv "$CLEANUP_TMP" "$CLEANUP_RECEIPT"; else rm -f "$CLEANUP_TMP"; exit 1; fi\nchmod 600 "$CLEANUP_RECEIPT"\ncat "$CLEANUP_RECEIPT"\n```\n\n4. Copy the attestation rows plus receipt hashes/fields into lifecycle; require matching setup/cleanup profile hashes and verified finalization. Complete ownerReview only after live observation and evidence review. Accepted and rejected decisions both require a written rationale; accepted requires all eight tasks completed with traceable evidence. Mark exactly one terminal attempt per profile `selectedForAggregate: true`; superseded rejected attempts stay false.\n5. Validate from the exact clean kit checkout captured during packet preparation:\n\n```sh\ncd "$KIT_CHECKOUT"\ntest "$(git rev-parse HEAD)" = "$KIT_GIT_SHA"\ntest -z "$(git status --porcelain --untracked-files=all)"\nnpm run qa:virtual-creators:validate -- --validate-observation "$OBSERVATION"\n```\n\n6. Keep accepted and rejected virtual sessions in the synthetic aggregate; never copy them into real participant rows.\n\n'
     + renderHintAppendix(instrument) + '\n';
 }
 
@@ -218,12 +252,11 @@ function blankObservation({ profile, sessionId, build }) {
       noForkConfirmed: false,
     },
     lifecycle: {
-      checkoutAttestation: {
-        expectedGitSha: build.provenance.gitSha,
-        actualGitSha: null,
-        sourceStatusSha256: null,
-        attestedAt: null,
-      },
+      attemptStage: 'pending',
+      checkoutAttestations: [],
+      checkoutAttestationReceiptSha256: null,
+      setupReceiptSha256: null,
+      cleanupReceiptSha256: null,
       setupProfileSha256: null,
       cleanupProfileSha256: null,
       dataStoreRemoved: false,
@@ -247,6 +280,7 @@ function blankObservation({ profile, sessionId, build }) {
       observedLive: false,
       evidenceReviewed: false,
       decision: 'pending',
+      selectedForAggregate: false,
       standard: 'Accept only when the live native run is complete, evidence is traceable, cleanup is verified, and the result meets the owner-defined product standard.',
       notes: '',
       reviewedAt: null,
@@ -263,7 +297,109 @@ export function listVirtualCreatorProfiles() {
   return loadProfiles().map(({ id, label, interactionConstraint }) => ({ id, label, interactionConstraint }));
 }
 
-function assertObservationSemantics(observation, { requireDecision = true } = {}) {
+function readSessionReceipt(path, label) {
+  const metadata = statSync(path);
+  if (lstatSync(path).isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o077) !== 0) {
+    throw new Error(`${label} must be a regular non-symlink file.`);
+  }
+  return readJson(path, label);
+}
+
+function verifyLifecycleEvidence(observation, observationPath) {
+  const lifecycle = observation.lifecycle;
+  if (lifecycle.attemptStage === 'prelaunch') {
+    if (observation.ownerReview.decision !== 'rejected'
+      || lifecycle.checkoutAttestations.length !== 0
+      || lifecycle.checkoutAttestationReceiptSha256 !== null
+      || lifecycle.setupReceiptSha256 !== null || lifecycle.cleanupReceiptSha256 !== null
+      || lifecycle.setupProfileSha256 !== null || lifecycle.cleanupProfileSha256 !== null
+      || lifecycle.dataStoreRemoved || lifecycle.dataStoreRemovalVerified || lifecycle.finalized
+      || lifecycle.cleanupReceiptRecordedAt !== null) {
+      throw new Error('Prelaunch rejection must not claim runtime or cleanup evidence.');
+    }
+    return;
+  }
+  if (lifecycle.attemptStage !== 'finalized') {
+    throw new Error('A decided launched attempt must be finalized.');
+  }
+
+  const controlDir = dirname(observationPath);
+  const attestationPath = join(controlDir, 'checkout-attestations.jsonl');
+  const attestationMetadata = statSync(attestationPath);
+  if (lstatSync(attestationPath).isSymbolicLink() || !attestationMetadata.isFile()
+    || (attestationMetadata.mode & 0o077) !== 0) {
+    throw new Error('Checkout attestation receipt must be a regular non-symlink file.');
+  }
+  const attestationBytes = readFileSync(attestationPath, 'utf8');
+  const attestations = attestationBytes.trim().split('\n').map((line, index) => {
+    try { return JSON.parse(line); } catch { throw new Error(`Checkout attestation row ${index + 1} is invalid JSON.`); }
+  });
+  const phases = attestations.map(({ phase }) => phase);
+  const expectedPhases = observation.ownerReview.decision === 'accepted'
+    ? ['fresh', 'resume', 'finalize']
+    : phases.includes('resume') ? ['fresh', 'resume', 'finalize'] : ['fresh', 'finalize'];
+  if (JSON.stringify(phases) !== JSON.stringify(expectedPhases)
+    || JSON.stringify(attestations) !== JSON.stringify(lifecycle.checkoutAttestations)
+    || sha256File(attestationPath) !== lifecycle.checkoutAttestationReceiptSha256) {
+    throw new Error('Checkout attestation phases, content, or receipt hash do not match.');
+  }
+  let priorAttestationTime = -1;
+  for (const attestation of attestations) {
+    const keys = Object.keys(attestation).sort();
+    if (JSON.stringify(keys) !== JSON.stringify(['actualGitSha', 'attestedAt', 'expectedGitSha', 'phase', 'sourceStatusSha256'])
+      || attestation.expectedGitSha !== observation.build.gitSha
+      || attestation.actualGitSha !== observation.build.gitSha
+      || attestation.sourceStatusSha256 !== cleanStatusSha256) {
+      throw new Error('Runtime checkout attestation does not match the frozen clean build.');
+    }
+    const time = strictUtcTimestamp(attestation.attestedAt, 'Checkout attestation time');
+    if (time <= priorAttestationTime) throw new Error('Checkout attestations must be in strict phase/time order.');
+    priorAttestationTime = time;
+  }
+
+  let setupReceipt = null;
+  if (lifecycle.setupReceiptSha256 !== null) {
+    const setupPath = join(controlDir, 'setup-receipt.json');
+    setupReceipt = readSessionReceipt(setupPath, 'Technical setup receipt');
+    if (sha256File(setupPath) !== lifecycle.setupReceiptSha256
+      || setupReceipt.schemaVersion !== 2
+      || setupReceipt.receiptType !== 'paintnode-creator-study-technical-setup'
+      || setupReceipt.technicalSetupReady !== true
+      || setupReceipt.gitSha !== observation.build.gitSha
+      || setupReceipt.bundleId !== observation.build.bundleId
+      || setupReceipt.projectState !== 'empty' || setupReceipt.rehearsalState !== 'deleted'
+      || setupReceipt.sessionReset?.appBootObserved !== true
+      || setupReceipt.sessionReset?.setupEvidenceConsumed !== true
+      || setupReceipt.sessionReset?.profileSha256 !== lifecycle.setupProfileSha256) {
+      throw new Error('Technical setup receipt is missing, mismatched, or not consumed evidence.');
+    }
+  } else if (observation.ownerReview.decision === 'accepted') {
+    throw new Error('Accepted session requires a captured technical setup receipt.');
+  }
+
+  const cleanupPath = join(controlDir, 'cleanup-receipt.json');
+  const cleanupReceipt = readSessionReceipt(cleanupPath, 'Native cleanup receipt');
+  if (sha256File(cleanupPath) !== lifecycle.cleanupReceiptSha256
+    || cleanupReceipt.profileSha256 !== lifecycle.cleanupProfileSha256
+    || cleanupReceipt.finalized !== true
+    || cleanupReceipt.dataStoreRemoved !== lifecycle.dataStoreRemoved
+    || cleanupReceipt.dataStoreRemovalVerified !== lifecycle.dataStoreRemovalVerified
+    || (setupReceipt && setupReceipt.sessionReset.profileSha256 !== cleanupReceipt.profileSha256)) {
+    throw new Error('Native cleanup receipt does not match the recorded lifecycle.');
+  }
+  if (observation.ownerReview.decision === 'accepted'
+    && (cleanupReceipt.aborted !== false || cleanupReceipt.dataStoreRemoved !== true
+      || cleanupReceipt.dataStoreRemovalVerified !== true)) {
+    throw new Error('Accepted session requires verified non-abort native data-store cleanup.');
+  }
+  const cleanupRecordedAt = strictUtcTimestamp(lifecycle.cleanupReceiptRecordedAt, 'Cleanup receipt record time');
+  const reviewedAt = strictUtcTimestamp(observation.ownerReview.reviewedAt, 'Owner review time');
+  if (cleanupRecordedAt < priorAttestationTime || reviewedAt < cleanupRecordedAt) {
+    throw new Error('Cleanup receipt and owner review must follow final checkout attestation in time order.');
+  }
+}
+
+function assertObservationSemantics(observation, { requireDecision = true, observationPath } = {}) {
   const decision = observation.ownerReview.decision;
   if (requireDecision && decision === 'pending') {
     throw new Error('Owner decision is still pending.');
@@ -273,19 +409,20 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
   if (observation.sessionId.slice(3, 6) !== observation.profileId) {
     throw new Error('Session ID and profile ID do not match.');
   }
-  if (!observation.agentTask.externalTaskId.trim()
-    || observation.agentTask.externalTaskId !== observation.agentTask.externalTaskId.trim()
-    || !observation.ownerReview.notes.trim()) {
-    throw new Error('External AI task ID and owner rationale must contain non-whitespace text.');
+  if (!observation.ownerReview.notes.trim()) {
+    throw new Error('Owner rationale must contain non-whitespace text.');
   }
-  const { checkoutAttestation } = observation.lifecycle;
-  if (checkoutAttestation.expectedGitSha !== observation.build.gitSha
-    || checkoutAttestation.actualGitSha !== observation.build.gitSha) {
-    throw new Error('Runtime checkout attestation does not match the frozen build Git SHA.');
+  if (observation.lifecycle.attemptStage === 'finalized'
+    && (!observation.agentTask.externalTaskId?.trim()
+      || observation.agentTask.externalTaskId !== observation.agentTask.externalTaskId.trim()
+      || !observation.agentTask.newTaskConfirmed || !observation.agentTask.noForkConfirmed)) {
+    throw new Error('Finalized attempt requires a distinct, confirmed external AI task ID.');
   }
-  if (observation.lifecycle.setupProfileSha256 !== observation.lifecycle.cleanupProfileSha256) {
-    throw new Error('Setup and cleanup native profile hashes do not match.');
+  if (observation.lifecycle.attemptStage === 'finalized'
+    && (!observation.ownerReview.observedLive || !observation.ownerReview.evidenceReviewed)) {
+    throw new Error('Finalized attempt requires live owner observation and evidence review.');
   }
+  verifyLifecycleEvidence(observation, observationPath);
 
   const invalidatingDeviations = new Set([
     'early-hint', 'out-of-order-hint', 'wording-changed', 'unlogged-assist',
@@ -302,13 +439,21 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
     if (task.deviationIds.includes('none') && task.deviationIds.length > 1) {
       throw new Error(`Task ${task.task} cannot combine the none deviation with another deviation.`);
     }
+    const seenInterventionIds = new Set();
+    let priorInterventionTime = -1;
     for (const intervention of task.interventions) {
+      if (seenInterventionIds.has(intervention.id) || intervention.elapsedWallMs <= priorInterventionTime) {
+        throw new Error(`Task ${task.task} interventions must have unique IDs in strictly increasing time order.`);
+      }
+      seenInterventionIds.add(intervention.id);
+      priorInterventionTime = intervention.elapsedWallMs;
       if (!intervention.checkpointId.startsWith(`T${task.task}-`)
         || !intervention.id.startsWith(`${intervention.checkpointId}-`)) {
         throw new Error(`Task ${task.task} intervention identity does not match its checkpoint.`);
       }
       if (intervention.eventType === 'neutral-probe'
-        && (intervention.exactText !== 'What are you looking for?' || intervention.assistIncrement !== 0)) {
+        && (intervention.exactText !== 'What are you looking for?'
+          || intervention.assistIncrement !== 0 || intervention.elapsedWallMs < 90_000)) {
         throw new Error(`Task ${task.task} has an invalid neutral probe.`);
       }
       if (intervention.eventType === 'standard-hint' && intervention.assistIncrement !== 1) {
@@ -318,6 +463,14 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
         && hints.get(intervention.id) !== intervention.exactText) {
         throw new Error(`Task ${task.task} has a hint that drifted from the closed instrument.`);
       }
+      if (intervention.eventType === 'standard-hint') {
+        const priorSuffix = intervention.id.endsWith('-H1') ? '-NP1' : '-H1';
+        const prior = task.interventions.find(({ id }) => id === `${intervention.checkpointId}${priorSuffix}`);
+        const minimum = intervention.id.endsWith('-H1') ? 180_000 : (prior?.elapsedWallMs ?? 0) + 90_000;
+        if (!prior || intervention.elapsedWallMs < minimum) {
+          throw new Error(`Task ${task.task} hint order or timing drifted from the closed instrument.`);
+        }
+      }
       if (intervention.eventType === 'takeover'
         && (intervention.assistIncrement !== 1 || task.outcome !== 'failed')) {
         throw new Error(`Task ${task.task} takeover must increment assist and force failure.`);
@@ -326,11 +479,28 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
         && takeovers.get(intervention.id) !== intervention.exactText) {
         throw new Error(`Task ${task.task} has a takeover that drifted from the closed instrument.`);
       }
+      if (intervention.eventType === 'takeover') {
+        const prior = task.interventions.find(({ id }) => id === `${intervention.checkpointId}-H2`);
+        if (!prior || intervention.elapsedWallMs < prior.elapsedWallMs + 90_000) {
+          throw new Error(`Task ${task.task} takeover order or timing drifted from the closed instrument.`);
+        }
+      }
     }
     const assist = task.interventions.reduce((sum, intervention) => sum + intervention.assistIncrement, 0);
     if ((task.outcome === 'completed-unaided' && assist !== 0)
       || (task.outcome === 'completed-assisted' && assist === 0)) {
       throw new Error(`Task ${task.task} outcome does not match its recorded assistance.`);
+    }
+    let priorScenarioTime = -1;
+    for (const event of task.scenarioEvents) {
+      const expectedSpokenText = event.action === 'setup'
+        ? 'I am setting the test checkpoint for this task'
+        : 'I am resetting the test checkpoint';
+      if (event.spokenText !== expectedSpokenText || event.elapsedWallMs <= priorScenarioTime
+        || !event.expectedTrigger.trim() || !event.observedTrigger?.trim()) {
+        throw new Error(`Task ${task.task} scenario events are incomplete or out of order.`);
+      }
+      priorScenarioTime = event.elapsedWallMs;
     }
   }
 
@@ -350,8 +520,11 @@ function assertObservationSemantics(observation, { requireDecision = true } = {}
       if (scenarioEvents.length !== 2
         || scenarioEvents[0].action !== 'setup'
         || scenarioEvents[0].scenario !== expectedScenario
+        || scenarioEvents[0].spokenText !== 'I am setting the test checkpoint for this task'
         || scenarioEvents[1].action !== 'reset'
         || scenarioEvents[1].scenario !== 'Standard checkpoint'
+        || scenarioEvents[1].spokenText !== 'I am resetting the test checkpoint'
+        || scenarioEvents[1].elapsedWallMs <= scenarioEvents[0].elapsedWallMs
         || scenarioEvents.some(({ observedTrigger }) => !observedTrigger?.trim())) {
         throw new Error(`Accepted session requires recorded setup and reset scenario events for Task ${taskNumber}.`);
       }
@@ -367,13 +540,14 @@ export function validateVirtualCreatorObservation({ observationPath, requireDeci
   if (!validate(observation)) {
     throw new Error(`Observation schema validation failed: ${ajv.errorsText(validate.errors)}`);
   }
-  assertObservationSemantics(observation, { requireDecision });
+  assertObservationSemantics(observation, { requireDecision, observationPath });
   return Object.freeze({
     valid: true,
     sessionId: observation.sessionId,
     profileId: observation.profileId,
     externalTaskId: observation.agentTask.externalTaskId,
     ownerDecision: observation.ownerReview.decision,
+    selectedForAggregate: observation.ownerReview.selectedForAggregate,
   });
 }
 
@@ -382,7 +556,7 @@ export function validateVirtualCreatorObservationSet({ controlRoot }) {
   const sessionDirs = readdirSync(canonicalRoot)
     .filter((name) => /^VC-V0[1-8]-/.test(name) && statSync(join(canonicalRoot, name)).isDirectory())
     .sort();
-  if (sessionDirs.length !== 8) throw new Error('Control root must contain exactly eight virtual creator sessions.');
+  if (sessionDirs.length < 8) throw new Error('Control root must contain at least eight virtual creator attempts.');
   const results = sessionDirs.map((name) => validateVirtualCreatorObservation({
     observationPath: join(canonicalRoot, name, 'observation.blank.json'),
   }));
@@ -392,15 +566,16 @@ export function validateVirtualCreatorObservationSet({ controlRoot }) {
     }
   }
   const expectedProfiles = loadProfiles().map(({ id }) => id).sort();
-  const actualProfiles = results.map(({ profileId }) => profileId).sort();
+  const selected = results.filter(({ selectedForAggregate }) => selectedForAggregate);
+  const actualProfiles = selected.map(({ profileId }) => profileId).sort();
   if (JSON.stringify(actualProfiles) !== JSON.stringify(expectedProfiles)) {
-    throw new Error('Observation set must contain exactly one session for each V01-V08 profile.');
+    throw new Error('Observation set must select exactly one terminal attempt for each V01-V08 profile.');
   }
-  const externalTaskIds = results.map(({ externalTaskId }) => externalTaskId);
+  const externalTaskIds = results.map(({ externalTaskId }) => externalTaskId).filter(Boolean);
   if (new Set(externalTaskIds).size !== externalTaskIds.length) {
     throw new Error('Every virtual creator must use a distinct external AI task ID.');
   }
-  return Object.freeze({ valid: true, sessionCount: results.length, results });
+  return Object.freeze({ valid: true, attemptCount: results.length, sessionCount: selected.length, results });
 }
 
 export function prepareVirtualCreatorSession({
@@ -412,6 +587,7 @@ export function prepareVirtualCreatorSession({
   repoRoot = root,
   randomUUID = nodeRandomUUID,
   checkoutCapture = captureApprovedCheckout,
+  kitCheckoutCapture = captureKitCheckout,
 }) {
   const canonicalRepo = realpathSync(repoRoot);
   const canonicalControlRoot = existingDirectory(controlRoot, 'Control root');
@@ -427,6 +603,7 @@ export function prepareVirtualCreatorSession({
   if (!profile) throw new Error(`Unknown virtual creator profile: ${profileId}`);
   const build = loadBuild(buildControlRoot);
   const canonicalApprovedCheckout = checkoutCapture(approvedCheckout, build.provenance.gitSha);
+  const kitCheckout = kitCheckoutCapture(canonicalRepo);
   const uuid = randomUUID().toLowerCase();
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uuid)) {
     throw new Error('Session allocation requires a lowercase UUID.');
@@ -447,7 +624,7 @@ export function prepareVirtualCreatorSession({
     privateFile(participantStartPath, participantPrompt({ profile, projectDir, sessionId }));
     privateFile(operatorDeckPath, operatorDeck({
       profile, sessionId, controlDir, projectDir, build,
-      approvedCheckout: canonicalApprovedCheckout, tasks, instrument,
+      approvedCheckout: canonicalApprovedCheckout, kitCheckout, tasks, instrument,
     }));
     privateFile(observationPath, `${JSON.stringify(observation, null, 2)}\n`);
     privateFile(planPath, `${JSON.stringify({
@@ -459,6 +636,7 @@ export function prepareVirtualCreatorSession({
       controlDir,
       projectDir,
       approvedCheckout: canonicalApprovedCheckout,
+      kitCheckout,
       buildControlRoot: build.canonicalRoot,
       appBundle: build.appBundle,
       deletedRehearsalDir: join(controlDir, 'deleted-rehearsal'),
