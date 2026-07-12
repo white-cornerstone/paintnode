@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "repositoryAllowed": [
+    "approved build Git SHA and QA bundle identity",
+    "approved build identity match including source provenance and executable fingerprints",
+    "approved static macOS CDHash and successful dynamic running-code identity match",
+    "approved build active generation and random non-derived approval ID",
+    "path-free Provider Free profile fingerprint and native cleanup completion status",
+    "Product fixture labels, dimensions, licenses, and hashes",
+    "participant codes without an identity mapping",
+    "eligibility and cohort buckets without raw answers",
+    "aggregate task metrics with counts and denominators",
+    "de-identified finding IDs and paraphrased evidence",
+    "severity counts and blocker decisions",
+    "separate de-identified recruitment exception approvals and decision references",
+    "versioned facilitator instrument, including approved hint and takeover text",
+    "role-based sign-offs without personal names",
+    "retention completion status without storage metadata"
+  ],
+  "privateOnly": [
+    "participant name and contact or scheduling details",
+    "participant code mapping to identity",
+    "session date, start time, time zone, delivery mode, and private meeting reference",
+    "facilitator, observer, technical operator, and accommodation setup assignments",
+    "accessibility support owner assignments and handoff status",
+    "study owner and observer names",
+    "approved storage path or internal storage reference",
+    "private approved-build record and active-ledger paths, approval date, decision references, ledger history, protected Keychain anchor payload, and mid-study change reason",
+    "raw Provider Free WebKit data-store identifier, boot nonce, cleanup nonce, lifecycle evidence paths, and macOS Keychain consumption markers",
+    "canonical preserved app path and private per-session launch binding",
+    "consent answers tied to a person",
+    "raw screener answers",
+    "accommodation or medical details",
+    "recordings, screens, audio, and raw notes",
+    "raw or potentially identifying quotes",
+    "intervention and session logs with identifying timestamps or paths",
+    "participant-linked delivered facilitator interventions, including IDs, exact delivered text, assist ordinals, timestamps, and deviation logs",
+    "retention and deletion ledger",
+    "private authorization/retention log references",
+    "access-control evidence and exceptions"
+  ]
+}

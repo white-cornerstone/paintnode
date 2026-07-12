@@ -63,7 +63,14 @@
     saveWorkflowCommand,
   } from './lib/state/commands';
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
-  import { isDesktop, quitApplication, setNativeMenuEnabledStates, takePendingOpenPaths } from './lib/integrations/desktop';
+  import { persistWorkflowAfterReturnForClose } from './lib/state/workflowReturnClose';
+  import {
+    isDesktop,
+    providerQaMode,
+    quitApplication,
+    setNativeMenuEnabledStates,
+    takePendingOpenPaths,
+  } from './lib/integrations/desktop';
   import { PANEL_GROUP_IDS, PANEL_GROUP_PANELS, TASKS_PANEL_MIN_HEIGHT, type PanelGroupId, type PanelId } from './lib/state/panels';
   import { aiTasks } from './lib/state/aiTasks.svelte';
   import { panels } from './lib/state/panels.svelte';
@@ -179,7 +186,7 @@
   let quitApproved = false;
 
   type UnsavedWorkItem =
-    | { kind: 'document'; id: string; name: string }
+    | { kind: 'document' | 'workflow-return'; id: string; name: string }
     | { kind: 'workflow'; name: string };
 
   function expandRightPanels(): void {
@@ -276,7 +283,11 @@
   function unsavedWorkItems(): UnsavedWorkItem[] {
     const items: UnsavedWorkItem[] = editor.documents
       .filter((session) => editor.hasUnsavedChanges(session))
-      .map((session) => ({ kind: 'document', id: session.id, name: documentDisplayName(session) }));
+      .map((session) => ({
+        kind: session.workflowReturnState ? 'workflow-return' as const : 'document' as const,
+        id: session.id,
+        name: documentDisplayName(session),
+      }));
     if (workflow.active && workflow.dirty) {
       items.push({ kind: 'workflow', name: workflow.name || 'Untitled Workflow' });
     }
@@ -304,7 +315,7 @@
 
     editor.switchDocument(session.id);
     const choice = await ui.askSaveChanges({
-      kind: 'document',
+      kind: session.workflowReturnState ? 'workflow-return' : 'document',
       name: documentDisplayName(session),
       index: 1,
       total: 1,
@@ -319,7 +330,7 @@
 
   async function closeActiveDocument(): Promise<void> {
     if (ui.activeSurface === 'workflow') {
-      workflow.close();
+      if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
       return;
     }
     const session = editor.activeDocument;
@@ -337,7 +348,7 @@
     const total = items.length;
     for (let index = 0; index < items.length; index++) {
       const item = items[index];
-      if (item.kind === 'document') {
+      if (item.kind === 'document' || item.kind === 'workflow-return') {
         const session = editor.documents.find((documentSession) => documentSession.id === item.id);
         if (!session || !editor.hasUnsavedChanges(session)) continue;
         editor.switchDocument(item.id);
@@ -356,8 +367,18 @@
       if (choice === 'cancel') return false;
       if (choice === 'discard') continue;
 
-      const saved = item.kind === 'document' ? await saveDocumentForClose(item.id) : await saveWorkflowForClose();
+      const saved = item.kind === 'document' || item.kind === 'workflow-return'
+        ? await saveDocumentForClose(item.id)
+        : await saveWorkflowForClose();
       if (!saved) return false;
+      if (item.kind === 'workflow-return') {
+        const persisted = await persistWorkflowAfterReturnForClose({
+          documentReturnSucceeded: saved,
+          workflowIsDirty: () => workflow.active && workflow.dirty,
+          saveWorkflow: saveWorkflowForClose,
+        });
+        if (!persisted) return false;
+      }
     }
     return true;
   }
@@ -642,7 +663,7 @@
         ui.open('aiUpscale');
         break;
       case 'app:workflow-board':
-        workflow.newBoard();
+        ui.openNew('workflow');
         break;
       case 'app:zoom-in':
         editor.viewport?.zoomBy(1.25);
@@ -749,10 +770,18 @@
     const disposeKeyboard = installKeyboard();
     ui.contextualTaskBarVisible = settings.value.general.showContextualTaskBarOnStartup;
     if (settings.value.general.reopenLastProject) void project.restore();
-    // First-time desktop users get the AI setup wizard once; it marks itself seen.
-    if (shouldOfferAiSetup(settings.value, localStorage.getItem(AI_SETUP_STORAGE_KEY), desktop)) {
-      ui.open('aiSetup');
-    }
+    // First-time desktop users get the AI setup wizard once; provider-free QA
+    // deliberately starts at the workspace without probing or configuring AI.
+    void providerQaMode()
+      .catch(() => null)
+      .then((qaMode) => {
+        if (
+          qaMode !== 'provider-free' &&
+          shouldOfferAiSetup(settings.value, localStorage.getItem(AI_SETUP_STORAGE_KEY), desktop)
+        ) {
+          ui.open('aiSetup');
+        }
+      });
     let unlistenMenu: UnlistenFn | null = null;
     let unlistenClose: UnlistenFn | null = null;
     let unlistenResize: UnlistenFn | null = null;

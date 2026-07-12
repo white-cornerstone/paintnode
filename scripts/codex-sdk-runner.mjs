@@ -1,20 +1,28 @@
 #!/usr/bin/env node
-import { Codex } from '@openai/codex-sdk';
-import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import readline from 'node:readline';
+import { assertProviderExecutableReady } from './provider-executable-trust.mjs';
 import { directorActionSchema } from './director-action-schema.mjs';
+import {
+  workflowDirectorGraphDraftSchema,
+  workflowDirectorRevisionSchema,
+} from './workflow-director-schema.mjs';
 
-function writeDirectorAction(path, value) {
+function writeStructuredOutput(path, value, schemaName) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('The SDK did not return a Director action object');
+    throw new Error('The SDK did not return a structured object');
   }
-  if (!directorActionSchema.properties.action.enum.includes(value.action)) {
+  if (schemaName === 'director-action' && !directorActionSchema.properties.action.enum.includes(value.action)) {
     throw new Error(`The SDK returned an unknown Director action: ${String(value.action)}`);
   }
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
 function usage() {
-  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
+  return `Usage: codex-sdk-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision] [--codex-path BIN] [--model MODEL] [--reasoning LEVEL] [--service-tier fast] [--sandbox MODE] [--approval MODE] [--skip-git-repo-check] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -30,6 +38,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     sessionId: undefined,
     outputFile: undefined,
+    outputSchema: 'director-action',
     codexPath: undefined,
     model: undefined,
     reasoning: undefined,
@@ -67,6 +76,12 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--output-file') {
       options.outputFile = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--output-schema') {
+      options.outputSchema = requireValue(argv, index, arg);
+      if (!['director-action', 'workflow-draft', 'workflow-revision'].includes(options.outputSchema)) {
+        throw new Error(`Unknown output schema: ${options.outputSchema}`);
+      }
       index += 2;
     } else if (arg === '--codex-path') {
       options.codexPath = requireValue(argv, index, arg);
@@ -106,17 +121,9 @@ function sanitizedEnv() {
   }
   delete env.OPENAI_API_KEY;
   delete env.CODEX_API_KEY;
+  delete env.PAINTNODE_CODEX_IDENTITY;
+  if (!env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE) env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE = 'codex_sdk_ts';
   return env;
-}
-
-function sdkConfig(options) {
-  if (options.serviceTier !== 'fast') return undefined;
-  return {
-    service_tier: 'fast',
-    features: {
-      fast_mode: true,
-    },
-  };
 }
 
 async function readStdin() {
@@ -126,49 +133,97 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function codexArgs(options, schemaPath) {
+  const args = ['exec', '--experimental-json'];
+  if (options.serviceTier === 'fast') {
+    args.push('--config', 'service_tier="fast"', '--config', 'features.fast_mode=true');
+  }
+  if (options.model) args.push('--model', options.model);
+  if (options.reasoning) args.push('--config', `model_reasoning_effort="${options.reasoning}"`);
+  args.push('--sandbox', options.sandbox, '--cd', options.cwd);
+  if (options.skipGitRepoCheck) args.push('--skip-git-repo-check');
+  if (schemaPath) args.push('--output-schema', schemaPath);
+  args.push('--config', `approval_policy="${options.approval}"`);
+  if (options.sessionId) args.push('resume', options.sessionId);
+  for (const image of options.images) args.push('--image', image);
+  return args;
+}
+
+async function* runCodex(options, prompt, outputSchema) {
+  let schemaDir;
+  let schemaPath;
+  if (outputSchema) {
+    schemaDir = mkdtempSync(join(tmpdir(), 'paintnode-codex-schema-'));
+    schemaPath = join(schemaDir, 'schema.json');
+    writeFileSync(schemaPath, JSON.stringify(outputSchema), 'utf8');
+  }
+  try {
+    // This is deliberately adjacent to the only native spawn in this runner.
+    assertProviderExecutableReady('codex', options.codexPath, process.env.PAINTNODE_CODEX_IDENTITY);
+    const child = spawn(options.codexPath, codexArgs(options, schemaPath), {
+      cwd: options.cwd,
+      env: sanitizedEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    child.stdin.end(prompt);
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const exit = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (line.trim()) yield line;
+    }
+    const result = await exit;
+    if (result.code !== 0 || result.signal) {
+      const detail = result.signal ? `signal ${result.signal}` : `code ${result.code ?? 1}`;
+      throw new Error(`Codex Exec exited with ${detail}${stderr.trim() ? `: ${stderr.trim()}` : ''}`);
+    }
+  } finally {
+    if (schemaDir) rmSync(schemaDir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const prompt = options.promptParts.join(' ').trim() || (await readStdin()).trim();
   if (!prompt) throw new Error('Prompt is required');
 
-  const codex = new Codex({
-    codexPathOverride: options.codexPath,
-    env: sanitizedEnv(),
-    config: sdkConfig(options),
-  });
-  const thread = options.sessionId
-    ? codex.resumeThread(options.sessionId)
-    : codex.startThread({
-        workingDirectory: options.cwd,
-        skipGitRepoCheck: options.skipGitRepoCheck,
-        model: options.model,
-        modelReasoningEffort: options.reasoning,
-        sandboxMode: options.sandbox,
-        approvalPolicy: options.approval,
-      });
   if (options.sessionId) {
     process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: options.sessionId, resumed: true })}\n`);
   }
-  const input = [
-    ...options.images.map((path) => ({ type: 'local_image', path })),
-    { type: 'text', text: prompt },
-  ];
-  const { events } = await thread.runStreamed(
-    input,
-    options.outputFile ? { outputSchema: directorActionSchema } : undefined,
-  );
+  const outputSchemas = {
+    'director-action': directorActionSchema,
+    'workflow-draft': workflowDirectorGraphDraftSchema,
+    'workflow-revision': workflowDirectorRevisionSchema,
+  };
   let failed = false;
   let finalResponse = null;
-  for await (const event of events) {
-    process.stdout.write(`${JSON.stringify(event)}\n`);
+  for await (const line of runCodex(
+    options,
+    prompt,
+    options.outputFile ? outputSchemas[options.outputSchema] : undefined,
+  )) {
+    process.stdout.write(`${line}\n`);
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
     if (event.type === 'turn.failed' || event.type === 'error') failed = true;
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
       finalResponse = event.item.text;
     }
   }
   if (!failed && options.outputFile) {
-    if (!finalResponse) throw new Error('Codex did not return a structured Director action');
-    writeDirectorAction(options.outputFile, JSON.parse(finalResponse));
+    if (!finalResponse) throw new Error('Codex did not return structured output');
+    writeStructuredOutput(options.outputFile, JSON.parse(finalResponse), options.outputSchema);
     process.stdout.write(
       `${JSON.stringify({ type: 'provider.progress', kind: 'actionReady', message: 'Codex returned a structured Director action' })}\n`,
     );

@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paintnode.com/schemas/normal-app-virtual-creator-observation-v2.json",
+  "title": "PaintNode normal-app virtual creator observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recordType", "syntheticOnly", "runtime", "sessionId", "profileId", "planSha256", "isolation", "lifecycle", "tasks", "findings", "ownerReview", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "recordType": { "const": "paintnode-normal-app-virtual-creator-observation" },
+    "syntheticOnly": { "const": true },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "gitSha", "checkoutPath", "sourceStatusSha256", "bundleId", "windowTitle", "providerBehavior"],
+      "properties": {
+        "mode": { "const": "repo-dev-real-providers" },
+        "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "checkoutPath": { "type": "string", "minLength": 1 },
+        "sourceStatusSha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+        "bundleId": { "const": "com.paintnode.editor.qa.repo.dev" },
+        "windowTitle": { "const": "PaintNode Repo QA — repo-dev" },
+        "providerBehavior": { "const": "real-subscription-backed" }
+      }
+    },
+    "sessionId": { "type": "string", "pattern": "^VC-V0[1-8]-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$" },
+    "profileId": { "type": "string", "pattern": "^V0[1-8]$" },
+    "planSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectDir", "projectWasEmptyAtStart", "externalTaskId", "newTaskConfirmed", "noForkConfirmed", "priorSessionContextShared"],
+      "properties": {
+        "projectDir": { "type": "string", "minLength": 1 },
+        "projectWasEmptyAtStart": { "type": "boolean" },
+        "externalTaskId": { "type": ["string", "null"], "minLength": 1 },
+        "newTaskConfirmed": { "type": "boolean" },
+        "noForkConfirmed": { "type": "boolean" },
+        "priorSessionContextShared": { "type": "boolean" }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attemptStage", "launchEvents", "appClosedAfterSession", "projectPreservedForReview"],
+      "properties": {
+        "attemptStage": { "enum": ["pending", "prelaunch", "finalized"] },
+        "launchEvents": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/launchEvent" } },
+        "appClosedAfterSession": { "type": "boolean" },
+        "projectPreservedForReview": { "type": "boolean" }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 1 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 2 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 3 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 4 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 5 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 6 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 7 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/task" }, { "type": "object", "properties": { "task": { "const": 8 } } }] }
+      ],
+      "items": false
+    },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "ownerReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedLive", "evidenceReviewed", "decision", "selectedForAggregate", "standard", "notes", "reviewedAt"],
+      "properties": {
+        "observedLive": { "type": "boolean" },
+        "evidenceReviewed": { "type": "boolean" },
+        "decision": { "enum": ["pending", "accepted", "rejected"] },
+        "selectedForAggregate": { "type": "boolean" },
+        "standard": { "type": "string", "minLength": 1 },
+        "notes": { "type": "string" },
+        "reviewedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "limitations": { "type": "array", "minItems": 3, "items": { "type": "string", "minLength": 1 } }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "ownerReview": { "type": "object", "properties": { "decision": { "const": "accepted" } }, "required": ["decision"] } }, "required": ["ownerReview"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "isolation": {
+            "type": "object",
+            "properties": {
+              "projectWasEmptyAtStart": { "const": true },
+              "externalTaskId": { "type": "string", "minLength": 1 },
+              "newTaskConfirmed": { "const": true },
+              "noForkConfirmed": { "const": true },
+              "priorSessionContextShared": { "const": false }
+            }
+          },
+          "lifecycle": {
+            "type": "object",
+            "properties": {
+              "attemptStage": { "const": "finalized" },
+              "launchEvents": { "type": "array", "minItems": 2, "maxItems": 2 },
+              "appClosedAfterSession": { "const": true },
+              "projectPreservedForReview": { "const": true }
+            }
+          },
+          "ownerReview": {
+            "type": "object",
+            "properties": {
+              "observedLive": { "const": true },
+              "evidenceReviewed": { "const": true },
+              "selectedForAggregate": { "const": true },
+              "notes": { "type": "string", "minLength": 1 },
+              "reviewedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "ownerReview": { "type": "object", "properties": { "decision": { "const": "pending" } }, "required": ["decision"] } }, "required": ["ownerReview"] },
+      "then": { "type": "object", "properties": { "ownerReview": { "type": "object", "properties": { "selectedForAggregate": { "const": false }, "reviewedAt": { "const": null } } } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "ownerReview": { "type": "object", "properties": { "decision": { "const": "rejected" } }, "required": ["decision"] } }, "required": ["ownerReview"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "ownerReview": {
+            "type": "object",
+            "properties": {
+              "selectedForAggregate": { "const": false },
+              "notes": { "type": "string", "minLength": 1 },
+              "reviewedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "launchEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "gitSha", "windowTitle", "operatorVerifiedRunning", "recordedAt"],
+      "properties": {
+        "phase": { "enum": ["fresh", "resume"] },
+        "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "windowTitle": { "const": "PaintNode Repo QA — repo-dev" },
+        "operatorVerifiedRunning": { "type": "boolean" },
+        "recordedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "outcome", "elapsedWallMs", "interventions", "providerEvidence", "uiEvidence", "errors", "notes"],
+      "properties": {
+        "task": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "outcome": { "enum": ["not-run", "completed-unaided", "completed-assisted", "blocked"] },
+        "elapsedWallMs": { "type": ["integer", "null"], "minimum": 0 },
+        "interventions": { "type": "array", "items": { "$ref": "#/$defs/intervention" } },
+        "providerEvidence": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "uiEvidence": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/error" } },
+        "notes": { "type": "string" }
+      }
+    },
+    "intervention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventType", "exactText", "elapsedWallMs"],
+      "properties": {
+        "eventType": { "enum": ["neutral-probe", "visible-ui-hint", "verbatim-repeat", "operator-handoff"] },
+        "exactText": { "type": "string", "minLength": 1 },
+        "elapsedWallMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "visibleMessage", "recoveryAttempted", "recoveryOutcome"],
+      "properties": {
+        "source": { "enum": ["provider", "app", "unknown"] },
+        "visibleMessage": { "type": "string", "minLength": 1 },
+        "recoveryAttempted": { "type": "boolean" },
+        "recoveryOutcome": { "enum": ["not-attempted", "recovered", "still-blocked"] }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "task", "category", "impact", "evidenceRefs", "interpretation", "requiresHumanValidation"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^VCF-[1-9][0-9]*$" },
+        "task": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "category": { "enum": ["data-integrity", "wrong-lineage", "accepted-direction", "editor-return", "save-reopen", "keyboard-accessibility", "critical-task-impossible", "required-input-comprehension", "copy-clarity", "navigation-discovery", "recovery-clarity", "repeated-error-burden", "provider-reliability", "performance"] },
+        "impact": { "enum": ["hypothesis-high", "hypothesis-medium", "hypothesis-low", "observation"] },
+        "evidenceRefs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "interpretation": { "type": "string", "minLength": 1 },
+        "requiresHumanValidation": { "const": true }
+      }
+    }
+  }
+}

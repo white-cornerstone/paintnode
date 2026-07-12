@@ -1,0 +1,29 @@
+{
+  "_copyWarning": "COPY OUTSIDE REPOSITORY — complete only in approved restricted research storage.",
+  "_privacyWarning": "PRIVATE ONLY. Never complete this record in GitHub, a checkout, worktree, chat, or participant project.",
+  "schemaVersion": 1,
+  "recordType": "paintnode-creator-study-approved-build",
+  "approvedBuild": {
+    "version": 1,
+    "mode": "provider-free",
+    "bundleId": "com.paintnode.editor.blueprintqa.provider.free",
+    "gitSha": "",
+    "sourceTreeSha": "",
+    "sourceDirty": false,
+    "sourceStatusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "executableSha256": ""
+  },
+  "approval": {
+    "ownerApproved": false,
+    "approvedAt": "",
+    "decisionReference": "",
+    "approvalId": ""
+  },
+  "changeControl": {
+    "kind": "initial",
+    "replacesDecisionReference": null,
+    "reason": null,
+    "rehearsalCompletedAt": "",
+    "comparabilityDecision": ""
+  }
+}

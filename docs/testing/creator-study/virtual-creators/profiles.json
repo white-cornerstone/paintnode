@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "recordType": "paintnode-virtual-creator-profiles",
+  "syntheticOnly": true,
+  "profiles": [
+    {
+      "id": "V01",
+      "label": "First-time workflow explorer",
+      "creativeToolFamiliarity": "basic",
+      "aiWorkflowFamiliarity": "none",
+      "multiFormatHabit": "occasional",
+      "interactionConstraint": "pointer-first",
+      "mentalModel": "Treat PaintNode as a layer editor and infer workflow behavior only from visible labels and state.",
+      "behavioralConstraint": "Prefer the most obvious visible action. Do not search documentation or inspect implementation details."
+    },
+    {
+      "id": "V02",
+      "label": "Keyboard-only workflow explorer",
+      "creativeToolFamiliarity": "intermediate",
+      "aiWorkflowFamiliarity": "occasional",
+      "multiFormatHabit": "regular",
+      "interactionConstraint": "keyboard-only",
+      "mentalModel": "Expect a logical focus order and explicit actions without precision pointer input.",
+      "behavioralConstraint": "Use keyboard actions only after the app is focused. Accessibility-tree inspection is allowed; pointer clicks are not."
+    },
+    {
+      "id": "V03",
+      "label": "Accessibility-tree navigation probe",
+      "creativeToolFamiliarity": "intermediate",
+      "aiWorkflowFamiliarity": "none",
+      "multiFormatHabit": "occasional",
+      "interactionConstraint": "accessibility-tree-and-keyboard",
+      "mentalModel": "Understand the product only through exposed names, roles, values, focus, and keyboard actions.",
+      "behavioralConstraint": "Do not infer that this simulates a person who uses assistive technology. Record only accessibility-tree and keyboard observations."
+    },
+    {
+      "id": "V04",
+      "label": "High-volume commerce creator lens",
+      "creativeToolFamiliarity": "advanced",
+      "aiWorkflowFamiliarity": "occasional",
+      "multiFormatHabit": "regular",
+      "interactionConstraint": "pointer-first",
+      "mentalModel": "Prioritize recognisable product identity, repeatability, and efficient multi-format adaptation.",
+      "behavioralConstraint": "Choose actions that appear efficient and report visible outcomes without deliberately seeking a particular failure or recovery result."
+    },
+    {
+      "id": "V05",
+      "label": "Traditional layer-editor lens",
+      "creativeToolFamiliarity": "advanced",
+      "aiWorkflowFamiliarity": "none",
+      "multiFormatHabit": "regular",
+      "interactionConstraint": "pointer-first",
+      "mentalModel": "Expect direct manipulation, explicit save state, and familiar document/layer behavior.",
+      "behavioralConstraint": "Do not assume graph terminology. Prefer document and layer concepts when interpreting the interface."
+    },
+    {
+      "id": "V06",
+      "label": "Prompt-first AI creator lens",
+      "creativeToolFamiliarity": "basic",
+      "aiWorkflowFamiliarity": "frequent",
+      "multiFormatHabit": "occasional",
+      "interactionConstraint": "pointer-first",
+      "mentalModel": "Expect generation to begin from prompts and references, with the system managing technical wiring.",
+      "behavioralConstraint": "Use only creator-facing controls. Do not inspect provider configuration, source code, or hidden graph data."
+    },
+    {
+      "id": "V07",
+      "label": "Multi-format social creator lens",
+      "creativeToolFamiliarity": "intermediate",
+      "aiWorkflowFamiliarity": "occasional",
+      "multiFormatHabit": "regular",
+      "interactionConstraint": "pointer-first",
+      "mentalModel": "Think in a coordinated family of square, portrait, and landscape deliverables.",
+      "behavioralConstraint": "Use the terminology visible in the app and report what you notice without deliberately seeking a particular state or format problem."
+    },
+    {
+      "id": "V08",
+      "label": "Deliberate verification lens",
+      "creativeToolFamiliarity": "advanced",
+      "aiWorkflowFamiliarity": "frequent",
+      "multiFormatHabit": "regular",
+      "interactionConstraint": "pointer-first",
+      "mentalModel": "Prefer to confirm visible context before consequential choices and expect the interface to explain what will continue.",
+      "behavioralConstraint": "Pause to inspect available visible context before key choices without seeking a predetermined failure; do not inspect files, source, logs, or prior evaluations."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { assertProviderExecutableReady } from './provider-executable-trust.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -36,12 +37,14 @@ function sanitizedEnv() {
   const env = { ...process.env };
   delete env.OPENAI_API_KEY;
   delete env.CODEX_API_KEY;
+  delete env.PAINTNODE_CODEX_IDENTITY;
   return env;
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const executable = codexCommand(options.codexPath);
+  assertProviderExecutableReady('codex', executable.command, process.env.PAINTNODE_CODEX_IDENTITY);
   const child = spawn(executable.command, executable.args, {
     env: sanitizedEnv(),
     stdio: ['pipe', 'pipe', 'pipe'],

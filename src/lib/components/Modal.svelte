@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onDestroy, onMount, tick, type Snippet } from 'svelte';
   import Icon from './Icon.svelte';
   import { tooltip } from '../actions/tooltip';
   import { Dismiss } from '../icons';
@@ -33,6 +33,7 @@
       left: number;
       top: number;
     } | null>(null);
+  let previousFocus: HTMLElement | null = null;
 
   const managedSize = $derived(resizable || height !== null || minHeight !== null);
   const modalStyle = $derived(
@@ -48,9 +49,55 @@
       .join(';'),
   );
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') onClose();
+  const focusableSelector = [
+    '[data-autofocus]',
+    'button:not([disabled]):not([tabindex="-1"])',
+    'input:not([disabled]):not([tabindex="-1"])',
+    'select:not([disabled]):not([tabindex="-1"])',
+    'textarea:not([disabled]):not([tabindex="-1"])',
+    '[href]',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(',');
+
+  function focusableElements(): HTMLElement[] {
+    if (!modalEl) return [];
+    return Array.from(modalEl.querySelectorAll<HTMLElement>(focusableSelector))
+      .filter((element) => element.getAttribute('aria-hidden') !== 'true');
   }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusable = focusableElements();
+    if (focusable.length === 0) {
+      e.preventDefault();
+      modalEl?.focus();
+      return;
+    }
+    const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+    const nextIndex = e.shiftKey
+      ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
+      : activeIndex < 0 || activeIndex === focusable.length - 1 ? 0 : activeIndex + 1;
+    if ((e.shiftKey && activeIndex <= 0) || (!e.shiftKey && (activeIndex < 0 || activeIndex === focusable.length - 1))) {
+      e.preventDefault();
+      focusable[nextIndex]?.focus();
+    }
+  }
+
+  onMount(async () => {
+    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    await tick();
+    const initial = modalEl?.querySelector<HTMLElement>('[data-autofocus]') ?? focusableElements()[0] ?? modalEl;
+    initial?.focus();
+  });
+
+  onDestroy(() => {
+    if (previousFocus?.isConnected) previousFocus.focus();
+  });
 
   function clampPosition(left: number, top: number): { left: number; top: number } {
     const rect = modalEl?.getBoundingClientRect();
@@ -93,7 +140,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={onPointerUp} />
+<svelte:window onpointermove={onPointerMove} onpointerup={onPointerUp} />
 
 <div class="overlay" onpointerdown={onClose} role="presentation">
   <div
@@ -108,8 +155,9 @@
     tabindex="-1"
     aria-modal="true"
     aria-label={title}
+    onkeydown={onKey}
   >
-    <header role="button" tabindex="0" aria-label={`Drag ${title} dialog`} onpointerdown={beginDrag}>
+    <header role="presentation" onpointerdown={beginDrag}>
       <span>{title}</span>
       <button class="x" onclick={onClose} aria-label="Close" use:tooltip={{ text: 'Close', placement: 'bottom' }}><Icon svg={Dismiss} size={16} /></button>
     </header>

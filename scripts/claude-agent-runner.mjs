@@ -4,21 +4,25 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { directorActionSchema } from './director-action-schema.mjs';
+import {
+  workflowDirectorGraphDraftSchema,
+  workflowDirectorRevisionSchema,
+} from './workflow-director-schema.mjs';
 
 const require = createRequire(import.meta.url);
 
-function writeDirectorAction(path, value) {
+function writeStructuredOutput(path, value, schemaName) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('The SDK did not return a Director action object');
+    throw new Error('The SDK did not return a structured object');
   }
-  if (!directorActionSchema.properties.action.enum.includes(value.action)) {
+  if (schemaName === 'director-action' && !directorActionSchema.properties.action.enum.includes(value.action)) {
     throw new Error(`The SDK returned an unknown Director action: ${String(value.action)}`);
   }
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
 function usage() {
-  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
+  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -34,6 +38,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     sessionId: undefined,
     outputFile: undefined,
+    outputSchema: 'director-action',
     claudePath: undefined,
     model: undefined,
     effort: undefined,
@@ -75,6 +80,12 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--output-file') {
       options.outputFile = requireValue(argv, index, arg);
+      index += 2;
+    } else if (arg === '--output-schema') {
+      options.outputSchema = requireValue(argv, index, arg);
+      if (!['director-action', 'workflow-draft', 'workflow-revision'].includes(options.outputSchema)) {
+        throw new Error(`Unknown output schema: ${options.outputSchema}`);
+      }
       index += 2;
     } else if (arg === '--claude-path') {
       options.claudePath = requireValue(argv, index, arg);
@@ -235,7 +246,14 @@ async function main() {
       maxTurns: 8,
       resume: options.sessionId,
       outputFormat: options.outputFile
-        ? { type: 'json_schema', schema: directorActionSchema }
+        ? {
+            type: 'json_schema',
+            schema: {
+              'director-action': directorActionSchema,
+              'workflow-draft': workflowDirectorGraphDraftSchema,
+              'workflow-revision': workflowDirectorRevisionSchema,
+            }[options.outputSchema],
+          }
         : undefined,
       agentProgressSummaries: true,
       env: sanitizedEnv(),
@@ -305,7 +323,7 @@ async function main() {
   }
   if (!failed && options.outputFile) {
     if (!structuredAction) throw new Error('Claude did not return a structured Director action');
-    writeDirectorAction(options.outputFile, structuredAction);
+    writeStructuredOutput(options.outputFile, structuredAction, options.outputSchema);
     process.stdout.write(
       `${JSON.stringify({ type: 'provider.progress', kind: 'actionReady', message: 'Claude returned a structured Director action' })}\n`,
     );
