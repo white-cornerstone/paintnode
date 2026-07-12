@@ -21,7 +21,7 @@
     {
       "task": 3,
       "title": "Compare and choose a direction",
-      "prompt": "Compare the available directions, inspect enough context to make a choice, and continue with the direction you prefer.",
+      "prompt": "Compare the available directions, inspect enough context to make a choice, and accept the direction you prefer for downstream work. Stop after the direction is accepted.",
       "stopCondition": "Stop when one direction is visibly accepted for downstream work, or when blocked.",
       "creatorFacingAddendum": null
     },

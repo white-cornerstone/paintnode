@@ -377,7 +377,8 @@ failure state, and candidate-local retry.
 Prompt:
 
 > Compare the available directions, inspect enough context to make a choice,
-> and continue with the direction you prefer.
+> and accept the direction you prefer for downstream work. Stop after the
+> direction is accepted.
 
 Do not say “Review,” “candidate,” or “Promote.” Record pointer versus keyboard
 behavior, comparison strategy, and whether the accepted state is understood.

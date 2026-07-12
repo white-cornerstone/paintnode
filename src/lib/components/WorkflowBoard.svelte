@@ -60,6 +60,7 @@
     selectiveExecutionRunAvailability,
     workflowProviderSelection,
     workflowReadiness,
+    workflowCandidateBranchResultSummary,
     resolveWorkflowCampaignPath,
     type CreatorNodeType,
     type WorkflowNodePort,
@@ -115,6 +116,7 @@
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let busy = $state(false);
   let progress = $state('');
+  let candidateResultMessages = $state<Record<string, string>>({});
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
@@ -1630,7 +1632,10 @@
     });
   }
 
-  function createWorkflowExecutionContext(runId: string) {
+  function createWorkflowExecutionContext(
+    runId: string,
+    progressLabel: (stage: string, message: string) => string = (_stage, message) => message,
+  ) {
     const runSelection = providerSelection;
     if (!runSelection.ready || !runSelection.provider) {
       throw new Error('Wait for native QA mode detection before preparing execution.');
@@ -1664,8 +1669,9 @@
         },
       }),
       onProgress: (event) => {
-        progress = event.message;
-        if (activeWorkflowTaskId) aiTasks.setProgress(activeWorkflowTaskId, event.message);
+        const message = progressLabel(event.stage, event.message);
+        progress = message;
+        if (activeWorkflowTaskId) aiTasks.setProgress(activeWorkflowTaskId, message);
       },
       resolveAsset: (asset) => resolveWorkflowBoardProjectAsset(runProjectPath, asset, resolveProjectAssetMaterial),
       readStoryboard: (storyboard: Readonly<WorkflowStoryboardDescriptor>) => resolveWorkflowStoryboardRead(
@@ -1946,7 +1952,10 @@
     if (!candidate || candidate.state !== 'eligible') return;
     busy = true;
     error = '';
-    const context = createWorkflowExecutionContext(createRunId());
+    const context = createWorkflowExecutionContext(
+      createRunId(),
+      (stage, message) => stage === 'succeeded' ? 'Finalizing candidate comparison…' : message,
+    );
     try {
       await workflow.promoteCandidate(nodeId, candidate.candidateId, context.options);
       editor.flash(`Promoted Candidate ${candidate.ordinal}`);
@@ -1987,6 +1996,7 @@
         error = outcome.commitMessage;
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
+        candidateResultMessages[nodeId] = workflowCandidateBranchResultSummary(outcome.group);
         editor.flash(outcome.commitMessage);
       }
     } catch (cause) {
@@ -2601,6 +2611,9 @@
                     <strong>Concept branches</strong>
                     <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
                   </div>
+                  {#if candidateResultMessages[node.id]}
+                    <p class="candidate-result-summary" aria-live="polite">{candidateResultMessages[node.id]}</p>
+                  {/if}
                   <div class="candidate-branch-controls" role="group" aria-label="Generate concept branches">
                     <label>
                       <span>Count</span>

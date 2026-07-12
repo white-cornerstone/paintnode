@@ -5,6 +5,8 @@ import {
   deriveWorkflowCandidateBranchGroups,
   executeWorkflowCandidateBranches,
   retryWorkflowCandidateBranch,
+  workflowCandidateBranchResultSummary,
+  type WorkflowCandidateBranchGroup,
 } from './candidateBranches';
 import { isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
 import { parseWorkflowGraphV2, serializeWorkflowGraphV2, type WorkflowRunRecordV1 } from './schema';
@@ -22,6 +24,30 @@ const product: WorkflowProjectAsset = {
   id: 'asset-product', name: 'Product.png', relativePath: 'assets/Product.png',
   width: 1200, height: 1200, mime: 'image/png',
 };
+
+function resultGroup(statuses: Array<'succeeded' | 'failed' | 'cancelled'>): WorkflowCandidateBranchGroup {
+  return {
+    id: 'branch-summary', sourceNodeId: 'transform-generate-square', requestedCount: statuses.length,
+    candidates: statuses.map((status, index) => ({
+      candidateId: `candidate-${index + 1}`, ordinal: index + 1, status, attemptCount: 1,
+      latestRunId: `run-${index + 1}`, materialKey: 'material', effectivePromptHash: 'sha256:prompt',
+      sourceAssetIds: ['asset-product'], outputAssetId: status === 'succeeded' ? `asset-${index + 1}` : null,
+      failure: status === 'succeeded' ? null : { code: status.toUpperCase(), message: status },
+    })),
+  };
+}
+
+describe('candidate branch result summary', () => {
+  it('keeps successful siblings visible when one candidate is cancelled', () => {
+    expect(workflowCandidateBranchResultSummary(resultGroup(['succeeded', 'succeeded', 'cancelled'])))
+      .toBe('3 candidates: 2 ready, 1 cancelled. Completed candidates remain available.');
+  });
+
+  it('does not imply that failed-only candidates produced completed work', () => {
+    expect(workflowCandidateBranchResultSummary(resultGroup(['failed', 'cancelled'])))
+      .toBe('2 candidates: 1 failed, 1 cancelled.');
+  });
+});
 
 function campaign() {
   const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {

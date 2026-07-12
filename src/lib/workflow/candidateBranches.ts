@@ -54,6 +54,23 @@ export interface WorkflowCandidateBranchExecutionOutcome {
   group: WorkflowCandidateBranchGroup;
 }
 
+export function workflowCandidateBranchResultSummary(group: WorkflowCandidateBranchGroup): string {
+  const counts = group.candidates.reduce((result, candidate) => {
+    result[candidate.status] = (result[candidate.status] ?? 0) + 1;
+    return result;
+  }, {} as Partial<Record<WorkflowRunStatus, number>>);
+  const parts = [
+    counts.succeeded ? `${counts.succeeded} ready` : null,
+    counts.failed ? `${counts.failed} failed` : null,
+    counts.cancelled ? `${counts.cancelled} cancelled` : null,
+    counts.running ? `${counts.running} still running` : null,
+  ].filter((part): part is string => Boolean(part));
+  const preserved = counts.succeeded
+    ? ' Completed candidates remain available.'
+    : '';
+  return `${group.candidates.length} candidates: ${parts.join(', ')}.${preserved}`;
+}
+
 function boundedCount(count: number): number {
   if (!Number.isSafeInteger(count) || count < WORKFLOW_MIN_CANDIDATES) {
     throw new Error(`Candidate branch count must be at least ${WORKFLOW_MIN_CANDIDATES}.`);

@@ -44,6 +44,9 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
     expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
+    expect(boardSource).toContain("stage === 'succeeded' ? 'Finalizing candidate comparison…' : message");
+    expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
+    expect(boardSource).toContain('candidate-result-summary');
     expect(boardSource).toContain('data-candidate-state={candidate.status}');
     expect(boardSource).toContain('Lineage:');
     expect(boardSource).toContain('aria-label="Candidate count"');
