@@ -1,18 +1,20 @@
-# Creative Blueprint moderated creator study protocol
+# Creative Blueprint creator validation protocol
 
 Updated: 2026-07-11
 
-This protocol defines the issue #85 moderated walkthrough with 6–8 target
-creators. It evaluates whether a new creator can complete Campaign Composer
-without understanding technical graph wiring. The study uses the repo-built
-provider-free QA app so it measures workflow comprehension and recovery rather
-than provider latency or image quality.
+This protocol defines the amended issue #85 owner-observed validation program
+with 6–8 isolated AI-assisted creator sessions. It evaluates whether a new
+creator persona can complete Campaign Composer without understanding technical
+graph wiring. The normal repo-built app uses real provider behavior; manual
+checkpoint review records workflow comprehension, recovery, and provider
+behavior.
 
-This document is an execution package, not study evidence. The study is not
-complete until 6–8 valid sessions have actually occurred and the de-identified
-synthesis has been reviewed. Empty templates, rehearsals, automated tests, AI
-summaries, and facilitator predictions never count as participant results.
-Real sessions remain required; this operational package cannot satisfy the gate.
+This document is an execution package and evidence contract. The amended gate
+is complete only after 6–8 isolated AI-assisted sessions have actually occurred,
+manual checkpoint review is complete, the records are de-identified, and the
+synthesis and blocker classification are reviewed by the owner. These records
+are synthetic-only product evidence, not qualifying human-creator research.
+Human recruitment remains a separate optional research track.
 
 Use the copyable templates, Product materials, privacy boundary, setup verifier,
 and deterministic synthesis calculator in
@@ -564,10 +566,11 @@ tasks before declaring the gate met.
   fails;
 - `conditional`: no exit blocker remains, but named non-blocking actions or
   re-tests remain. A conditional result never closes issue #85;
-- `pass`: 6–8 valid real sessions, complete traceability, each recruitment
-  requirement or its own complete approved exception, every threshold, no
-  unresolved blocker, configured-provider evidence, and all required role
-  sign-offs are complete.
+- `pass`: 6–8 valid isolated AI-assisted sessions, complete traceability,
+  manual checkpoint review, every threshold, no unresolved blocker,
+  configured-provider evidence, and all required owner sign-offs are complete.
+  This pass state is synthetic product validation and is not human-creator
+  research.
 
 Generate calculations from a de-identified schema-valid input with
 `npm run qa:creator-study:synthesize -- --input PATH`. Review the output against
@@ -748,5 +751,6 @@ excludes the private fields below.
 - If a session or metric did not occur, write `not run`, `not observed`, or
   `insufficient evidence`.
 - Do not mark issue #85, the MVP milestone, or PR #65 complete from this protocol
-  alone. Completion requires real sessions, reviewed synthesis, blocker
-  decisions, and the separate configured-provider evidence in the roadmap.
+  alone. Completion requires the amended 6–8-session synthetic validation,
+  reviewed de-identified synthesis, blocker decisions, and the separate
+  configured-provider evidence in the roadmap.

@@ -88,13 +88,14 @@ downstream work.
 
 Issue #85 supplies the integrated provider-free draft evidence in
 `src/lib/workflow/campaignComposerFlagshipAcceptance.test.ts` and the manual
-native scenario in `docs/testing/native-qa.md`. The gate remains open until both a configured
-provider run and a moderated walkthrough with 6–8 target creators are recorded;
-passing unit, Rust, or build checks alone must not be reported as milestone exit.
-The walkthrough is executed and audited with the
-[Creative Blueprint moderated creator study protocol](../testing/creative-blueprint-creator-study.md).
-The protocol and empty templates are preparation only; they cannot satisfy the
-gate without 6–8 real valid sessions and a reviewed synthesis.
+native scenario in `docs/testing/native-qa.md`. The amended gate requires both
+a configured-provider run and an owner-observed validation program with 6–8
+isolated AI-assisted creator sessions, manual checkpoint review, de-identified
+records, and an explicit blocker classification. These sessions are synthetic
+product evidence and must not be represented as human-creator research.
+Passing unit, Rust, or build checks alone must not be reported as milestone exit.
+The validation program is documented in the
+[Creative Blueprint creator study protocol](../testing/creative-blueprint-creator-study.md).
 
 ## Milestone 3 — Recipes & Portability
 
@@ -151,7 +152,7 @@ integration, and migration risk.
 2. Implement the Foundation issues test-first in dependency order.
 3. Review the v2 schema and migration using real saved workflow fixtures.
 4. Build one thin Campaign Composer vertical slice before expanding node types.
-5. Validate the MVP interaction with 6–8 target creators.
+5. Validate the MVP interaction with 6–8 isolated AI-assisted creator sessions under owner-observed manual checkpoint review; keep human creator research separate.
 6. Complete the remaining MVP behaviors based on observed friction.
 7. Begin Recipes & Portability only after selective execution and editor
    round-tripping are reliable.
