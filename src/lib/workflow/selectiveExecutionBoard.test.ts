@@ -72,6 +72,8 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('aria-keyshortcuts="Control+Enter"');
     expect(boardSource).toContain('void focusReviewCandidates(node.id)');
     expect(boardSource).toContain('void promoteReviewCandidate(node.id)');
+    expect(boardSource).toContain("event.code === 'KeyR'");
+    expect(boardSource).toContain("event.code !== 'Enter' && event.code !== 'NumpadEnter'");
     expect(boardSource).toContain('<strong>Brief</strong>');
     expect(boardSource).toContain('<strong>Art direction</strong>');
     expect(boardSource).toContain('Provenance:');

@@ -309,7 +309,7 @@
   }
 
   function projectKeyboardShortcut(event: KeyboardEvent): void {
-    if (!event.altKey || event.ctrlKey || event.metaKey || event.key.toLowerCase() !== 'w') return;
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.code !== 'KeyW') return;
     if (!workflowFiles.length) return;
     event.preventDefault();
     openFirstWorkflow();

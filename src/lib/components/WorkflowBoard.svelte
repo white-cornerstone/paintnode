@@ -1973,12 +1973,12 @@
   }
 
   function reviewKeyboardShortcut(event: KeyboardEvent): void {
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'r') {
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyR') {
       event.preventDefault();
       void focusReviewCandidates();
       return;
     }
-    if (!event.ctrlKey || event.altKey || event.metaKey || event.key !== 'Enter') return;
+    if (!event.ctrlKey || event.altKey || event.metaKey || (event.code !== 'Enter' && event.code !== 'NumpadEnter')) return;
     const selection = workflow.selection;
     if (selection?.kind !== 'creator') return;
     const node = workflow.creatorNodes.find((candidate) => candidate.id === selection.id);

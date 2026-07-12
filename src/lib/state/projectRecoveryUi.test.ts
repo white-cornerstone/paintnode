@@ -12,6 +12,7 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain('aria-keyshortcuts="Alt+W"');
     expect(projectPanelSource).toContain('projectKeyboardShortcut(event)');
     expect(projectPanelSource).toContain('openFirstWorkflow()');
+    expect(projectPanelSource).toContain("event.code !== 'KeyW'");
   });
 
   it('distinguishes layer placement from candidate inspection and requires an image document', () => {
