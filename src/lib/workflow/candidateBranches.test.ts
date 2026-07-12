@@ -6,6 +6,7 @@ import {
   executeWorkflowCandidateBranches,
   retryWorkflowCandidateBranch,
   workflowCandidateBranchResultSummary,
+  workflowCandidateProgressLabel,
   type WorkflowCandidateBranchGroup,
 } from './candidateBranches';
 import { isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
@@ -46,6 +47,17 @@ describe('candidate branch result summary', () => {
   it('does not imply that failed-only candidates produced completed work', () => {
     expect(workflowCandidateBranchResultSummary(resultGroup(['failed', 'cancelled'])))
       .toBe('2 candidates: 1 failed, 1 cancelled.');
+  });
+});
+
+describe('candidate branch progress labels', () => {
+  it('keeps terminal provider wording in a finalizing state until candidates commit', () => {
+    expect(workflowCandidateProgressLabel('running', 'Execution completed.'))
+      .toBe('Finalizing candidate comparison…');
+    expect(workflowCandidateProgressLabel('succeeded', 'Done'))
+      .toBe('Finalizing candidate comparison…');
+    expect(workflowCandidateProgressLabel('running', 'Generating image…'))
+      .toBe('Generating image…');
   });
 });
 

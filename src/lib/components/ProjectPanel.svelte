@@ -329,7 +329,7 @@
 </script>
 
 {#snippet fileThumb(file: ProjectFile, actionLabel: 'Open' | 'Place')}
-  <button class="thumb" aria-label={`${actionLabel} ${file.name}`} onclick={() => void openFile(file)}>
+  <button class="thumb" aria-label={`${actionLabel === 'Place' ? 'Place as layer' : actionLabel} ${file.name}`} disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>
     {#if file.previewDataUrl}
       <img src={file.previewDataUrl} alt="" />
     {:else}
@@ -367,13 +367,13 @@
       oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}
     >
       {@render fileThumb(file, actionLabel)}
-      <button class="file-name" use:croppedNameTooltip={file.name} onclick={() => void openFile(file)}>{file.name}</button>
+      <button class="file-name" use:croppedNameTooltip={file.name} disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>{file.name}</button>
     </div>
   {:else}
     <div class="file-row" role="listitem" oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}>
       {@render fileThumb(file, actionLabel)}
       <div class="meta">
-        <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
+        <button class="file-name" disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>{file.name}</button>
         <span>{metaFor(file)}</span>
       </div>
       {@render fileActions(file, allowDelete)}
@@ -500,6 +500,12 @@
     {#if !desktop}
       <p class="empty">Projects are available in the desktop app.</p>
     {:else if !project.current}
+      {#if project.lastPath}
+        <button class="open-project" onclick={() => void project.reopenLastProject()}>
+          <Icon svg={ArchiveClock} size={16} /> Reopen Last Project
+        </button>
+        <p class="empty">{project.lastPath}</p>
+      {/if}
       <button class="open-project" onclick={() => void project.openFolder()}>
         <Icon svg={FolderOpen} size={16} /> Open Project Folder
       </button>

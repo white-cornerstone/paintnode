@@ -71,6 +71,12 @@ export function workflowCandidateBranchResultSummary(group: WorkflowCandidateBra
   return `${group.candidates.length} candidates: ${parts.join(', ')}.${preserved}`;
 }
 
+export function workflowCandidateProgressLabel(stage: string, message: string): string {
+  return stage === 'succeeded' || /^Execution completed\.?$/i.test(message.trim())
+    ? 'Finalizing candidate comparison…'
+    : message;
+}
+
 function boundedCount(count: number): number {
   if (!Number.isSafeInteger(count) || count < WORKFLOW_MIN_CANDIDATES) {
     throw new Error(`Candidate branch count must be at least ${WORKFLOW_MIN_CANDIDATES}.`);

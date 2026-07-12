@@ -38,11 +38,23 @@ class ProjectStore {
     return `${this.identityRevision}:${this.path ?? ''}`;
   }
 
+  get lastPath(): string | null {
+    return localStorage.getItem(KEY);
+  }
+
   async restore(): Promise<void> {
     if (!isDesktop()) return;
     const path = localStorage.getItem(KEY);
     if (!path) return;
     await ui.withLoading('Loading project…', () => this.refresh(path));
+  }
+
+  async reopenLastProject(): Promise<boolean> {
+    const path = this.lastPath;
+    if (!path || !isDesktop()) return false;
+    this.error = '';
+    await ui.withLoading('Reopening last project…', () => this.refresh(path));
+    return this.path === path;
   }
 
   async openFolder(): Promise<boolean> {

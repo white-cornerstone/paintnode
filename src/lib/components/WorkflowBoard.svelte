@@ -61,6 +61,7 @@
     workflowProviderSelection,
     workflowReadiness,
     workflowCandidateBranchResultSummary,
+    workflowCandidateProgressLabel,
     resolveWorkflowCampaignPath,
     type CreatorNodeType,
     type WorkflowNodePort,
@@ -1835,7 +1836,7 @@
     if (!selectiveRunning) invalidateSelectivePreview();
   }
 
-  async function generate(node: WorkflowOutputNode | undefined = undefined): Promise<void> {
+  async function generate(node: WorkflowOutputNode | undefined = undefined, forceRegenerate = false): Promise<void> {
     if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
     if (storyboardCanvas) persistStoryboard();
     const targetOutput = targetOutputForGenerate(node);
@@ -1883,6 +1884,18 @@
         if (reviewedOutput) await workflow.cancelSelectiveExecution();
         else if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
       });
+      if (!reviewedOutput && !forceRegenerate && path?.transformNodeId) {
+        aiTasks.setProgress(task.id, 'Checking for reusable output…');
+        const reusePreflight = await workflow.preflightSelectiveExecution(
+          'run-node', path.transformNodeId, context.options,
+        );
+        if (reusePreflight.stateByNodeId[path.transformNodeId]?.state === 'cached') {
+          const outcome = await workflow.runSelectiveExecution(reusePreflight, context.options, { maxConcurrency: 1 });
+          aiTasks.complete(task.id, `Reused verified output · ${selectiveExecutionOutcomeSummary(outcome)}`);
+          editor.flash('Reused verified output; no provider request was sent');
+          return;
+        }
+      }
       if (reviewedOutput) {
         const outcome = await workflow.runReviewedOutput(targetOutput.id, context.options);
         const summary = selectiveExecutionOutcomeSummary(outcome);
@@ -1954,7 +1967,7 @@
     error = '';
     const context = createWorkflowExecutionContext(
       createRunId(),
-      (stage, message) => stage === 'succeeded' ? 'Finalizing candidate comparison…' : message,
+      workflowCandidateProgressLabel,
     );
     try {
       await workflow.promoteCandidate(nodeId, candidate.candidateId, context.options);
@@ -2301,7 +2314,7 @@
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
                   value={asset?.id ?? ''}
-                  onchange={(event) => workflow.assignAsset(
+                  oninput={(event) => workflow.assignAsset(
                     node.id,
                     assets.find((item) => item.id === event.currentTarget.value) ?? null,
                   )}
@@ -2309,6 +2322,7 @@
                   <option value="">Choose from project…</option>
                   {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
                 </select>
+                <small aria-live="polite">{asset ? `Selected ${asset.name}` : 'No asset selected'}</small>
               </label>
               <textarea
                 aria-label={`Role for ${node.name}`}
@@ -2503,6 +2517,7 @@
                     {/each}
                   </div>
                   {#if reviewCandidate}
+                    {@const reviewAsset = assets.find((item) => item.id === reviewCandidate.output?.assetId)}
                     <div
                       class="review-candidate-context"
                       role="tabpanel"
@@ -2510,6 +2525,9 @@
                       aria-labelledby={`review-candidate-tab-${node.id}-${reviewCandidate.candidateId}`}
                       tabindex="0"
                     >
+                      {#if reviewAsset?.previewDataUrl}
+                        <img class="review-candidate-preview" src={reviewAsset.previewDataUrl} alt={`Candidate ${reviewCandidate.ordinal} preview`} />
+                      {/if}
                       <p><strong>Brief</strong> {reviewCandidate.brief || 'No brief recorded.'}</p>
                       <p><strong>Art direction</strong> {reviewCandidate.artDirection || 'No art direction recorded.'}</p>
                       <small>
@@ -2977,8 +2995,13 @@
               <div class="output-actions">
                 <button onclick={() => void generate(outputNode)} disabled={busy || selectiveUiState.busy || !targetReadiness.ready} aria-describedby={`generate-block-${outputNode.id}`}>
                   <Icon svg={PaintBrush} size={14} />
-                  {reviewedOutput ? 'Use promoted' : providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
+                  {reviewedOutput ? 'Use promoted' : outputAsset ? 'Reuse or update' : providerSelection.qaFake ? 'Generate QA Fake' : 'Generate'}
                 </button>
+                {#if !reviewedOutput && outputAsset}
+                  <button onclick={() => void generate(outputNode, true)} disabled={busy || selectiveUiState.busy || !targetReadiness.ready}>
+                    <Icon svg={ArrowSync} size={14} /> Regenerate
+                  </button>
+                {/if}
                 <button onclick={() => void placeOutput(outputNode)} disabled={!outputAsset}>
                   <Icon svg={Open} size={14} />
                   Place
@@ -3604,6 +3627,15 @@
     border: 1px solid var(--border);
     border-radius: 5px;
     background: color-mix(in srgb, var(--panel-bg) 88%, white 12%);
+  }
+
+  .review-candidate-preview {
+    display: block;
+    width: 100%;
+    max-height: 180px;
+    object-fit: contain;
+    border-radius: 6px;
+    background: var(--surface-sunken);
   }
 
   .review-candidate-context p,

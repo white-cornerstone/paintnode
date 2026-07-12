@@ -44,9 +44,16 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
     expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
-    expect(boardSource).toContain("stage === 'succeeded' ? 'Finalizing candidate comparison…' : message");
+    expect(boardSource).toContain('workflowCandidateProgressLabel');
     expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
     expect(boardSource).toContain('candidate-result-summary');
+    expect(boardSource).toContain("oninput={(event) => workflow.assignAsset");
+    expect(boardSource).toContain('Selected ${asset.name}');
+    expect(boardSource).toContain('review-candidate-preview');
+    expect(boardSource).toContain("'Checking for reusable output…'");
+    expect(boardSource).toContain("'Reused verified output; no provider request was sent'");
+    expect(boardSource).toContain('Reuse or update');
+    expect(boardSource).toContain('Regenerate');
     expect(boardSource).toContain('data-candidate-state={candidate.status}');
     expect(boardSource).toContain('Lineage:');
     expect(boardSource).toContain('aria-label="Candidate count"');
