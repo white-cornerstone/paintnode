@@ -831,7 +831,7 @@
           <span>Open File</span>
           <kbd>⌘O</kbd>
         </button>
-        <button type="button" class="empty-action" onclick={() => workflow.newBoard()}>
+        <button type="button" class="empty-action" onclick={() => ui.openNew('workflow')}>
           <span>New Workflow Board</span>
         </button>
         <div class="empty-drop">Drop image or .ora files here to open them</div>

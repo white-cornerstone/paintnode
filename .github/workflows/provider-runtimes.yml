@@ -6,7 +6,7 @@ on:
       package_version:
         description: PaintNode provider package version
         required: true
-        default: "1.0.0"
+        default: "4.0.0"
       codex_sdk_version:
         description: Codex SDK version
         required: true
@@ -15,16 +15,43 @@ on:
         description: Claude Agent SDK version
         required: true
         default: "0.3.205"
+      runtime_release_tag:
+        description: Isolated release tag; production requires explicit confirmation
+        required: true
+        default: "provider-runtimes-creative-blueprint"
+      confirm_production_publish:
+        description: Confirm replacing the production provider runtime channel
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 env:
   NODE_VERSION: "22.19.0"
-  RUNTIME_RELEASE_TAG: provider-runtimes-latest
+  RUNTIME_RELEASE_TAG: ${{ inputs.runtime_release_tag }}
 
 jobs:
+  release-target:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Protect production runtime channel
+        env:
+          CONFIRM_PRODUCTION_PUBLISH: ${{ inputs.confirm_production_publish }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RUNTIME_RELEASE_TAG" =~ ^provider-runtimes-[a-z0-9-]+$ ]]; then
+            echo "Runtime release tag is invalid: $RUNTIME_RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [[ "$RUNTIME_RELEASE_TAG" == "provider-runtimes-latest" && "$CONFIRM_PRODUCTION_PUBLISH" != "true" ]]; then
+            echo "Production runtime publication requires explicit confirmation." >&2
+            exit 1
+          fi
+
   build:
+    needs: release-target
     runs-on: macos-14
     strategy:
       fail-fast: false

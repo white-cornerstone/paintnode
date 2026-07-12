@@ -28,6 +28,9 @@
   }
 
   function documentTooltip(session: DocumentSession): string {
+    const recovery = session.workflowReturnState?.recoveryStatus;
+    if (recovery === 'flattened-from-png') return `${documentNameWithMarker(session)} · Layered ORA missing; flattened recovery`;
+    if (recovery === 'layered-with-missing-png') return `${documentNameWithMarker(session)} · Flattened PNG missing; return to repair`;
     return documentNameWithMarker(session);
   }
 
@@ -65,7 +68,7 @@
 
     editor.switchDocument(session.id);
     const choice = await ui.askSaveChanges({
-      kind: 'document',
+      kind: session.workflowReturnState ? 'workflow-return' : 'document',
       name: documentName(session),
       index: 1,
       total: 1,
@@ -138,7 +141,11 @@
         use:tooltip={{ text: `Close ${workflow.name || 'workflow'}`, placement: 'bottom' }}
         onclick={(e) => {
           e.stopPropagation();
-          workflow.close();
+          if (workflow.dirty) {
+            editor.flash('Save the workflow before closing it so generated candidates and outputs are preserved.');
+            return;
+          }
+          if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
         }}
       >
         <Icon svg={Dismiss} size={13} />

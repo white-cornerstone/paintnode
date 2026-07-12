@@ -62,6 +62,14 @@ export function isAntigravityImageRatio(width: number, height: number): boolean 
   );
 }
 
+export function isGrokImageRatio(width: number, height: number): boolean {
+  const safeWidth = normalizedDimension(width);
+  const safeHeight = normalizedDimension(height);
+  return imageModelCapabilities.providers.grok.aspectRatios.some(
+    (ratio) => safeWidth * ratio.height === safeHeight * ratio.width,
+  );
+}
+
 export function fillFrameSummary(
   provider: AiImageProvider,
   documentWidth: number,

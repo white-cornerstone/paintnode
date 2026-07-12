@@ -10,11 +10,14 @@ use tauri::AppHandle;
 
 use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;
 use crate::ai::{
-    ai_provider_features, ai_run_cancelled, apply_ai_cli_environment, clear_ai_run_cancelled,
-    codex_agent_message_text, output_tail, spawn_output_reader, AgentRunResult, AiDirectorProvider,
+    ai_provider_features, ai_run_cancelled, apply_ai_cli_environment,
+    cleanup_ai_process_tree_after_bridge_exit, clear_ai_run_cancelled, codex_agent_message_text,
+    configure_ai_process_group, join_output_readers_bounded, output_tail, spawn_output_reader,
+    terminate_ai_process_tree, track_ai_process_tree, AgentRunResult, AiDirectorProvider,
     AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
-    AI_RUN_STOPPED_MESSAGE, POLL_INTERVAL,
+    AI_RUN_STOPPED_MESSAGE, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
+use crate::provider_executable::{ensure_provider_launch_allowed, Provider};
 
 #[derive(Debug)]
 pub(crate) struct ClaudeCommandOptions {
@@ -89,7 +92,15 @@ fn build_claude_agent_command(
     prompt_text: &str,
     image_paths: &[PathBuf],
 ) -> Command {
-    build_claude_agent_command_with_session(options, job_path, prompt_text, image_paths, None)
+    build_claude_agent_command_with_session(
+        options,
+        job_path,
+        prompt_text,
+        image_paths,
+        None,
+        None,
+        None,
+    )
 }
 
 fn build_claude_agent_command_with_session(
@@ -98,6 +109,8 @@ fn build_claude_agent_command_with_session(
     prompt_text: &str,
     image_paths: &[PathBuf],
     session_id: Option<&str>,
+    output_file: Option<&str>,
+    output_schema: Option<&str>,
 ) -> Command {
     let managed_bin = managed_claude_bin_or(&options.bin);
     let mut command = Command::new(claude_sdk_node());
@@ -117,6 +130,12 @@ fn build_claude_agent_command_with_session(
     }
     if let Some(effort) = options.effort.as_deref() {
         command.arg("--effort").arg(effort);
+    }
+    if let Some(output_file) = output_file {
+        command.arg("--output-file").arg(job_path.join(output_file));
+    }
+    if let Some(output_schema) = output_schema {
+        command.arg("--output-schema").arg(output_schema);
     }
     for path in image_paths {
         command.arg("--image").arg(path);
@@ -147,17 +166,99 @@ pub(crate) fn build_director_claude_command(
     image_paths: &[PathBuf],
     session_id: Option<&str>,
 ) -> Command {
-    let mut command = build_claude_agent_command_with_session(
+    build_claude_agent_command_with_session(
         options,
         job_path,
         prompt_text,
         image_paths,
         session_id,
+        Some(PAINTNODE_DIRECTOR_ACTION_FILE),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_claude_workflow_draft_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Claude)?;
+    let options = claude_command_options(bin, model, effort);
+    let mut command = build_claude_agent_command_with_session(
+        &options,
+        job_path,
+        prompt_text,
+        &[],
+        None,
+        Some(output_file),
+        Some("workflow-draft"),
     );
-    command
-        .arg("--output-file")
-        .arg(job_path.join(PAINTNODE_DIRECTOR_ACTION_FILE));
-    command
+    let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Claude at '{}': {error}",
+                claude_command_label(&options)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_claude_agent_message(&run.output) {
+        Err(format!("Claude workflow Director failed.\n\n{message}"))
+    } else {
+        Err(claude_command_failure(
+            "Claude workflow Director",
+            &run.output,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_claude_workflow_revision_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Claude)?;
+    let options = claude_command_options(bin, model, effort);
+    let mut command = build_claude_agent_command_with_session(
+        &options,
+        job_path,
+        prompt_text,
+        &[],
+        None,
+        Some(output_file),
+        Some("workflow-revision"),
+    );
+    let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Claude at '{}': {error}",
+                claude_command_label(&options)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_claude_agent_message(&run.output) {
+        Err(format!("Claude workflow revision failed.\n\n{message}"))
+    } else {
+        Err(claude_command_failure(
+            "Claude workflow revision",
+            &run.output,
+        ))
+    }
 }
 
 pub(crate) fn run_claude_with_progress(
@@ -165,11 +266,13 @@ pub(crate) fn run_claude_with_progress(
     app: AppHandle,
     run_id: String,
 ) -> Result<AgentRunResult, String> {
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch command: {e}"))?;
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -199,26 +302,38 @@ pub(crate) fn run_claude_with_progress(
         ));
     }
 
-    let status = loop {
+    let mut stopped = false;
+    let (status, tree_cleanup) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for command: {e}"))?
         {
-            break status;
+            break (
+                Ok(status),
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
+            );
         }
 
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
+            stopped = true;
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                Ok(()),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);
     };
 
-    for reader in readers {
-        let _ = reader.join();
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    if stopped {
+        clear_ai_run_cancelled(&run_id);
+    }
+    tree_cleanup?;
+    reader_cleanup?;
+    let status = status?;
+    if stopped {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
 
     let stdout = stdout
@@ -562,6 +677,63 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--output-file" && pair[1].ends_with(PAINTNODE_DIRECTOR_ACTION_FILE)
         }));
+    }
+
+    #[test]
+    fn workflow_director_output_flags_precede_prompt_delimiter() {
+        let job = TempJobDir::new("paintnode-claude-workflow-draft-test").expect("temp dir");
+        let command = build_claude_agent_command_with_session(
+            &claude_command_options(None, None, None),
+            job.path(),
+            "draft a workflow",
+            &[],
+            None,
+            Some("paintnode-workflow-draft.json"),
+            Some("workflow-draft"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let delimiter = args.iter().position(|arg| arg == "--").expect("delimiter");
+        let output = args
+            .iter()
+            .position(|arg| arg == "--output-file")
+            .expect("output");
+        let schema = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema");
+        assert!(output < delimiter);
+        assert!(schema < delimiter);
+        assert_eq!(args[schema + 1], "workflow-draft");
+        assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_revision_uses_dedicated_patch_schema_before_prompt() {
+        let job = TempJobDir::new("paintnode-claude-workflow-revision-test").expect("temp dir");
+        let command = build_claude_agent_command_with_session(
+            &claude_command_options(None, None, None),
+            job.path(),
+            "revise a workflow",
+            &[],
+            None,
+            Some("paintnode-workflow-revision.json"),
+            Some("workflow-revision"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let delimiter = args.iter().position(|arg| arg == "--").expect("delimiter");
+        let schema = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema");
+        assert!(schema < delimiter);
+        assert_eq!(args[schema + 1], "workflow-revision");
+        assert!(!args.iter().any(|arg| arg == "--image"));
     }
 
     #[test]

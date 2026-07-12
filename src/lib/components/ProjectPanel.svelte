@@ -62,7 +62,16 @@
   const storyboardFiles = $derived(files.filter((file) => file.kind === 'storyboard'));
   const workflowFiles = $derived(files.filter((file) => file.kind === 'workflow'));
   const autosaveFiles = $derived(files.filter((file) => file.kind === 'autosave'));
-  const generatedFiles = $derived(files.filter((file) => file.kind === 'generated'));
+  const generatedFiles = $derived(files.filter((file) => file.kind === 'generated' || file.kind === 'edited'));
+  const latestWorkflowEdit = $derived(
+    generatedFiles
+      // Returned workflow edits are persisted as `edited` project assets. Keep
+      // the filename check as a compatibility fallback for older manifests,
+      // but do not hide a valid edited asset just because its display name is
+      // the document name (for example, "Virtual Accepted Direction").
+      .filter((file) => file.kind === 'edited' || /^editor-revision-.*\.png$/i.test(file.name))
+      .toSorted((a, b) => (b.modifiedAt ?? b.createdAt ?? 0) - (a.modifiedAt ?? a.createdAt ?? 0))[0] ?? null,
+  );
   const importedFiles = $derived(files.filter((file) => file.kind === 'imported'));
   const viewModes: { id: ViewMode; label: string; icon: string }[] = [
     { id: 'list', label: 'List view', icon: AppsList },
@@ -241,6 +250,16 @@
     }
 
     if (isWorkflow(file)) {
+      if (workflow.active && workflow.dirty) {
+        workflow.show();
+        editor.flash('Workflow has unsaved changes. Save it before opening another saved workflow.');
+        return;
+      }
+      if (workflow.active && workflow.savedPath === file.relativePath) {
+        workflow.show();
+        editor.flash(`${file.name} is already open`);
+        return;
+      }
       const bytes = await project.readFile(file);
       workflow.openFromBytes(bytes, file.relativePath, file.name.replace(/\.cxflow\.json$/i, ''));
       editor.flash(`Opened ${file.name}`);
@@ -291,16 +310,36 @@
 
   async function switchProject(): Promise<void> {
     closeFileMenu();
-    await project.openFolder();
+    if (!await project.openFolder() && project.error) editor.flash(project.error);
   }
 
   function closeProject(): void {
     closeFileMenu();
-    project.clear();
+    if (!project.clear() && project.error) editor.flash(project.error);
   }
 
   function toggleGroup(id: ProjectSectionId): void {
     collapsedGroups[id] = !collapsedGroups[id];
+  }
+
+  function openFirstWorkflow(): void {
+    const file = workflowFiles[0];
+    if (file) void openFile(file);
+  }
+
+  function placeLatestWorkflowEdit(): void {
+    if (latestWorkflowEdit && editor.doc) void openFile(latestWorkflowEdit);
+  }
+
+  function projectKeyboardShortcut(event: KeyboardEvent): void {
+    if (!event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.code === 'KeyW' && workflowFiles.length) {
+      event.preventDefault();
+      openFirstWorkflow();
+    } else if (event.code === 'KeyL' && latestWorkflowEdit && editor.doc) {
+      event.preventDefault();
+      placeLatestWorkflowEdit();
+    }
   }
 
   async function importExternalImages(): Promise<void> {
@@ -329,7 +368,7 @@
 </script>
 
 {#snippet fileThumb(file: ProjectFile, actionLabel: 'Open' | 'Place')}
-  <button class="thumb" aria-label={`${actionLabel} ${file.name}`} onclick={() => void openFile(file)}>
+  <button class="thumb" aria-label={`${actionLabel === 'Place' ? 'Place as layer' : actionLabel} ${file.name}`} disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>
     {#if file.previewDataUrl}
       <img src={file.previewDataUrl} alt="" />
     {:else}
@@ -367,13 +406,13 @@
       oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}
     >
       {@render fileThumb(file, actionLabel)}
-      <button class="file-name" use:croppedNameTooltip={file.name} onclick={() => void openFile(file)}>{file.name}</button>
+      <button class="file-name" use:croppedNameTooltip={file.name} disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>{file.name}</button>
     </div>
   {:else}
     <div class="file-row" role="listitem" oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}>
       {@render fileThumb(file, actionLabel)}
       <div class="meta">
-        <button class="file-name" onclick={() => void openFile(file)}>{file.name}</button>
+        <button class="file-name" disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>{file.name}</button>
         <span>{metaFor(file)}</span>
       </div>
       {@render fileActions(file, allowDelete)}
@@ -430,6 +469,26 @@
         >
           <Icon svg={ImageAdd} size={13} />
         </button>
+      {:else if id === 'workflows' && groupFiles.length > 0}
+        <button
+          class="group-action"
+          aria-label="Open first workflow (Alt+W)"
+          aria-keyshortcuts="Alt+W"
+          use:tooltip={{ text: 'Open first workflow (Alt+W)', placement: 'left' }}
+          onclick={openFirstWorkflow}
+        >
+          <Icon svg={Open} size={13} />
+        </button>
+      {:else if id === 'generated' && latestWorkflowEdit && editor.doc}
+        <button
+          class="group-action"
+          aria-label="Place latest workflow edit as layer (Alt+L)"
+          aria-keyshortcuts="Alt+L"
+          use:tooltip={{ text: 'Place latest workflow edit as layer (Alt+L)', placement: 'left' }}
+          onclick={placeLatestWorkflowEdit}
+        >
+          <Icon svg={ImageAdd} size={13} />
+        </button>
       {/if}
       <small>{groupFiles.length}</small>
     </div>
@@ -475,6 +534,7 @@
   onpointerdown={closeFileMenu}
   onkeydown={(event) => {
     if (event.key === 'Escape') closeFileMenu();
+    projectKeyboardShortcut(event);
   }}
 />
 
@@ -500,6 +560,12 @@
     {#if !desktop}
       <p class="empty">Projects are available in the desktop app.</p>
     {:else if !project.current}
+      {#if project.lastPath}
+        <button class="open-project" onclick={() => void project.reopenLastProject()}>
+          <Icon svg={ArchiveClock} size={16} /> Reopen Last Project
+        </button>
+        <p class="empty">{project.lastPath}</p>
+      {/if}
       <button class="open-project" onclick={() => void project.openFolder()}>
         <Icon svg={FolderOpen} size={16} /> Open Project Folder
       </button>
@@ -512,9 +578,9 @@
         </div>
         <div class="head-actions">
           <button
-            aria-label="Refresh project"
-            use:tooltip={{ text: 'Refresh project', placement: 'left' }}
-            onclick={() => void ui.withLoading('Refreshing project…', () => project.refresh())}
+            aria-label="Refresh project files and assets"
+            use:tooltip={{ text: 'Refresh project files and assets', placement: 'left' }}
+            onclick={() => void ui.withLoading('Refreshing project files and assets…', () => project.refresh())}
           >
             <Icon svg={ArrowSync} size={15} />
           </button>
@@ -548,6 +614,11 @@
       {/if}
 
       <div class="browser">
+        {#if workflowFiles.length > 0 || (latestWorkflowEdit && editor.doc)}
+          <p class="project-keyboard-hint">
+            Keyboard: Alt+W opens the first saved workflow.{latestWorkflowEdit && editor.doc ? ' Alt+L places the latest workflow edit as a layer.' : ''}
+          </p>
+        {/if}
         {@render fileGroup('documents', 'Documents', documentFiles, 'Open', false, 'Saved .ora files appear here.')}
         {@render fileGroup('storyboards', 'Storyboards', storyboardFiles, 'Open', false, 'Composition storyboard .ora files appear here.')}
         {@render fileGroup('workflows', 'Workflows', workflowFiles, 'Open', false, 'Saved composition boards appear here.')}

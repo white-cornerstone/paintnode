@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "Untitled Workflow",
+  "prompt": "",
+  "promptX": 480,
+  "promptY": 70,
+  "outputX": 895,
+  "outputY": 96,
+  "panX": 0,
+  "panY": 0,
+  "zoom": 1,
+  "storyboardDataUrl": null,
+  "nodes": [],
+  "connections": [
+    {
+      "id": "connection-default",
+      "from": "composition",
+      "to": "output"
+    }
+  ],
+  "outputAssetId": null,
+  "outputRelativePath": null
+}

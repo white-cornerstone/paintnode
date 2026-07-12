@@ -8,6 +8,7 @@ pub(crate) mod director;
 pub(crate) mod fill_storyboard;
 pub(crate) mod grok;
 pub(crate) mod placement;
+pub(crate) mod workflow_director;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -15,10 +16,17 @@ use std::fs;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
+#[cfg(any(windows, test))]
+use std::io::Write;
+#[cfg(any(windows, test))]
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
+use std::process::ExitStatus;
 use std::process::Output;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -85,10 +93,14 @@ pub(crate) async fn cancel_ai_run(run_id: String) -> Result<(), String> {
     if run_id.is_empty() {
         return Err("Missing run id.".into());
     }
+    request_ai_run_cancel(&run_id)
+}
+
+pub(crate) fn request_ai_run_cancel(run_id: &str) -> Result<(), String> {
     cancelled_ai_runs()
         .lock()
         .map_err(|_| "Cancellation registry is unavailable.".to_string())?
-        .insert(run_id);
+        .insert(run_id.to_string());
     pending_director_inputs().1.notify_all();
     Ok(())
 }
@@ -222,7 +234,497 @@ pub(crate) fn ai_run_cancelled(run_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Prepare provider bridges for tree-scoped cancellation. Unix starts a new
+/// process group. Windows starts a PaintNode wrapper blocked on an
+/// authenticated loopback channel. Only after the parent assigns that wrapper
+/// to a kill-on-close Job Object does it send the release token. The OS owns
+/// the unique endpoint, no handles are inherited, and stdin remains untouched.
+/// Windows associates every later descendant with that job by default;
+/// breakaway is not enabled.
+#[cfg(windows)]
+const PROVIDER_WRAPPER_ARG: &str = "--paintnode-ai-provider-wrapper";
+#[cfg(any(windows, test))]
+const PROVIDER_WRAPPER_RELEASE_TOKEN: &[u8] = b"paintnode-provider-job-assigned-v1";
+
+pub(crate) struct ProviderLaunchGate {
+    #[cfg(any(windows, test))]
+    listener: TcpListener,
+    #[cfg(any(windows, test))]
+    secret: [u8; 32],
+}
+
+#[cfg(any(windows, test))]
+fn encode_provider_gate_secret(secret: &[u8; 32]) -> String {
+    secret.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(any(windows, test))]
+fn decode_provider_gate_secret(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Provider launch channel secret is invalid.".into());
+    }
+    let mut secret = [0_u8; 32];
+    for (index, byte) in secret.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "Provider launch channel secret is invalid.".to_string())?;
+    }
+    Ok(secret)
+}
+
+#[cfg(any(windows, test))]
+fn create_provider_launch_gate(secret: [u8; 32]) -> Result<ProviderLaunchGate, String> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| format!("Could not reserve the provider launch channel: {error}"))?;
+    Ok(ProviderLaunchGate { listener, secret })
+}
+
+#[cfg(windows)]
+fn create_windows_provider_launch_gate() -> Result<ProviderLaunchGate, String> {
+    let mut secret = [0_u8; 32];
+    getrandom::fill(&mut secret)
+        .map_err(|error| format!("Could not secure the provider launch channel: {error}"))?;
+    create_provider_launch_gate(secret)
+}
+
+#[cfg(any(windows, test))]
+fn release_provider_launch_gate(gate: &ProviderLaunchGate) -> Result<(), String> {
+    release_provider_launch_gate_with_timeout(gate, Duration::from_secs(10))
+}
+
+#[cfg(any(windows, test))]
+fn release_provider_launch_gate_with_timeout(
+    gate: &ProviderLaunchGate,
+    timeout: Duration,
+) -> Result<(), String> {
+    gate.listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Could not prepare the provider launch channel: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Provider wrapper did not authenticate before launch timeout.".into());
+        }
+        match gate.listener.accept() {
+            Ok((mut stream, peer)) => {
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("Could not secure provider launch input: {error}"))?;
+                stream
+                    .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
+                    .map_err(|error| format!("Could not secure provider launch input: {error}"))?;
+                let mut received = Vec::new();
+                if Read::by_ref(&mut stream)
+                    .take(64)
+                    .read_to_end(&mut received)
+                    .is_err()
+                    || received.as_slice() != gate.secret
+                {
+                    continue;
+                }
+                stream
+                    .write_all(PROVIDER_WRAPPER_RELEASE_TOKEN)
+                    .and_then(|_| stream.shutdown(Shutdown::Write))
+                    .map_err(|error| format!("Could not release the provider wrapper: {error}"))?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(format!("Could not accept the provider wrapper: {error}")),
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn connect_provider_launch_gate(address: &str, secret: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let address = address
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| "Provider launch channel address is invalid.".to_string())?;
+    if !address.ip().is_loopback() {
+        return Err("Provider launch channel must use loopback.".into());
+    }
+    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
+        .map_err(|error| format!("Could not connect to the provider launch channel: {error}"))?;
+    authenticate_provider_launch_stream(stream, secret)
+}
+
+#[cfg(any(windows, test))]
+fn authenticate_provider_launch_stream(
+    mut stream: TcpStream,
+    secret: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("Could not configure the provider launch channel: {error}"))?;
+    stream
+        .write_all(secret)
+        .and_then(|_| stream.shutdown(Shutdown::Write))
+        .map_err(|error| format!("Could not authenticate the provider wrapper: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .take(128)
+        .read_to_end(&mut response)
+        .map_err(|error| format!("Could not read the provider launch release: {error}"))?;
+    Ok(response)
+}
+
+#[cfg(any(windows, test))]
+fn with_verified_provider_release<T>(
+    release: &[u8],
+    launch: impl FnOnce() -> T,
+) -> Result<T, String> {
+    if release != PROVIDER_WRAPPER_RELEASE_TOKEN {
+        return Err("Provider launch was not released by its assigned process tree.".into());
+    }
+    Ok(launch())
+}
+
+pub(crate) fn configure_ai_process_group(
+    command: &mut Command,
+) -> Result<Option<ProviderLaunchGate>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        Ok(None)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        let program = command.get_program().to_os_string();
+        let args = command
+            .get_args()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| (name.to_os_string(), value.map(ToOwned::to_owned)))
+            .collect::<Vec<_>>();
+        let current_dir = command.get_current_dir().map(Path::to_path_buf);
+        let gate = create_windows_provider_launch_gate()?;
+        let address = gate
+            .listener
+            .local_addr()
+            .map_err(|error| format!("Could not inspect the provider launch channel: {error}"))?;
+        let secret = encode_provider_gate_secret(&gate.secret);
+        let mut wrapper =
+            Command::new(std::env::current_exe().map_err(|error| {
+                format!("Could not locate PaintNode provider wrapper: {error}")
+            })?);
+        wrapper
+            .arg(PROVIDER_WRAPPER_ARG)
+            .arg(address.to_string())
+            .arg(secret)
+            .arg(program)
+            .args(args)
+            .creation_flags(CREATE_NEW_PROCESS_GROUP);
+        if let Some(current_dir) = current_dir {
+            wrapper.current_dir(current_dir);
+        }
+        for (name, value) in environment {
+            if let Some(value) = value {
+                wrapper.env(name, value);
+            } else {
+                wrapper.env_remove(name);
+            }
+        }
+        *command = wrapper;
+        Ok(Some(gate))
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn run_provider_process_wrapper_if_requested() -> Option<i32> {
+    let mut args = std::env::args_os();
+    let _executable = args.next()?;
+    if args.next()?.to_str() != Some(PROVIDER_WRAPPER_ARG) {
+        return None;
+    }
+    let address = args.next()?.to_string_lossy().into_owned();
+    let secret = match args
+        .next()
+        .and_then(|value| value.to_str().map(str::to_string))
+        .ok_or_else(|| "Provider launch channel secret is missing.".to_string())
+        .and_then(|value| decode_provider_gate_secret(&value))
+    {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(70);
+        }
+    };
+    let program = args.next()?;
+    let forwarded = args.collect::<Vec<_>>();
+    let release = match connect_provider_launch_gate(&address, &secret) {
+        Ok(release) => release,
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(70);
+        }
+    };
+    let status = match with_verified_provider_release(&release, || {
+        Command::new(program).args(forwarded).status()
+    }) {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            eprintln!("PaintNode provider wrapper could not launch the provider bridge: {error}");
+            return Some(71);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(70);
+        }
+    };
+    Some(status.code().unwrap_or(1))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn run_provider_process_wrapper_if_requested() -> Option<i32> {
+    None
+}
+
+#[cfg(any(windows, test))]
+fn process_tree_action_result(success: bool, action: &str) -> Result<(), String> {
+    if success {
+        Ok(())
+    } else {
+        Err(format!("{action} did not stop the provider process tree."))
+    }
+}
+
+pub(crate) struct AiProcessTree {
+    #[cfg(unix)]
+    process_id: u32,
+    #[cfg(windows)]
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+impl AiProcessTree {
+    fn terminate(&mut self) -> Result<(), String> {
+        #[cfg(unix)]
+        unsafe {
+            // configure_ai_process_group makes the direct child the group
+            // leader, so this id remains valid after that child exits.
+            if libc::kill(-(self.process_id as i32), libc::SIGKILL) == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            Err(format!(
+                "Could not stop provider process group {}: {error}",
+                self.process_id
+            ))
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+            if self.job.is_null() {
+                return Ok(());
+            }
+            let terminated = TerminateJobObject(self.job, 1) != 0;
+            let terminate_error = (!terminated).then(std::io::Error::last_os_error);
+            let closed = CloseHandle(self.job) != 0;
+            self.job = std::ptr::null_mut();
+            process_tree_action_result(terminated, "Windows Job Object termination").map_err(
+                |message| {
+                    format!(
+                        "{message} {} Kill-on-close fallback {}.",
+                        terminate_error
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "Unknown Windows error.".into()),
+                        if closed {
+                            "was requested"
+                        } else {
+                            "also failed"
+                        }
+                    )
+                },
+            )?;
+            process_tree_action_result(closed, "Windows Job Object close")
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AiProcessTree {
+    fn drop(&mut self) {
+        if !self.job.is_null() {
+            unsafe {
+                // KILL_ON_JOB_CLOSE is a final safety net if a caller exits
+                // before explicit termination.
+                let _ = windows_sys::Win32::Foundation::CloseHandle(self.job);
+            }
+            self.job = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn abort_windows_provider_wrapper(
+    child: &mut Child,
+    launch_gate: &mut Option<ProviderLaunchGate>,
+    message: String,
+) -> String {
+    // Closing the listener first independently makes the blocked wrapper fail
+    // closed even if direct process termination fails.
+    drop(launch_gate.take());
+    let _ = child.kill();
+    let deadline = Instant::now() + OUTPUT_READER_JOIN_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return message,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => return format!("{message} Provider wrapper reap timed out."),
+            Err(error) => return format!("{message} Could not reap provider wrapper: {error}"),
+        }
+    }
+}
+
+pub(crate) fn track_ai_process_tree(
+    child: &mut Child,
+    launch_gate: Option<ProviderLaunchGate>,
+) -> Result<AiProcessTree, String> {
+    #[cfg(unix)]
+    {
+        let _ = launch_gate;
+        Ok(AiProcessTree {
+            process_id: child.id(),
+        })
+    }
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let mut launch_gate = launch_gate;
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            let message = format!(
+                "Could not create Windows provider Job Object: {}",
+                std::io::Error::last_os_error()
+            );
+            return Err(abort_windows_provider_wrapper(
+                child,
+                &mut launch_gate,
+                message,
+            ));
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) != 0;
+        let assigned =
+            configured && AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) != 0;
+        if !assigned {
+            // This also handles an invalid nested-job environment. Never fall
+            // back to an untracked provider process tree.
+            let error = std::io::Error::last_os_error();
+            let _ = CloseHandle(job);
+            return Err(abort_windows_provider_wrapper(
+                child,
+                &mut launch_gate,
+                format!("Could not isolate the Windows provider process tree: {error}"),
+            ));
+        }
+        let gate = match launch_gate.take() {
+            Some(gate) => gate,
+            None => {
+                let _ = TerminateJobObject(job, 1);
+                let _ = CloseHandle(job);
+                return Err(abort_windows_provider_wrapper(
+                    child,
+                    &mut launch_gate,
+                    "Windows provider wrapper launch gate is missing.".into(),
+                ));
+            }
+        };
+        if let Err(error) = release_provider_launch_gate(&gate) {
+            drop(gate);
+            let _ = TerminateJobObject(job, 1);
+            let _ = CloseHandle(job);
+            return Err(abort_windows_provider_wrapper(
+                child,
+                &mut launch_gate,
+                format!("Could not release the isolated Windows provider wrapper: {error}"),
+            ));
+        }
+        drop(gate);
+        Ok(AiProcessTree { job })
+    }
+}
+
+pub(crate) fn cleanup_ai_process_tree_after_bridge_exit(
+    tree: &mut AiProcessTree,
+) -> Result<(), String> {
+    tree.terminate()
+}
+
+/// Force-stop an isolated provider process tree and reap its direct child.
+pub(crate) fn terminate_ai_process_tree(
+    tree: &mut AiProcessTree,
+    child: &mut Child,
+) -> Result<ExitStatus, String> {
+    let tree_result = tree.terminate();
+    let _ = child.kill();
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not reap provider bridge: {error}"))?;
+    tree_result?;
+    Ok(status)
+}
+
+/// Reader threads normally finish as soon as the isolated process group is
+/// gone. Keep a hard upper bound so an OS-level termination failure or an
+/// unexpected inherited pipe cannot hold the caller indefinitely.
+pub(crate) fn join_output_readers_bounded(
+    readers: Vec<thread::JoinHandle<()>>,
+    timeout: Duration,
+) -> Result<(), String> {
+    if readers.is_empty() {
+        return Ok(());
+    }
+    let count = readers.len();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    for reader in readers {
+        let finished_tx = finished_tx.clone();
+        thread::spawn(move || {
+            let _ = reader.join();
+            let _ = finished_tx.send(());
+        });
+    }
+    drop(finished_tx);
+    let deadline = Instant::now() + timeout;
+    for _ in 0..count {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || finished_rx.recv_timeout(remaining).is_err() {
+            return Err(
+                "Provider output reader cleanup timed out after process termination.".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const OUTPUT_READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const CODEX_PROGRESS_EVENT: &str = "codex-generation-progress";
 
@@ -386,6 +888,8 @@ struct DecoupleManifestLayer {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkflowSourceImage {
     name: String,
+    #[serde(default)]
+    role: String,
     bytes: Vec<u8>,
 }
 
@@ -1692,6 +2196,245 @@ pub(crate) fn project_or_temp_job_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_tree_termination_kills_bridge_and_descendant() {
+        let job = TempJobDir::new("paintnode-process-tree-test").expect("temp dir");
+        let descendant_path = job.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$1\"; wait")
+            .arg("paintnode-process-tree-test")
+            .arg(&descendant_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let launch_gate = configure_ai_process_group(&mut command).expect("configure process tree");
+        let mut child = command.spawn().expect("spawn bridge with descendant");
+        let mut process_tree =
+            track_ai_process_tree(&mut child, launch_gate).expect("track process tree");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !descendant_path.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_id = fs::read_to_string(&descendant_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+
+        let status = terminate_ai_process_tree(&mut process_tree, &mut child).expect("reap bridge");
+        assert!(!status.success());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let exists = unsafe { libc::kill(descendant_id, 0) } == 0;
+            if !exists {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "provider descendant survived process-tree termination"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_exit_still_kills_descendant_holding_inherited_output_pipe() {
+        let job = TempJobDir::new("paintnode-inherited-pipe-test").expect("temp dir");
+        let descendant_path = job.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$1\"; echo bridge-done")
+            .arg("paintnode-inherited-pipe-test")
+            .arg(&descendant_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let launch_gate = configure_ai_process_group(&mut command).expect("configure process tree");
+        let mut child = command.spawn().expect("spawn short-lived bridge");
+        let mut process_tree =
+            track_ai_process_tree(&mut child, launch_gate).expect("track process tree");
+        let mut stream = child.stdout.take().expect("bridge stdout");
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll bridge") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = terminate_ai_process_tree(&mut process_tree, &mut child);
+                panic!("test bridge did not exit before its descendant");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success());
+        let descendant_id = fs::read_to_string(&descendant_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+
+        cleanup_ai_process_tree_after_bridge_exit(&mut process_tree)
+            .expect("kill lingering process tree");
+        join_output_readers_bounded(vec![reader], Duration::from_secs(1))
+            .expect("inherited output pipe closed");
+        assert_ne!(unsafe { libc::kill(descendant_id, 0) }, 0);
+    }
+
+    #[test]
+    fn process_tree_action_failure_is_never_reported_as_success() {
+        assert!(process_tree_action_result(true, "Windows Job Object termination").is_ok());
+        let error =
+            process_tree_action_result(false, "Windows Job Object termination").unwrap_err();
+        assert!(error.contains("did not stop the provider process tree"));
+    }
+
+    #[test]
+    fn output_reader_cleanup_has_a_hard_timeout() {
+        let reader = thread::spawn(|| thread::sleep(Duration::from_millis(100)));
+        let error = join_output_readers_bounded(vec![reader], Duration::from_millis(5))
+            .expect_err("reader cleanup should time out");
+        assert!(error.contains("cleanup timed out"));
+    }
+
+    #[test]
+    fn authenticated_loopback_gate_rejects_spoofing_and_releases_exact_wrapper() {
+        let secret = [7_u8; 32];
+        assert_eq!(
+            decode_provider_gate_secret(&encode_provider_gate_secret(&secret)),
+            Ok(secret)
+        );
+        let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
+        let address = gate.listener.local_addr().expect("gate address");
+        let wrong_stream = TcpStream::connect(address).expect("preconnect wrong client");
+        let release_gate = thread::spawn(move || release_provider_launch_gate(&gate));
+        assert_ne!(
+            authenticate_provider_launch_stream(wrong_stream, &[8_u8; 32]).unwrap_or_default(),
+            PROVIDER_WRAPPER_RELEASE_TOKEN
+        );
+        let correct_stream = TcpStream::connect(address).expect("preconnect correct client");
+        let release =
+            authenticate_provider_launch_stream(correct_stream, &secret).expect("release token");
+        release_gate
+            .join()
+            .expect("release thread")
+            .expect("release authenticated wrapper");
+        assert_eq!(release, PROVIDER_WRAPPER_RELEASE_TOKEN);
+    }
+
+    #[test]
+    fn dropped_assignment_gate_fails_closed_without_launch() {
+        let secret = [11_u8; 32];
+        let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
+        let address = gate
+            .listener
+            .local_addr()
+            .expect("gate address")
+            .to_string();
+        drop(gate);
+        let release = connect_provider_launch_gate(&address, &secret).unwrap_or_default();
+        let launched = std::cell::Cell::new(false);
+        assert!(with_verified_provider_release(&release, || launched.set(true)).is_err());
+        assert!(!launched.get());
+    }
+
+    #[test]
+    fn sustained_wrong_clients_cannot_extend_release_deadline() {
+        let secret = [13_u8; 32];
+        let gate = create_provider_launch_gate(secret).expect("reserve loopback gate");
+        let address = gate.listener.local_addr().expect("gate address");
+        let _slow_clients = (0..4)
+            .map(|_| TcpStream::connect(address).expect("preconnect slow wrong client"))
+            .collect::<Vec<_>>();
+        let started = Instant::now();
+        let error = release_provider_launch_gate_with_timeout(&gate, Duration::from_millis(120))
+            .expect_err("wrong clients must not authenticate");
+        assert!(error.contains("timeout"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn invalid_or_preexisting_release_never_reaches_provider_launch() {
+        let launched = std::cell::Cell::new(false);
+        for signal in [
+            b"".as_slice(),
+            b"assigned",
+            b"paintnode-provider-job-assigned-v1-extra",
+        ] {
+            let result = with_verified_provider_release(signal, || launched.set(true));
+            assert!(result.is_err());
+            assert!(!launched.get());
+        }
+        with_verified_provider_release(PROVIDER_WRAPPER_RELEASE_TOKEN, || launched.set(true))
+            .expect("exact parent signal");
+        assert!(launched.get());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_bridge_is_gated_before_job_assignment() {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C", "exit 0"]);
+        let _gate = configure_ai_process_group(&mut command)
+            .expect("configure wrapper")
+            .expect("Windows gate");
+        let args = command.get_args().collect::<Vec<_>>();
+        assert_eq!(args[0], std::ffi::OsStr::new(PROVIDER_WRAPPER_ARG));
+        assert_eq!(args[3], std::ffi::OsStr::new("cmd.exe"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_object_kills_descendant_after_bridge_exit() {
+        let secret = [9_u8; 32];
+        let gate = create_provider_launch_gate(secret).expect("loopback launch gate");
+        let address = gate
+            .listener
+            .local_addr()
+            .expect("gate address")
+            .to_string();
+        let wrapper = thread::spawn(move || connect_provider_launch_gate(&address, &secret));
+        let mut command = Command::new("cmd.exe");
+        command
+            .args([
+                "/D",
+                "/S",
+                "/C",
+                "ping -n 2 127.0.0.1 >nul & start \"\" /B cmd.exe /D /S /C \"ping -n 30 127.0.0.1\"",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().expect("spawn delayed bridge");
+        let mut tree = track_ai_process_tree(&mut child, Some(gate)).expect("assign job");
+        assert_eq!(
+            wrapper.join().expect("wrapper").expect("release"),
+            PROVIDER_WRAPPER_RELEASE_TOKEN
+        );
+        let mut stream = child.stdout.take().expect("bridge stdout");
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().expect("poll bridge").is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Windows bridge did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        cleanup_ai_process_tree_after_bridge_exit(&mut tree).expect("terminate retained job");
+        join_output_readers_bounded(vec![reader], Duration::from_secs(2))
+            .expect("descendant inherited pipe closed");
+    }
     use crate::ai::antigravity::antigravity_generate_prompt;
     use crate::ai::codex::codex_direct_generate_prompt;
     use crate::ai::director::PAINTNODE_DIRECTOR_ACTION_FILE;

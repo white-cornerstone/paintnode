@@ -2,15 +2,19 @@
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import ManagedRuntimeCard from './ManagedRuntimeCard.svelte';
-  import { detectAntigravity, detectCodex, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
+  import { detectAntigravity, detectCodex, detectGrok, isDesktop, type CodexDetectionResult } from '../integrations/desktop';
   import { markAiSetupSeen } from '../state/aiSetup';
   import {
     ANTIGRAVITY_IMAGE_MODEL_OPTIONS,
     ANTIGRAVITY_IMAGE_SIZE_OPTIONS,
+    GROK_IMAGE_MODEL_OPTIONS,
+    GROK_IMAGE_RESOLUTION_OPTIONS,
     type AiAutonomyLevel,
     type AntigravityImageModelId,
     type AntigravityImageSize,
     type CodexModelId,
+    type GrokImageModelId,
+    type GrokImageResolution,
     type ReasoningEffort,
   } from '../state/settings';
   import { settings } from '../state/settings.svelte';
@@ -29,7 +33,7 @@
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type WizardProvider = 'codex' | 'antigravity';
+  type WizardProvider = 'codex' | 'antigravity' | 'grok';
   type Step = 1 | 2 | 3 | 4;
   type DetectState = { status: 'checking' | 'found' | 'missing'; result: CodexDetectionResult | null };
 
@@ -55,6 +59,13 @@
       command: 'agy',
       description: 'Uses your Antigravity sign-in for PaintNode-owned image generation.',
     },
+    {
+      id: 'grok',
+      icon: Sparkle,
+      title: 'Grok',
+      command: 'grok',
+      description: 'Uses your local Grok sign-in for Grok Imagine generation and AI Director work.',
+    },
   ];
   const autonomyLevels: { value: AiAutonomyLevel; label: string }[] = [
     { value: 'low', label: 'Low autonomy' },
@@ -78,17 +89,18 @@
   ];
 
   let step = $state<Step>(1);
-    let provider = $state<WizardProvider>(settings.value.ai.imageProvider === 'antigravity' ? 'antigravity' : 'codex');
+  let provider = $state<WizardProvider>(settings.value.ai.imageProvider);
   let userPicked = false;
   let codexDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
   let agyDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
+  let grokDetect = $state<DetectState>({ status: desktop ? 'checking' : 'missing', result: null });
   let manualBin = $state('');
   let firstPrompt = $state(starterPrompts[0].prompt);
   let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
 
-  const providerName = $derived(provider === 'antigravity' ? 'Antigravity' : 'Codex');
-  const providerCommand = $derived(provider === 'antigravity' ? 'agy' : 'codex');
-  const selectedDetect = $derived(provider === 'antigravity' ? agyDetect : codexDetect);
+  const providerName = $derived(provider === 'codex' ? 'Codex' : provider === 'antigravity' ? 'Antigravity' : 'Grok');
+  const providerCommand = $derived(provider === 'codex' ? 'codex' : provider === 'antigravity' ? 'agy' : 'grok');
+  const selectedDetect = $derived(provider === 'codex' ? codexDetect : provider === 'antigravity' ? agyDetect : grokDetect);
   const availableCodexModels = $derived(codexModelOptions(codexCapabilities, settings.value.ai.model));
   const availableReasoningEfforts = $derived(
     codexReasoningOptions(codexCapabilities, settings.value.ai.model, settings.value.ai.reasoningEffort),
@@ -104,6 +116,10 @@
     void runDetection(
       'antigravity',
       settings.value.ai.antigravityExecutableMode === 'custom' ? settings.value.ai.antigravityBin : '',
+    );
+    void runDetection(
+      'grok',
+      settings.value.ai.grokExecutableMode === 'custom' ? settings.value.ai.grokBin : '',
     );
   }
 
@@ -133,6 +149,7 @@
   async function runDetection(target: WizardProvider, bin: string, saveCustomPath = false): Promise<void> {
     const setState = (value: DetectState) => {
       if (target === 'antigravity') agyDetect = value;
+      else if (target === 'grok') grokDetect = value;
       else codexDetect = value;
     };
     if (!desktop) {
@@ -141,12 +158,17 @@
     }
     setState({ status: 'checking', result: null });
     try {
-      const result = target === 'antigravity' ? await detectAntigravity(bin) : await detectCodex(bin);
+      const result = target === 'antigravity'
+        ? await detectAntigravity(bin)
+        : target === 'grok'
+          ? await detectGrok(bin)
+          : await detectCodex(bin);
       if (saveCustomPath && result.found && result.path) {
         settings.update({
-          ai:
-            target === 'antigravity'
-              ? { antigravityExecutableMode: 'custom', antigravityBin: result.path }
+          ai: target === 'antigravity'
+            ? { antigravityExecutableMode: 'custom', antigravityBin: result.path }
+            : target === 'grok'
+              ? { grokExecutableMode: 'custom', grokBin: result.path }
               : { codexExecutableMode: 'custom', codexBin: result.path },
         });
       }
@@ -164,9 +186,12 @@
   // provider that is actually installed.
   function maybeAutoSelect(): void {
     if (userPicked) return;
-    const other: WizardProvider = provider === 'antigravity' ? 'codex' : 'antigravity';
-    const otherDetect = other === 'antigravity' ? agyDetect : codexDetect;
-    if (selectedDetect.status === 'missing' && otherDetect.status === 'found') provider = other;
+    if (selectedDetect.status !== 'missing') return;
+    const detected = providerCards.find((card) => {
+      const state = card.id === 'codex' ? codexDetect : card.id === 'antigravity' ? agyDetect : grokDetect;
+      return state.status === 'found';
+    });
+    if (detected) provider = detected.id;
   }
 
   function pickProvider(id: WizardProvider): void {
@@ -175,28 +200,29 @@
   }
 
   function managedRuntimeChanged(status: ManagedRuntimeStatus | null): void {
-    if (status && (status.state === 'ready' || status.state === 'updateAvailable') && status.authenticated !== false) {
+    if (status?.state === 'ready' && status.authenticated !== false) {
       void runDetection('codex', '');
     }
   }
 
-    function confirmProvider(): void {
-      // The wizard only offers Codex/Antigravity cards; a stored Grok
-      // selection falls back to the Codex card for display. Don't overwrite
-      // the user's Grok settings unless they actively picked a card.
-      if (userPicked || settings.value.ai.imageProvider !== 'grok') {
-        settings.update({
-          ai: {
-            provider,
-            imageProvider: provider,
-            directorProvider: provider === 'codex' ? 'codex' : settings.value.ai.directorProvider,
-            directorMode: provider === 'antigravity' ? 'skip' : settings.value.ai.directorMode === 'skip' ? 'auto' : settings.value.ai.directorMode,
-          },
-        });
-      }
-      manualBin = provider === 'antigravity' ? settings.value.ai.antigravityBin : settings.value.ai.codexBin;
-      step = 2;
-    }
+  function confirmProvider(): void {
+    settings.update({
+      ai: {
+        provider,
+        imageProvider: provider,
+        directorProvider: provider === 'antigravity' ? settings.value.ai.directorProvider : provider,
+        directorMode: provider === 'antigravity'
+          ? 'skip'
+          : settings.value.ai.directorMode === 'skip' ? 'auto' : settings.value.ai.directorMode,
+      },
+    });
+    manualBin = provider === 'codex'
+      ? settings.value.ai.codexBin
+      : provider === 'antigravity'
+        ? settings.value.ai.antigravityBin
+        : settings.value.ai.grokBin;
+    step = 2;
+  }
 
   function chooseProjectFolder(): void {
     void project.openFolder();
@@ -241,15 +267,15 @@
         <div>
           <h2>Welcome to PaintNode!</h2>
           <p>
-            Choose an AI provider. PaintNode can install and maintain Codex for you; Antigravity continues to
-            use your existing <code>agy</code> installation and local sign-in.
+            Choose an AI provider. PaintNode can install and maintain Codex for you; Antigravity and Grok
+            use your existing local installations and sign-ins.
           </p>
         </div>
       </div>
 
       <div class="provider-cards" role="radiogroup" aria-label="Default AI provider">
         {#each providerCards as card (card.id)}
-          {@const detect = card.id === 'antigravity' ? agyDetect : codexDetect}
+          {@const detect = card.id === 'codex' ? codexDetect : card.id === 'antigravity' ? agyDetect : grokDetect}
           <button
             type="button"
             class="provider-card"
@@ -349,7 +375,7 @@
               </select>
             </label>
           </div>
-        {:else}
+        {:else if provider === 'antigravity'}
           <div class="grid-2">
             <label class="field">
               <span>Image model</span>
@@ -371,6 +397,31 @@
                   settings.update({ ai: { antigravityImageSize: textValue(event) as AntigravityImageSize } })}
               >
                 {#each ANTIGRAVITY_IMAGE_SIZE_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+        {:else}
+          <div class="grid-2">
+            <label class="field">
+              <span>Image model</span>
+              <select
+                value={settings.value.ai.grokImageModel}
+                onchange={(event) => settings.update({ ai: { grokImageModel: textValue(event) as GrokImageModelId } })}
+              >
+                {#each GROK_IMAGE_MODEL_OPTIONS as option (option.id)}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="field">
+              <span>Image resolution</span>
+              <select
+                value={settings.value.ai.grokImageResolution}
+                onchange={(event) => settings.update({ ai: { grokImageResolution: textValue(event) as GrokImageResolution } })}
+              >
+                {#each GROK_IMAGE_RESOLUTION_OPTIONS as option (option.id)}
                   <option value={option.id}>{option.label}</option>
                 {/each}
               </select>
@@ -424,7 +475,7 @@
             <div>
               <strong>Not found yet — no worries!</strong>
               <small>
-                Install Antigravity with Google's install script, then run <code>agy</code> once in Terminal to sign in.
+                Install {providerName}, then run <code>{providerCommand}</code> once in Terminal to sign in.
                 If it lives somewhere unusual, enter the full path below and try again.
               </small>
             </div>
@@ -440,7 +491,9 @@
               <input
                 type="text"
                 bind:value={manualBin}
-                placeholder="agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy"
+                placeholder={provider === 'antigravity'
+                  ? 'agy, ~/.local/bin/agy, /opt/homebrew/bin/agy, or /usr/local/bin/agy'
+                  : 'grok, ~/.local/bin/grok, ~/.grok/bin/grok, or /opt/homebrew/bin/grok'}
                 spellcheck="false"
               />
             </label>

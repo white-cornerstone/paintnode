@@ -14,6 +14,7 @@ import { ui } from './ui.svelte';
 import { workflow } from './workflow.svelte';
 import { isDesktop, readNativeDroppedFile } from '../integrations/desktop';
 import { fileDocumentSourceKey, nativePathDocumentSourceKey, type DocumentSourceKey } from './documentSource';
+import { returnActiveDocumentToWorkflow } from './workflowEditorCommands';
 
 /** Distinct font families used by the document's text layers. */
 function textFamilies(doc: PaintDocument): string[] {
@@ -418,6 +419,16 @@ async function savePsdCopyCommand(): Promise<void> {
 
 /** File ▸ Save — routes to the document's native format (.psd docs stay .psd). */
 export async function saveDocumentCommand(): Promise<void> {
+  if (editor.activeDocument?.workflowReturnState) {
+    try {
+      editor.flash('Returning edit to workflow…');
+      const warning = await returnActiveDocumentToWorkflow();
+      editor.flash(warning ?? 'Returned edit to workflow');
+    } catch (error) {
+      editor.flash('Return to workflow failed: ' + ((error as Error)?.message ?? String(error)));
+    }
+    return;
+  }
   if (editor.activeDocument?.saveFormat === 'psd') {
     await savePsdDocumentCommand();
     return;

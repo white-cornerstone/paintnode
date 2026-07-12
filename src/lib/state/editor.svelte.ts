@@ -90,6 +90,7 @@ import {
   type AnnotationKind,
 } from '../engine/annotations';
 import { projectDocumentSourceKey, type DocumentSourceKey } from './documentSource';
+import { clearWorkflowRoundTripAuthority } from './workflowEditorSession';
 
 export interface PlacedImageResult {
   oversized: boolean;
@@ -299,6 +300,12 @@ export interface DocumentSession {
   saveFormat: 'ora' | 'psd';
   /** Extension of the file this document was loaded from (e.g. 'psd', 'png'), if any. */
   sourceExtension: string | null;
+  workflowReturnState: null | {
+    label: string;
+    pendingReturn: boolean;
+    returnedRevisionId: string | null;
+    recoveryStatus: 'source-png' | 'layered' | 'flattened-from-png' | 'layered-with-missing-png';
+  };
 }
 
 interface LayerStackSnapshot {
@@ -528,6 +535,7 @@ export class EditorStore implements ToolHost {
       embedFonts: null,
       saveFormat: 'ora',
       sourceExtension: null,
+      workflowReturnState: null,
     };
   }
 
@@ -556,7 +564,10 @@ export class EditorStore implements ToolHost {
     this.rev++;
     if (markDocumentChanged) {
       const session = this.activeDocument;
-      if (session) session.revision++;
+      if (session) {
+        session.revision++;
+        if (session.workflowReturnState) session.workflowReturnState.pendingReturn = true;
+      }
     }
   }
 
@@ -691,6 +702,13 @@ export class EditorStore implements ToolHost {
   }
   toggleLayerLocked(layer: Layer): void {
     this.setLayerLocked(layer, !layer.userLocked);
+  }
+  setLayerName(layer: Layer, name: string): void {
+    const next = name.trim();
+    if (!next || layer.name === next) return;
+    layer.name = next;
+    this.bump();
+    this.invalidate();
   }
   setLayerOpacity(layer: Layer, opacity: number): void {
     const next = Math.max(0, Math.min(1, opacity));
@@ -1329,6 +1347,7 @@ export class EditorStore implements ToolHost {
     const idx = this.documents.findIndex((d) => d.id === id);
     if (idx < 0) return;
     const wasActive = this.activeDocumentId === id;
+    clearWorkflowRoundTripAuthority(this.documents[idx]);
     if (wasActive) this.cancelFreeTransform();
     const next = this.documents.slice();
     next.splice(idx, 1);
@@ -1365,6 +1384,14 @@ export class EditorStore implements ToolHost {
     this.notify();
   }
 
+  markWorkflowReturned(docId: string, revisionId: string, returnedDocumentRevision: number): void {
+    const session = this.documents.find((candidate) => candidate.id === docId);
+    if (!session?.workflowReturnState) return;
+    session.workflowReturnState.pendingReturn = session.revision !== returnedDocumentRevision;
+    session.workflowReturnState.returnedRevisionId = revisionId;
+    this.notify();
+  }
+
   renameActiveDocument(name: string): void {
     const session = this.activeDocument;
     const next = name.trim();
@@ -1382,6 +1409,7 @@ export class EditorStore implements ToolHost {
   }
 
   hasUnsavedChanges(session: DocumentSession): boolean {
+    if (session.workflowReturnState) return session.workflowReturnState.pendingReturn;
     return !session.hasSavedBaseline || session.revision !== session.savedRevision;
   }
 

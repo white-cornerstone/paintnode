@@ -1,21 +1,30 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import { editor } from '../state/editor.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { project } from '../state/project.svelte';
+  import { ui, type NewDialogTab } from '../state/ui.svelte';
   import { settings } from '../state/settings.svelte';
   import { clamp } from '../engine/types';
   import { isDesktop } from '../integrations/desktop';
   import { tooltip } from '../actions/tooltip';
   import { Board, FolderAdd, ImageAdd } from '../icons';
-  import { isAntigravityImageRatio, isCodexImageSize } from '../ai/imageModelCapabilities';
+  import {
+    imageModelCapabilities,
+    isAntigravityImageRatio,
+    isCodexImageSize,
+    isGrokImageRatio,
+  } from '../ai/imageModelCapabilities';
+  import { WORKFLOW_TEMPLATES, type WorkflowTemplateDefinition } from '../workflow';
+  import { restoreExternalDialogTrigger } from '../state/workflowFocus';
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type Tab = 'image' | 'workflow' | 'project';
+  type Tab = NewDialogTab;
   type Background = 'white' | 'transparent';
-  type PresetFilter = 'all' | 'codex' | 'agy' | 'shared';
+  type PresetFilter = 'all' | 'codex' | 'agy' | 'grok' | 'shared';
   interface ImagePreset {
     id: string;
     name: string;
@@ -24,15 +33,8 @@
     height: number;
     bg: Background;
   }
-  interface WorkflowPreset {
-    id: string;
-    name: string;
-    meta: string;
-    prompt: string;
-  }
-
   const desktop = isDesktop();
-  let tab = $state<Tab>('image');
+  let tab = $state<Tab>(ui.newDialogTab);
   let presetFilter = $state<PresetFilter>('all');
 
   const presetFilters: { id: PresetFilter; label: string; tooltip: string }[] = [
@@ -40,7 +42,7 @@
     {
       id: 'shared',
       label: 'Shared',
-      tooltip: 'Show ratios and dimensions that best fit both Codex and Antigravity image models.',
+      tooltip: 'Show ratios and dimensions that best fit Codex, Antigravity, and Grok image models.',
     },
     {
       id: 'codex',
@@ -52,6 +54,11 @@
       label: 'Antigravity',
       tooltip: 'Show aspect ratios that best fit Antigravity image generation.',
     },
+    {
+      id: 'grok',
+      label: 'Grok',
+      tooltip: 'Show aspect ratios that best fit Grok image generation.',
+    },
   ];
 
   function isAgyFriendly(width: number, height: number): boolean {
@@ -60,6 +67,10 @@
 
   function isCodexFriendly(width: number, height: number): boolean {
     return isCodexImageSize(width, height);
+  }
+
+  function isGrokFriendly(width: number, height: number): boolean {
+    return isGrokImageRatio(width, height);
   }
 
   function normalizedDimension(value: number): number {
@@ -89,6 +100,31 @@
     });
   }
 
+  const grokPresetNames: Record<string, string> = {
+    '1:1': 'Grok Square',
+    '2:3': 'Grok Photo Portrait',
+    '3:2': 'Grok Photo Landscape',
+    '3:4': 'Grok Portrait',
+    '4:3': 'Grok Classic Landscape',
+    '1:2': 'Grok Tall Banner',
+    '2:1': 'Grok Wide Banner',
+    '9:16': 'Grok Mobile Story',
+    '16:9': 'Grok Widescreen',
+    '9:19.5': 'Grok Smartphone Portrait',
+    '19.5:9': 'Grok Smartphone Wide',
+    '9:20': 'Grok Ultra-tall',
+    '20:9': 'Grok Ultra-wide',
+  };
+
+  const grokImagePresets: ImagePreset[] = imageModelCapabilities.providers.grok.aspectRatios.map((ratio) => ({
+    id: `grok-${ratio.label.replaceAll('.', '-')}`,
+    name: grokPresetNames[ratio.label] ?? `Grok ${ratio.label}`,
+    meta: presetMeta(ratio.width, ratio.height),
+    width: ratio.width,
+    height: ratio.height,
+    bg: 'transparent',
+  }));
+
   const imagePresets: ImagePreset[] = uniqueImagePresets([
     {
       id: 'default',
@@ -113,30 +149,12 @@
     { id: 'ai-9-16', name: 'AI Story', meta: presetMeta(768, 1376), width: 768, height: 1376, bg: 'transparent' },
     { id: 'ai-16-9', name: 'AI Wide Screen', meta: presetMeta(1376, 768), width: 1376, height: 768, bg: 'transparent' },
     { id: 'ai-21-9', name: 'AI Cinema', meta: presetMeta(1584, 672), width: 1584, height: 672, bg: 'transparent' },
+    ...grokImagePresets,
     { id: 'social', name: 'Social Post', meta: presetMeta(1080, 1350), width: 1080, height: 1350, bg: 'white' },
     { id: 'icon', name: 'Icon Asset', meta: presetMeta(512, 512), width: 512, height: 512, bg: 'transparent' },
     { id: 'banner', name: 'Web Banner', meta: presetMeta(1600, 600), width: 1600, height: 600, bg: 'white' },
   ]);
-  const workflowPresets: WorkflowPreset[] = [
-    {
-      id: 'blank',
-      name: 'Blank Workflow',
-      meta: 'Start with an empty storyboard board',
-      prompt: '',
-    },
-    {
-      id: 'composition',
-      name: 'Asset Composition',
-      meta: 'Arrange extracted assets into a new image brief',
-      prompt: 'Use these visual references to compose a new image.',
-    },
-    {
-      id: 'storyboard',
-      name: 'Storyboard Draft',
-      meta: 'Plan scene beats before generation',
-      prompt: 'Create a coherent storyboard from the connected visual assets.',
-    },
-  ];
+  const workflowPresets = WORKFLOW_TEMPLATES;
 
   let selectedImageId = $state(imagePresets[0].id);
   let selectedWorkflowId = $state(workflowPresets[0].id);
@@ -158,15 +176,18 @@
     const badges: string[] = [];
     if (isCodexFriendly(preset.width, preset.height)) badges.push('Codex');
     if (isAgyFriendly(preset.width, preset.height)) badges.push('Antigravity');
+    if (isGrokFriendly(preset.width, preset.height)) badges.push('Grok');
     return badges;
   }
 
   function presetMatchesFilter(preset: ImagePreset, filter: PresetFilter): boolean {
     const codex = isCodexFriendly(preset.width, preset.height);
     const agy = isAgyFriendly(preset.width, preset.height);
+    const grok = isGrokFriendly(preset.width, preset.height);
     if (filter === 'codex') return codex;
     if (filter === 'agy') return agy;
-    if (filter === 'shared') return codex && agy;
+    if (filter === 'grok') return grok;
+    if (filter === 'shared') return codex && agy && grok;
     return true;
   }
 
@@ -193,16 +214,12 @@
     pickImagePreset(preset);
   }
 
-  function pickWorkflowPreset(preset: WorkflowPreset): void {
+  function pickWorkflowPreset(preset: WorkflowTemplateDefinition): void {
     selectedWorkflowId = preset.id;
     workflowName = preset.name === 'Blank Workflow' ? 'Untitled Workflow' : preset.name;
   }
 
-  function chooseWorkflowPreset(preset: WorkflowPreset): void {
-    if (selectedWorkflowId === preset.id) {
-      createWorkflow();
-      return;
-    }
+  function chooseWorkflowPreset(preset: WorkflowTemplateDefinition): void {
     pickWorkflowPreset(preset);
   }
 
@@ -217,12 +234,17 @@
   }
 
   function createWorkflow(): void {
-    workflow.newBoard(workflowName.trim() || 'Untitled Workflow');
-    if (selectedWorkflow.prompt) workflow.setPrompt(selectedWorkflow.prompt);
-    onClose();
+    projectError = '';
+    try {
+      workflow.newFromTemplate(selectedWorkflow.id, workflowName.trim() || selectedWorkflow.name);
+      ui.requestWorkflowFocus();
+      onClose();
+    } catch (error) {
+      projectError = (error as Error)?.message ?? String(error);
+    }
   }
 
-  async function createProject(): Promise<void> {
+  async function chooseWorkflowProject(trigger: HTMLElement): Promise<void> {
     projectError = '';
     if (!desktop) {
       projectError = 'Project folders are available in the desktop app.';
@@ -231,12 +253,35 @@
     projectBusy = true;
     try {
       await project.openFolder();
-      if (!project.error) onClose();
+      projectError = project.error;
+    } catch (e) {
+      projectError = (e as Error)?.message ?? String(e);
+    } finally {
+      projectBusy = false;
+      await tick();
+      restoreExternalDialogTrigger(trigger);
+    }
+  }
+
+  async function createProject(trigger?: HTMLElement): Promise<void> {
+    projectError = '';
+    if (!desktop) {
+      projectError = 'Project folders are available in the desktop app.';
+      return;
+    }
+    projectBusy = true;
+    try {
+      const opened = await project.openFolder();
+      if (opened) onClose();
       else projectError = project.error;
     } catch (e) {
       projectError = (e as Error)?.message ?? String(e);
     } finally {
       projectBusy = false;
+      if (trigger) {
+        await tick();
+        restoreExternalDialogTrigger(trigger);
+      }
     }
   }
 
@@ -252,30 +297,46 @@
 
   function onDialogKeydown(event: KeyboardEvent): void {
     if (event.key !== 'Enter' || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-    if (event.target instanceof HTMLTextAreaElement) return;
-    if (event.target instanceof HTMLButtonElement && !event.target.classList.contains('preset-tile')) return;
+    if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
+    if (event.target instanceof HTMLButtonElement) return;
     event.preventDefault();
     createCurrent();
   }
+
+  const tabs: readonly Tab[] = ['image', 'workflow', 'project'];
+  function selectTab(next: Tab, focus = false): void {
+    tab = next;
+    if (focus) requestAnimationFrame(() => document.getElementById(`new-tab-${next}`)?.focus());
+  }
+
+  function onTabKeydown(event: KeyboardEvent, current: Tab): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = tabs.indexOf(current);
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? tabs.length - 1
+        : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    selectTab(tabs[nextIndex], true);
+  }
 </script>
 
-<svelte:window onkeydown={onDialogKeydown} />
-
 <Modal title="New" {onClose} width={980} height={680} minWidth={720} minHeight={460} resizable>
-  <div class="new-dialog">
+  <div class="new-dialog" role="presentation" onkeydown={onDialogKeydown}>
     <div class="tabs" role="tablist" aria-label="New item type">
-      <button class:active={tab === 'image'} onclick={() => (tab = 'image')} role="tab">
+      <button id="new-tab-image" class:active={tab === 'image'} onclick={() => selectTab('image')} onkeydown={(event) => onTabKeydown(event, 'image')} role="tab" aria-selected={tab === 'image'} aria-controls="new-panel-image" tabindex={tab === 'image' ? 0 : -1} data-autofocus={tab === 'image' ? '' : undefined}>
         <Icon svg={ImageAdd} size={17} /><span>Image</span>
       </button>
-      <button class:active={tab === 'workflow'} onclick={() => (tab = 'workflow')} role="tab">
+      <button id="new-tab-workflow" class:active={tab === 'workflow'} onclick={() => selectTab('workflow')} onkeydown={(event) => onTabKeydown(event, 'workflow')} role="tab" aria-selected={tab === 'workflow'} aria-controls="new-panel-workflow" tabindex={tab === 'workflow' ? 0 : -1} data-autofocus={tab === 'workflow' ? '' : undefined}>
         <Icon svg={Board} size={17} /><span>Workflow</span>
       </button>
-      <button class:active={tab === 'project'} onclick={() => (tab = 'project')} role="tab">
+      <button id="new-tab-project" class:active={tab === 'project'} onclick={() => selectTab('project')} onkeydown={(event) => onTabKeydown(event, 'project')} role="tab" aria-selected={tab === 'project'} aria-controls="new-panel-project" tabindex={tab === 'project' ? 0 : -1} data-autofocus={tab === 'project' ? '' : undefined}>
         <Icon svg={FolderAdd} size={17} /><span>Project</span>
       </button>
     </div>
 
-    <div class="dialog-grid">
+    <div class="dialog-grid" id={`new-panel-${tab}`} role="tabpanel" aria-labelledby={`new-tab-${tab}`}>
       <section class="preset-browser">
         {#if tab === 'image'}
           <div class="preset-header">
@@ -331,7 +392,8 @@
               >
                 <Icon svg={Board} size={44} />
                 <span>{preset.name}</span>
-                <small>{preset.meta}</small>
+                <small>{preset.description}</small>
+                <span class="template-counts">{preset.slots.length} inputs · {preset.outputs.length} outputs</span>
               </button>
             {/each}
           </div>
@@ -389,8 +451,24 @@
           </label>
           <div class="summary">
             <span>{selectedWorkflow.name}</span>
-            <small>{selectedWorkflow.meta}</small>
+            <small>{selectedWorkflow.description}</small>
           </div>
+          <div class="workflow-plan" aria-label="Template contents">
+            <strong>Inputs</strong>
+            <span>{selectedWorkflow.slots.map((slot) => `${slot.name}${slot.required ? ' (required)' : ' (optional)'}`).join(', ')}</span>
+            <strong>Outputs</strong>
+            <span>{selectedWorkflow.outputs.map((output) => `${output.name} · ${output.width}×${output.height}`).join(', ')}</span>
+          </div>
+          <div class="project-requirement" class:ready={!!project.path}>
+            <strong>{project.path ? 'Project folder ready' : 'Project folder required for Generate'}</strong>
+            <span>{project.path ?? (desktop
+              ? 'You can create the board now, but Generate and Save stay blocked until a project folder is open.'
+              : 'Open this workflow in the PaintNode desktop app to choose a project folder, Save, and Generate.')}</span>
+            <button type="button" onclick={(event) => void chooseWorkflowProject(event.currentTarget)} disabled={projectBusy || !desktop}>
+              {projectBusy ? 'Opening…' : project.path ? 'Change folder…' : 'Choose or create folder…'}
+            </button>
+          </div>
+          {#if projectError}<div class="error" role="alert">{projectError}</div>{/if}
           <div class="actions">
             <button onclick={onClose}>Close</button>
             <button class="primary" onclick={createWorkflow}>Create</button>
@@ -406,7 +484,7 @@
           {/if}
           <div class="actions">
             <button onclick={onClose}>Close</button>
-            <button class="primary" onclick={createProject} disabled={projectBusy || !desktop}>
+            <button class="primary" onclick={(event) => void createProject(event.currentTarget)} disabled={projectBusy || !desktop}>
               {projectBusy ? 'Opening...' : 'Choose Folder'}
             </button>
           </div>
@@ -472,6 +550,39 @@
     font-size: 12px;
     font-weight: 800;
     text-transform: uppercase;
+  }
+  .template-counts {
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .workflow-plan,
+  .project-requirement {
+    display: grid;
+    gap: 5px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .workflow-plan strong,
+  .project-requirement strong {
+    color: var(--text-bright);
+    font-size: 11px;
+  }
+  .project-requirement {
+    margin-top: 10px;
+    border-color: color-mix(in srgb, var(--warning, #d6a84b) 55%, var(--border));
+  }
+  .project-requirement.ready {
+    border-color: color-mix(in srgb, var(--success, #65b884) 55%, var(--border));
+  }
+  .project-requirement button {
+    justify-self: start;
+    margin-top: 4px;
   }
   .preset-header {
     display: flex;

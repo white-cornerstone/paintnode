@@ -831,6 +831,18 @@ mod tests {
             grok_output_target("1:1", (9000, 9000)),
             Some(("2k", (2048, 2048)))
         );
+        assert_eq!(
+            grok_output_target("2:1", (1200, 600)),
+            Some(("1k", (1408, 704)))
+        );
+        assert_eq!(
+            grok_output_target("19.5:9", (1400, 640)),
+            Some(("1k", (1456, 672)))
+        );
+        assert_eq!(
+            grok_output_target("20:9", (1200, 540)),
+            Some(("1k", (1280, 576)))
+        );
         // Labels outside the grok grid are not resolvable.
         assert_eq!(grok_output_target("21:9", (1584, 672)), None);
         assert_eq!(grok_output_target("codex-crop", (1280, 800)), None);

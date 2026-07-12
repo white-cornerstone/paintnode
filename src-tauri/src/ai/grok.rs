@@ -13,6 +13,7 @@
 //! `docs/grok-future-expansion.md` for a later pass.
 
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -52,17 +53,22 @@ use crate::ai::placement::{
 };
 use crate::ai::{
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
-    clean_option, cleanup_project_agent_job, clear_ai_run_cancelled, command_failure,
-    emit_codex_part_progress, emit_codex_progress, emit_job_file_progress, emit_kept_job_dir,
+    clean_option, cleanup_ai_process_tree_after_bridge_exit, cleanup_project_agent_job,
+    clear_ai_run_cancelled, command_failure, configure_ai_process_group, emit_codex_part_progress,
+    emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, join_output_readers_bounded,
     now_id, output_tail, project_or_temp_job_path, remove_legacy_generative_fill_agent_inputs,
-    should_keep_job_dir, spawn_output_reader, validate_reference_pngs, watched_job_files,
-    write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
-    AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult, CodexDetectionResult,
-    GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    GROK_RUNS_DIR, POLL_INTERVAL,
+    should_keep_job_dir, spawn_output_reader, terminate_ai_process_tree, track_ai_process_tree,
+    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_ai_job_settings,
+    write_reference_pngs, AgentRunResult, AiDirectorProvider, AiModelCapability,
+    AiProviderCapabilitiesResult, CodexDetectionResult, GeneratedImageLayerResult,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, GROK_RUNS_DIR,
+    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{safe_stem, store_generated_png_asset};
+use crate::provider_executable::{
+    resolve_provider_executable, Provider, ResolvedProviderExecutable,
+};
 
 /// Fixed xAI image model used by Grok Build's `image_gen` tool. The `grok
 /// models` CLI listing advertises chat/coding models (used for the Director),
@@ -74,10 +80,12 @@ const GROK_IMAGE_REQUEST_FILE: &str = "paintnode-grok-image-request.json";
 const GROK_IMAGE_RESPONSE_FILE: &str = "paintnode-grok-image-response.json";
 const GROK_EDIT_REQUEST_FILE: &str = "paintnode-grok-edit-request.json";
 const GROK_EDIT_RESPONSE_FILE: &str = "paintnode-grok-edit-response.json";
+const GROK_API_BASE_URL: &str = "https://api.x.ai";
 const GROK_FALLBACK_CLI_VERSION: &str = "0.2.93";
 /// The xAI edits endpoint references attached images as `<IMAGE_0>`,
 /// `<IMAGE_1>`, ... in the prompt; treat three as the practical maximum.
 const GROK_MAX_EDIT_REFERENCE_IMAGES: usize = 3;
+const GROK_MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `~/.grok/auth.json` — the CLI's OIDC credential store.
 fn grok_auth_json_path() -> Option<PathBuf> {
@@ -171,7 +179,7 @@ fn now_unix_seconds() -> i64 {
 /// Use the stored token while it is still valid; only spawn the CLI refresh
 /// (`grok models`, a network round-trip) when it is missing or near expiry.
 /// The 401/403 retry in the request runner covers stale-token races.
-fn fresh_grok_auth_token(grok_bin: &str) -> Result<GrokAuthToken, String> {
+fn fresh_grok_auth_token(grok_bin: &ResolvedProviderExecutable) -> Result<GrokAuthToken, String> {
     match load_grok_auth_token() {
         Ok(token) if !grok_token_needs_refresh(&token, now_unix_seconds(), 120) => Ok(token),
         _ => {
@@ -181,36 +189,10 @@ fn fresh_grok_auth_token(grok_bin: &str) -> Result<GrokAuthToken, String> {
     }
 }
 
-fn configured_or_default_grok_bin(bin: Option<String>) -> Result<String, String> {
-    if let Some(bin) = bin
-        .map(|value| value.trim().to_string())
-        .filter(|v| !v.is_empty())
-    {
-        return Ok(bin);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        "grok".to_string(),
-        format!("{home}/.local/bin/grok"),
-        format!("{home}/.grok/bin/grok"),
-        "/opt/homebrew/bin/grok".to_string(),
-        "/usr/local/bin/grok".to_string(),
-    ];
-    for candidate in candidates {
-        let mut command = Command::new(&candidate);
-        apply_ai_cli_environment(&mut command).arg("--version");
-        if command
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            return Ok(candidate);
-        }
-    }
-    Err(
-        "Grok CLI was not found. Install Grok Build, or enter the full path to the `grok` binary."
-            .into(),
-    )
+fn configured_or_default_grok_bin(
+    bin: Option<String>,
+) -> Result<ResolvedProviderExecutable, String> {
+    resolve_provider_executable(Provider::Grok, bin, None)
 }
 
 fn grok_version_from_output(text: &str) -> Option<String> {
@@ -226,8 +208,11 @@ fn grok_version_from_output(text: &str) -> Option<String> {
     })
 }
 
-fn grok_cli_version(grok_bin: &str) -> String {
-    let mut command = Command::new(grok_bin);
+fn grok_cli_version(grok_bin: &ResolvedProviderExecutable) -> String {
+    let Ok(path) = grok_bin.revalidate_for_launch() else {
+        return GROK_FALLBACK_CLI_VERSION.into();
+    };
+    let mut command = Command::new(path);
     apply_ai_cli_environment(&mut command).arg("--version");
     let text = command
         .output()
@@ -247,12 +232,13 @@ fn grok_image_user_agent(version: &str) -> String {
 
 /// Run `grok models` so the CLI refreshes its stored OAuth token in place. This
 /// is the "mint/refresh" trigger before the token is re-read from disk.
-fn wake_grok_auth(grok_bin: &str) -> Result<(), String> {
-    let mut command = Command::new(grok_bin);
+fn wake_grok_auth(grok_bin: &ResolvedProviderExecutable) -> Result<(), String> {
+    let path = grok_bin.revalidate_for_launch()?;
+    let mut command = Command::new(path);
     apply_ai_cli_environment(&mut command).arg("models");
     let output = command
         .output()
-        .map_err(|e| format!("Failed to launch the Grok auth helper at '{grok_bin}': {e}"))?;
+        .map_err(|e| format!("Failed to launch the Grok auth helper at '{path}': {e}"))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -434,20 +420,12 @@ fn configured_or_default_grok_image_model(image_model: Option<String>) -> String
         .unwrap_or_else(|| DEFAULT_GROK_IMAGE_MODEL.to_string())
 }
 
-fn grok_api_base_url() -> String {
-    std::env::var("PAINTNODE_GROK_IMAGE_BASE_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "https://api.x.ai".into())
-}
-
 fn grok_images_endpoint() -> String {
-    grok_api_base_url() + "/v1/images/generations"
+    format!("{GROK_API_BASE_URL}/v1/images/generations")
 }
 
 fn grok_edits_endpoint() -> String {
-    grok_api_base_url() + "/v1/images/edits"
+    format!("{GROK_API_BASE_URL}/v1/images/edits")
 }
 
 fn post_grok_image_request(
@@ -474,9 +452,22 @@ fn post_grok_image_request(
             message
         })?;
     let status = response.status();
-    let text = response
-        .text()
+    if response
+        .content_length()
+        .is_some_and(|length| length > GROK_MAX_RESPONSE_BYTES)
+    {
+        return Err("Grok image generation response exceeded the 64 MiB safety limit.".into());
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(GROK_MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| format!("Grok image generation response could not be read: {e}"))?;
+    if bytes.len() as u64 > GROK_MAX_RESPONSE_BYTES {
+        return Err("Grok image generation response exceeded the 64 MiB safety limit.".into());
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "Grok image generation response was not valid UTF-8.".to_string())?;
     Ok((status, text))
 }
 
@@ -576,7 +567,7 @@ struct GrokDirectRequest<'a> {
 fn run_grok_direct_request(
     app: &AppHandle,
     run_id: &str,
-    grok_bin: &str,
+    grok_bin: &ResolvedProviderExecutable,
     job_path: &Path,
     request: &GrokDirectRequest,
     keep_debug_artifacts: bool,
@@ -639,7 +630,7 @@ fn run_grok_direct_request(
 fn run_grok_direct_image(
     app: &AppHandle,
     run_id: &str,
-    grok_bin: &str,
+    grok_bin: &ResolvedProviderExecutable,
     job_path: &Path,
     spec: GrokImageRequestSpec,
     image_model: &str,
@@ -665,7 +656,7 @@ fn run_grok_direct_image(
 fn run_grok_direct_edit(
     app: &AppHandle,
     run_id: &str,
-    grok_bin: &str,
+    grok_bin: &ResolvedProviderExecutable,
     job_path: &Path,
     spec: GrokEditRequestSpec,
     image_model: &str,
@@ -1144,7 +1135,7 @@ PaintNode will do after the candidate is returned:
 fn grok_restore_image_details(
     app: &AppHandle,
     run_id: &str,
-    grok_bin: &str,
+    grok_bin: &ResolvedProviderExecutable,
     image_model: &str,
     image_resolution: Option<&str>,
     keep_debug_artifacts: bool,
@@ -2288,13 +2279,13 @@ pub(crate) async fn detect_grok(bin: Option<String>) -> Result<CodexDetectionRes
         match wake_grok_auth(&grok_bin) {
             Ok(()) => CodexDetectionResult {
                 found: true,
-                path: Some(grok_bin.clone()),
-                version: Some(format!("Grok {}", grok_cli_version(&grok_bin))),
+                path: Some(grok_bin.path.clone()),
+                version: Some(format!("Grok {}", grok_bin.version)),
                 error: None,
             },
             Err(error) => CodexDetectionResult {
                 found: false,
-                path: Some(grok_bin),
+                path: Some(grok_bin.path),
                 version: None,
                 error: Some(error),
             },
@@ -2393,7 +2384,11 @@ pub(crate) async fn discover_grok_capabilities(
             Ok(bin) => bin,
             Err(error) => return fallback_grok_capabilities(Some(error)),
         };
-        let mut command = Command::new(&grok_bin);
+        let path = match grok_bin.revalidate_for_launch() {
+            Ok(path) => path,
+            Err(error) => return fallback_grok_capabilities(Some(error)),
+        };
+        let mut command = Command::new(path);
         apply_ai_cli_environment(&mut command).arg("models");
         match command.output() {
             Ok(output) if output.status.success() => {
@@ -2510,15 +2505,19 @@ pub(crate) fn final_grok_agent_message(output: &Output) -> Option<String> {
 
 fn run_grok_with_progress(
     command: &mut Command,
+    grok_bin: &ResolvedProviderExecutable,
     app: AppHandle,
     run_id: String,
     job_path: &Path,
 ) -> Result<AgentRunResult, String> {
+    grok_bin.revalidate_for_launch()?;
+    let launch_gate = configure_ai_process_group(command)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch Grok: {e}"))?;
+    let mut process_tree = track_ai_process_tree(&mut child, launch_gate)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -2549,29 +2548,41 @@ fn run_grok_with_progress(
 
     let mut last_file_poll = Instant::now();
     let mut file_snapshot = watched_job_files(job_path);
-    let status = loop {
+    let mut stopped = false;
+    let (status, tree_cleanup) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("Failed to wait for Grok: {e}"))?
         {
             emit_job_file_progress(&app, &run_id, "Grok", job_path, &mut file_snapshot, None);
-            break status;
+            break (
+                Ok(status),
+                cleanup_ai_process_tree_after_bridge_exit(&mut process_tree),
+            );
         }
         if last_file_poll.elapsed() >= Duration::from_millis(1000) {
             emit_job_file_progress(&app, &run_id, "Grok", job_path, &mut file_snapshot, None);
             last_file_poll = Instant::now();
         }
         if ai_run_cancelled(&run_id) {
-            let _ = child.kill();
-            let _ = child.wait();
-            clear_ai_run_cancelled(&run_id);
-            return Err(AI_RUN_STOPPED_MESSAGE.into());
+            stopped = true;
+            break (
+                terminate_ai_process_tree(&mut process_tree, &mut child),
+                Ok(()),
+            );
         }
         thread::sleep(POLL_INTERVAL);
     };
 
-    for reader in readers {
-        let _ = reader.join();
+    let reader_cleanup = join_output_readers_bounded(readers, OUTPUT_READER_JOIN_TIMEOUT);
+    if stopped {
+        clear_ai_run_cancelled(&run_id);
+    }
+    tree_cleanup?;
+    reader_cleanup?;
+    let status = status?;
+    if stopped {
+        return Err(AI_RUN_STOPPED_MESSAGE.into());
     }
     let stdout = stdout.lock().map(|bytes| bytes.clone()).unwrap_or_default();
     let stderr = stderr.lock().map(|bytes| bytes.clone()).unwrap_or_default();
@@ -2605,9 +2616,15 @@ pub(crate) fn run_grok_director_request(
     // is needed here; a sign-in failure surfaces through the exit status.
     let grok_bin = configured_or_default_grok_bin(bin)?;
     let options = grok_director_options(model, reasoning_effort);
-    let mut command =
-        build_grok_director_command(&grok_bin, job_path, prompt, &options, session_id);
-    let run = run_grok_with_progress(&mut command, app.clone(), run_id.to_string(), job_path)?;
+    let path = grok_bin.revalidate_for_launch()?;
+    let mut command = build_grok_director_command(path, job_path, prompt, &options, session_id);
+    let run = run_grok_with_progress(
+        &mut command,
+        &grok_bin,
+        app.clone(),
+        run_id.to_string(),
+        job_path,
+    )?;
     if run.output.status.success() {
         Ok(run)
     } else if let Some(message) = final_grok_agent_message(&run.output) {
@@ -2871,6 +2888,14 @@ mod tests {
         assert_eq!(
             grok_closest_aspect_label((800, 1200)).as_deref(),
             Some("2:3")
+        );
+        assert_eq!(
+            grok_closest_aspect_label((2000, 900)).as_deref(),
+            Some("20:9")
+        );
+        assert_eq!(
+            grok_closest_aspect_label((900, 1950)).as_deref(),
+            Some("9:19.5")
         );
     }
 }

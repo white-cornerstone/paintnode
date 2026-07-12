@@ -274,8 +274,14 @@
         }
         const addedToWorkflow = addToWorkflow && extractedAssets.length > 0;
         if (addedToWorkflow) {
-          if (!workflow.active) workflow.newBoard(`${sourceLayer.name} Assets`);
-          for (const asset of extractedAssets) workflow.addAsset(asset);
+          if (!workflow.active) {
+            workflow.newFromTemplate('asset-composition', `${sourceLayer.name} Assets`);
+            const subjectSlot = workflow.nodes.find((node) => node.slotId === 'subject');
+            if (subjectSlot) workflow.assignAsset(subjectSlot.id, extractedAssets[0]);
+            for (const asset of extractedAssets.slice(subjectSlot ? 1 : 0)) workflow.addAsset(asset);
+          } else {
+            for (const asset of extractedAssets) workflow.addAsset(asset);
+          }
           if (!workflow.prompt.trim()) {
             workflow.setPrompt('Use these extracted assets as visual references to compose a new image.');
           }

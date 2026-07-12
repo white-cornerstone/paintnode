@@ -10,6 +10,8 @@
 
   const runningCount = $derived(aiTasks.tasks.filter((task) => task.status === 'running').length);
   const completedCount = $derived(aiTasks.tasks.filter((task) => task.status === 'completed').length);
+  const cancelledCount = $derived(aiTasks.tasks.filter((task) => task.status === 'cancelled').length);
+  const nonErrorFinishedCount = $derived(completedCount + cancelledCount);
   const erroredCount = $derived(aiTasks.tasks.filter((task) => task.status === 'error').length);
 
   // Confirmation before a Clear that would also drop failed tasks the user may
@@ -37,6 +39,7 @@
   function statusLabel(task: AiTask): string {
     if (task.status === 'running') return 'Running';
     if (task.status === 'completed') return 'Completed';
+    if (task.status === 'cancelled') return 'Cancelled';
     return 'Failed';
   }
 
@@ -56,7 +59,7 @@
 
 <Panel title={runningCount > 0 ? `Tasks (${runningCount})` : 'Tasks'} {grow} bind:collapsed>
   {#snippet actions()}
-    {#if completedCount > 0 || erroredCount > 0}
+    {#if completedCount > 0 || cancelledCount > 0 || erroredCount > 0}
       <button
         class="clear-completed"
         type="button"
@@ -82,6 +85,7 @@
             class="task-row"
             class:running={task.status === 'running'}
             class:completed={task.status === 'completed'}
+            class:cancelled={task.status === 'cancelled'}
             class:error={task.status === 'error'}
           >
             <button
@@ -95,6 +99,8 @@
                   <span class="spinner"></span>
                 {:else if task.status === 'completed'}
                   <Icon svg={Checkmark} size={13} />
+                {:else if task.status === 'cancelled'}
+                  <Icon svg={Dismiss} size={13} />
                 {:else}
                   <Icon svg={Dismiss} size={13} />
                 {/if}
@@ -119,14 +125,27 @@
                   {/if}
                 </span>
                 <span class="task-progress">{task.progress || task.subtitle}</span>
+                {#if task.status === 'error' && task.error}
+                  <span class="task-error" role="alert">{task.error}</span>
+                {/if}
               </span>
             </button>
-            {#if task.status === 'completed'}
+            {#if task.status === 'running' && aiTasks.canCancel(task)}
               <button
                 class="task-action"
                 type="button"
-                aria-label={`Clear ${task.title}`}
-                use:tooltip={{ text: 'Clear task', placement: 'left' }}
+                aria-label={`Cancel ${task.title}`}
+                use:tooltip={{ text: 'Cancel task', placement: 'left' }}
+                onclick={() => void aiTasks.cancel(task.id)}
+              >
+                <Icon svg={Dismiss} size={13} />
+              </button>
+            {:else if task.status === 'completed' || task.status === 'cancelled'}
+              <button
+                class="task-action"
+                type="button"
+                aria-label={`Clear ${task.status === 'cancelled' ? 'cancelled ' : ''}${task.title}`}
+                use:tooltip={{ text: task.status === 'cancelled' ? 'Clear cancelled task' : 'Clear task', placement: 'left' }}
                 onclick={() => aiTasks.clearCompletedTask(task.id)}
               >
                 <Icon svg={Dismiss} size={13} />
@@ -165,9 +184,9 @@
 {#if confirmClear}
   <Modal title="Clear Tasks" onClose={() => (confirmClear = false)} width={420}>
     <p class="confirm-text">
-      {#if completedCount > 0}
-        This clears {completedCount} completed
-        {completedCount === 1 ? 'task' : 'tasks'}. Also dismiss {erroredCount} failed
+      {#if nonErrorFinishedCount > 0}
+        This clears {nonErrorFinishedCount} completed or cancelled
+        {nonErrorFinishedCount === 1 ? 'task' : 'tasks'}. Also dismiss {erroredCount} failed
         {erroredCount === 1 ? 'task' : 'tasks'}?
       {:else}
         Dismiss {erroredCount} failed {erroredCount === 1 ? 'task' : 'tasks'}?
@@ -175,12 +194,12 @@
     </p>
     <p class="confirm-note">Dismissed failed tasks can no longer be retried.</p>
     <div class="dlg-actions">
-      {#if completedCount > 0}
+      {#if nonErrorFinishedCount > 0}
         <button type="button" onclick={keepFailed}>Keep Failed</button>
       {/if}
       <button type="button" onclick={() => (confirmClear = false)}>Cancel</button>
       <button type="button" class="dlg-primary" onclick={clearAll}>
-        {completedCount > 0 ? 'Clear All' : 'Dismiss All'}
+        {nonErrorFinishedCount > 0 ? 'Clear All' : 'Dismiss All'}
       </button>
     </div>
   </Modal>
@@ -243,6 +262,9 @@
   }
   .task-row.completed {
     border-color: color-mix(in srgb, #42b883 42%, var(--border-soft));
+  }
+  .task-row.cancelled {
+    border-color: color-mix(in srgb, var(--text-dim) 58%, var(--border-soft));
   }
   .task-row.error {
     border-color: color-mix(in srgb, var(--danger) 58%, var(--border-soft));
@@ -358,6 +380,12 @@
   .task-progress {
     color: var(--text-dim);
     font-size: 11px;
+  }
+  .task-error {
+    color: color-mix(in srgb, var(--danger) 78%, var(--text-bright));
+    font-size: 11px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
   }
   @keyframes spin {
     to {
