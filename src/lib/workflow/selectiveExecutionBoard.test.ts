@@ -66,6 +66,12 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('role="tablist"');
     expect(boardSource).toContain("event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'");
     expect(boardSource).toContain('Promote this candidate');
+    expect(boardSource).toContain('Keyboard: Alt+R focuses candidates; Ctrl+Enter promotes the selected eligible candidate.');
+    expect(boardSource).toContain('aria-keyshortcuts="Alt+R"');
+    expect(boardSource).toContain('Focus candidate review');
+    expect(boardSource).toContain('aria-keyshortcuts="Control+Enter"');
+    expect(boardSource).toContain('void focusReviewCandidates(node.id)');
+    expect(boardSource).toContain('void promoteReviewCandidate(node.id)');
     expect(boardSource).toContain('<strong>Brief</strong>');
     expect(boardSource).toContain('<strong>Art direction</strong>');
     expect(boardSource).toContain('Provenance:');

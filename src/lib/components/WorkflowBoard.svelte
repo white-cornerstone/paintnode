@@ -1960,6 +1960,33 @@
     document.getElementById(`review-candidate-tab-${nodeId}-${next.candidateId}`)?.focus();
   }
 
+  async function focusReviewCandidates(nodeId?: string): Promise<void> {
+    const reviewNode = nodeId
+      ? workflow.creatorNodes.find((node) => node.id === nodeId && node.type === 'review')
+      : workflow.creatorNodes.find((node) => node.type === 'review' && workflow.reviewCandidates(node.id, assets, true, project.identity).length > 0);
+    if (!reviewNode) return;
+    workflow.select({ kind: 'creator', id: reviewNode.id });
+    await tick();
+    const candidate = selectedReviewCandidate(reviewNode.id);
+    if (candidate) document.getElementById(`review-candidate-tab-${reviewNode.id}-${candidate.candidateId}`)?.focus();
+    else document.getElementById(`review-node-${reviewNode.id}`)?.focus();
+  }
+
+  function reviewKeyboardShortcut(event: KeyboardEvent): void {
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      void focusReviewCandidates();
+      return;
+    }
+    if (!event.ctrlKey || event.altKey || event.metaKey || event.key !== 'Enter') return;
+    const selection = workflow.selection;
+    if (selection?.kind !== 'creator') return;
+    const node = workflow.creatorNodes.find((candidate) => candidate.id === selection.id);
+    if (node?.type !== 'review' || selectedReviewCandidate(node.id)?.state !== 'eligible') return;
+    event.preventDefault();
+    void promoteReviewCandidate(node.id);
+  }
+
   async function promoteReviewCandidate(nodeId: string): Promise<void> {
     const candidate = selectedReviewCandidate(nodeId);
     if (!candidate || candidate.state !== 'eligible') return;
@@ -2069,6 +2096,7 @@
 <svelte:window
   onkeydown={(event) => {
     if (event.key === 'Alt') altDown = true;
+    reviewKeyboardShortcut(event);
   }}
   onkeyup={(event) => {
     if (event.key === 'Alt') altDown = false;
@@ -2385,6 +2413,7 @@
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
             tabindex="-1"
+            id={node.type === 'review' ? `review-node-${node.id}` : undefined}
             data-workflow-node={node.id}
             data-creator-node-type={node.type}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
@@ -2479,6 +2508,12 @@
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
                 {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
+                  <p class="review-keyboard-hint">Keyboard: Alt+R focuses candidates; Ctrl+Enter promotes the selected eligible candidate.</p>
+                  <button
+                    type="button"
+                    aria-keyshortcuts="Alt+R"
+                    onclick={() => void focusReviewCandidates(node.id)}
+                  >Focus candidate review</button>
                   <p class="review-resolution" data-review-state={reviewResolution.state}>
                     {reviewResolution.state === 'ready'
                       ? `Promoted Candidate ${reviewCandidates.find((candidate) => candidate.candidateId === reviewResolution.promotion.candidateId)?.ordinal ?? ''}`
@@ -2537,6 +2572,7 @@
                       {#if reviewCandidate.failure}<p>{reviewCandidate.failure.message}</p>{/if}
                       <button
                         type="button"
+                        aria-keyshortcuts="Control+Enter"
                         disabled={busy || reviewCandidate.state !== 'eligible'}
                         onclick={() => void promoteReviewCandidate(node.id)}
                       >Promote this candidate</button>
