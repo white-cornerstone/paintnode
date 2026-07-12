@@ -1973,12 +1973,18 @@
   }
 
   function reviewKeyboardShortcut(event: KeyboardEvent): void {
-    if (event.key === 'F7' || (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyR')) {
+    const target = event.target;
+    const typing = target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement
+      || (target instanceof HTMLElement && target.isContentEditable);
+    const plainKey = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+    if (!typing && ((plainKey && event.key.toLowerCase() === 'r') || event.key === 'F7' || (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyR'))) {
       event.preventDefault();
       void focusReviewCandidates();
       return;
     }
-    const dedicatedPromote = event.key === 'F8';
+    const dedicatedPromote = !typing && ((plainKey && event.key.toLowerCase() === 'p') || event.key === 'F8');
     const modifiedPromote = event.ctrlKey && !event.altKey && !event.metaKey && (event.code === 'Enter' || event.code === 'NumpadEnter');
     if (!dedicatedPromote && !modifiedPromote) return;
     const selection = workflow.selection;
@@ -2510,10 +2516,10 @@
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
                 {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
-                  <p class="review-keyboard-hint">Keyboard: F7 focuses candidates; F8 promotes the selected eligible candidate. Alt+R and Ctrl+Enter are also available.</p>
+                  <p class="review-keyboard-hint">Keyboard: R focuses candidates; P promotes the selected eligible candidate. F7/F8 and Alt+R/Ctrl+Enter are also available.</p>
                   <button
                     type="button"
-                    aria-keyshortcuts="F7 Alt+R"
+                    aria-keyshortcuts="R F7 Alt+R"
                     onclick={() => void focusReviewCandidates(node.id)}
                   >Focus candidate review</button>
                   <p class="review-resolution" data-review-state={reviewResolution.state}>
@@ -2574,7 +2580,7 @@
                       {#if reviewCandidate.failure}<p>{reviewCandidate.failure.message}</p>{/if}
                       <button
                         type="button"
-                        aria-keyshortcuts="F8 Control+Enter"
+                        aria-keyshortcuts="P F8 Control+Enter"
                         disabled={busy || reviewCandidate.state !== 'eligible'}
                         onclick={() => void promoteReviewCandidate(node.id)}
                       >Promote this candidate</button>
