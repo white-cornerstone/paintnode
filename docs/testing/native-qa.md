@@ -17,6 +17,10 @@ can target without touching an installed production PaintNode. It does not set
 editing, retry, and errors use the normal configured subscription-backed paths.
 Use this mode for public-user-like virtual creator evaluations. Use Provider
 Free only for deterministic engineering or approved human-study checkpoints.
+The normal repo QA bundle checks the isolated
+`provider-runtimes-creative-blueprint` release. Installed production PaintNode
+continues to use `provider-runtimes-latest`, so preview SDK packages and protocol
+changes cannot replace the production update channel.
 
 ## Provider-free smoke test
 
