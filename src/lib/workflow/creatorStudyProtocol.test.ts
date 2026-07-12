@@ -38,8 +38,10 @@ describe('Creative Blueprint creator study protocol', () => {
     expect(setup).toContain('not because of hidden attempt state');
   });
 
-  it('makes real sessions and the private copy-outside-repository boundary non-negotiable', () => {
-    expect(protocol).toMatch(/real sessions remain required/i);
+  it('makes the amended synthetic validation gate and private copy-outside-repository boundary explicit', () => {
+    expect(protocol).toMatch(/6[–-]8 isolated AI-assisted sessions/i);
+    expect(protocol).toMatch(/synthetic-only product evidence/i);
+    expect(protocol).toMatch(/Human recruitment remains a separate optional research track/i);
     expect(protocol).toMatch(/Never complete private\s+templates inside the repository/);
     expect(protocol).toContain('npm run qa:creator-study:setup');
     expect(protocol).toContain('npm run qa:creator-study:synthesize');
