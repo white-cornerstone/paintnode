@@ -125,6 +125,9 @@
                   {/if}
                 </span>
                 <span class="task-progress">{task.progress || task.subtitle}</span>
+                {#if task.status === 'error' && task.error}
+                  <span class="task-error" role="alert">{task.error}</span>
+                {/if}
               </span>
             </button>
             {#if task.status === 'running' && aiTasks.canCancel(task)}
@@ -377,6 +380,12 @@
   .task-progress {
     color: var(--text-dim);
     font-size: 11px;
+  }
+  .task-error {
+    color: color-mix(in srgb, var(--danger) 78%, var(--text-bright));
+    font-size: 11px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
   }
   @keyframes spin {
     to {

@@ -1842,7 +1842,11 @@
     if (!selectiveRunning) invalidateSelectivePreview();
   }
 
-  async function generate(node: WorkflowOutputNode | undefined = undefined, forceRegenerate = false): Promise<void> {
+  async function generate(
+    node: WorkflowOutputNode | undefined = undefined,
+    forceRegenerate = false,
+    existingTaskId: string | null = null,
+  ): Promise<void> {
     if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
     if (storyboardCanvas) persistStoryboard();
     const targetOutput = targetOutputForGenerate(node);
@@ -1874,22 +1878,27 @@
         ? null
         : workflow.incoming(targetOutput.id)
           .find((connection) => connection.targetPortId === 'source')?.from ?? null;
-      const task = aiTasks.create({
-        projectPath: runProjectPath,
-        kind: 'workflow',
-        title: `Workflow: ${targetOutput.name || 'Generate output'}`,
-        subtitle: runProvider,
-        progress,
-        runId,
-        detail: {
-          kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
-        },
-      });
+      const task = existingTaskId
+        ? aiTasks.find(existingTaskId)
+        : aiTasks.create({
+          projectPath: runProjectPath,
+          kind: 'workflow',
+          title: `Workflow: ${targetOutput.name || 'Generate output'}`,
+          subtitle: runProvider,
+          progress,
+          runId,
+          detail: {
+            kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
+          },
+        });
+      if (!task) return;
+      aiTasks.setRunId(task.id, runId);
       activeWorkflowTaskId = task.id;
       aiTasks.setCancel(task.id, async () => {
         if (reviewedOutput) await workflow.cancelSelectiveExecution();
         else if (activeTransformNodeId) await workflow.cancelCampaignGenerate(activeTransformNodeId);
       });
+      aiTasks.setRetry(task.id, () => generate(targetOutput, true, task.id));
       if (!reviewedOutput && !forceRegenerate && path?.transformNodeId) {
         aiTasks.setProgress(task.id, 'Checking for reusable output…');
         const reusePreflight = await workflow.preflightSelectiveExecution(
@@ -2356,7 +2365,7 @@
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
                   value={asset?.id ?? ''}
-                  oninput={(event) => workflow.assignAsset(
+                  onchange={(event) => workflow.assignAsset(
                     node.id,
                     assets.find((item) => item.id === event.currentTarget.value) ?? null,
                   )}
@@ -2573,9 +2582,15 @@
                       id={`review-candidate-panel-${node.id}`}
                       aria-labelledby={`review-candidate-tab-${node.id}-${reviewCandidate.candidateId}`}
                       tabindex="0"
+                      onpointerdown={(event) => event.stopPropagation()}
                     >
                       {#if reviewAsset?.previewDataUrl}
-                        <img class="review-candidate-preview" src={reviewAsset.previewDataUrl} alt={`Candidate ${reviewCandidate.ordinal} preview`} />
+                        <img
+                          class="review-candidate-preview"
+                          src={reviewAsset.previewDataUrl}
+                          alt={`Candidate ${reviewCandidate.ordinal} preview`}
+                          draggable="false"
+                        />
                       {/if}
                       <p><strong>Brief</strong> {reviewCandidate.brief || 'No brief recorded.'}</p>
                       <p><strong>Art direction</strong> {reviewCandidate.artDirection || 'No art direction recorded.'}</p>
@@ -3681,6 +3696,8 @@
 
   .review-candidate-preview {
     display: block;
+    pointer-events: none;
+    user-select: none;
     width: 100%;
     max-height: 180px;
     object-fit: contain;

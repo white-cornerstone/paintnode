@@ -42,12 +42,13 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain("workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity)");
     expect(boardSource).toContain("reviewedOutput ? 'Use promoted'");
     expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
+    expect(boardSource).toContain('aiTasks.setRetry(task.id, () => generate(targetOutput, true, task.id))');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
     expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
     expect(boardSource).toContain('workflowCandidateProgressLabel');
     expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
     expect(boardSource).toContain('candidate-result-summary');
-    expect(boardSource).toContain("oninput={(event) => workflow.assignAsset");
+    expect(boardSource).toContain("onchange={(event) => workflow.assignAsset");
     expect(boardSource).toContain('Selected ${asset.name}');
     expect(boardSource).toContain('review-candidate-preview');
     expect(boardSource).toContain("'Checking for reusable output…'");
