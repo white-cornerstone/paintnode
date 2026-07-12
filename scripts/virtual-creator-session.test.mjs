@@ -195,7 +195,7 @@ test('prepares owner-only, isolated session materials and an empty separate proj
     assert.match(operator, /APPROVED_CHECKOUT=/);
     assert.match(operator, /KIT_CHECKOUT=/);
     assert.match(operator, /What are you looking for\?/);
-    assert.match(operator, /restart the 90-second interval/);
+    assert.match(operator, /restart a 90-second interval/);
     assert.match(operator, /rename the active workflow-result layer to Virtual Accepted Direction and set its opacity to 96 percent/);
     assert.match(operator, /I am setting the test checkpoint for this task/);
     assert.match(operator, /SOURCE_STATUS_SHA256/);
@@ -275,6 +275,23 @@ test('virtual observation validates only as synthetic evidence and requires comp
     observation = completeAcceptedObservation(result.observationPath, 'codex-task-v01');
 
     observation.tasks[0].checkpointEvents = [
+      { checkpointId: 'T1-C1', eventType: 'completed', elapsedWallMs: 200_000 },
+      { checkpointId: 'T1-C2', eventType: 'completed', elapsedWallMs: 300_000 },
+      { checkpointId: 'T1-C3', eventType: 'completed', elapsedWallMs: 310_000 },
+      { checkpointId: 'T1-C4', eventType: 'completed', elapsedWallMs: 320_000 },
+    ];
+    observation.tasks[0].interventions = [
+      { id: 'T1-C1-NP1', checkpointId: 'T1-C1', eventType: 'neutral-probe', exactText: 'What are you looking for?', elapsedWallMs: 90_000, assistIncrement: 0 },
+      { id: 'T1-C1-H1', checkpointId: 'T1-C1', eventType: 'standard-hint', exactText: 'Look for the place where you can open a project folder.', elapsedWallMs: 180_000, assistIncrement: 1 },
+      { id: 'T1-C2-H1', checkpointId: 'T1-C2', eventType: 'standard-hint', exactText: 'Look for a way to bring the supplied image into this project.', elapsedWallMs: 290_000, assistIncrement: 1 },
+    ];
+    observation.tasks[0].outcome = 'completed-assisted';
+    observation.tasks[0].elapsedWallMs = 330_000;
+    writeJson(result.observationPath, observation);
+    assert.equal(validateVirtualCreatorObservation({ observationPath: result.observationPath }).valid, true);
+    observation = completeAcceptedObservation(result.observationPath, 'codex-task-v01');
+
+    observation.tasks[0].checkpointEvents = [
       { checkpointId: 'T1-C1', eventType: 'completed', elapsedWallMs: 190_000 },
       { checkpointId: 'T1-C2', eventType: 'completed', elapsedWallMs: 300_000 },
       { checkpointId: 'T1-C3', eventType: 'completed', elapsedWallMs: 310_000 },
@@ -334,7 +351,7 @@ test('virtual observation validates only as synthetic evidence and requires comp
     writeJson(result.observationPath, observation);
     assert.throws(
       () => validateVirtualCreatorObservation({ observationPath: result.observationPath }),
-      /hint order or timing/,
+      /H2 order or timing|hint order or timing/,
     );
   } finally {
     rmSync(env.base, { recursive: true, force: true });

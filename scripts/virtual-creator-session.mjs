@@ -211,9 +211,9 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
     + 'chmod 600 "$SETUP_RECEIPT"\ncat "$SETUP_RECEIPT"\n'
     + '```\n\nKeep this terminal open because `attest_checkout` is reused before resume and finalization. Do not open the empty project before setup verification. Task 1 opens it.\n\n'
     + '## Moderator timing\n\nFollow the committed instrument algorithm, not a flat ladder:\n\n'
-    + '1. After 90 seconds without progress, ask exactly “What are you looking for?” Record a `neutral-probe` ID from the current task and checkpoint (for example `T1-C2-NP1`) with zero assist.\n'
-    + '2. At 180 total seconds, recompute the earliest incomplete checkpoint and deliver only its H1 verbatim.\n'
-    + '3. Whenever a checkpoint completes, restart the 90-second interval from observed completion and recompute the earliest incomplete checkpoint before any later intervention. If the checkpoint changed, its H1 is next; never deliver a stale H2.\n'
+    + '1. On the initial checkpoint, after 90 seconds without progress ask exactly “What are you looking for?” Record a `neutral-probe` ID from the current task and checkpoint (for example `T1-C2-NP1`) with zero assist.\n'
+    + '2. At 180 total seconds on that initial checkpoint, recompute the earliest incomplete checkpoint and deliver only its H1 verbatim.\n'
+    + '3. Whenever a checkpoint completes, restart a 90-second interval from observed completion and recompute the earliest incomplete checkpoint before the next intervention. If the checkpoint changed, deliver its H1 after that restarted interval without another neutral probe; never deliver a stale H2.\n'
     + '4. Only when the same checkpoint remains incomplete for another 90 seconds may H2 be delivered. Only after a further 90 seconds on that same checkpoint may its exact takeover occur. A takeover forces task failure.\n'
     + '5. Record every checkpoint completion in `checkpointEvents` at the observed elapsed time. Record every intervention object with checkpoint, event type, exact delivered text, elapsed time, and assist increment. The validator replays the merged timeline and rejects stale-checkpoint interventions. Record every deviation from the closed instrument.\n\n'
     + tasks.map((task) => {
@@ -478,14 +478,6 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
         && hints.get(intervention.id) !== intervention.exactText) {
         throw new Error(`Task ${task.task} has a hint that drifted from the closed instrument.`);
       }
-      if (intervention.eventType === 'standard-hint') {
-        const priorSuffix = intervention.id.endsWith('-H1') ? '-NP1' : '-H1';
-        const prior = task.interventions.find(({ id }) => id === `${intervention.checkpointId}${priorSuffix}`);
-        const minimum = intervention.id.endsWith('-H1') ? 180_000 : (prior?.elapsedWallMs ?? 0) + 90_000;
-        if (!prior || intervention.elapsedWallMs < minimum) {
-          throw new Error(`Task ${task.task} hint order or timing drifted from the closed instrument.`);
-        }
-      }
       if (intervention.eventType === 'takeover'
         && (intervention.assistIncrement !== 1 || task.outcome !== 'failed')) {
         throw new Error(`Task ${task.task} takeover must increment assist and force failure.`);
@@ -513,7 +505,7 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
       .checkpoints.map(({ id }) => id);
     let checkpointIndex = 0;
     let intervalStartedAt = 0;
-    let moderatorStage = 'none';
+    let moderatorStage = 'initial';
     let stageStartedAt = 0;
     let priorTimelineTime = -1;
     const timeline = [
@@ -532,16 +524,19 @@ function assertObservationSemantics(observation, { requireDecision = true, obser
       if (event.kind === 'checkpoint') {
         checkpointIndex += 1;
         intervalStartedAt = event.elapsedWallMs;
-        moderatorStage = 'none';
+        moderatorStage = 'after-progress';
         stageStartedAt = event.elapsedWallMs;
       } else if (event.eventType === 'neutral-probe') {
-        if (moderatorStage !== 'none' || event.elapsedWallMs < intervalStartedAt + 90_000) {
+        if (moderatorStage !== 'initial' || event.elapsedWallMs < intervalStartedAt + 90_000) {
           throw new Error(`Task ${task.task} neutral probe order or timing drifted from the facilitator algorithm.`);
         }
         moderatorStage = 'probe';
         stageStartedAt = event.elapsedWallMs;
       } else if (event.eventType === 'standard-hint' && event.id.endsWith('-H1')) {
-        if (moderatorStage !== 'probe' || event.elapsedWallMs < intervalStartedAt + 180_000) {
+        const validInitial = moderatorStage === 'probe' && event.elapsedWallMs >= intervalStartedAt + 180_000;
+        const validAfterProgress = moderatorStage === 'after-progress'
+          && event.elapsedWallMs >= intervalStartedAt + 90_000;
+        if (!validInitial && !validAfterProgress) {
           throw new Error(`Task ${task.task} H1 order or timing drifted from the facilitator algorithm.`);
         }
         moderatorStage = 'h1';
