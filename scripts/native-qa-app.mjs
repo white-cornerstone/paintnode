@@ -18,6 +18,7 @@ import {
   studySessionBuildEvidence,
   studySessionBuildOnlyEvidence,
 } from './native-qa-session.mjs';
+import { runtimeManifestUrlForNativeQaMode } from './provider-runtime-channel.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -82,6 +83,8 @@ const env = {
   PAINTNODE_QUICKLOOK_ARCHS: process.arch === 'arm64' ? 'arm64' : 'x86_64',
 };
 if (!normalMode) env.PAINTNODE_PROVIDER_QA_MODE = mode;
+const runtimeManifestUrl = runtimeManifestUrlForNativeQaMode(mode);
+if (runtimeManifestUrl) env.PAINTNODE_RUNTIME_MANIFEST_URL = runtimeManifestUrl;
 if (mode === 'provider-e2e') {
   env.PAINTNODE_QA_CODEX_BIN = executablePath('--codex-path');
   env.PAINTNODE_QA_ANTIGRAVITY_BIN = executablePath('--antigravity-path');

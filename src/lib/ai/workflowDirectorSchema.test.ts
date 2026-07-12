@@ -37,6 +37,10 @@ describe('Workflow Director GraphDraft schema', () => {
       'provider-executable-trust.mjs',
     ]));
     expect(providerRuntimeWorkflow).toContain('default: "4.0.0"');
+    expect(providerRuntimeWorkflow).toContain('default: "provider-runtimes-creative-blueprint"');
+    expect(providerRuntimeWorkflow).toContain('confirm_production_publish');
+    expect(providerRuntimeWorkflow).toContain('Production runtime publication requires explicit confirmation');
+    expect(providerRuntimeWorkflow).toContain('needs: release-target');
   });
 
   it('defines a strict structured-output schema for current-workflow revisions', () => {
