@@ -12,11 +12,19 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain('aria-keyshortcuts="Alt+W"');
     expect(projectPanelSource).toContain('projectKeyboardShortcut(event)');
     expect(projectPanelSource).toContain('openFirstWorkflow()');
-    expect(projectPanelSource).toContain("event.code !== 'KeyW'");
+    expect(projectPanelSource).toContain("event.code === 'KeyW' && workflowFiles.length");
   });
 
   it('distinguishes layer placement from candidate inspection and requires an image document', () => {
     expect(projectPanelSource).toContain("'Place as layer'");
     expect(projectPanelSource).toContain("disabled={actionLabel === 'Place' && !editor.doc}");
+  });
+
+  it('offers a guarded keyboard path to place the latest saved workflow edit after restart', () => {
+    expect(projectPanelSource).toContain("/^editor-revision-.*\\.png$/i");
+    expect(projectPanelSource).toContain('Place latest workflow edit as layer (Alt+L)');
+    expect(projectPanelSource).toContain('aria-keyshortcuts="Alt+L"');
+    expect(projectPanelSource).toContain("event.code === 'KeyL' && latestWorkflowEdit && editor.doc");
+    expect(projectPanelSource).toContain('placeLatestWorkflowEdit()');
   });
 });

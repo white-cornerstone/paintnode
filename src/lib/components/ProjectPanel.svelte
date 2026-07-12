@@ -63,6 +63,11 @@
   const workflowFiles = $derived(files.filter((file) => file.kind === 'workflow'));
   const autosaveFiles = $derived(files.filter((file) => file.kind === 'autosave'));
   const generatedFiles = $derived(files.filter((file) => file.kind === 'generated'));
+  const latestWorkflowEdit = $derived(
+    generatedFiles
+      .filter((file) => /^editor-revision-.*\.png$/i.test(file.name))
+      .toSorted((a, b) => (b.modifiedAt ?? b.createdAt ?? 0) - (a.modifiedAt ?? a.createdAt ?? 0))[0] ?? null,
+  );
   const importedFiles = $derived(files.filter((file) => file.kind === 'imported'));
   const viewModes: { id: ViewMode; label: string; icon: string }[] = [
     { id: 'list', label: 'List view', icon: AppsList },
@@ -308,11 +313,19 @@
     if (file) void openFile(file);
   }
 
+  function placeLatestWorkflowEdit(): void {
+    if (latestWorkflowEdit && editor.doc) void openFile(latestWorkflowEdit);
+  }
+
   function projectKeyboardShortcut(event: KeyboardEvent): void {
-    if (!event.altKey || event.ctrlKey || event.metaKey || event.code !== 'KeyW') return;
-    if (!workflowFiles.length) return;
-    event.preventDefault();
-    openFirstWorkflow();
+    if (!event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.code === 'KeyW' && workflowFiles.length) {
+      event.preventDefault();
+      openFirstWorkflow();
+    } else if (event.code === 'KeyL' && latestWorkflowEdit && editor.doc) {
+      event.preventDefault();
+      placeLatestWorkflowEdit();
+    }
   }
 
   async function importExternalImages(): Promise<void> {
@@ -452,6 +465,16 @@
         >
           <Icon svg={Open} size={13} />
         </button>
+      {:else if id === 'generated' && latestWorkflowEdit && editor.doc}
+        <button
+          class="group-action"
+          aria-label="Place latest workflow edit as layer (Alt+L)"
+          aria-keyshortcuts="Alt+L"
+          use:tooltip={{ text: 'Place latest workflow edit as layer (Alt+L)', placement: 'left' }}
+          onclick={placeLatestWorkflowEdit}
+        >
+          <Icon svg={ImageAdd} size={13} />
+        </button>
       {/if}
       <small>{groupFiles.length}</small>
     </div>
@@ -577,7 +600,11 @@
       {/if}
 
       <div class="browser">
-        {#if workflowFiles.length > 0}<p class="project-keyboard-hint">Keyboard: Alt+W opens the first saved workflow.</p>{/if}
+        {#if workflowFiles.length > 0 || (latestWorkflowEdit && editor.doc)}
+          <p class="project-keyboard-hint">
+            Keyboard: Alt+W opens the first saved workflow.{latestWorkflowEdit && editor.doc ? ' Alt+L places the latest workflow edit as a layer.' : ''}
+          </p>
+        {/if}
         {@render fileGroup('documents', 'Documents', documentFiles, 'Open', false, 'Saved .ora files appear here.')}
         {@render fileGroup('storyboards', 'Storyboards', storyboardFiles, 'Open', false, 'Composition storyboard .ora files appear here.')}
         {@render fileGroup('workflows', 'Workflows', workflowFiles, 'Open', false, 'Saved composition boards appear here.')}
