@@ -109,7 +109,8 @@ test('prepares isolated normal-app materials pinned to a clean checkout', () => 
   assert.match(participant, /PaintNode Repo QA — repo-dev/);
   assert.match(participant, /real provider behavior/i);
   assert.doesNotMatch(participant, /Provider Free/);
-  assert.match(operator, /npm run tauri:dev/);
+  assert.match(operator, /npm run qa:native:normal/);
+  assert.doesNotMatch(operator, /npm run tauri:dev/);
   assert.match(operator, /Never change hidden QA scenarios, inject failures, substitute fake outputs/i);
   assert.equal(plan.runtimeMode, 'repo-dev-real-providers');
   assert.equal(plan.bundleId, 'com.paintnode.editor.qa.repo.dev');

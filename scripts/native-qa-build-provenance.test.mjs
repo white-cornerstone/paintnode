@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
   captureCleanSourceState,
+  qaBuildIdentity,
   qaBuildIdentitySha256,
   qaBuildProvenancePath,
   writeQaBuildProvenance,
@@ -57,6 +58,31 @@ test('bundle provenance fingerprints the actual executable and source state', ()
     JSON.parse(readFileSync(qaBuildProvenancePath(appBundle), 'utf8')),
     provenance,
   );
+});
+
+test('normal-provider QA bundle has a distinct valid repo-dev identity', () => {
+  const root = mkdtempSync(join(tmpdir(), 'paintnode-normal-build-bundle-'));
+  const appBundle = join(root, 'PaintNode Repo QA — repo-dev.app');
+  const executable = join(appBundle, 'Contents/MacOS/PaintNode');
+  mkdirSync(join(appBundle, 'Contents/MacOS'), { recursive: true });
+  writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+  chmodSync(executable, 0o755);
+
+  const provenance = writeQaBuildProvenance({
+    appBundle,
+    mode: 'normal',
+    bundleId: 'com.paintnode.editor.qa.repo.dev',
+    sourceState: {
+      gitSha: 'a'.repeat(40), sourceTreeSha: 'b'.repeat(40), sourceDirty: false,
+      sourceStatusSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    },
+  });
+  assert.equal(qaBuildIdentity(provenance).mode, 'normal');
+
+  const source = readFileSync(new URL('./native-qa-app.mjs', import.meta.url), 'utf8');
+  assert.match(source, /\['normal', 'provider-free', 'provider-e2e'\]/);
+  assert.match(source, /PaintNode Repo QA — repo-dev/);
+  assert.match(source, /com\.paintnode\.editor\.qa\.repo\.dev/);
 });
 
 test('native QA build writes provenance before launching the built executable', () => {
