@@ -1,217 +1,136 @@
-# Creative Blueprint virtual creator evaluation
+# Creative Blueprint normal-app virtual creator evaluation
 
 ## Purpose
 
-This lane runs eight isolated AI-operated interaction probes against the exact
-approved Provider Free native PaintNode bundle. It is designed to expose
-navigation, copy, state, recovery, keyboard, provenance, and persistence
-friction before or alongside real creator research.
+This lane runs eight isolated, owner-observed AI creator tasks through the same
+normal repository-built PaintNode behavior used by a public user. Generation,
+editing, retry, persistence, and recovery use real configured providers and real
+subscription-backed results. The lane does not use Provider Free fixtures,
+deterministic outputs, injected failures, or hidden QA scenario controls.
 
-Every record is explicitly synthetic and requires live owner observation plus
-an accept/reject decision. Owner review increases the trustworthiness of the
-recorded run; it does not turn an AI agent into an independent qualifying
-creator.
+The repository app is launched with `npm run tauri:dev`. Its separate
+`PaintNode Repo QA — repo-dev` identity prevents Computer Use from accidentally
+targeting an installed production build; it does not replace normal provider
+behavior.
 
 ## Validity boundary
 
-Virtual creator results:
+Each virtual creator uses a predefined behavioral lens, a brand-new AI task,
+and a unique empty project. The product owner observes the live run and accepts
+or rejects its evidence. These records can create product hypotheses,
+regression cases, and backlog candidates.
 
-- may create product hypotheses, regression cases, and backlog candidates;
-- may be compared across predefined behavioral lenses;
-- may be accepted or rejected by the product owner after live observation;
-- must never be copied into real participant rows or human-study metrics;
-- do not satisfy recruitment, participation consent, recording consent,
-  accessibility representation, facilitator sign-off, or the #85 requirement
-  for 6–8 qualifying creators;
-- cannot close #85, Milestone 2, or PR #65 under the current acceptance
-  contract.
+They remain synthetic records. Owner review makes the run auditable but does
+not retrospectively make an AI task a human participant or independently close
+the current #85 qualifying-creator gate. Keep any later governance decision
+separate and never relabel old records.
 
-If the milestone contract is intentionally changed later, preserve these
-records as synthetic evidence and document the governance decision separately.
-Never relabel old virtual sessions as human sessions.
+## What is isolated
 
-## Study design
+- AI conversation: new task, no fork, no prior creator transcript.
+- Project data: unique empty project folder for every attempt.
+- Runtime identity: repo-built QA title and bundle ID, distinct from the
+  installed production app.
+- Source version: clean checkout path and Git SHA pinned in `session-plan.json`.
+- Evidence: private control directory and explicit owner disposition.
 
-The fixed profile matrix lives in
-`creator-study/virtual-creators/profiles.json`. Profiles are behavioral lenses,
-not demographic personas and not claims of lived experience. They vary visible
-interaction constraints and likely mental models without directing the agent to
-find a predetermined problem.
+Provider credentials and normal app settings are intentionally not replaced by
+test fixtures. They behave as they do for a public user. Project folders are
+preserved after the run for owner evidence review.
 
-Each profile receives:
+## Prepare a session
 
-1. a newly allocated virtual session ID;
-2. a new AI task with no forked conversation or prior-session context;
-3. a unique empty project folder outside the repository;
-4. a cryptographically fresh isolated PaintNode profile;
-5. only its own participant-start prompt and the current task prompt;
-6. a neutral probe and standardized hints only when the committed facilitator
-   algorithm allows them;
-7. final owner observation and acceptance or rejection;
-8. verified native profile cleanup before the next profile begins.
-
-Sessions are strictly sequential because the approved lifecycle deliberately
-allows only one active study profile at a time.
-
-## Operator and creator separation
-
-The generated `operator-deck.md` contains hidden checkpoint setup, timing,
-hints, lifecycle commands, and owner-review steps. Never paste that file into
-the virtual creator task.
-
-The generated `participant-start.md` contains only one behavioral lens, the
-session-specific empty project, supplied Product paths, and the interaction
-rules. The operator then sends exactly one task prompt at a time from the
-operator deck.
-
-The creator task must use Computer Use against the native repo-built app. It
-must not use Terminal, a browser PaintNode build, source code, tests, GitHub,
-logs, prior results, operator files, or any other session.
-
-The protected Provider Free study bundle must never be opened directly by the
-virtual creator or by Computer Use auto-launch. Direct launch intentionally
-aborts because it lacks the operator-created isolated study profile. Complete
-native setup first; the participant prompt initially forbids Computer Use and
-waits for `APP READY`. After that signal, the creator uses non-launching
-running-app discovery and reports `BLOCKED — APP NOT RUNNING` instead of opening
-the bundle. The same gate applies after Task 8 until `APP RESUMED` is sent.
-
-## Prepare one session
-
-Create two owner-only roots outside the repository. Keep control records away
-from the empty PaintNode projects:
+Create separate private roots outside the repository:
 
 ```sh
-mkdir -p "$HOME/Library/Application Support/PaintNode/virtual-creators/control"
-mkdir -p "$HOME/Library/Application Support/PaintNode/virtual-creators/projects"
-chmod 700 "$HOME/Library/Application Support/PaintNode/virtual-creators/control"
-chmod 700 "$HOME/Library/Application Support/PaintNode/virtual-creators/projects"
+mkdir -p "$HOME/Library/Application Support/PaintNode/virtual-creators-normal/control"
+mkdir -p "$HOME/Library/Application Support/PaintNode/virtual-creators-normal/projects"
+chmod 700 "$HOME/Library/Application Support/PaintNode/virtual-creators-normal/control"
+chmod 700 "$HOME/Library/Application Support/PaintNode/virtual-creators-normal/projects"
 ```
 
-List the eight profiles:
-
-```sh
-npm run qa:virtual-creators:prepare -- --list-profiles
-```
-
-Prepare V01, substituting the real build-control pack when needed:
+From the exact clean feature worktree that will run the app:
 
 ```sh
 npm run qa:virtual-creators:prepare -- \
   --profile V01 \
-  --control-root "$HOME/Library/Application Support/PaintNode/virtual-creators/control" \
-  --project-root "$HOME/Library/Application Support/PaintNode/virtual-creators/projects" \
-  --build-control-root "$HOME/Library/Application Support/PaintNode/creator-study-ops/2026-07-12-preauth" \
-  --approved-checkout "/absolute/clean/detached/checkout/at/the-approved-git-sha"
+  --control-root "$HOME/Library/Application Support/PaintNode/virtual-creators-normal/control" \
+  --project-root "$HOME/Library/Application Support/PaintNode/virtual-creators-normal/projects" \
+  --app-checkout "$PWD"
 ```
 
-The command creates one owner-only control directory and one separate, empty,
-owner-only project. It fails when roots are inside the repository, nested,
-symlinked, or when the preserved study-capable bundle/records are absent.
-It also rejects an approved checkout whose HEAD differs from the frozen build
-or whose source tree, including untracked files, is dirty. Packet generation
-also requires a clean virtual-creator kit checkout and pins its Git SHA so the
-final validator cannot silently drift. The generated deck
-captures hashed `fresh`, `resume`, and `finalize` attestation rows and native
-setup/cleanup receipts. The validator reopens those private receipt files and
-binds their build, profile, cleanup, phase, and time fields to the observation.
-Keep that detached checkout unchanged for all
-eight sessions even if `feature/creative-blueprint` advances.
+The command creates:
 
-## Run one session
+- `session-plan.json`: immutable runtime, source, project, and profile binding;
+- `participant-start.md`: the only session-start file sent to the new AI task;
+- `operator-deck.md`: launch, moderation, task, relaunch, and review instructions;
+- `observation.blank.json`: schema-v2 evidence record.
 
-1. Open the generated `operator-deck.md` in the coordinating task only.
-2. Launch and verify the exact preserved bundle using the generated commands.
-3. Confirm through Computer Use that no document, project, workflow, or imported
-   asset is visible. Do not open the project before setup verification.
-4. Only after setup succeeded and the app is visibly running, start a brand-new
-   AI task with no inherited conversation.
-5. Paste only `participant-start.md` into that task. Require the exact
-   `READY — WAITING FOR APP READY` reply with no Computer Use invocation.
-6. Send `APP READY`, require non-launching running-app confirmation, then send
-   Task 1, observe the live native run, and record visible evidence.
-7. Continue one task at a time. Perform Task 2 and Task 7 checkpoint changes
-   from the operator lane, and Task 8 resume from the same native profile.
-8. Apply the committed facilitator algorithm exactly: neutral probe at 90
-   seconds without progress, H1 at 180 seconds, then recompute the earliest
-   incomplete checkpoint and restart timing whenever progress occurs. Deliver
-   H2 and takeover only after the additional same-checkpoint intervals. Record
-   every observed checkpoint completion so the validator can replay the merged
-   progress/intervention timeline and reject stale hints.
-9. Complete `observation.blank.json` with the distinct external AI task ID,
-   three checkout attestations, receipt hashes/fields, exact interventions,
-   scenario events, synthetic task outcomes, visible evidence, and findings.
-10. Close PaintNode and require successful `qa:creator-study:finalize-session`
-    cleanup before starting the next profile.
-11. Complete `ownerReview`: observed live, evidence reviewed, accepted/rejected,
-    written standard, notes, and UTC review timestamp.
-12. Run the fail-closed record validator:
+Preparation fails if the source checkout is dirty, either private root is
+inside the repository, the roots contain each other, or the profile is unknown.
 
-    ```sh
-    npm run qa:virtual-creators:validate -- \
-      --validate-observation "/absolute/path/to/observation.blank.json"
-    ```
+## Run one creator
 
-An accepted virtual run requires all eight tasks completed, elapsed time and
-traceable native UI evidence for every task, the planned Task 2 and Task 7
-setup/reset events, every checkpoint completion, only permitted deviations,
-matching setup/cleanup profile
-hashes from validated native receipts, verified data-store removal and
-finalization, and the owner’s written explicit decision. A failed or incomplete
-run must be rejected.
+1. Open only `operator-deck.md` in the coordinating task.
+2. Verify the unique project is empty, then run `npm run tauri:dev` from the
+   pinned clean checkout.
+3. Confirm `PaintNode Repo QA — repo-dev` is visibly running with no project or
+   document open.
+4. Create a brand-new, non-forked AI task and paste only
+   `participant-start.md`.
+5. After its waiting reply, send `APP READY`, then send one task prompt at a
+   time from the operator deck.
+6. Observe normal real-provider behavior. Do not change a hidden QA mode,
+   inject a failure, substitute an output, or silently operate the app for the
+   creator. If a real failure occurs, let the creator use only visible recovery
+   controls and record the result.
+7. For Task 8, the creator saves and quits. The operator restarts the same
+   pinned repo app, verifies it is running, then sends `APP RESUMED`. The
+   creator reopens its own saved project.
+8. Close the repo-dev app after the task, preserve the project, fill the
+   observation, and record the owner's accept/reject decision.
+9. Validate before moving to the next profile.
 
-A packet rejected before launch uses `attemptStage: prelaunch`, must keep
-`selectedForAggregate: false`, and must not invent an external task,
-attestation, setup, or cleanup evidence. A launched
-attempt is retained after verified finalization even when rejected. Prepare a
-new packet to retry that profile; keep the rejected attempt with
-`selectedForAggregate: false`, and mark exactly one terminal attempt for each
-V01–V08 profile `selectedForAggregate: true`. The set validator permits retained
-rejected attempts while rejecting missing, duplicate-selected, or reused-task-ID
-records.
+```sh
+npm run qa:virtual-creators:validate -- \
+  --validate-observation "/absolute/path/to/observation.blank.json"
+```
 
-If fresh launch or technical setup fails after a native profile is allocated,
-close PaintNode, add the `finalize` checkout attestation, run
-`qa:creator-study:abort-session`, and capture its cleanup receipt through the
-temporary-file/atomic-rename pattern in the operator deck. Record the attempt as
-rejected and finalized; do not allocate the next profile until cleanup verifies.
-An AI task that attempts to open the bundle before `APP READY` is a rejected
-prelaunch attempt and must not be reused for the replacement profile.
+Run strictly one profile at a time. A rejected attempt is retained; a retry
+gets a new session, project, and AI task.
 
-## Synthesis
+## Acceptance contract
 
-Use `virtual-aggregate-template.md`. Keep three layers separate:
+An accepted session requires:
 
-1. **Observed UI evidence** — labels, states, dimensions, actions, errors, and
-   persisted results actually visible in the native app.
-2. **Agent interpretation** — what the assigned behavioral lens inferred.
-3. **Human-validation hypothesis** — what should be checked with real creators.
+- all eight tasks completed through visible normal-app controls;
+- a distinct external AI task ID and confirmed new-task/no-fork isolation;
+- fresh and Task 8 resume launch evidence for the pinned repo app;
+- native UI evidence for every task;
+- real-provider evidence for Tasks 2, 5, 6, and 7;
+- real errors and recovery attempts recorded without injection;
+- successful save/reopen and final app closure;
+- live owner observation, evidence review, rationale, and timestamp.
 
-Do not use human-study severity S0–S4, SEQ, participant percentages, cohort
-exceptions, or milestone recommendations. Virtual findings use hypothesis
-impact and always set `requiresHumanValidation: true`.
-
-## Eight-session completion checklist
-
-- [ ] V01 First-time workflow explorer
-- [ ] V02 Keyboard-only workflow explorer
-- [ ] V03 Accessibility-tree navigation probe
-- [ ] V04 High-volume commerce creator lens
-- [ ] V05 Traditional layer-editor lens
-- [ ] V06 Prompt-first AI creator lens
-- [ ] V07 Multi-format social creator lens
-- [ ] V08 Deliberate verification lens
-- [ ] Every launched attempt used a distinct AI task, project, and session ID
-- [ ] Every session passed its fail-closed observation validator
-- [ ] Every profile was finalized before the next allocation
-- [ ] Every record has an owner accept/reject decision
-- [ ] Exactly one terminal attempt per V01–V08 is selected for the aggregate
-- [ ] Aggregate report keeps synthetic findings outside real study evidence
-
-After all eight owner decisions, validate the complete set and task-ID
-uniqueness:
+After all eight profiles have a selected owner-accepted attempt, validate the set:
 
 ```sh
 npm run qa:virtual-creators:validate -- \
   --validate-control-root "/absolute/path/to/control"
 ```
+
+The set validator requires exactly one selected, accepted V01–V08 attempt and
+unique AI task IDs and project directories. Rejected attempts remain retained
+but unselected.
+
+## Synthesis
+
+Keep three layers separate:
+
+1. observed visible UI and provider evidence;
+2. the AI creator's interpretation through its assigned lens;
+3. a hypothesis that still requires validation with human creators.
+
+Do not turn variable provider output quality into a deterministic cross-profile
+score. Compare workflow comprehension, control discovery, state, recovery,
+persistence, and evidence quality instead.
