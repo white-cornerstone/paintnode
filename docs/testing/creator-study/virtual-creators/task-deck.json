@@ -1,7 +1,8 @@
 {
-  "schemaVersion": 1,
-  "recordType": "paintnode-virtual-creator-task-deck",
+  "schemaVersion": 2,
+  "recordType": "paintnode-normal-app-virtual-creator-task-deck",
   "syntheticOnly": true,
+  "runtimeMode": "repo-dev-real-providers",
   "tasks": [
     {
       "task": 1,
@@ -12,9 +13,9 @@
     },
     {
       "task": 2,
-      "title": "Create alternatives and recover one",
-      "prompt": "Create three different campaign directions. If one does not complete, keep the useful alternatives and recover the incomplete one.",
-      "stopCondition": "Stop immediately when the planned branch failure is visible; continue only after the operator confirms the checkpoint reset.",
+      "title": "Create real alternatives",
+      "prompt": "Create three different campaign directions using PaintNode's normal generation flow. Compare what completed. If a real provider or app failure occurs, keep the useful alternatives and try to recover only the incomplete work using visible public-user controls.",
+      "stopCondition": "Stop when three real directions are available for comparison, or when a real visible error prevents progress.",
       "creatorFacingAddendum": null
     },
     {
@@ -34,29 +35,29 @@
     {
       "task": 5,
       "title": "Produce the output family",
-      "prompt": "Finish the campaign as square, portrait, and landscape outputs based on your accepted edited direction. Check that you received all three formats.",
-      "stopCondition": "Stop when all three format states are inspected, or when blocked.",
+      "prompt": "Finish the campaign as square, portrait, and landscape outputs based on your accepted edited direction. Use the normal generation flow and check that you received all three formats.",
+      "stopCondition": "Stop when all three real format results are inspected, or when blocked by a visible provider or app error.",
       "creatorFacingAddendum": null
     },
     {
       "task": 6,
       "title": "Understand reuse and an upstream change",
-      "prompt": "First run the campaign again without changing anything. Then replace the Product with this updated version and bring the campaign up to date while keeping work that does not need to change.",
-      "stopCondition": "Stop after reuse and selective stale-work behavior have both been inspected, or when blocked.",
+      "prompt": "First run the campaign again without changing anything and inspect what PaintNode reuses. Then replace the Product with this updated version and bring the campaign up to date while keeping work that does not need to change.",
+      "stopCondition": "Stop after unchanged reuse and the real selective update after Product replacement have both been inspected, or when blocked.",
       "creatorFacingAddendum": "UPDATED_PRODUCT_PATH"
     },
     {
       "task": 7,
-      "title": "Recover one format",
-      "prompt": "Complete the campaign after this output problem. Preserve any formats that already completed successfully.",
-      "stopCondition": "Stop immediately when the planned Landscape failure is visible; continue only after the operator confirms the checkpoint reset.",
+      "title": "Revise one output without losing the others",
+      "prompt": "Revise or regenerate only the Landscape output using the normal public-user controls. Keep the completed Square and Portrait outputs unchanged. If a real provider or app failure occurs, recover only the affected work if the UI allows it.",
+      "stopCondition": "Stop when Landscape has a new real result and Square and Portrait remain intact, or when a real visible error prevents progress.",
       "creatorFacingAddendum": null
     },
     {
       "task": 8,
       "title": "Resume after restart and use a result",
-      "prompt": "Save your work, quit PaintNode, reopen the same project and campaign, and confirm you can understand where you left off. Then place the edited campaign result into an image document.",
-      "stopCondition": "Stop after PaintNode quits so the operator can resume the same profile; continue only after the operator confirms relaunch.",
+      "prompt": "Save your work and quit PaintNode. Wait while the operator restarts the same repo-built app. After APP RESUMED, reopen the same project and campaign, confirm you can understand where you left off, then place the edited campaign result into an image document.",
+      "stopCondition": "Pause after PaintNode quits; after APP RESUMED, stop when saved state is verified and the edited result is placed as a document layer, or when blocked.",
       "creatorFacingAddendum": null
     }
   ]

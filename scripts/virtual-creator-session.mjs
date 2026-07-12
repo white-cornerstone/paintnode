@@ -6,11 +6,10 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 
@@ -18,12 +17,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const virtualRoot = join(root, 'docs', 'testing', 'creator-study', 'virtual-creators');
 const profilesPath = join(virtualRoot, 'profiles.json');
 const taskDeckPath = join(virtualRoot, 'task-deck.json');
-const hintsPath = join(root, 'docs', 'testing', 'creator-study', 'facilitator-hints.json');
-const materialRoot = join(root, 'docs', 'testing', 'creator-study', 'materials');
-const appName = 'PaintNode Blueprint QA — Provider Free.app';
-const sidecarName = `${appName}.paintnode-qa-build.json`;
-const cleanStatusSha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const observationSchemaPath = join(virtualRoot, 'observation.schema.json');
+const materialRoot = join(root, 'docs', 'testing', 'creator-study', 'materials');
+const appTitle = 'PaintNode Repo QA — repo-dev';
+const appBundleId = 'com.paintnode.editor.qa.repo.dev';
+const cleanStatusSha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 function readJson(path, label) {
   try {
@@ -59,8 +57,8 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
-function sha256File(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function strictUtcTimestamp(value, label) {
@@ -75,7 +73,7 @@ function strictUtcTimestamp(value, label) {
 function loadProfiles() {
   const document = readJson(profilesPath, 'Virtual creator profiles');
   if (document.schemaVersion !== 1 || document.recordType !== 'paintnode-virtual-creator-profiles'
-    || document.syntheticOnly !== true || !Array.isArray(document.profiles)) {
+    || document.syntheticOnly !== true || document.profiles?.length !== 8) {
     throw new Error('Virtual creator profile contract is unsupported.');
   }
   return document.profiles;
@@ -83,208 +81,106 @@ function loadProfiles() {
 
 function loadTaskDeck() {
   const document = readJson(taskDeckPath, 'Virtual creator task deck');
-  if (document.schemaVersion !== 1 || document.recordType !== 'paintnode-virtual-creator-task-deck'
-    || document.syntheticOnly !== true || !Array.isArray(document.tasks) || document.tasks.length !== 8) {
-    throw new Error('Virtual creator task deck contract is unsupported.');
+  if (document.schemaVersion !== 2 || document.recordType !== 'paintnode-normal-app-virtual-creator-task-deck'
+    || document.syntheticOnly !== true || document.runtimeMode !== 'repo-dev-real-providers'
+    || document.tasks?.length !== 8) {
+    throw new Error('Normal-app virtual creator task deck contract is unsupported.');
   }
   return document.tasks;
 }
 
-function loadBuild(buildControlRoot) {
-  const canonicalRoot = existingDirectory(buildControlRoot, 'Build-control root');
-  if (isInside(root, canonicalRoot)) throw new Error('Build-control root must be outside the Git repository.');
-  const appBundle = join(canonicalRoot, 'build', appName);
-  const sidecarPath = join(canonicalRoot, 'build', sidecarName);
-  if (!statSync(appBundle).isDirectory()) throw new Error('Preserved Provider Free app bundle is missing.');
-  const provenance = readJson(sidecarPath, 'Preserved Provider Free provenance');
-  if (provenance?.mode !== 'provider-free'
-    || provenance?.bundleId !== 'com.paintnode.editor.blueprintqa.provider.free'
-    || provenance?.studyCapable !== true
-    || !/^[a-f0-9]{40}$/.test(provenance.gitSha ?? '')
-    || !/^[a-f0-9]{64}$/.test(provenance.executableSha256 ?? '')) {
-    throw new Error('Preserved Provider Free provenance is not a study-capable approved-build identity.');
-  }
-  for (const name of ['private-approved-build-record.json', 'private-active-build-decisions.json']) {
-    if (!statSync(join(canonicalRoot, name)).isFile()) throw new Error(`Build-control record is missing: ${name}`);
-  }
-  return Object.freeze({ canonicalRoot, appBundle, provenance });
-}
-
-function captureApprovedCheckout(approvedCheckout, expectedGitSha) {
-  const canonical = existingDirectory(approvedCheckout, 'Approved checkout');
-  const gitSha = spawnSync('git', ['-C', canonical, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
-  const status = spawnSync('git', ['-C', canonical, 'status', '--porcelain'], { encoding: 'utf8' });
-  if (gitSha.status !== 0 || status.status !== 0) {
-    throw new Error('Approved checkout must be a readable Git worktree.');
-  }
-  if (gitSha.stdout.trim() !== expectedGitSha) {
-    throw new Error('Approved checkout HEAD does not match the frozen build Git SHA.');
-  }
-  if (status.stdout !== '') throw new Error('Approved checkout must be clean.');
-  return canonical;
-}
-
-function captureKitCheckout(repoRoot) {
-  const canonical = existingDirectory(repoRoot, 'Virtual creator kit checkout');
+function captureCheckout(appCheckout) {
+  const canonical = existingDirectory(appCheckout, 'App checkout');
   const gitSha = spawnSync('git', ['-C', canonical, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
   const status = spawnSync('git', ['-C', canonical, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
-  if (gitSha.status !== 0 || status.status !== 0 || status.stdout !== '') {
-    throw new Error('Virtual creator kit checkout must be a clean Git worktree.');
-  }
-  return Object.freeze({ path: canonical, gitSha: gitSha.stdout.trim() });
+  if (gitSha.status !== 0 || status.status !== 0) throw new Error('App checkout must be a readable Git worktree.');
+  if (status.stdout !== '') throw new Error('App checkout must be clean, including untracked files.');
+  return Object.freeze({
+    path: canonical,
+    gitSha: gitSha.stdout.trim(),
+    sourceStatusSha256: sha256(status.stdout),
+  });
 }
 
 function participantPrompt({ profile, projectDir, sessionId }) {
-  const productA = join(materialRoot, 'product-a.png');
-  return `# Virtual creator session ${profile.id}\n\n`
-    + `This is an explicitly synthetic PaintNode interaction probe, session \`${sessionId}\`. `
-    + 'Do not claim to be a real creator or infer human-population results.\n\n'
-    + '## Launch safety gate\n\n'
-    + 'Do not invoke Computer Use yet. Never open or launch PaintNode yourself; the protected study bundle intentionally aborts when opened outside the operator-controlled repository QA command. '
-    + 'The operator exclusively owns fresh launch, resume, and cleanup. Reply without inspecting the desktop and wait until the operator sends exactly `APP READY`. '
-    + 'After `APP READY`, first use the non-launching Computer Use running-app discovery/list operation. If **PaintNode Blueprint QA — Provider Free** is not already listed as running, do not call an app-state operation and do not try another app target; report exactly `BLOCKED — APP NOT RUNNING` and wait. '
-    + 'If PaintNode later quits or disappears, stop all Computer Use until the operator sends exactly `APP RESUMED`, then repeat the same non-launching running-app check.\n\n'
-    + 'Operate only the already-open native **PaintNode Blueprint QA — Provider Free** app through Computer Use. '
-    + 'Do not use a browser version of PaintNode. Do not use Terminal, inspect the repository, source code, tests, Git history, issues, prior task transcripts, operator materials, logs, saved results, or any other virtual session. '
-    + 'Infer behavior only from the visible app and the task prompt currently supplied by the operator.\n\n'
-    + `## Behavioral lens\n\n- Label: ${profile.label}\n- Creative-tool familiarity: ${profile.creativeToolFamiliarity}\n`
+  return `# PaintNode virtual creator ${profile.id}\n\n`
+    + `You are running an explicitly synthetic product-use session, \`${sessionId}\`. Act through the visible PaintNode UI using the assigned creative-working style. Do not claim to be a real person or generalize your experience to human creators.\n\n`
+    + '## App handoff\n\n'
+    + 'The operator will start the normal repository-built PaintNode app. Do not open an installed PaintNode, use Terminal, or launch the app yourself. Reply now without inspecting the desktop and wait for exactly `APP READY`. After that signal, use non-launching running-app discovery and attach only to **PaintNode Repo QA — repo-dev**. If it is not running, report exactly `BLOCKED — APP NOT RUNNING` and wait.\n\n'
+    + 'This is the normal app path with real provider behavior. Use generation, editing, retry, save, and reopen features as a public user would. Do not inspect source code, tests, Git history, logs, operator files, or another creator session. Do not change provider settings unless a task explicitly asks you to. A provider or app error is real evidence: report it and use only recovery actions visible to a public user.\n\n'
+    + `## Working style\n\n- Label: ${profile.label}\n- Creative-tool familiarity: ${profile.creativeToolFamiliarity}\n`
     + `- AI-workflow familiarity: ${profile.aiWorkflowFamiliarity}\n- Multi-format habit: ${profile.multiFormatHabit}\n`
     + `- Interaction constraint: ${profile.interactionConstraint}\n- Mental model: ${profile.mentalModel}\n`
     + `- Constraint: ${profile.behavioralConstraint}\n\n`
-    + `## Supplied material\n\n- Empty project folder: \`${projectDir}\`\n- Product A: \`${productA}\`\n\n`
-    + 'The operator will send exactly one task prompt at a time. Do not read ahead or invent future tasks. '
-    + 'Complete the visible task using your assigned interaction constraint. If blocked, state what is visibly blocking you and wait for a standardized operator message. '
-    + 'When a task is complete, report only: completion or blocked state, visible evidence, actions taken, and any confusing label or state. '
-    + 'Do not grade severity, use human-study metrics, or propose a milestone decision. Reply only `READY — WAITING FOR APP READY` now; do not invoke Computer Use.\n';
+    + `## Supplied material\n\n- Your unique empty project folder: \`${projectDir}\`\n- Product A: \`${join(materialRoot, 'product-a.png')}\`\n\n`
+    + 'The operator will send one task at a time. Do not read ahead. When finished, report only the completion or blocked state, visible evidence, actions taken, provider/app errors encountered, and confusing labels or state. Do not grade severity or make a milestone decision. Reply only `READY — WAITING FOR APP READY` now.\n';
 }
 
-function renderHintAppendix(instrument) {
-  const lines = ['## Standardized intervention appendix', ''];
-  for (const task of instrument.tasks) {
-    lines.push(`### Task ${task.task}`, '');
-    for (const checkpoint of task.checkpoints) {
-      const takeover = instrument.takeoverActions.find((entry) => entry.checkpointId === checkpoint.id);
-      lines.push(
-        `- ${checkpoint.id} H1: ${checkpoint.firstHint}`,
-        `- ${checkpoint.id} H2: ${checkpoint.secondHint}`,
-        `- ${takeover.id}: ${takeover.exactAction}`,
-      );
-    }
-    lines.push('');
-  }
-  return lines.join('\n');
+function taskMessage(task) {
+  const addendum = task.creatorFacingAddendum === 'UPDATED_PRODUCT_PATH'
+    ? `Updated Product image: ${join(materialRoot, 'product-b.png')}`
+    : task.creatorFacingAddendum;
+  return addendum ? `${task.prompt}\n\n${addendum}` : task.prompt;
 }
 
-function operatorDeck({ profile, sessionId, controlDir, projectDir, build, approvedCheckout, kitCheckout, tasks, instrument }) {
-  const record = join(build.canonicalRoot, 'private-approved-build-record.json');
-  const ledger = join(build.canonicalRoot, 'private-active-build-decisions.json');
-  const deletedRehearsal = join(controlDir, 'deleted-rehearsal');
-  const attestations = join(controlDir, 'checkout-attestations.jsonl');
-  const setupReceipt = join(controlDir, 'setup-receipt.json');
-  const cleanupReceipt = join(controlDir, 'cleanup-receipt.json');
+function operatorDeck({ profile, sessionId, controlDir, projectDir, checkout, tasks }) {
+  const observation = join(controlDir, 'observation.blank.json');
   return `# Operator deck — ${sessionId}\n\n`
-    + '> OPERATOR ONLY. Never paste this whole file into the virtual creator task. Send only participant-start.md, then one task prompt or approved intervention at a time.\n\n'
-    + '## Validity boundary\n\nThis is owner-observed synthetic evaluation. It is not recruitment, consented participant research, accessibility representation, or #85 exit evidence. '
-    + 'The owner must observe the live run and explicitly accept or reject the final record.\n\n'
-    + '## Isolation\n\n- Run one virtual session at a time; the native lifecycle state is intentionally single-session.\n'
-    + '- Complete Native setup and visible empty-state verification first. Do not create the virtual creator task before native setup has succeeded and the setup receipt exists.\n'
-    + '- Only then start a brand-new AI task with no forked conversation or prior session context.\n'
-    + '- Give that task only participant-start.md, the readiness signal, and the current task/intervention message.\n'
-    + '- Never provide this control directory, prior observations, profile matrix, source code, GitHub context, or hidden hint ladder.\n'
-    + `- Profile: ${profile.id} — ${profile.label}\n- Session: ${sessionId}\n- Project: ${projectDir}\n\n`
-    + '## Native setup\n\nRun from the exact feature checkout at the approved Git SHA. Do not rebuild the app.\n\n'
-    + '```sh\n'
-    + 'set -euo pipefail\n'
-    + `APPROVED_CHECKOUT=${shellQuote(approvedCheckout)}\nKIT_CHECKOUT=${shellQuote(kitCheckout.path)}\nKIT_GIT_SHA=${shellQuote(kitCheckout.gitSha)}\nCONTROL=${shellQuote(controlDir)}\nOBSERVATION=${shellQuote(join(controlDir, 'observation.blank.json'))}\nATTESTATIONS=${shellQuote(attestations)}\nSETUP_RECEIPT=${shellQuote(setupReceipt)}\nCLEANUP_RECEIPT=${shellQuote(cleanupReceipt)}\nEXPECTED_GIT_SHA=${shellQuote(build.provenance.gitSha)}\nAPP=${shellQuote(build.appBundle)}\nRECORD=${shellQuote(record)}\nLEDGER=${shellQuote(ledger)}\nPROJECT=${shellQuote(projectDir)}\nREHEARSAL=${shellQuote(deletedRehearsal)}\n`
-    + 'test ! -e "$ATTESTATIONS"\n(umask 077; : > "$ATTESTATIONS")\n'
-    + 'attest_checkout() {\n'
-    + 'PHASE=$1\ncase "$PHASE" in fresh|resume|finalize) ;; *) return 64 ;; esac\n'
-    + 'cd "$APPROVED_CHECKOUT"\n'
-    + 'ACTUAL_GIT_SHA=$(git rev-parse HEAD)\n'
-    + 'SOURCE_STATUS=$(git status --porcelain --untracked-files=all)\n'
-    + 'SOURCE_STATUS_SHA256=$(printf %s "$SOURCE_STATUS" | shasum -a 256 | awk \'{print $1}\')\n'
-    + 'test "$ACTUAL_GIT_SHA" = "$EXPECTED_GIT_SHA"\n'
-    + 'test -z "$SOURCE_STATUS"\n'
-    + `test "$SOURCE_STATUS_SHA256" = ${shellQuote(cleanStatusSha256)}\n`
-    + 'ATTESTED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\n'
-    + 'printf \'{"phase":"%s","expectedGitSha":"%s","actualGitSha":"%s","sourceStatusSha256":"%s","attestedAt":"%s"}\\n\' "$PHASE" "$EXPECTED_GIT_SHA" "$ACTUAL_GIT_SHA" "$SOURCE_STATUS_SHA256" "$ATTESTED_AT" >> "$ATTESTATIONS"\n'
-    + '}\n'
-    + 'attest_checkout fresh\n'
-    + 'npm run qa:creator-study:launch -- --app-bundle "$APP" --fresh-study-session\n'
-    + '# Use Computer Use to verify: no document, no project, no workflow, no imported asset.\n'
-    + 'SETUP_TMP="$SETUP_RECEIPT.tmp"\ntest ! -e "$SETUP_RECEIPT" && test ! -e "$SETUP_TMP"\n'
-    + 'if (umask 077; npm run --silent qa:creator-study:setup -- --approved-build-record "$RECORD" --active-build-decisions "$LEDGER" --app-bundle "$APP" --project-dir "$PROJECT" --rehearsal-dir "$REHEARSAL" --visible-empty-state-attested > "$SETUP_TMP"); then mv "$SETUP_TMP" "$SETUP_RECEIPT"; else rm -f "$SETUP_TMP"; exit 1; fi\n'
-    + 'chmod 600 "$SETUP_RECEIPT"\ncat "$SETUP_RECEIPT"\n'
-    + '```\n\nKeep this terminal open because `attest_checkout` is reused before resume and finalization. Do not open the empty project before setup verification. Task 1 opens it.\n\n'
-    + '## Participant handoff — only after setup\n\n'
-    + '1. Confirm through operator-controlled Computer Use that **PaintNode Blueprint QA — Provider Free** is visibly running with no document, project, workflow, or imported asset.\n'
-    + '2. Start the brand-new, non-forked virtual creator task and paste only `participant-start.md`. It must reply `READY — WAITING FOR APP READY` without invoking Computer Use. If it attempts to launch or inspect an app, reject this attempt before Task 1.\n'
-    + '3. Send exactly `APP READY`. The virtual creator must use non-launching running-app discovery and report `BLOCKED — APP NOT RUNNING` rather than opening the bundle if readiness was lost.\n'
-    + '4. Only after the running app is confirmed, send the exact Task 1 prompt below.\n\n'
-    + '## Moderator timing\n\nFollow the committed instrument algorithm, not a flat ladder:\n\n'
-    + '1. On the initial checkpoint, after 90 seconds without progress ask exactly “What are you looking for?” Record a `neutral-probe` ID from the current task and checkpoint (for example `T1-C2-NP1`) with zero assist.\n'
-    + '2. At 180 total seconds on that initial checkpoint, recompute the earliest incomplete checkpoint and deliver only its H1 verbatim.\n'
-    + '3. Whenever a checkpoint completes, restart a 90-second interval from observed completion and recompute the earliest incomplete checkpoint before the next intervention. If the checkpoint changed, deliver its H1 after that restarted interval without another neutral probe; never deliver a stale H2.\n'
-    + '4. Only when the same checkpoint remains incomplete for another 90 seconds may H2 be delivered. Only after a further 90 seconds on that same checkpoint may its exact takeover occur. A takeover forces task failure.\n'
-    + '5. Record every checkpoint completion in `checkpointEvents` at the observed elapsed time. Record every intervention object with checkpoint, event type, exact delivered text, elapsed time, and assist increment. The validator replays the merged timeline and rejects stale-checkpoint interventions. Record every deviation from the closed instrument.\n\n'
-    + tasks.map((task) => {
-      const setup = task.task === 2
-        ? '\nBefore selection, send exactly: “I am setting the test checkpoint for this task”. Then visibly select Branch recovery checkpoint and record a setup scenario event. When the planned branch failure appears, stop the creator task, send exactly “I am resetting the test checkpoint”, visibly reset to Standard checkpoint, record the reset event, then send: “Continue the same task.”\n'
-        : task.task === 7
-          ? '\nConfirm Square and Portrait are complete. Before selection, send exactly: “I am setting the test checkpoint for this task”. Then visibly select Format recovery checkpoint and record a setup scenario event. When Landscape fails, stop the creator task, send exactly “I am resetting the test checkpoint”, visibly reset to Standard checkpoint, record the reset event, then send: “Continue the same task.”\n'
-          : task.task === 8
-            ? '\nWhen PaintNode quits, the virtual creator must stop Computer Use. Run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "$APP" --resume-study-session`, verify the same profile resumes, then send exactly `APP RESUMED`, followed by: “PaintNode has reopened in the same session. Continue the same task.”\n'
-            : '';
-      const addendum = task.creatorFacingAddendum === 'UPDATED_PRODUCT_PATH'
-        ? `The updated Product image for this task is: ${join(materialRoot, 'product-b.png')}`
-        : task.creatorFacingAddendum;
-      const creatorMessage = addendum ? `${task.prompt}\n\n${addendum}` : task.prompt;
-      return `## Task ${task.task} — ${task.title}\n${setup}\nPaste exactly:\n\n> ${creatorMessage.replaceAll('\n', '\n> ')}\n\nOperator stop condition: ${task.stopCondition}\n`;
-    }).join('\n')
-    + '\n## End and owner decision\n\n1. Save a nonempty native UI evidence reference for every task and fill the distinct external AI task ID/new-task/no-fork confirmations.\n2. Close PaintNode.\n3. Capture final attestation and cleanup without retaining a partial receipt:\n\n```sh\nattest_checkout finalize\nCLEANUP_TMP="$CLEANUP_RECEIPT.tmp"\ntest ! -e "$CLEANUP_RECEIPT" && test ! -e "$CLEANUP_TMP"\nif (umask 077; npm run --silent qa:creator-study:finalize-session > "$CLEANUP_TMP"); then mv "$CLEANUP_TMP" "$CLEANUP_RECEIPT"; else rm -f "$CLEANUP_TMP"; exit 1; fi\nchmod 600 "$CLEANUP_RECEIPT"\ncat "$CLEANUP_RECEIPT"\nshasum -a 256 "$ATTESTATIONS" "$SETUP_RECEIPT" "$CLEANUP_RECEIPT"\n```\n\nIf fresh launch or setup failed, close PaintNode, run `attest_checkout finalize`, capture `npm run --silent qa:creator-study:abort-session` through the same temporary-file/rename pattern, and reject the finalized attempt. Never start the next profile while native cleanup is unresolved.\n\n4. Copy the attestation rows plus receipt hashes/fields into lifecycle; require matching setup/cleanup profile hashes and verified finalization. Complete ownerReview only after live observation and evidence review. Accepted and rejected decisions both require a written rationale; accepted requires all eight tasks completed with traceable evidence. Mark exactly one terminal attempt per profile `selectedForAggregate: true`; superseded rejected attempts stay false.\n5. Validate from the exact clean kit checkout captured during packet preparation:\n\n```sh\ncd "$KIT_CHECKOUT"\ntest "$(git rev-parse HEAD)" = "$KIT_GIT_SHA"\ntest -z "$(git status --porcelain --untracked-files=all)"\nnpm run qa:virtual-creators:validate -- --validate-observation "$OBSERVATION"\n```\n\n6. Keep accepted and rejected virtual sessions in the synthetic aggregate; never copy them into real participant rows.\n\n'
-    + renderHintAppendix(instrument) + '\n';
+    + '> OPERATOR ONLY. Give the AI task only participant-start.md, APP READY / APP RESUMED, the current task prompt, and an intervention you actually record.\n\n'
+    + '## Boundary\n\nThis is an owner-observed synthetic evaluation of the normal public-user workflow. It uses real subscription-backed provider calls. It is not a Provider Free QA run, a deterministic failure scenario, recruitment, or a qualifying human session for #85.\n\n'
+    + `- Profile: ${profile.id} — ${profile.label}\n- Session: ${sessionId}\n- Unique project: ${projectDir}\n`
+    + `- Pinned app checkout: ${checkout.path}\n- Pinned Git SHA: ${checkout.gitSha}\n- Expected window: ${appTitle}\n\n`
+    + '## Before creating the AI task\n\n1. Confirm the unique project directory is empty.\n2. Confirm no other virtual creator task is active.\n3. From a terminal, pin and launch the normal repo app:\n\n'
+    + '```sh\nset -euo pipefail\n'
+    + `APP_CHECKOUT=${shellQuote(checkout.path)}\nEXPECTED_GIT_SHA=${shellQuote(checkout.gitSha)}\nPROJECT=${shellQuote(projectDir)}\nOBSERVATION=${shellQuote(observation)}\n`
+    + 'cd "$APP_CHECKOUT"\ntest "$(git rev-parse HEAD)" = "$EXPECTED_GIT_SHA"\ntest -z "$(git status --porcelain --untracked-files=all)"\ntest -z "$(find "$PROJECT" -mindepth 1 -maxdepth 1 -print -quit)"\nnpm run tauri:dev\n```\n'
+    + '\n4. Use Computer Use to verify **PaintNode Repo QA — repo-dev** is running and no project/document is open. Do not target an installed production app.\n5. Create a brand-new, non-forked AI task. Paste participant-start.md. After its exact waiting reply, send `APP READY`.\n\n'
+    + '## Moderation\n\nAllow the creator to act naturally. If it is stuck, first ask `What are you looking for?`; then give the smallest visible-UI hint needed and record the exact text. Never change hidden QA scenarios, inject failures, substitute fake outputs, use source knowledge to take over silently, or change provider settings for the creator. Natural provider/app failures remain part of the observation.\n\n'
+    + tasks.map((task) => `## Task ${task.task} — ${task.title}\n\nPaste exactly:\n\n> ${taskMessage(task).replaceAll('\n', '\n> ')}\n\nStop condition: ${task.stopCondition}\n\nRecord: visible UI evidence, provider shown/used when visible, real errors/retries, elapsed time, and every intervention.\n`).join('\n')
+    + '\n## Task 8 relaunch\n\nWhen the creator quits PaintNode, stop the old `npm run tauri:dev` process if needed. Re-run the same pinned-checkout launch block, verify the same repo-dev window is running, then send `APP RESUMED` followed by `PaintNode has reopened. Continue the same task using your saved project.` Do not open the project for the creator.\n\n'
+    + '## Finish\n\n1. Close the repo-dev app after Task 8 and verify it is no longer running. Preserve the unique project for evidence review.\n2. Fill observation.blank.json. Record the external AI task ID, new-task/no-fork confirmation, fresh/resume launch evidence, per-task UI/provider evidence, natural failures, interventions, and owner decision.\n3. An accepted run requires all eight tasks completed, visible UI evidence for every task, real-provider evidence for generation tasks 2, 5, 6, and 7, successful save/reopen, and live owner review. Reject incomplete or contaminated runs.\n4. Validate:\n\n'
+    + '```sh\ncd "$APP_CHECKOUT"\ntest "$(git rev-parse HEAD)" = "$EXPECTED_GIT_SHA"\ntest -z "$(git status --porcelain --untracked-files=all)"\nnpm run qa:virtual-creators:validate -- --validate-observation "$OBSERVATION"\n```\n';
 }
 
-function blankObservation({ profile, sessionId, build }) {
+function blankObservation({ profile, sessionId, projectDir, checkout, tasks, planSha256 }) {
   return {
-    schemaVersion: 1,
-    recordType: 'paintnode-virtual-creator-observation',
+    schemaVersion: 2,
+    recordType: 'paintnode-normal-app-virtual-creator-observation',
     syntheticOnly: true,
+    runtime: {
+      mode: 'repo-dev-real-providers',
+      gitSha: checkout.gitSha,
+      checkoutPath: checkout.path,
+      sourceStatusSha256: checkout.sourceStatusSha256,
+      bundleId: appBundleId,
+      windowTitle: appTitle,
+      providerBehavior: 'real-subscription-backed',
+    },
     sessionId,
     profileId: profile.id,
-    build: {
-      gitSha: build.provenance.gitSha,
-      bundleId: build.provenance.bundleId,
-      executableSha256: build.provenance.executableSha256,
-    },
-    agentTask: {
+    planSha256,
+    isolation: {
+      projectDir,
+      projectWasEmptyAtStart: true,
       externalTaskId: null,
       newTaskConfirmed: false,
       noForkConfirmed: false,
+      priorSessionContextShared: false,
     },
     lifecycle: {
       attemptStage: 'pending',
-      checkoutAttestations: [],
-      checkoutAttestationReceiptSha256: null,
-      setupReceiptSha256: null,
-      cleanupReceiptSha256: null,
-      setupProfileSha256: null,
-      cleanupProfileSha256: null,
-      dataStoreRemoved: false,
-      dataStoreRemovalVerified: false,
-      finalized: false,
-      cleanupReceiptRecordedAt: null,
+      launchEvents: [],
+      appClosedAfterSession: false,
+      projectPreservedForReview: true,
     },
-    tasks: Array.from({ length: 8 }, (_, index) => ({
-      task: index + 1,
+    tasks: tasks.map((task) => ({
+      task: task.task,
       outcome: 'not-run',
       elapsedWallMs: null,
-      checkpointEvents: [],
       interventions: [],
-      scenarioEvents: [],
-      deviationIds: [],
-      frictionFlags: [],
+      providerEvidence: [],
       uiEvidence: [],
+      errors: [],
       notes: '',
     })),
     findings: [],
@@ -293,14 +189,14 @@ function blankObservation({ profile, sessionId, build }) {
       evidenceReviewed: false,
       decision: 'pending',
       selectedForAggregate: false,
-      standard: 'Accept only when the live native run is complete, evidence is traceable, cleanup is verified, and the result meets the owner-defined product standard.',
+      standard: 'Accept only a complete, uncontaminated normal-app run with traceable visible evidence.',
       notes: '',
       reviewedAt: null,
     },
     limitations: [
-      'This record describes an AI-operated synthetic interaction probe, not a real creator session.',
-      'Owner review validates the recorded run but does not create independent human-participant evidence.',
-      'This record cannot satisfy recruitment, consent, accessibility representation, or the #85 participant count.',
+      'This is an AI-operated synthetic evaluation, not evidence from a human creator.',
+      'Real provider results are variable and cannot be compared as deterministic fixtures.',
+      'Owner observation validates the record but does not make the AI task a qualifying creator for #85.',
     ],
   };
 }
@@ -309,475 +205,162 @@ export function listVirtualCreatorProfiles() {
   return loadProfiles().map(({ id, label, interactionConstraint }) => ({ id, label, interactionConstraint }));
 }
 
-function readSessionReceipt(path, label) {
-  const metadata = statSync(path);
-  if (lstatSync(path).isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o077) !== 0) {
-    throw new Error(`${label} must be a regular non-symlink file.`);
-  }
-  return readJson(path, label);
+function compileValidator() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, formats: {
+    'date-time': (value) => {
+      try { strictUtcTimestamp(value, 'date-time'); return true; } catch { return false; }
+    },
+  } });
+  return ajv.compile(readJson(observationSchemaPath, 'Virtual creator observation schema'));
 }
 
-function verifyLifecycleEvidence(observation, observationPath) {
-  const lifecycle = observation.lifecycle;
-  if (lifecycle.attemptStage === 'prelaunch') {
-    if (observation.ownerReview.decision !== 'rejected'
-      || observation.ownerReview.selectedForAggregate
-      || lifecycle.checkoutAttestations.length !== 0
-      || lifecycle.checkoutAttestationReceiptSha256 !== null
-      || lifecycle.setupReceiptSha256 !== null || lifecycle.cleanupReceiptSha256 !== null
-      || lifecycle.setupProfileSha256 !== null || lifecycle.cleanupProfileSha256 !== null
-      || lifecycle.dataStoreRemoved || lifecycle.dataStoreRemovalVerified || lifecycle.finalized
-      || lifecycle.cleanupReceiptRecordedAt !== null) {
-      throw new Error('Prelaunch rejection must not claim runtime or cleanup evidence.');
-    }
-    return;
+function assertObservationSemantics(observation, { observationPath, requireDecision = true } = {}) {
+  const validate = compileValidator();
+  if (!validate(observation)) {
+    throw new Error(`Virtual creator observation is invalid: ${ajvErrors(validate.errors)}`);
   }
-  if (lifecycle.attemptStage !== 'finalized') {
-    throw new Error('A decided launched attempt must be finalized.');
+  const profiles = loadProfiles();
+  if (!profiles.some(({ id }) => id === observation.profileId)) throw new Error('Observation profile is unknown.');
+  const planPath = join(dirname(observationPath), 'session-plan.json');
+  const planRaw = readFileSync(planPath);
+  if (sha256(planRaw) !== observation.planSha256) throw new Error('Observation does not match its immutable session plan.');
+  const plan = JSON.parse(planRaw);
+  for (const [key, expected] of Object.entries({
+    sessionId: observation.sessionId,
+    profileId: observation.profileId,
+    projectDir: observation.isolation.projectDir,
+    gitSha: observation.runtime.gitSha,
+  })) {
+    if (plan[key] !== expected) throw new Error(`Observation ${key} does not match its session plan.`);
   }
-
-  const controlDir = dirname(observationPath);
-  const attestationPath = join(controlDir, 'checkout-attestations.jsonl');
-  const attestationMetadata = statSync(attestationPath);
-  if (lstatSync(attestationPath).isSymbolicLink() || !attestationMetadata.isFile()
-    || (attestationMetadata.mode & 0o077) !== 0) {
-    throw new Error('Checkout attestation receipt must be a regular non-symlink file.');
-  }
-  const attestationBytes = readFileSync(attestationPath, 'utf8');
-  const attestations = attestationBytes.trim().split('\n').map((line, index) => {
-    try { return JSON.parse(line); } catch { throw new Error(`Checkout attestation row ${index + 1} is invalid JSON.`); }
-  });
-  const phases = attestations.map(({ phase }) => phase);
-  const expectedPhases = observation.ownerReview.decision === 'accepted'
-    ? ['fresh', 'resume', 'finalize']
-    : phases.includes('resume') ? ['fresh', 'resume', 'finalize'] : ['fresh', 'finalize'];
-  if (JSON.stringify(phases) !== JSON.stringify(expectedPhases)
-    || JSON.stringify(attestations) !== JSON.stringify(lifecycle.checkoutAttestations)
-    || sha256File(attestationPath) !== lifecycle.checkoutAttestationReceiptSha256) {
-    throw new Error('Checkout attestation phases, content, or receipt hash do not match.');
-  }
-  let priorAttestationTime = -1;
-  for (const attestation of attestations) {
-    const keys = Object.keys(attestation).sort();
-    if (JSON.stringify(keys) !== JSON.stringify(['actualGitSha', 'attestedAt', 'expectedGitSha', 'phase', 'sourceStatusSha256'])
-      || attestation.expectedGitSha !== observation.build.gitSha
-      || attestation.actualGitSha !== observation.build.gitSha
-      || attestation.sourceStatusSha256 !== cleanStatusSha256) {
-      throw new Error('Runtime checkout attestation does not match the frozen clean build.');
-    }
-    const time = strictUtcTimestamp(attestation.attestedAt, 'Checkout attestation time');
-    if (time <= priorAttestationTime) throw new Error('Checkout attestations must be in strict phase/time order.');
-    priorAttestationTime = time;
-  }
-
-  let setupReceipt = null;
-  if (lifecycle.setupReceiptSha256 !== null) {
-    const setupPath = join(controlDir, 'setup-receipt.json');
-    setupReceipt = readSessionReceipt(setupPath, 'Technical setup receipt');
-    if (sha256File(setupPath) !== lifecycle.setupReceiptSha256
-      || setupReceipt.schemaVersion !== 2
-      || setupReceipt.receiptType !== 'paintnode-creator-study-technical-setup'
-      || setupReceipt.scope !== 'technical-setup-only'
-      || setupReceipt.technicalSetupReady !== true
-      || setupReceipt.studyAuthorizationEvaluated !== false
-      || setupReceipt.gitSha !== observation.build.gitSha
-      || setupReceipt.bundleId !== observation.build.bundleId
-      || setupReceipt.approvedBuildIdentity?.matched !== true
-      || setupReceipt.approvalRecord?.validated !== true
-      || setupReceipt.projectState !== 'empty' || setupReceipt.rehearsalState !== 'deleted'
-      || setupReceipt.sessionReset?.isolatedProfile !== true
-      || setupReceipt.sessionReset?.appBootObserved !== true
-      || setupReceipt.sessionReset?.setupEvidenceConsumed !== true
-      || setupReceipt.sessionReset?.profileSha256 !== lifecycle.setupProfileSha256) {
-      throw new Error('Technical setup receipt is missing, mismatched, or not consumed evidence.');
-    }
-  } else if (observation.ownerReview.decision === 'accepted') {
-    throw new Error('Accepted session requires a captured technical setup receipt.');
-  }
-
-  const cleanupPath = join(controlDir, 'cleanup-receipt.json');
-  const cleanupReceipt = readSessionReceipt(cleanupPath, 'Native cleanup receipt');
-  if (sha256File(cleanupPath) !== lifecycle.cleanupReceiptSha256
-    || cleanupReceipt.profileSha256 !== lifecycle.cleanupProfileSha256
-    || cleanupReceipt.finalized !== true
-    || cleanupReceipt.dataStoreRemoved !== lifecycle.dataStoreRemoved
-    || cleanupReceipt.dataStoreRemovalVerified !== lifecycle.dataStoreRemovalVerified
-    || (setupReceipt && setupReceipt.sessionReset.profileSha256 !== cleanupReceipt.profileSha256)) {
-    throw new Error('Native cleanup receipt does not match the recorded lifecycle.');
-  }
-  if (observation.ownerReview.decision === 'accepted'
-    && (cleanupReceipt.aborted !== false || cleanupReceipt.dataStoreRemoved !== true
-      || cleanupReceipt.dataStoreRemovalVerified !== true)) {
-    throw new Error('Accepted session requires verified non-abort native data-store cleanup.');
-  }
-  const cleanupRecordedAt = strictUtcTimestamp(lifecycle.cleanupReceiptRecordedAt, 'Cleanup receipt record time');
-  const reviewedAt = strictUtcTimestamp(observation.ownerReview.reviewedAt, 'Owner review time');
-  if (cleanupRecordedAt < priorAttestationTime || reviewedAt < cleanupRecordedAt) {
-    throw new Error('Cleanup receipt and owner review must follow final checkout attestation in time order.');
-  }
-}
-
-function assertObservationSemantics(observation, { requireDecision = true, observationPath } = {}) {
-  const decision = observation.ownerReview.decision;
-  if (requireDecision && decision === 'pending') {
-    throw new Error('Owner decision is still pending.');
-  }
-  if (decision === 'pending') return;
-
-  if (observation.sessionId.slice(3, 6) !== observation.profileId) {
-    throw new Error('Session ID and profile ID do not match.');
-  }
-  if (!observation.ownerReview.notes.trim()) {
-    throw new Error('Owner rationale must contain non-whitespace text.');
-  }
-  if (observation.lifecycle.attemptStage === 'finalized'
-    && observation.ownerReview.selectedForAggregate
-    && (!observation.agentTask.externalTaskId?.trim()
-      || observation.agentTask.externalTaskId !== observation.agentTask.externalTaskId.trim()
-      || !observation.agentTask.newTaskConfirmed || !observation.agentTask.noForkConfirmed)) {
-    throw new Error('Selected finalized attempt requires a distinct, confirmed external AI task ID.');
-  }
-  if (observation.lifecycle.attemptStage === 'finalized'
-    && (!observation.ownerReview.observedLive || !observation.ownerReview.evidenceReviewed)) {
-    throw new Error('Finalized attempt requires live owner observation and evidence review.');
-  }
-  verifyLifecycleEvidence(observation, observationPath);
-
-  const invalidatingDeviations = new Set([
-    'early-hint', 'out-of-order-hint', 'wording-changed', 'unlogged-assist',
-    'silent-app-state-change', 'unauthorized-takeover', 'calibration-missing',
-    'instrument-version-mismatch', 'instrument-hash-mismatch', 'instrument-change-unapproved',
-  ]);
-  const instrument = readJson(hintsPath, 'Facilitator instrument');
-  const taskDeck = loadTaskDeck();
-  const creatorMessages = new Map(taskDeck.map((task) => {
-    const addendum = task.creatorFacingAddendum === 'UPDATED_PRODUCT_PATH'
-      ? `The updated Product image for this task is: ${join(materialRoot, 'product-b.png')}`
-      : task.creatorFacingAddendum;
-    return [task.task, addendum ? `${task.prompt}\n\n${addendum}` : task.prompt];
-  }));
-  const hints = new Map(instrument.tasks.flatMap(({ checkpoints }) => checkpoints.flatMap((checkpoint) => [
-    [`${checkpoint.id}-H1`, checkpoint.firstHint],
-    [`${checkpoint.id}-H2`, checkpoint.secondHint],
-  ])));
-  const takeovers = new Map(instrument.takeoverActions.map(({ id, exactAction }) => [id, exactAction]));
-  for (const task of observation.tasks) {
-    if (task.deviationIds.includes('none') && task.deviationIds.length > 1) {
-      throw new Error(`Task ${task.task} cannot combine the none deviation with another deviation.`);
-    }
-    const seenInterventionIds = new Set();
-    let priorInterventionTime = -1;
-    for (const intervention of task.interventions) {
-      if (seenInterventionIds.has(intervention.id) || intervention.elapsedWallMs <= priorInterventionTime) {
-        throw new Error(`Task ${task.task} interventions must have unique IDs in strictly increasing time order.`);
-      }
-      seenInterventionIds.add(intervention.id);
-      priorInterventionTime = intervention.elapsedWallMs;
-      if (!intervention.checkpointId.startsWith(`T${task.task}-`)
-        || !intervention.id.startsWith(`${intervention.checkpointId}-`)) {
-        throw new Error(`Task ${task.task} intervention identity does not match its checkpoint.`);
-      }
-      if (intervention.eventType === 'neutral-probe'
-        && (intervention.exactText !== 'What are you looking for?'
-          || intervention.assistIncrement !== 0 || intervention.elapsedWallMs < 90_000)) {
-        throw new Error(`Task ${task.task} has an invalid neutral probe.`);
-      }
-      if (intervention.eventType === 'standard-hint' && intervention.assistIncrement !== 1) {
-        throw new Error(`Task ${task.task} has a hint with an invalid assist increment.`);
-      }
-      if (intervention.eventType === 'standard-hint'
-        && hints.get(intervention.id) !== intervention.exactText) {
-        throw new Error(`Task ${task.task} has a hint that drifted from the closed instrument.`);
-      }
-      if (intervention.eventType === 'takeover'
-        && (intervention.assistIncrement !== 1 || task.outcome !== 'failed')) {
-        throw new Error(`Task ${task.task} takeover must increment assist and force failure.`);
-      }
-      if (intervention.eventType === 'takeover'
-        && takeovers.get(intervention.id) !== intervention.exactText) {
-        throw new Error(`Task ${task.task} has a takeover that drifted from the closed instrument.`);
-      }
-      if (intervention.eventType === 'takeover') {
-        const prior = task.interventions.find(({ id }) => id === `${intervention.checkpointId}-H2`);
-        if (!prior || intervention.elapsedWallMs < prior.elapsedWallMs + 90_000) {
-          throw new Error(`Task ${task.task} takeover order or timing drifted from the closed instrument.`);
-        }
-      }
-      if (intervention.eventType === 'verbatim-repeat') {
-        const earlierText = task.interventions.some((candidate) => candidate.elapsedWallMs < intervention.elapsedWallMs
-          && candidate.exactText === intervention.exactText);
-        if (intervention.assistIncrement !== 0
-          || (intervention.exactText !== creatorMessages.get(task.task) && !earlierText)) {
-          throw new Error(`Task ${task.task} verbatim repeat added new or assisted information.`);
-        }
-      }
-    }
-    const checkpointIds = instrument.tasks.find(({ task: number }) => number === task.task)
-      .checkpoints.map(({ id }) => id);
-    let checkpointIndex = 0;
-    let intervalStartedAt = 0;
-    let moderatorStage = 'initial';
-    let stageStartedAt = 0;
-    let priorTimelineTime = -1;
-    const timeline = [
-      ...task.checkpointEvents.map((event) => ({ ...event, kind: 'checkpoint' })),
-      ...task.interventions.map((event) => ({ ...event, kind: 'intervention' })),
-    ].sort((left, right) => left.elapsedWallMs - right.elapsedWallMs);
-    for (const event of timeline) {
-      if (event.elapsedWallMs <= priorTimelineTime) {
-        throw new Error(`Task ${task.task} moderator timeline must be strictly ordered.`);
-      }
-      priorTimelineTime = event.elapsedWallMs;
-      const currentCheckpoint = checkpointIds[checkpointIndex];
-      if (event.checkpointId !== currentCheckpoint) {
-        throw new Error(`Task ${task.task} moderator event targeted a stale or out-of-order checkpoint.`);
-      }
-      if (event.kind === 'checkpoint') {
-        checkpointIndex += 1;
-        intervalStartedAt = event.elapsedWallMs;
-        moderatorStage = 'after-progress';
-        stageStartedAt = event.elapsedWallMs;
-      } else if (event.eventType === 'neutral-probe') {
-        if (moderatorStage !== 'initial' || event.elapsedWallMs < intervalStartedAt + 90_000) {
-          throw new Error(`Task ${task.task} neutral probe order or timing drifted from the facilitator algorithm.`);
-        }
-        moderatorStage = 'probe';
-        stageStartedAt = event.elapsedWallMs;
-      } else if (event.eventType === 'standard-hint' && event.id.endsWith('-H1')) {
-        const validInitial = moderatorStage === 'probe' && event.elapsedWallMs >= intervalStartedAt + 180_000;
-        const validAfterProgress = moderatorStage === 'after-progress'
-          && event.elapsedWallMs >= intervalStartedAt + 90_000;
-        if (!validInitial && !validAfterProgress) {
-          throw new Error(`Task ${task.task} H1 order or timing drifted from the facilitator algorithm.`);
-        }
-        moderatorStage = 'h1';
-        stageStartedAt = event.elapsedWallMs;
-      } else if (event.eventType === 'standard-hint' && event.id.endsWith('-H2')) {
-        if (moderatorStage !== 'h1' || event.elapsedWallMs < stageStartedAt + 90_000) {
-          throw new Error(`Task ${task.task} H2 order or timing drifted from the facilitator algorithm.`);
-        }
-        moderatorStage = 'h2';
-        stageStartedAt = event.elapsedWallMs;
-      } else if (event.eventType === 'takeover') {
-        if (moderatorStage !== 'h2' || event.elapsedWallMs < stageStartedAt + 90_000) {
-          throw new Error(`Task ${task.task} takeover order or timing drifted from the facilitator algorithm.`);
-        }
-        moderatorStage = 'takeover';
-        stageStartedAt = event.elapsedWallMs;
-      }
-    }
-    if (task.elapsedWallMs !== null && task.elapsedWallMs < priorTimelineTime) {
-      throw new Error(`Task ${task.task} elapsed time ends before its moderator timeline.`);
-    }
-    const assist = task.interventions.reduce((sum, intervention) => sum + intervention.assistIncrement, 0);
-    if ((task.outcome === 'completed-unaided' && assist !== 0)
-      || (task.outcome === 'completed-assisted' && assist === 0)) {
-      throw new Error(`Task ${task.task} outcome does not match its recorded assistance.`);
-    }
-    let priorScenarioTime = -1;
-    if (![2, 7].includes(task.task) && task.scenarioEvents.length > 0) {
-      throw new Error(`Task ${task.task} cannot contain operator scenario changes.`);
-    }
-    for (const event of task.scenarioEvents) {
-      const expectedSpokenText = event.action === 'setup'
-        ? 'I am setting the test checkpoint for this task'
-        : 'I am resetting the test checkpoint';
-      if (event.spokenText !== expectedSpokenText || event.elapsedWallMs <= priorScenarioTime
-        || !event.expectedTrigger.trim() || !event.observedTrigger?.trim()) {
-        throw new Error(`Task ${task.task} scenario events are incomplete or out of order.`);
-      }
-      priorScenarioTime = event.elapsedWallMs;
-    }
-  }
-
-  if (decision === 'accepted') {
+  if (observation.runtime.checkoutPath !== plan.checkoutPath) throw new Error('Observation checkout path does not match its session plan.');
+  if (requireDecision && observation.ownerReview.decision === 'pending') throw new Error('Owner review decision is required.');
+  if (observation.ownerReview.decision === 'accepted') {
+    const requiredProviderTasks = new Set([2, 5, 6, 7]);
     for (const task of observation.tasks) {
-      if (!['completed-unaided', 'completed-assisted'].includes(task.outcome)
-        || task.elapsedWallMs === null || task.uiEvidence.length === 0
-        || task.uiEvidence.some((entry) => !entry.trim()) || task.deviationIds.length === 0) {
-        throw new Error(`Accepted session requires completed, timed, evidenced Task ${task.task}.`);
+      if (!['completed-unaided', 'completed-assisted'].includes(task.outcome)) {
+        throw new Error(`Accepted observation requires Task ${task.task} to be completed.`);
       }
-      const invalid = task.deviationIds.find((id) => invalidatingDeviations.has(id));
-      if (invalid) throw new Error(`Accepted session has invalidating deviation ${invalid} on Task ${task.task}.`);
-      const requiredCheckpointCount = instrument.tasks.find(({ task: number }) => number === task.task).checkpoints.length;
-      if (task.checkpointEvents.length !== requiredCheckpointCount) {
-        throw new Error(`Accepted session requires every checkpoint completion for Task ${task.task}.`);
+      if (task.uiEvidence.length === 0) throw new Error(`Accepted observation requires Task ${task.task} UI evidence.`);
+      if (requiredProviderTasks.has(task.task) && task.providerEvidence.length === 0) {
+        throw new Error(`Accepted observation requires Task ${task.task} real-provider evidence.`);
       }
     }
-    for (const taskNumber of [2, 7]) {
-      const scenarioEvents = observation.tasks[taskNumber - 1].scenarioEvents;
-      const expectedScenario = taskNumber === 2 ? 'Branch recovery checkpoint' : 'Format recovery checkpoint';
-      if (scenarioEvents.length !== 2
-        || scenarioEvents[0].action !== 'setup'
-        || scenarioEvents[0].scenario !== expectedScenario
-        || scenarioEvents[0].spokenText !== 'I am setting the test checkpoint for this task'
-        || scenarioEvents[1].action !== 'reset'
-        || scenarioEvents[1].scenario !== 'Standard checkpoint'
-        || scenarioEvents[1].spokenText !== 'I am resetting the test checkpoint'
-        || scenarioEvents[1].elapsedWallMs <= scenarioEvents[0].elapsedWallMs
-        || scenarioEvents.some(({ observedTrigger }) => !observedTrigger?.trim())) {
-        throw new Error(`Accepted session requires recorded setup and reset scenario events for Task ${taskNumber}.`);
+    const phases = observation.lifecycle.launchEvents.map(({ phase }) => phase);
+    if (phases.join(',') !== 'fresh,resume') throw new Error('Accepted observation requires ordered fresh and resume launch evidence.');
+    for (const event of observation.lifecycle.launchEvents) {
+      if (event.gitSha !== observation.runtime.gitSha || event.windowTitle !== appTitle || !event.operatorVerifiedRunning) {
+        throw new Error('Launch evidence does not match the pinned normal repo app.');
       }
     }
   }
+  return observation;
+}
+
+function ajvErrors(errors) {
+  return (errors ?? []).map((error) => `${error.instancePath || '/'} ${error.message}`).join('; ');
 }
 
 export function validateVirtualCreatorObservation({ observationPath, requireDecision = true }) {
-  const observationMetadata = statSync(observationPath);
-  if (lstatSync(observationPath).isSymbolicLink() || !observationMetadata.isFile()
-    || (observationMetadata.mode & 0o077) !== 0) {
-    throw new Error('Virtual creator observation must be an owner-only regular non-symlink file.');
-  }
-  const observation = readJson(observationPath, 'Virtual creator observation');
-  const schema = readJson(observationSchemaPath, 'Virtual creator observation schema');
-  const ajv = new Ajv2020({ strict: false, validateFormats: false });
-  const validate = ajv.compile(schema);
-  if (!validate(observation)) {
-    throw new Error(`Observation schema validation failed: ${ajv.errorsText(validate.errors)}`);
-  }
-  assertObservationSemantics(observation, { requireDecision, observationPath });
-  return Object.freeze({
-    valid: true,
-    sessionId: observation.sessionId,
-    profileId: observation.profileId,
-    externalTaskId: observation.agentTask.externalTaskId,
-    ownerDecision: observation.ownerReview.decision,
-    selectedForAggregate: observation.ownerReview.selectedForAggregate,
+  const canonical = realpathSync(observationPath);
+  return assertObservationSemantics(readJson(canonical, 'Virtual creator observation'), {
+    observationPath: canonical,
+    requireDecision,
   });
 }
 
 export function validateVirtualCreatorObservationSet({ controlRoot }) {
   const canonicalRoot = existingDirectory(controlRoot, 'Control root');
-  const sessionDirs = readdirSync(canonicalRoot)
-    .filter((name) => /^VC-V0[1-8]-/.test(name) && statSync(join(canonicalRoot, name)).isDirectory())
-    .sort();
-  if (sessionDirs.length < 8) throw new Error('Control root must contain at least eight virtual creator attempts.');
-  const results = sessionDirs.map((name) => validateVirtualCreatorObservation({
-    observationPath: join(canonicalRoot, name, 'observation.blank.json'),
-  }));
-  for (let index = 0; index < results.length; index += 1) {
-    if (basename(sessionDirs[index]) !== results[index].sessionId) {
-      throw new Error('Observation session ID must match its control directory.');
-    }
+  const observations = readdirSync(canonicalRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(canonicalRoot, entry.name, 'observation.blank.json'))
+    .filter((path) => { try { return statSync(path).isFile(); } catch { return false; } })
+    .map((path) => validateVirtualCreatorObservation({ observationPath: path }));
+  const selected = observations.filter(({ ownerReview }) => ownerReview.selectedForAggregate);
+  if (selected.some(({ ownerReview }) => ownerReview.decision !== 'accepted')) {
+    throw new Error('Only owner-accepted sessions can be selected for the aggregate.');
   }
-  const expectedProfiles = loadProfiles().map(({ id }) => id).sort();
-  const selected = results.filter(({ selectedForAggregate }) => selectedForAggregate);
-  const actualProfiles = selected.map(({ profileId }) => profileId).sort();
-  if (JSON.stringify(actualProfiles) !== JSON.stringify(expectedProfiles)) {
-    throw new Error('Observation set must select exactly one terminal attempt for each V01-V08 profile.');
-  }
-  const externalTaskIds = results.map(({ externalTaskId }) => externalTaskId).filter(Boolean);
-  if (new Set(externalTaskIds).size !== externalTaskIds.length) {
-    throw new Error('Every virtual creator must use a distinct external AI task ID.');
-  }
-  return Object.freeze({ valid: true, attemptCount: results.length, sessionCount: selected.length, results });
+  const profileIds = selected.map(({ profileId }) => profileId);
+  const externalTaskIds = selected.map(({ isolation }) => isolation.externalTaskId);
+  const projectDirs = selected.map(({ isolation }) => isolation.projectDir);
+  const expected = loadProfiles().map(({ id }) => id).sort();
+  if (profileIds.slice().sort().join(',') !== expected.join(',')) throw new Error('Selected set must contain exactly one terminal attempt for every profile.');
+  if (new Set(externalTaskIds).size !== externalTaskIds.length) throw new Error('Selected sessions must use distinct external AI task IDs.');
+  if (new Set(projectDirs).size !== projectDirs.length) throw new Error('Selected sessions must use distinct project directories.');
+  return observations;
 }
 
 export function prepareVirtualCreatorSession({
   profileId,
   controlRoot,
   projectRoot,
-  buildControlRoot,
-  approvedCheckout,
-  repoRoot = root,
+  appCheckout = root,
   randomUUID = nodeRandomUUID,
-  checkoutCapture = captureApprovedCheckout,
-  kitCheckoutCapture = captureKitCheckout,
+  now = () => new Date(),
 }) {
-  const canonicalRepo = realpathSync(repoRoot);
+  const profile = loadProfiles().find(({ id }) => id === profileId);
+  if (!profile) throw new Error(`Unknown virtual creator profile: ${profileId}`);
+  const tasks = loadTaskDeck();
   const canonicalControlRoot = existingDirectory(controlRoot, 'Control root');
   const canonicalProjectRoot = existingDirectory(projectRoot, 'Project root');
-  for (const [label, value] of [['Control root', canonicalControlRoot], ['Project root', canonicalProjectRoot]]) {
-    if (isInside(canonicalRepo, value)) throw new Error(`${label} must be outside the Git repository.`);
-  }
-  if (isInside(canonicalControlRoot, canonicalProjectRoot) || isInside(canonicalProjectRoot, canonicalControlRoot)) {
-    throw new Error('Control and project roots must be separate and non-nested.');
-  }
-  const profiles = loadProfiles();
-  const profile = profiles.find(({ id }) => id === profileId);
-  if (!profile) throw new Error(`Unknown virtual creator profile: ${profileId}`);
-  const build = loadBuild(buildControlRoot);
-  const canonicalApprovedCheckout = checkoutCapture(approvedCheckout, build.provenance.gitSha);
-  const kitCheckout = kitCheckoutCapture(canonicalRepo);
-  const uuid = randomUUID().toLowerCase();
-  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uuid)) {
-    throw new Error('Session allocation requires a lowercase UUID.');
-  }
-  const sessionId = `VC-${profile.id}-${uuid}`;
-  let controlDir;
-  let projectDir;
-  try {
-    controlDir = privateDirectory(join(canonicalControlRoot, sessionId));
-    projectDir = privateDirectory(join(canonicalProjectRoot, sessionId));
-    const tasks = loadTaskDeck();
-    const instrument = readJson(hintsPath, 'Facilitator instrument');
-    const observation = blankObservation({ profile, sessionId, build });
-    const participantStartPath = join(controlDir, 'participant-start.md');
-    const operatorDeckPath = join(controlDir, 'operator-deck.md');
-    const observationPath = join(controlDir, 'observation.blank.json');
-    const planPath = join(controlDir, 'session-plan.json');
-    privateFile(participantStartPath, participantPrompt({ profile, projectDir, sessionId }));
-    privateFile(operatorDeckPath, operatorDeck({
-      profile, sessionId, controlDir, projectDir, build,
-      approvedCheckout: canonicalApprovedCheckout, kitCheckout, tasks, instrument,
-    }));
-    privateFile(observationPath, `${JSON.stringify(observation, null, 2)}\n`);
-    privateFile(planPath, `${JSON.stringify({
-      schemaVersion: 1,
-      recordType: 'paintnode-virtual-creator-session-plan',
-      syntheticOnly: true,
-      sessionId,
-      profileId: profile.id,
-      controlDir,
-      projectDir,
-      approvedCheckout: canonicalApprovedCheckout,
-      kitCheckout,
-      buildControlRoot: build.canonicalRoot,
-      appBundle: build.appBundle,
-      deletedRehearsalDir: join(controlDir, 'deleted-rehearsal'),
-    }, null, 2)}\n`);
-    return Object.freeze({
-      sessionId,
-      profileId: profile.id,
-      controlDir,
-      projectDir,
-      participantStartPath,
-      operatorDeckPath,
-      observationPath,
-      planPath,
-    });
-  } catch (error) {
-    if (projectDir) rmSync(projectDir, { recursive: true, force: true });
-    if (controlDir) rmSync(controlDir, { recursive: true, force: true });
-    throw error;
-  }
+  if (isInside(root, canonicalControlRoot) || isInside(root, canonicalProjectRoot)) throw new Error('Control and project roots must be outside the Git repository.');
+  if (isInside(canonicalControlRoot, canonicalProjectRoot) || isInside(canonicalProjectRoot, canonicalControlRoot)) throw new Error('Control and project roots cannot contain each other.');
+  const checkout = captureCheckout(appCheckout);
+  const sessionId = `VC-${profile.id}-${randomUUID()}`;
+  const controlDir = privateDirectory(join(canonicalControlRoot, sessionId));
+  const projectDir = privateDirectory(join(canonicalProjectRoot, sessionId));
+  if (readdirSync(projectDir).length !== 0) throw new Error('Allocated project must be empty.');
+  const plan = {
+    schemaVersion: 2,
+    recordType: 'paintnode-normal-app-virtual-creator-session-plan',
+    syntheticOnly: true,
+    runtimeMode: 'repo-dev-real-providers',
+    sessionId,
+    profileId: profile.id,
+    projectDir,
+    checkoutPath: checkout.path,
+    gitSha: checkout.gitSha,
+    sourceStatusSha256: checkout.sourceStatusSha256,
+    appTitle,
+    bundleId: appBundleId,
+    createdAt: now().toISOString(),
+  };
+  const planRaw = `${JSON.stringify(plan, null, 2)}\n`;
+  const planSha256 = sha256(planRaw);
+  privateFile(join(controlDir, 'session-plan.json'), planRaw);
+  privateFile(join(controlDir, 'participant-start.md'), participantPrompt({ profile, projectDir, sessionId }));
+  privateFile(join(controlDir, 'operator-deck.md'), operatorDeck({ profile, sessionId, controlDir, projectDir, checkout, tasks }));
+  privateFile(join(controlDir, 'observation.blank.json'), `${JSON.stringify(blankObservation({ profile, sessionId, projectDir, checkout, tasks, planSha256 }), null, 2)}\n`);
+  return { sessionId, controlDir, projectDir, gitSha: checkout.gitSha, planSha256 };
 }
 
 function valueAfter(args, flag) {
   const index = args.indexOf(flag);
-  if (index < 0 || !args[index + 1]) throw new Error(`${flag} requires a value`);
+  if (index < 0 || !args[index + 1]) throw new Error(`${flag} requires a value.`);
   return args[index + 1];
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2);
-    const output = args.includes('--list-profiles')
-      ? listVirtualCreatorProfiles()
-      : args.includes('--validate-observation')
-        ? validateVirtualCreatorObservation({ observationPath: valueAfter(args, '--validate-observation') })
-        : args.includes('--validate-control-root')
-          ? validateVirtualCreatorObservationSet({ controlRoot: valueAfter(args, '--validate-control-root') })
-          : prepareVirtualCreatorSession({
+    if (args.includes('--list-profiles')) {
+      console.log(JSON.stringify(listVirtualCreatorProfiles(), null, 2));
+    } else if (args.includes('--validate-observation')) {
+      console.log(JSON.stringify(validateVirtualCreatorObservation({ observationPath: valueAfter(args, '--validate-observation') }), null, 2));
+    } else if (args.includes('--validate-control-root')) {
+      const observations = validateVirtualCreatorObservationSet({ controlRoot: valueAfter(args, '--validate-control-root') });
+      console.log(JSON.stringify({ valid: true, observations: observations.length }, null, 2));
+    } else {
+      const result = prepareVirtualCreatorSession({
         profileId: valueAfter(args, '--profile'),
         controlRoot: valueAfter(args, '--control-root'),
         projectRoot: valueAfter(args, '--project-root'),
-        buildControlRoot: valueAfter(args, '--build-control-root'),
-        approvedCheckout: valueAfter(args, '--approved-checkout'),
-          });
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+        appCheckout: args.includes('--app-checkout') ? valueAfter(args, '--app-checkout') : root,
+      });
+      console.log(JSON.stringify(result, null, 2));
+    }
   } catch (error) {
-    console.error(`[virtual-creator-session] ${error instanceof Error ? error.message : error}`);
+    console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   }
 }

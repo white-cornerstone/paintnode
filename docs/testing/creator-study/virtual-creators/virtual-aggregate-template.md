@@ -1,50 +1,46 @@
-# Creative Blueprint virtual creator aggregate
+# Creative Blueprint normal-app virtual creator aggregate
 
-> SYNTHETIC ONLY. This report cannot be copied into real participant evidence
-> or used to close #85 under the current acceptance contract.
+> SYNTHETIC ONLY. These owner-observed AI tasks use real provider behavior but
+> are not human participant records or current #85 qualifying-creator evidence.
 
-- Approved build Git SHA:
+- Pinned app Git SHA:
 - Evaluation dates:
-- Planned / launched / retained rejected / selected terminal attempts:
+- Planned / launched / rejected / selected attempts:
 - Distinct AI task IDs verified:
-- Runtime checkout attestations verified:
-- Distinct native profile fingerprints verified:
-- Matching setup / cleanup profile hashes verified:
-- Cleanup receipts verified:
+- Distinct project directories verified:
+- Fresh and resume launches verified:
 - Product owner review standard:
 
 ## Session disposition
 
-| Virtual ID | Attempt / behavioral lens | External task ID | Tasks completed | Checkout and receipt proof | Cleanup verified | Selected | Owner decision | Owner rationale / rejection reason |
-| --- | --- | --- | ---: | --- | --- | --- | --- | --- |
-| V01 | | | | | | yes / no | pending / accepted / rejected | |
-| V02 | | | | | | yes / no | pending / accepted / rejected | |
-| V03 | | | | | | yes / no | pending / accepted / rejected | |
-| V04 | | | | | | yes / no | pending / accepted / rejected | |
-| V05 | | | | | | yes / no | pending / accepted / rejected | |
-| V06 | | | | | | yes / no | pending / accepted / rejected | |
-| V07 | | | | | | yes / no | pending / accepted / rejected | |
-| V08 | | | | | | yes / no | pending / accepted / rejected | |
+| Virtual ID | Behavioral lens | External task ID | Tasks completed | Real-provider evidence | Save/reopen | Selected | Owner decision and rationale |
+| --- | --- | --- | ---: | --- | --- | --- | --- |
+| V01 | | | | | | yes / no | |
+| V02 | | | | | | yes / no | |
+| V03 | | | | | | yes / no | |
+| V04 | | | | | | yes / no | |
+| V05 | | | | | | yes / no | |
+| V06 | | | | | | yes / no | |
+| V07 | | | | | | yes / no | |
+| V08 | | | | | | yes / no | |
 
 ## Cross-session observations
 
-| ID | Task | Profiles | Observed native UI evidence | Agent interpretation | Owner assessment | Hypothesis impact | Requires human validation | Product action |
+| ID | Task | Profiles | Visible UI/provider evidence | AI interpretation | Owner assessment | Hypothesis impact | Human validation needed | Product action |
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
 | VCF-1 | | | | | | hypothesis-high / hypothesis-medium / hypothesis-low / observation | true | |
 
-## Interaction-constraint results
+## Real failure and recovery observations
 
-- Pointer-first:
-- Keyboard-only:
-- Accessibility-tree and keyboard probe:
-- Important limitation: the accessibility-tree probe is not evidence from a
-  person who uses assistive technology.
+| Session / task | Provider or app | Visible error | Public-user recovery attempted | Outcome | Product implication |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
 
 ## Owner decision
 
 - Virtual evaluation accepted as internally useful: yes / no
 - Accepted sessions:
 - Rejected sessions and why:
-- Fixes to implement before real creator research:
-- Hypotheses reserved for real creator validation:
-- Explicit statement that no AI session was counted as a qualifying creator:
+- Fixes to implement before human creator research:
+- Hypotheses reserved for human validation:
+- Explicit statement that no AI task was relabelled as a human creator:
