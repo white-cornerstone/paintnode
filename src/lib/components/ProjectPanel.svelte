@@ -62,10 +62,14 @@
   const storyboardFiles = $derived(files.filter((file) => file.kind === 'storyboard'));
   const workflowFiles = $derived(files.filter((file) => file.kind === 'workflow'));
   const autosaveFiles = $derived(files.filter((file) => file.kind === 'autosave'));
-  const generatedFiles = $derived(files.filter((file) => file.kind === 'generated'));
+  const generatedFiles = $derived(files.filter((file) => file.kind === 'generated' || file.kind === 'edited'));
   const latestWorkflowEdit = $derived(
     generatedFiles
-      .filter((file) => /^editor-revision-.*\.png$/i.test(file.name))
+      // Returned workflow edits are persisted as `edited` project assets. Keep
+      // the filename check as a compatibility fallback for older manifests,
+      // but do not hide a valid edited asset just because its display name is
+      // the document name (for example, "Virtual Accepted Direction").
+      .filter((file) => file.kind === 'edited' || /^editor-revision-.*\.png$/i.test(file.name))
       .toSorted((a, b) => (b.modifiedAt ?? b.createdAt ?? 0) - (a.modifiedAt ?? a.createdAt ?? 0))[0] ?? null,
   );
   const importedFiles = $derived(files.filter((file) => file.kind === 'imported'));

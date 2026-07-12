@@ -217,6 +217,12 @@
     });
   });
 
+  $effect(() => {
+    workflow.rev;
+    project.identity;
+    if (!busy) error = '';
+  });
+
   function outputReadiness(outputNodeId: string) {
     return workflowReadiness(workflow.graphSnapshot(), {
       desktop,

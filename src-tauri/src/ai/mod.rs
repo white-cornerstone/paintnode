@@ -886,6 +886,8 @@ struct DecoupleManifestLayer {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkflowSourceImage {
     name: String,
+    #[serde(default)]
+    role: String,
     bytes: Vec<u8>,
 }
 

@@ -86,7 +86,7 @@ describe('desktop workflow composition adapters', () => {
       expect.any(String),
       [
         { name: 'Storyboard sketch - mandatory layout guide', bytes: new Uint8Array([2]) },
-        { name: 'Product', bytes: new Uint8Array([1]) },
+        { name: 'Product', role: 'Hero product', bytes: new Uint8Array([1]) },
       ],
       expect.objectContaining({ width: 1024, height: 1024 }),
     );
@@ -126,7 +126,7 @@ describe('desktop workflow composition adapters', () => {
       'Use the storyboard as the primary spatial plan.',
       [
         { name: 'Storyboard sketch - mandatory layout guide', bytes: new Uint8Array([2]) },
-        { name: 'Product', bytes: new Uint8Array([1]) },
+        { name: 'Product', role: 'Hero product', bytes: new Uint8Array([1]) },
       ],
       expect.objectContaining({ width: 1024, height: 1024 }),
     );

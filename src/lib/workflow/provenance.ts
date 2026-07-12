@@ -264,6 +264,11 @@ export function createWorkflowRunRecord(
       effectiveOptions: providerOptions,
     },
   }, hash);
+  const normalizedSourceAssets = draft.material.sourceAssets.map((source) => ({
+    ...source,
+    name: source.name.trim() || 'Connected visual input',
+    role: source.role.trim() || 'Connected visual input',
+  }));
   const record: WorkflowRunRecordV1 = {
     recordVersion: 1,
     id: draft.id,
@@ -273,7 +278,7 @@ export function createWorkflowRunRecord(
     workflowRevision,
     nodeRevision,
     materialKey,
-    sourceAssets: structuredClone(draft.material.sourceAssets),
+    sourceAssets: structuredClone(normalizedSourceAssets),
     prompt: {
       brief: draft.material.prompt.brief,
       artDirection: draft.material.prompt.artDirection,

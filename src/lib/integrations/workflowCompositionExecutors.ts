@@ -145,7 +145,11 @@ function providerSources(request: Readonly<WorkflowTransformExecutionRequest>) {
       name: request.storyboard.source.name,
       bytes: request.storyboard.source.bytes,
     }] : []),
-    ...request.sources.map((source) => ({ name: source.name, bytes: source.bytes })),
+    ...request.sources.map((source) => ({
+      name: source.name,
+      role: source.role,
+      bytes: source.bytes,
+    })),
   ];
 }
 

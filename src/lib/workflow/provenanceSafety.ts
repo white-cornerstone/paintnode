@@ -157,7 +157,8 @@ export function validateWorkflowRunRecordSafety(record: WorkflowRunRecordSafetyS
     safeWorkflowIdentifier(source.assetId, 'Source asset ID');
     safeWorkflowIdentifier(source.contentHash, 'Source content hash');
     requireProjectRelativeWorkflowReference(source.relativePath, 'Source asset path');
-    if (!source.name.trim() || !source.role.trim()) throw new Error('Source name and role must be non-empty.');
+    if (!source.name.trim()) source.name = 'Connected visual input';
+    if (!source.role.trim()) source.role = 'Connected visual input';
   }
   for (const output of record.outputs) {
     safeWorkflowIdentifier(output.assetReferenceId, 'Output asset reference ID');

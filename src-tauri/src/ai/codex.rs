@@ -4968,7 +4968,12 @@ pub(crate) async fn compose_codex_workflow(
             let path = input_dir.join(format!("{}-{}.png", index + 1, safe_stem(&name)));
             fs::write(&path, &source.bytes)
                 .map_err(|e| format!("Failed to write workflow source image: {e}"))?;
-            source_names.push(name);
+            let role = if source.role.trim().is_empty() {
+                "Connected visual input"
+            } else {
+                source.role.trim()
+            };
+            source_names.push(format!("{name} — {role}"));
             image_paths.push(path);
         }
         let prompt_text = codex_direct_workflow_compose_prompt(prompt.trim(), &source_names);

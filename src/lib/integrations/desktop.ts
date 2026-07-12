@@ -318,6 +318,7 @@ export interface GeneratedImageLayerResult {
 export interface WorkflowSourceImage {
   name: string;
   bytes: Uint8Array;
+  role?: string;
 }
 
 export interface DecoupledLayerResult {
@@ -800,6 +801,7 @@ export async function composeCodexWorkflow(
     projectPath,
     sources: sources.map((source) => ({
       name: source.name,
+      role: source.role?.trim() || 'Connected visual input',
       bytes: Array.from(source.bytes),
     })),
     targetWidth: targetDimensions?.width ?? null,
@@ -950,6 +952,7 @@ export async function composeAntigravityWorkflow(
     prompt,
     sources: sources.map((source) => ({
       name: source.name,
+      role: source.role?.trim() || 'Connected visual input',
       bytes: Array.from(source.bytes),
     })),
     targetWidth: targetDimensions?.width ?? null,

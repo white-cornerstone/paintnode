@@ -448,10 +448,20 @@ export function createWorkflowCompositionExecutor(
         }),
         reportProgress: () => undefined,
       }),
-    ) => service(
-      deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>,
-      context,
-    ),
+    ) => {
+      const normalizedRequest: WorkflowTransformExecutionRequest = {
+        ...request,
+        sources: request.sources.map((source) => ({
+          ...source,
+          name: source.name.trim() || 'Connected visual input',
+          role: source.role.trim() || 'Connected visual input',
+        })),
+      };
+      return service(
+        deepFreeze(cloneValue(normalizedRequest)) as Readonly<WorkflowTransformExecutionRequest>,
+        context,
+      );
+    },
   });
 }
 
@@ -779,11 +789,13 @@ async function campaignGenerateTransform(
       );
     }
     const contentHash = computedHash ?? claimedHash;
+    const sourceName = input.title.trim() || textConfig(input, 'slotId') || 'Connected visual input';
+    const sourceRole = textConfig(input, 'role') || textConfig(input, 'note') || textConfig(input, 'slotId') || 'Connected visual input';
     sources.push({
       nodeId: input.id,
       portId: edge.source.portId,
-      name: input.title,
-      role: textConfig(input, 'role'),
+      name: sourceName,
+      role: sourceRole,
       assetId: canonicalAssetId,
       relativePath: canonicalRelativePath,
       contentHash,
