@@ -246,6 +246,16 @@
     }
 
     if (isWorkflow(file)) {
+      if (workflow.active && workflow.dirty) {
+        workflow.show();
+        editor.flash('Workflow has unsaved changes. Save it before opening another saved workflow.');
+        return;
+      }
+      if (workflow.active && workflow.savedPath === file.relativePath) {
+        workflow.show();
+        editor.flash(`${file.name} is already open`);
+        return;
+      }
       const bytes = await project.readFile(file);
       workflow.openFromBytes(bytes, file.relativePath, file.name.replace(/\.cxflow\.json$/i, ''));
       editor.flash(`Opened ${file.name}`);

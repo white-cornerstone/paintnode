@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import projectPanelSource from '../components/ProjectPanel.svelte?raw';
+import documentTabsSource from '../components/DocumentTabs.svelte?raw';
 import projectStoreSource from './project.svelte.ts?raw';
 
 describe('project restart recovery UX', () => {
@@ -26,5 +27,13 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain('aria-keyshortcuts="Alt+L"');
     expect(projectPanelSource).toContain("event.code === 'KeyL' && latestWorkflowEdit && editor.doc");
     expect(projectPanelSource).toContain('placeLatestWorkflowEdit()');
+  });
+
+  it('prevents dirty generated workflow state from being replaced by an older saved file', () => {
+    expect(projectPanelSource).toContain('workflow.active && workflow.dirty');
+    expect(projectPanelSource).toContain('Save it before opening another saved workflow.');
+    expect(projectPanelSource).toContain('workflow.savedPath === file.relativePath');
+    expect(documentTabsSource).toContain('if (workflow.dirty)');
+    expect(documentTabsSource).toContain('generated candidates and outputs are preserved');
   });
 });

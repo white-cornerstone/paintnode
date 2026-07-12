@@ -141,6 +141,10 @@
         use:tooltip={{ text: `Close ${workflow.name || 'workflow'}`, placement: 'bottom' }}
         onclick={(e) => {
           e.stopPropagation();
+          if (workflow.dirty) {
+            editor.flash('Save the workflow before closing it so generated candidates and outputs are preserved.');
+            return;
+          }
           if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
         }}
       >
