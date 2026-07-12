@@ -8,10 +8,11 @@ editing, retry, persistence, and recovery use real configured providers and real
 subscription-backed results. The lane does not use Provider Free fixtures,
 deterministic outputs, injected failures, or hidden QA scenario controls.
 
-The repository app is launched with `npm run tauri:dev`. Its separate
+The repository app is built and launched with `npm run qa:native:normal`. Its separate
 `PaintNode Repo QA — repo-dev` identity prevents Computer Use from accidentally
-targeting an installed production build; it does not replace normal provider
-behavior.
+targeting an installed production build. The command creates a registered
+macOS `.app` bundle that Computer Use can control, while leaving provider QA
+mode unset so generation behavior remains normal.
 
 ## Validity boundary
 
@@ -72,7 +73,7 @@ inside the repository, the roots contain each other, or the profile is unknown.
 ## Run one creator
 
 1. Open only `operator-deck.md` in the coordinating task.
-2. Verify the unique project is empty, then run `npm run tauri:dev` from the
+2. Verify the unique project is empty, then run `npm run qa:native:normal` from the
    pinned clean checkout.
 3. Confirm `PaintNode Repo QA — repo-dev` is visibly running with no project or
    document open.

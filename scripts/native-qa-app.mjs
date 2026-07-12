@@ -38,8 +38,8 @@ function executablePath(flag) {
 }
 
 const mode = valueAfter('--mode');
-if (!['provider-free', 'provider-e2e'].includes(mode)) {
-  throw new Error('--mode must be provider-free or provider-e2e');
+if (!['normal', 'provider-free', 'provider-e2e'].includes(mode)) {
+  throw new Error('--mode must be normal, provider-free, or provider-e2e');
 }
 
 const freshStudySession = args.includes('--fresh-study-session');
@@ -72,14 +72,16 @@ if (studySession) {
   assertProviderFreeStudyPlatform(process.platform, version.stdout.trim());
 }
 
+const normalMode = mode === 'normal';
 const suffix = mode === 'provider-free' ? 'Provider Free' : 'Provider E2E';
 const slug = mode.replaceAll('-', '.');
-const productName = `PaintNode Blueprint QA — ${suffix}`;
+const productName = normalMode ? 'PaintNode Repo QA — repo-dev' : `PaintNode Blueprint QA — ${suffix}`;
+const bundleId = normalMode ? 'com.paintnode.editor.qa.repo.dev' : `com.paintnode.editor.blueprintqa.${slug}`;
 const env = {
   ...process.env,
-  PAINTNODE_PROVIDER_QA_MODE: mode,
   PAINTNODE_QUICKLOOK_ARCHS: process.arch === 'arm64' ? 'arm64' : 'x86_64',
 };
+if (!normalMode) env.PAINTNODE_PROVIDER_QA_MODE = mode;
 if (mode === 'provider-e2e') {
   env.PAINTNODE_QA_CODEX_BIN = executablePath('--codex-path');
   env.PAINTNODE_QA_ANTIGRAVITY_BIN = executablePath('--antigravity-path');
@@ -109,7 +111,7 @@ writeFileSync(
   JSON.stringify(
     {
       productName,
-      identifier: `com.paintnode.editor.blueprintqa.${slug}`,
+      identifier: bundleId,
       app: {
         windows: [
           (studyCapable || studySession)
@@ -156,7 +158,7 @@ if (JSON.stringify(finalSourceState) !== JSON.stringify(buildSourceState)) {
 writeQaBuildProvenance({
   appBundle,
   mode,
-  bundleId: `com.paintnode.editor.blueprintqa.${slug}`,
+  bundleId,
   sourceState: finalSourceState,
   studyCapable,
   codeIdentity: studyCapable ? readMacosStaticCodeIdentity(executable) : null,

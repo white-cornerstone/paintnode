@@ -21,6 +21,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
+    "qa:native:normal": "node scripts/native-qa-app.mjs --mode normal",
     "qa:native:provider-free": "node scripts/native-qa-app.mjs --mode provider-free",
     "qa:creator-study:launch": "node scripts/native-qa-study-launch.mjs",
     "qa:creator-study:consume-qa-only": "node scripts/creator-study-qa-consume.mjs",

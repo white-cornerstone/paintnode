@@ -4,6 +4,20 @@ Workflow-board checkpoints must use the repo-built Tauri desktop application.
 The browser build is useful for layout checks only and the installed production
 PaintNode must not be used as a substitute.
 
+## Normal-provider Computer Use app
+
+```sh
+npm run qa:native:normal
+```
+
+This builds and launches **PaintNode Repo QA — repo-dev**, bundle ID
+`com.paintnode.editor.qa.repo.dev`, as a registered macOS app that Computer Use
+can target without touching an installed production PaintNode. It does not set
+`PAINTNODE_PROVIDER_QA_MODE`; provider discovery, authentication, generation,
+editing, retry, and errors use the normal configured subscription-backed paths.
+Use this mode for public-user-like virtual creator evaluations. Use Provider
+Free only for deterministic engineering or approved human-study checkpoints.
+
 ## Provider-free smoke test
 
 ```sh

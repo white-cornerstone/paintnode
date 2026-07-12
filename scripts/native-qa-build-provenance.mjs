@@ -90,7 +90,7 @@ export function sha256File(path) {
 
 export function qaBuildIdentity(provenance) {
   if (!provenance || provenance.version !== 1
-    || !['provider-free', 'provider-e2e'].includes(provenance.mode)
+    || !['normal', 'provider-free', 'provider-e2e'].includes(provenance.mode)
     || typeof provenance.bundleId !== 'string'
     || !/^[a-f0-9]{40}$/.test(provenance.gitSha ?? '')
     || !/^[a-f0-9]{40}$/.test(provenance.sourceTreeSha ?? '')
