@@ -29,6 +29,8 @@
     "qa:creator-study:abort-session": "node scripts/native-qa-session-finalize.mjs --abort",
     "qa:creator-study:finalize-session": "node scripts/native-qa-session-finalize.mjs",
     "qa:creator-study:synthesize": "node scripts/creator-study-synthesis.mjs",
+    "qa:virtual-creators:prepare": "node scripts/virtual-creator-session.mjs",
+    "qa:virtual-creators:validate": "node scripts/virtual-creator-session.mjs",
     "qa:provider:doctor": "node scripts/native-provider-e2e.mjs --preflight-only",
     "qa:native:provider-e2e": "node scripts/native-provider-e2e.mjs",
     "tauri:build": "tauri build",
