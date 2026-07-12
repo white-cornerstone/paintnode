@@ -68,6 +68,14 @@ The creator task must use Computer Use against the native repo-built app. It
 must not use Terminal, a browser PaintNode build, source code, tests, GitHub,
 logs, prior results, operator files, or any other session.
 
+The protected Provider Free study bundle must never be opened directly by the
+virtual creator or by Computer Use auto-launch. Direct launch intentionally
+aborts because it lacks the operator-created isolated study profile. Complete
+native setup first; the participant prompt initially forbids Computer Use and
+waits for `APP READY`. After that signal, the creator uses non-launching
+running-app discovery and reports `BLOCKED — APP NOT RUNNING` instead of opening
+the bundle. The same gate applies after Task 8 until `APP RESUMED` is sent.
+
 ## Prepare one session
 
 Create two owner-only roots outside the repository. Keep control records away
@@ -116,9 +124,12 @@ eight sessions even if `feature/creative-blueprint` advances.
 2. Launch and verify the exact preserved bundle using the generated commands.
 3. Confirm through Computer Use that no document, project, workflow, or imported
    asset is visible. Do not open the project before setup verification.
-4. Start a brand-new AI task with no inherited conversation.
-5. Paste only `participant-start.md` into that task.
-6. Send Task 1, observe the live native run, and record visible evidence.
+4. Only after setup succeeded and the app is visibly running, start a brand-new
+   AI task with no inherited conversation.
+5. Paste only `participant-start.md` into that task. Require the exact
+   `READY — WAITING FOR APP READY` reply with no Computer Use invocation.
+6. Send `APP READY`, require non-launching running-app confirmation, then send
+   Task 1, observe the live native run, and record visible evidence.
 7. Continue one task at a time. Perform Task 2 and Task 7 checkpoint changes
    from the operator lane, and Task 8 resume from the same native profile.
 8. Apply the committed facilitator algorithm exactly: neutral probe at 90
@@ -164,6 +175,8 @@ close PaintNode, add the `finalize` checkout attestation, run
 `qa:creator-study:abort-session`, and capture its cleanup receipt through the
 temporary-file/atomic-rename pattern in the operator deck. Record the attempt as
 rejected and finalized; do not allocate the next profile until cleanup verifies.
+An AI task that attempts to open the bundle before `APP READY` is a rejected
+prelaunch attempt and must not be reused for the replacement profile.
 
 ## Synthesis
 

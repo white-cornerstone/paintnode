@@ -139,6 +139,11 @@ function participantPrompt({ profile, projectDir, sessionId }) {
   return `# Virtual creator session ${profile.id}\n\n`
     + `This is an explicitly synthetic PaintNode interaction probe, session \`${sessionId}\`. `
     + 'Do not claim to be a real creator or infer human-population results.\n\n'
+    + '## Launch safety gate\n\n'
+    + 'Do not invoke Computer Use yet. Never open or launch PaintNode yourself; the protected study bundle intentionally aborts when opened outside the operator-controlled repository QA command. '
+    + 'The operator exclusively owns fresh launch, resume, and cleanup. Reply without inspecting the desktop and wait until the operator sends exactly `APP READY`. '
+    + 'After `APP READY`, first use the non-launching Computer Use running-app discovery/list operation. If **PaintNode Blueprint QA — Provider Free** is not already listed as running, do not call an app-state operation and do not try another app target; report exactly `BLOCKED — APP NOT RUNNING` and wait. '
+    + 'If PaintNode later quits or disappears, stop all Computer Use until the operator sends exactly `APP RESUMED`, then repeat the same non-launching running-app check.\n\n'
     + 'Operate only the already-open native **PaintNode Blueprint QA — Provider Free** app through Computer Use. '
     + 'Do not use a browser version of PaintNode. Do not use Terminal, inspect the repository, source code, tests, Git history, issues, prior task transcripts, operator materials, logs, saved results, or any other virtual session. '
     + 'Infer behavior only from the visible app and the task prompt currently supplied by the operator.\n\n'
@@ -150,7 +155,7 @@ function participantPrompt({ profile, projectDir, sessionId }) {
     + 'The operator will send exactly one task prompt at a time. Do not read ahead or invent future tasks. '
     + 'Complete the visible task using your assigned interaction constraint. If blocked, state what is visibly blocking you and wait for a standardized operator message. '
     + 'When a task is complete, report only: completion or blocked state, visible evidence, actions taken, and any confusing label or state. '
-    + 'Do not grade severity, use human-study metrics, or propose a milestone decision. Wait now for Task 1.\n';
+    + 'Do not grade severity, use human-study metrics, or propose a milestone decision. Reply only `READY — WAITING FOR APP READY` now; do not invoke Computer Use.\n';
 }
 
 function renderHintAppendix(instrument) {
@@ -182,8 +187,9 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
     + '## Validity boundary\n\nThis is owner-observed synthetic evaluation. It is not recruitment, consented participant research, accessibility representation, or #85 exit evidence. '
     + 'The owner must observe the live run and explicitly accept or reject the final record.\n\n'
     + '## Isolation\n\n- Run one virtual session at a time; the native lifecycle state is intentionally single-session.\n'
-    + '- Start a brand-new AI task with no forked conversation or prior session context.\n'
-    + '- Give that task only participant-start.md and the current task/intervention message.\n'
+    + '- Complete Native setup and visible empty-state verification first. Do not create the virtual creator task before native setup has succeeded and the setup receipt exists.\n'
+    + '- Only then start a brand-new AI task with no forked conversation or prior session context.\n'
+    + '- Give that task only participant-start.md, the readiness signal, and the current task/intervention message.\n'
     + '- Never provide this control directory, prior observations, profile matrix, source code, GitHub context, or hidden hint ladder.\n'
     + `- Profile: ${profile.id} — ${profile.label}\n- Session: ${sessionId}\n- Project: ${projectDir}\n\n`
     + '## Native setup\n\nRun from the exact feature checkout at the approved Git SHA. Do not rebuild the app.\n\n'
@@ -210,6 +216,11 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
     + 'if (umask 077; npm run --silent qa:creator-study:setup -- --approved-build-record "$RECORD" --active-build-decisions "$LEDGER" --app-bundle "$APP" --project-dir "$PROJECT" --rehearsal-dir "$REHEARSAL" --visible-empty-state-attested > "$SETUP_TMP"); then mv "$SETUP_TMP" "$SETUP_RECEIPT"; else rm -f "$SETUP_TMP"; exit 1; fi\n'
     + 'chmod 600 "$SETUP_RECEIPT"\ncat "$SETUP_RECEIPT"\n'
     + '```\n\nKeep this terminal open because `attest_checkout` is reused before resume and finalization. Do not open the empty project before setup verification. Task 1 opens it.\n\n'
+    + '## Participant handoff — only after setup\n\n'
+    + '1. Confirm through operator-controlled Computer Use that **PaintNode Blueprint QA — Provider Free** is visibly running with no document, project, workflow, or imported asset.\n'
+    + '2. Start the brand-new, non-forked virtual creator task and paste only `participant-start.md`. It must reply `READY — WAITING FOR APP READY` without invoking Computer Use. If it attempts to launch or inspect an app, reject this attempt before Task 1.\n'
+    + '3. Send exactly `APP READY`. The virtual creator must use non-launching running-app discovery and report `BLOCKED — APP NOT RUNNING` rather than opening the bundle if readiness was lost.\n'
+    + '4. Only after the running app is confirmed, send the exact Task 1 prompt below.\n\n'
     + '## Moderator timing\n\nFollow the committed instrument algorithm, not a flat ladder:\n\n'
     + '1. On the initial checkpoint, after 90 seconds without progress ask exactly “What are you looking for?” Record a `neutral-probe` ID from the current task and checkpoint (for example `T1-C2-NP1`) with zero assist.\n'
     + '2. At 180 total seconds on that initial checkpoint, recompute the earliest incomplete checkpoint and deliver only its H1 verbatim.\n'
@@ -222,7 +233,7 @@ function operatorDeck({ profile, sessionId, controlDir, projectDir, build, appro
         : task.task === 7
           ? '\nConfirm Square and Portrait are complete. Before selection, send exactly: “I am setting the test checkpoint for this task”. Then visibly select Format recovery checkpoint and record a setup scenario event. When Landscape fails, stop the creator task, send exactly “I am resetting the test checkpoint”, visibly reset to Standard checkpoint, record the reset event, then send: “Continue the same task.”\n'
           : task.task === 8
-            ? '\nWhen PaintNode quits, run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "$APP" --resume-study-session`, verify the same profile resumes, then send: “PaintNode has reopened in the same session. Continue the same task.”\n'
+            ? '\nWhen PaintNode quits, the virtual creator must stop Computer Use. Run `attest_checkout resume` immediately before `npm run qa:creator-study:launch -- --app-bundle "$APP" --resume-study-session`, verify the same profile resumes, then send exactly `APP RESUMED`, followed by: “PaintNode has reopened in the same session. Continue the same task.”\n'
             : '';
       const addendum = task.creatorFacingAddendum === 'UPDATED_PRODUCT_PATH'
         ? `The updated Product image for this task is: ${join(materialRoot, 'product-b.png')}`
