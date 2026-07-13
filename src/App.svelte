@@ -20,6 +20,7 @@
   import CharacterPanel from './lib/components/CharacterPanel.svelte';
   import ParagraphPanel from './lib/components/ParagraphPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
+  import WorkflowPanels from './lib/components/WorkflowPanels.svelte';
   import TasksPanel from './lib/components/TasksPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import LongRunningTaskToast from './lib/components/LongRunningTaskToast.svelte';
@@ -1075,6 +1076,9 @@
               </div>
             {/if}
           </aside>
+        {/if}
+        {#if hasWorkflowBoard && !ui.workspaceFocusMode}
+          <WorkflowPanels />
         {/if}
         {#if !ui.workspaceFocusMode}
           <aside class="project-side" class:collapsed={panels.value.projectCollapsed}>

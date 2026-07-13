@@ -29,11 +29,7 @@
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
   import { wheelZoomFactor } from '../engine/zoomGesture';
-  import {
-    clampWorkflowPan as clampWorkflowPanGeometry,
-    workflowMapBounds as workflowMapNavigationBounds,
-    type WorkflowMapBounds,
-  } from '../workflow/viewportGeometry';
+  import { clampWorkflowPan as clampWorkflowPanGeometry } from '../workflow/viewportGeometry';
   import { compositeToCanvas } from '../engine/compositor';
   import { saveOra } from '../ora/save';
   import { loadOra } from '../ora/load';
@@ -41,7 +37,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { panels } from '../state/panels.svelte';
+  import { workflowBoardViewport } from '../state/workflowBoardViewport.svelte';
   import { directorModeFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -99,13 +95,11 @@
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { ArrowSync, Board, CheckmarkCircle, ChevronDoubleLeft, ChevronDoubleRight, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, Options, PaintBrush, SlideSize } from '../icons';
+  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
-  import Panel from './Panel.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
-  import WorkflowPropertiesPanel from './workflow/WorkflowPropertiesPanel.svelte';
   import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
   import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
@@ -127,7 +121,7 @@
   import { workflowReviewCandidateSetHash } from '../workflow/reviewRecommendation';
   import type { WorkflowDirectorRevisionRequester } from '../workflow';
 
-  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
+  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported';
   type WorkflowNodeId = string;
   type AssetPreviewMenu = { nodeId: string; x: number; y: number };
   type WorkflowMapRect = {
@@ -139,11 +133,6 @@
     height: number;
     color: string;
     included?: boolean;
-  };
-  type WorkflowMapModel = {
-    items: WorkflowMapRect[];
-    viewport: WorkflowMapRect;
-    bounds: WorkflowMapBounds;
   };
 
   const desktop = isDesktop();
@@ -159,17 +148,6 @@
   let assetExtractionStates = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
-  const propertiesNode = $derived.by((): WorkflowNodeV2 | null => {
-    workflow.rev;
-    const selection = workflow.selection;
-    if (!selection) return null;
-    const nodeId = selection.kind === 'composition'
-      ? 'composition'
-      : selection.kind === 'creator' || selection.kind === 'asset' || selection.kind === 'output'
-        ? selection.id
-        : null;
-    return nodeId ? workflow.graphSnapshot().nodes.find((node) => node.id === nodeId) ?? null : null;
-  });
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
   let qaModeResolved = $state(!desktop);
   let qaScenario = $state<ProviderFreeQaScenario>('success');
@@ -194,7 +172,6 @@
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
-  let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
   let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
@@ -207,8 +184,6 @@
   let revisionDirectorTitle = $state('Revise current workflow');
   let boardWidth = $state(1);
   let boardHeight = $state(1);
-  let workflowPropertiesCollapsed = $state(false);
-  let workflowMapCollapsed = $state(false);
   let storyboardCanvas = $state<HTMLCanvasElement>();
   let storyboardViewport: Viewport | null = null;
 
@@ -244,7 +219,6 @@
   let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
 
   const ASSET_NODE_W = 205;
-  const MAP_EDGE_PADDING = 260;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -256,7 +230,6 @@
       ? workflow.zoomMode === 'in' ? 'out' : 'in'
       : workflow.zoomMode,
   );
-  const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
   const hasCompositionNode = $derived.by(() => {
     workflow.rev;
@@ -406,17 +379,24 @@
       const type = (event as CustomEvent<{ type?: CreatorNodeType }>).detail?.type;
       if (type) void addCreatorNodeFromPalette(type);
     };
+    const handleWorkflowNodeDirectorAction = (event: Event) => {
+      const nodeId = (event as CustomEvent<{ nodeId?: string }>).detail?.nodeId;
+      const node = nodeId ? workflow.graphSnapshot().nodes.find((item) => item.id === nodeId) : null;
+      if (node) openNodeDirectorAction(node);
+    };
     const handleWorkflowRefresh = () => void refreshWorkflowAssetsAndReview();
     window.addEventListener('paintnode:workflow-before-save', flushBeforeSave);
     window.addEventListener('paintnode:annotation-created', recordAnnotation);
     window.addEventListener('paintnode:workflow-board-action', handleWorkflowBoardAction);
     window.addEventListener('paintnode:workflow-add-node', handleWorkflowAddNode);
+    window.addEventListener('paintnode:workflow-node-director-action', handleWorkflowNodeDirectorAction);
     window.addEventListener('paintnode:workflow-refresh', handleWorkflowRefresh);
     return () => {
       window.removeEventListener('paintnode:workflow-before-save', flushBeforeSave);
       window.removeEventListener('paintnode:annotation-created', recordAnnotation);
       window.removeEventListener('paintnode:workflow-board-action', handleWorkflowBoardAction);
       window.removeEventListener('paintnode:workflow-add-node', handleWorkflowAddNode);
+      window.removeEventListener('paintnode:workflow-node-director-action', handleWorkflowNodeDirectorAction);
       window.removeEventListener('paintnode:workflow-refresh', handleWorkflowRefresh);
     };
   });
@@ -484,6 +464,7 @@
       resizeFrame = null;
       boardWidth = Math.max(1, board.clientWidth);
       boardHeight = Math.max(1, board.clientHeight);
+      workflowBoardViewport.setSize(boardWidth, boardHeight);
       clampWorkflowPan();
     };
     const scheduleResize = () => {
@@ -1282,69 +1263,6 @@
     ];
   }
 
-  function mapBoundsFor(items: WorkflowMapRect[], padding: number): WorkflowMapBounds {
-    const minX = Math.min(...items.map((rect) => rect.x)) - padding;
-    const minY = Math.min(...items.map((rect) => rect.y)) - padding;
-    const maxX = Math.max(...items.map((rect) => rect.x + rect.width)) + padding;
-    const maxY = Math.max(...items.map((rect) => rect.y + rect.height)) + padding;
-    return {
-      minX,
-      minY,
-      maxX,
-      maxY,
-      width: Math.max(1, maxX - minX),
-      height: Math.max(1, maxY - minY),
-    };
-  }
-
-  function workflowViewportRect(): WorkflowMapRect {
-    const zoom = Math.max(0.001, workflow.zoom);
-    return {
-      id: 'viewport',
-      kind: 'viewport',
-      x: -workflow.panX / zoom,
-      y: -workflow.panY / zoom,
-      width: boardWidth / zoom,
-      height: boardHeight / zoom,
-      color: 'var(--accent)',
-    };
-  }
-
-  function workflowMap(): WorkflowMapModel {
-    const items = workflowMapItems();
-    const viewport = workflowViewportRect();
-    return {
-      items,
-      viewport,
-      bounds: workflowMapNavigationBounds(
-        items,
-        boardWidth,
-        boardHeight,
-        workflow.zoom,
-        MAP_EDGE_PADDING,
-      ) ?? mapBoundsFor([viewport], MAP_EDGE_PADDING),
-    };
-  }
-
-  function mapX(x: number, map: WorkflowMapModel): number {
-    return ((x - map.bounds.minX) / map.bounds.width) * 100;
-  }
-
-  function mapY(y: number, map: WorkflowMapModel): number {
-    return ((y - map.bounds.minY) / map.bounds.height) * 100;
-  }
-
-  function mapRectStyle(rect: WorkflowMapRect, map: WorkflowMapModel): string {
-    const minSize = rect.kind === 'viewport' ? 8 : 5;
-    return [
-      `left:${mapX(rect.x, map)}%`,
-      `top:${mapY(rect.y, map)}%`,
-      `width:max(${minSize}px, ${(rect.width / map.bounds.width) * 100}%)`,
-      `height:max(${minSize}px, ${(rect.height / map.bounds.height) * 100}%)`,
-      `--mini-color:${rect.color}`,
-    ].join(';');
-  }
-
   function clampWorkflowPan(): void {
     const next = clampWorkflowPanGeometry(
       { panX: workflow.panX, panY: workflow.panY },
@@ -1363,89 +1281,11 @@
     clampWorkflowPan();
   }
 
-  function setViewportOrigin(left: number, top: number): void {
-    const zoom = Math.max(0.001, workflow.zoom);
-    const nextPanX = -left * zoom;
-    const nextPanY = -top * zoom;
-    workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
-    clampWorkflowPan();
-  }
-
   function centerBoardAt(worldX: number, worldY: number): void {
     const nextPanX = boardWidth / 2 - worldX * workflow.zoom;
     const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
     workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
-  }
-
-  function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
-    const source = outputPortPoint(connection.from, connection.sourcePortId);
-    const target = inputPortPoint(connection.to, connection.targetPortId);
-    if (!source || !target) return 'display:none';
-    const x1 = mapX(source.x, map);
-    const y1 = mapY(source.y, map);
-    const x2 = mapX(target.x, map);
-    const y2 = mapY(target.y, map);
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const length = Math.hypot(dx, dy);
-    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-    return `left:${x1}%; top:${y1}%; width:${length}%; transform:rotate(${angle}deg)`;
-  }
-
-  function centerBoardFromMap(event: PointerEvent, map: WorkflowMapModel): void {
-    const point = mapPoint(event, map);
-    if (!point) return;
-    centerBoardAt(point.x, point.y);
-  }
-
-  function mapPoint(event: PointerEvent, map: WorkflowMapModel): { x: number; y: number } | null {
-    if (!(event.currentTarget instanceof HTMLElement)) return null;
-    const rect = event.currentTarget.getBoundingClientRect();
-    return {
-      x: map.bounds.minX + ((event.clientX - rect.left) / rect.width) * map.bounds.width,
-      y: map.bounds.minY + ((event.clientY - rect.top) / rect.height) * map.bounds.height,
-    };
-  }
-
-  function rectContainsPoint(rect: WorkflowMapRect, point: { x: number; y: number }): boolean {
-    return point.x >= rect.x
-      && point.x <= rect.x + rect.width
-      && point.y >= rect.y
-      && point.y <= rect.y + rect.height;
-  }
-
-  function startMapDrag(event: PointerEvent, map: WorkflowMapModel): void {
-    if (!(event.currentTarget instanceof HTMLElement)) return;
-    const point = mapPoint(event, map);
-    if (!point) return;
-    event.preventDefault();
-    if (rectContainsPoint(map.viewport, point)) {
-      mapDragging = {
-        offsetX: point.x - map.viewport.x,
-        offsetY: point.y - map.viewport.y,
-      };
-      event.currentTarget.setPointerCapture(event.pointerId);
-      return;
-    }
-    centerBoardFromMap(event, map);
-  }
-
-  function moveMapDrag(event: PointerEvent, map: WorkflowMapModel): void {
-    if (!mapDragging) return;
-    const point = mapPoint(event, map);
-    if (!point) return;
-    setViewportOrigin(point.x - mapDragging.offsetX, point.y - mapDragging.offsetY);
-  }
-
-  function stopMapDrag(): void {
-    mapDragging = null;
-  }
-
-  function showWorkflowPanel(panel: 'properties' | 'map'): void {
-    panels.setRightCollapsed(false);
-    if (panel === 'properties') workflowPropertiesCollapsed = false;
-    else workflowMapCollapsed = false;
   }
 
   function workflowNodeRect(nodeId: WorkflowNodeId): { x: number; y: number; width: number; height: number } | null {
@@ -3699,73 +3539,6 @@
         {/each}
       </div>
     </div>
-    <aside class="workflow-panels" class:collapsed={panels.value.rightCollapsed} aria-label="Workflow panels">
-      {#if panels.value.rightCollapsed}
-        <div class="workflow-panel-rail">
-          <button
-            class="workflow-panel-toggle expand"
-            type="button"
-            aria-label="Expand workflow panels"
-            use:tooltip={{ text: 'Expand workflow panels', placement: 'left' }}
-            onclick={() => panels.setRightCollapsed(false)}
-          ><Icon svg={ChevronDoubleLeft} size={16} /></button>
-          <button type="button" class="workflow-rail-item" onclick={() => showWorkflowPanel('properties')}>
-            <Icon svg={Options} size={18} /><span>Properties</span>
-          </button>
-          <button type="button" class="workflow-rail-item" onclick={() => showWorkflowPanel('map')}>
-            <Icon svg={Board} size={18} /><span>Map</span>
-          </button>
-        </div>
-      {:else}
-        <div class="workflow-column-bar">
-          <button
-            class="workflow-panel-toggle"
-            type="button"
-            aria-label="Collapse workflow panels"
-            use:tooltip={{ text: 'Collapse workflow panels', placement: 'left' }}
-            onclick={() => panels.setRightCollapsed(true)}
-          ><Icon svg={ChevronDoubleRight} size={16} /></button>
-        </div>
-        <Panel title="Properties" grow bind:collapsed={workflowPropertiesCollapsed}>
-          <WorkflowPropertiesPanel embedded node={propertiesNode} onDirectorAction={openNodeDirectorAction} />
-        </Panel>
-        <Panel title="Map" bind:collapsed={workflowMapCollapsed}>
-          <div class="workflow-map">
-            <button
-              class="workflow-map-canvas"
-              class:dragging={mapDragging}
-              aria-label="Workflow map. Drag the viewport frame or click to center the workflow canvas."
-              onpointerdown={(event) => startMapDrag(event, workflowMapModel)}
-              onpointermove={(event) => moveMapDrag(event, workflowMapModel)}
-              onpointerup={stopMapDrag}
-              onpointercancel={stopMapDrag}
-            >
-              {#each graphConnections as connection (connection.id)}
-                <span class="map-link" style={mapLinkStyle(connection, workflowMapModel)}></span>
-              {/each}
-              {#each workflowMapModel.items as item (item.id)}
-                <span
-                  class="map-node"
-                  class:asset={item.kind === 'asset'}
-                  class:brief={item.kind === 'brief'}
-                  class:composition={item.kind === 'composition'}
-                  class:creator={item.kind === 'creator'}
-                  class:output={item.kind === 'output'}
-                  class:unsupported={item.kind === 'unsupported'}
-                  class:included={item.included}
-                  style={mapRectStyle(item, workflowMapModel)}
-                ></span>
-              {/each}
-              <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
-            </button>
-            <div class="map-meta">
-              <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + (hasCompositionNode ? 1 : 0) + workflow.outputNodes.length} nodes</span>
-              <span>{Math.round(workflow.zoom * 100)}%</span>
-            </div>
-          </div>
-        </Panel>
-      {/if}
-    </aside>
   </div>
 </section>
 
@@ -3836,163 +3609,10 @@
     min-height: 0;
   }
   .composition-summary { margin: 8px; }
-  .workflow-panels {
-    width: var(--rightpanel-w);
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: hidden;
-    border-left: 1px solid var(--border);
-    background: var(--bg-panel);
-  }
-  .workflow-panels.collapsed {
-    width: 132px;
-  }
-  .workflow-column-bar {
-    height: 26px;
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 0 6px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-panel-2);
-  }
-  .workflow-panel-toggle {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 20px;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-  }
-  .workflow-panel-toggle:hover {
-    color: var(--text-bright);
-  }
-  .workflow-panel-rail {
-    display: flex;
-    flex-direction: column;
-    padding-top: 4px;
-  }
-  .workflow-panel-rail .workflow-panel-toggle.expand {
-    align-self: flex-end;
-    margin: 0 5px 4px 0;
-  }
-  .workflow-rail-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 8px 10px;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-    color: var(--text);
-    text-align: left;
-  }
-  .workflow-rail-item:hover {
-    background: var(--bg-elevated);
-  }
   .node-head span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .workflow-panels :global(.panel.grow) {
-    flex: 1;
-  }
-  .workflow-panels :global(.panel.grow .panel-body) {
-    overflow: hidden;
-  }
-  .workflow-map {
-    flex: none;
-    display: grid;
-    gap: 6px;
-    padding: 8px 8px 10px;
-  }
-  .workflow-map-canvas {
-    position: relative;
-    display: block;
-    width: 100%;
-    aspect-ratio: 1;
-    min-height: 148px;
-    padding: 0;
-    overflow: hidden;
-    border: 1px solid #3b3d41;
-    border-radius: 6px;
-    background:
-      linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
-    background-color: #202225;
-    background-size: 18px 18px;
-    cursor: grab;
-    touch-action: none;
-  }
-  .workflow-map-canvas:hover {
-    border-color: color-mix(in srgb, var(--accent) 50%, #3b3d41);
-  }
-  .workflow-map-canvas.dragging {
-    cursor: grabbing;
-  }
-  .map-node,
-  .map-viewport,
-  .map-link {
-    position: absolute;
-    display: block;
-    pointer-events: none;
-  }
-  .map-node {
-    border: 1px solid color-mix(in srgb, var(--mini-color) 58%, #65686f);
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--mini-color) 40%, #4b4d52);
-    opacity: 0.78;
-  }
-  .map-node.asset:not(.included) {
-    opacity: 0.38;
-  }
-  .map-node.composition {
-    background: color-mix(in srgb, var(--accent) 28%, #4b4d52);
-    border-color: color-mix(in srgb, var(--accent) 65%, #65686f);
-  }
-  .map-node.brief {
-    background: color-mix(in srgb, #a77ad1 30%, #4b4d52);
-    border-color: color-mix(in srgb, #a77ad1 68%, #65686f);
-  }
-  .map-node.creator {
-    background: color-mix(in srgb, #59a2c8 28%, #4b4d52);
-    border-color: color-mix(in srgb, #59a2c8 64%, #65686f);
-  }
-  .map-node.unsupported {
-    border-style: dashed;
-    background: color-mix(in srgb, #d08b67 22%, #4b4d52);
-    border-color: color-mix(in srgb, #d08b67 65%, #65686f);
-  }
-  .map-node.output {
-    background: color-mix(in srgb, #6b7cff 28%, #4b4d52);
-  }
-  .map-viewport {
-    border: 2px solid var(--accent);
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-    box-shadow:
-      0 0 0 1px rgba(0, 0, 0, 0.35),
-      0 0 10px color-mix(in srgb, var(--accent) 32%, transparent);
-  }
-  .map-link {
-    height: 1px;
-    transform-origin: 0 50%;
-    border-top: 1px solid color-mix(in srgb, var(--accent) 72%, transparent);
-    opacity: 0.66;
-  }
-  .map-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    color: var(--text-dim);
-    font-size: 11px;
   }
   .err,
   .progress {
