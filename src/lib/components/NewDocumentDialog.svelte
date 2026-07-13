@@ -220,6 +220,10 @@
   }
 
   function chooseWorkflowPreset(preset: WorkflowTemplateDefinition): void {
+    if (selectedWorkflowId === preset.id) {
+      createWorkflow();
+      return;
+    }
     pickWorkflowPreset(preset);
   }
 
