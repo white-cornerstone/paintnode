@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::ai::apply_ai_cli_environment;
 use crate::provider_executable::{resolve_exact_provider_executable, Provider};
 
-const RUNTIME_PROTOCOL_VERSION: u32 = 4;
+const RUNTIME_PROTOCOL_VERSION: u32 = 5;
 const DIRECTOR_ACTION_SCHEMA_FILE: &str = "bridge/director-action-schema.mjs";
 const WORKFLOW_DIRECTOR_SCHEMA_FILE: &str = "bridge/workflow-director-schema.mjs";
 const PROVIDER_EXECUTABLE_TRUST_FILE: &str = "bridge/provider-executable-trust.mjs";
@@ -764,7 +764,7 @@ mod tests {
         };
         let error = release_for(&release, "codex").unwrap_err();
         assert!(error.contains("outdated runtime protocol 1"));
-        assert!(error.contains("requires protocol 4"));
+        assert!(error.contains("requires protocol 5"));
     }
 
     #[test]

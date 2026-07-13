@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  workflowDirectorExtractionSchema,
   workflowDirectorGraphDraftSchema,
   workflowDirectorRevisionSchema,
 } from '../../../scripts/workflow-director-schema.mjs';
@@ -30,13 +31,13 @@ describe('Workflow Director GraphDraft schema', () => {
   });
 
   it('versions and packages every shared schema dependency required by managed runners', () => {
-    expect(MANAGED_RUNTIME_PROTOCOL_VERSION).toBe(4);
+    expect(MANAGED_RUNTIME_PROTOCOL_VERSION).toBe(5);
     expect(MANAGED_RUNTIME_SHARED_BRIDGE_FILES).toEqual(expect.arrayContaining([
       'director-action-schema.mjs',
       'workflow-director-schema.mjs',
       'provider-executable-trust.mjs',
     ]));
-    expect(providerRuntimeWorkflow).toContain('default: "4.0.0"');
+    expect(providerRuntimeWorkflow).toContain('default: "5.0.0"');
     expect(providerRuntimeWorkflow).toContain('default: "provider-runtimes-creative-blueprint"');
     expect(providerRuntimeWorkflow).toContain('confirm_production_publish');
     expect(providerRuntimeWorkflow).toContain('Production runtime publication requires explicit confirmation');
@@ -55,5 +56,18 @@ describe('Workflow Director GraphDraft schema', () => {
     expect(variants.map((variant: { properties: { op: { const: string } } }) => variant.properties.op.const)).toEqual([
       'add-node', 'remove-node', 'configure-node', 'move-node', 'add-edge', 'remove-edge',
     ]);
+  });
+
+  it('defines a strict structured-output schema for asset extraction plans', () => {
+    expect(workflowDirectorExtractionSchema.additionalProperties).toBe(false);
+    expect(workflowDirectorExtractionSchema.required).toEqual(['version', 'items', 'notes']);
+    expect(workflowDirectorExtractionSchema.properties.version.const).toBe(1);
+    expect(workflowDirectorExtractionSchema.properties.items.minItems).toBe(1);
+    expect(workflowDirectorExtractionSchema.properties.items.maxItems).toBe(32);
+    expect(workflowDirectorExtractionSchema.properties.items.items.additionalProperties).toBe(false);
+    expect(workflowDirectorExtractionSchema.properties.items.items.required).toEqual([
+      'id', 'name', 'instruction',
+    ]);
+    expect(workflowDirectorExtractionSchema.properties.notes.maxLength).toBe(4000);
   });
 });

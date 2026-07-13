@@ -682,6 +682,52 @@ pub(crate) fn run_codex_workflow_revision_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_workflow_extraction_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    source_image: &Path,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
+    let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        &[source_image.to_path_buf()],
+        &options,
+        None,
+        Some(output_file),
+        Some("workflow-extraction"),
+    );
+    let run = run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.to_string())
+        .map_err(|error| {
+            format!(
+                "Failed to run Codex at '{}': {error}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!(
+            "Codex workflow extraction planning failed.\n\n{message}"
+        ))
+    } else {
+        Err(command_failure(
+            "Codex workflow extraction planning",
+            &run.output,
+        ))
+    }
+}
+
 fn configured_codex_bin(bin: Option<String>) -> Option<String> {
     bin.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -5277,6 +5323,32 @@ mod tests {
             .windows(2)
             .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-revision" }));
         assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_extraction_command_uses_dedicated_schema_and_source_image() {
+        let job = TempJobDir::new("paintnode-codex-workflow-extraction-test").expect("temp dir");
+        let source_image = job.path().join("extraction-source.png");
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "plan asset extraction",
+            std::slice::from_ref(&source_image),
+            &CodexCommandOptions::default(),
+            None,
+            Some("paintnode-asset-extraction-plan.json"),
+            Some("workflow-extraction"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-extraction" }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--image" && pair[1] == source_image.to_string_lossy() }));
     }
 
     #[test]

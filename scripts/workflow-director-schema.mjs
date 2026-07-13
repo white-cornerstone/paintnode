@@ -203,3 +203,28 @@ export const workflowDirectorRevisionSchema = {
   },
   required: ['version', 'sourceGraphRevision', 'summary', 'operations'],
 };
+
+export const workflowDirectorExtractionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    version: { type: 'integer', const: 1 },
+    items: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 32,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 160 },
+          name: shortText,
+          instruction: longText,
+        },
+        required: ['id', 'name', 'instruction'],
+      },
+    },
+    notes: { type: 'string', maxLength: 4000 },
+  },
+  required: ['version', 'items', 'notes'],
+};

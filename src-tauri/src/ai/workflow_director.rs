@@ -17,8 +17,14 @@ use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::ai::antigravity::run_antigravity_director_request;
-use crate::ai::claude::{run_claude_workflow_draft_request, run_claude_workflow_revision_request};
-use crate::ai::codex::{run_codex_workflow_draft_request, run_codex_workflow_revision_request};
+use crate::ai::claude::{
+    run_claude_workflow_draft_request, run_claude_workflow_extraction_request,
+    run_claude_workflow_revision_request,
+};
+use crate::ai::codex::{
+    run_codex_workflow_draft_request, run_codex_workflow_extraction_request,
+    run_codex_workflow_revision_request,
+};
 use crate::ai::grok::run_grok_director_request;
 use crate::ai::{
     ai_run_cancelled, clear_ai_run_cancelled, request_ai_run_cancel, TempJobDir,
@@ -985,10 +991,11 @@ fn run_workflow_director_extraction_plan(
     let job = TempJobDir::new("paintnode-extraction-plan")?;
     let (context_json, maximum_assets) = prepare_workflow_extraction(&job, context)?;
     let prompt = workflow_director_extraction_prompt(&context_json);
+    let source_image = job.path().join("extraction-source.png");
     run_with_timeout(run_id, timeout, || {
         match provider.trim() {
             "codex" => {
-                run_codex_workflow_revision_request(
+                run_codex_workflow_extraction_request(
                     app,
                     run_id,
                     codex_bin,
@@ -997,11 +1004,12 @@ fn run_workflow_director_extraction_plan(
                     codex_service_tier,
                     job.path(),
                     &prompt,
+                    &source_image,
                     WORKFLOW_DIRECTOR_EXTRACTION_FILE,
                 )?;
             }
             "claude" => {
-                run_claude_workflow_revision_request(
+                run_claude_workflow_extraction_request(
                     app,
                     run_id,
                     claude_bin,
@@ -1009,6 +1017,7 @@ fn run_workflow_director_extraction_plan(
                     claude_effort,
                     job.path(),
                     &prompt,
+                    &source_image,
                     WORKFLOW_DIRECTOR_EXTRACTION_FILE,
                 )?;
             }
