@@ -11,7 +11,6 @@
     directorModeFromRunOptions,
     directorProviderFromRunOptions,
     focusTaskDocument,
-    grokEditComingSoonError,
     imageProviderFromRunOptions,
     providerLabel,
   } from '../ai/taskSupport';
@@ -35,10 +34,15 @@
     decoupleCodexImage,
     decoupleAntigravityImage,
     antigravityConfigFromRunOptions,
+    extractGrokAsset,
+    grokConfigFromRunOptions,
     isDesktop,
+    type DecoupleImageResult,
     type DecoupledLayerResult,
     type ProjectAsset,
   } from '../integrations/desktop';
+  import { planWorkflowAssetExtraction } from '../integrations/workflowExtractionAdapters';
+  import { assertExtractedAssetHasUsefulAlpha } from '../workflow/assetExtraction';
   import { Copy } from '../icons';
 
   let { onClose, taskId = null }: { onClose: () => void; taskId?: string | null } = $props();
@@ -155,6 +159,7 @@
         softness: Math.max(4, tolerance * 0.25),
         despill: 0.35,
       });
+      assertExtractedAssetHasUsefulAlpha(img.data, layer.name);
       ctx.putImageData(img, 0, 0);
     }
 
@@ -225,34 +230,68 @@
       );
 
       try {
-        if (decoupleProvider === 'grok') throw grokEditComingSoonError('asset extraction');
         const sourcePng = await canvasPngBytes(sourceLayer.canvas);
-        const result =
-          decoupleProvider === 'antigravity'
-            ? await decoupleAntigravityImage(
-                antigravityConfigFromRunOptions(
-                  runOptions,
-                  taskProjectPath,
-                  runId,
-                  false,
-                  settings.value.workspace.keepAiDebugArtifacts,
-                ),
-                sourcePng,
-                prompt.trim() || DEFAULT_PROMPT,
+        let result: DecoupleImageResult;
+        if (decoupleProvider === 'grok') {
+          if (directorModeFromRunOptions(runOptions) === 'skip') {
+            throw new Error('Grok asset extraction requires an AI Director to plan the asset inventory. Enable the Director or choose Codex or Antigravity.');
+          }
+          aiTasks.setProgress(task.id, 'AI Director is planning the asset inventory...');
+          const guidance = prompt.trim() || DEFAULT_PROMPT;
+          const plan = await planWorkflowAssetExtraction(runOptions, {
+            sourcePng,
+            guidance,
+            mode: 'quality',
+            maximumAssets: 16,
+          }, { runId: () => runId });
+          const layers: DecoupledLayerResult[] = [];
+          for (const [index, item] of plan.items.entries()) {
+            aiTasks.setProgress(task.id, `Extracting ${index + 1} of ${plan.items.length}: ${item.name}...`);
+            const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset and preserve its complete edges.`;
+            const extracted = await extractGrokAsset(
+              grokConfigFromRunOptions(
+                runOptions,
+                taskProjectPath,
+                `${runId}-${index + 1}`,
                 false,
-              )
-            : await decoupleCodexImage(
-                codexConfigFromRunOptions(
-                  runOptions,
-                  taskProjectPath,
-                  runId,
-                  false,
-                  settings.value.workspace.keepAiDebugArtifacts,
-                ),
-                sourcePng,
-                prompt.trim() || DEFAULT_PROMPT,
-                false,
-              );
+                settings.value.workspace.keepAiDebugArtifacts,
+              ),
+              itemPrompt,
+              item.name,
+              [{ name: sourceLayer.name, role: 'Extraction source', bytes: sourcePng }],
+            );
+            const layer = extracted.layers[0];
+            if (!layer) throw new Error(`Grok did not return "${item.name}".`);
+            layers.push(layer);
+          }
+          result = { layers, notes: plan.notes };
+        } else if (decoupleProvider === 'antigravity') {
+          result = await decoupleAntigravityImage(
+            antigravityConfigFromRunOptions(
+              runOptions,
+              taskProjectPath,
+              runId,
+              false,
+              settings.value.workspace.keepAiDebugArtifacts,
+            ),
+            sourcePng,
+            prompt.trim() || DEFAULT_PROMPT,
+            false,
+          );
+        } else {
+          result = await decoupleCodexImage(
+            codexConfigFromRunOptions(
+              runOptions,
+              taskProjectPath,
+              runId,
+              false,
+              settings.value.workspace.keepAiDebugArtifacts,
+            ),
+            sourcePng,
+            prompt.trim() || DEFAULT_PROMPT,
+            false,
+          );
+        }
         aiTasks.setProgress(task.id, 'Cleaning and saving extracted assets...');
         const imports = await Promise.all(result.layers.map((layer) => layerToImport(layer)));
         const extractedAssets: ProjectAsset[] = [];

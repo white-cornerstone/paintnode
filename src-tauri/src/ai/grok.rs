@@ -7,9 +7,9 @@
 //! the CLI's own login is reused. Running any `grok` command refreshes the
 //! token file in place, so `grok models` is used to wake/refresh auth.
 //!
-//! Scope: text-to-image generation (`/v1/images/generations`) plus masked
-//! image editing (`/v1/images/edits`) for fill, retouch, upscale/restore, and
-//! multi-asset workflow composition. Video is documented in
+//! Scope: text-to-image generation (`/v1/images/generations`) plus image
+//! editing (`/v1/images/edits`) for Director-planned asset extraction, fill,
+//! retouch, upscale/restore, and multi-asset workflow composition. Video is documented in
 //! `docs/grok-future-expansion.md` for a later pass.
 
 use std::fs;
@@ -39,7 +39,7 @@ use crate::ai::canvas::{
     ai_candidate_rejection, ai_edit_checks_level, ai_grok_image_capability,
     ai_retouch_editable_mask_png, grok_output_target, read_png_bytes_cropped_to_ai_working_canvas,
     remove_rejected_ai_candidate, validate_optional_target_dimensions, AiWorkingCanvas,
-    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    AI_CHROMA_KEY_HEX, AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::director::{
@@ -67,8 +67,9 @@ use crate::ai::{
     track_ai_process_tree, validate_reference_pngs, watched_job_files, write_ai_job_prompt,
     write_ai_job_settings, write_reference_pngs, AgentRunResult, AiDirectorInvolvement,
     AiDirectorMode, AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult,
-    CodexDetectionResult, GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage,
-    AI_RUN_STOPPED_MESSAGE, GROK_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    CodexDetectionResult, DecoupleImageResult, DecoupledLayerResult, GeneratedImageLayerResult,
+    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, GROK_RUNS_DIR,
+    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{safe_stem, store_generated_png_asset};
@@ -765,6 +766,193 @@ fn grok_reference_generation_prompt(user_prompt: &str, reference_names: &[String
     lines.push("User image prompt:".into());
     lines.push(user_prompt.to_string());
     lines.join("\n")
+}
+
+fn grok_asset_extraction_prompt(
+    asset_name: &str,
+    instruction: &str,
+    reference_names: &[String],
+) -> String {
+    let references = reference_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let role = if index == 0 {
+                "the primary source image"
+            } else {
+                "an additional source or annotated support image"
+            };
+            format!("- <IMAGE_{index}>: {role} (`{name}`)")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"Create one reusable PaintNode asset from the attached reference images.
+
+Attached images:
+{references}
+
+Asset name:
+{asset_name}
+
+Extraction instruction:
+{instruction}
+
+Required output:
+- Return exactly one image containing only the requested asset, centered and fully visible with complete edges.
+- Preserve the asset's identity, proportions, materials, label details, lighting, and characteristic fine structure from the references.
+- Reconstruct only small occluded portions needed to make the asset reusable. Do not redesign or replace it with a generic substitute.
+- Fill every pixel outside the asset with one perfectly flat solid PaintNode chroma-key matte: {AI_CHROMA_KEY_HEX}.
+- The instruction may request transparency; for this xAI image response, represent that transparent area only with the exact chroma-key matte. PaintNode will convert the border-connected matte to real alpha after the image is returned.
+- Do not add a floor, wall, table, scenery, cast shadow, reflection, gradient, vignette, border, frame, caption, label, checkerboard, or transparency preview outside the asset.
+- Do not reproduce any source/support montage labels, guideline cells, annotations, or UI chrome.
+- Return a single composition, never an index sheet or multiple variations."#
+    )
+}
+
+/// Generate one Director-planned reusable asset. Grok Imagine does not expose
+/// an alpha-output parameter and commonly returns JPEG, so the native contract
+/// deliberately requests PaintNode's fixed chroma matte. The frontend converts
+/// that matte to transparency and validates useful alpha before saving.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn extract_grok_asset(
+    app: AppHandle,
+    bin: Option<String>,
+    prompt: String,
+    asset_name: String,
+    project_path: Option<String>,
+    keep_job_dir: Option<bool>,
+    keep_debug_artifacts: Option<bool>,
+    sources: Vec<WorkflowSourceImage>,
+    run_id: String,
+    image_model: Option<String>,
+    image_resolution: Option<String>,
+) -> Result<DecoupleImageResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Enter an asset extraction instruction.".into());
+    }
+    if asset_name.trim().is_empty() {
+        return Err("Asset extraction needs a name.".into());
+    }
+    validate_reference_pngs(&sources, "Grok asset extraction")?;
+    if sources.is_empty() {
+        return Err("Grok asset extraction needs at least one source image.".into());
+    }
+    if sources.len() > GROK_MAX_EDIT_REFERENCE_IMAGES {
+        return Err("Grok asset extraction supports up to 3 source or support images. Remove extra inputs or switch the image provider.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<DecoupleImageResult, String> {
+        let grok_bin = configured_or_default_grok_bin(bin)?;
+        let image_model = configured_or_default_grok_image_model(image_model);
+        let keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
+        let run_id = if run_id.trim().is_empty() {
+            format!("grok-extract-{}", now_id())
+        } else {
+            run_id
+        };
+        clear_ai_run_cancelled(&run_id);
+        let keep_job_dir = should_keep_job_dir(keep_job_dir);
+        let (_project_dir, _job_project_dir, job_path, cleanup_project_job, _temp_job) =
+            project_or_temp_job_path(
+                &app,
+                &project_path,
+                GROK_RUNS_DIR,
+                "grok-extract",
+                &run_id,
+                keep_job_dir,
+            )?;
+        let (reference_paths, reference_names) =
+            write_reference_pngs(&job_path, &sources, "Grok asset extraction")?;
+        let name = asset_name.trim().chars().take(80).collect::<String>();
+        let prompt_text = grok_asset_extraction_prompt(&name, prompt.trim(), &reference_names);
+        let resolution = explicit_grok_resolution(image_resolution.as_deref())
+            .unwrap_or_else(|| GROK_IMAGE_RESOLUTION.into());
+        write_ai_job_settings(
+            &job_path,
+            json!({
+                "version": 1,
+                "workflow": "extract_asset",
+                "runId": run_id,
+                "provider": "Grok",
+                "assetName": name,
+                "imageGenerator": {
+                    "provider": "Grok",
+                    "model": image_model,
+                    "aspectRatio": "1:1",
+                    "resolution": resolution,
+                },
+                "referenceImages": reference_names,
+                "matteColor": AI_CHROMA_KEY_HEX,
+                "keepJobDir": keep_job_dir,
+                "debugArtifacts": keep_debug_artifacts,
+            }),
+        )?;
+        write_ai_job_prompt(&job_path, &prompt_text, "Grok asset extraction")?;
+        emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
+
+        let result_path = job_path.join("result.png");
+        let bytes = match fs::read(&result_path)
+            .ok()
+            .filter(|bytes| is_png(bytes) && png_dimensions_from_bytes(bytes).is_some())
+        {
+            Some(bytes) => {
+                emit_codex_progress(&app, &run_id, "Reusing the previously generated asset");
+                bytes
+            }
+            None => {
+                let _ = fs::remove_file(&result_path);
+                emit_codex_progress(&app, &run_id, format!("Extracting {name} with Grok"));
+                let bytes = run_grok_direct_edit(
+                    &app,
+                    &run_id,
+                    &grok_bin,
+                    &job_path,
+                    GrokEditRequestSpec {
+                        prompt: prompt_text,
+                        image_paths: reference_paths,
+                        aspect_ratio: Some("1:1".into()),
+                        resolution: Some(resolution),
+                    },
+                    &image_model,
+                    keep_debug_artifacts,
+                )?;
+                png_dimensions_from_bytes(&bytes).ok_or_else(|| {
+                    "Grok extracted asset PNG dimensions are invalid.".to_string()
+                })?;
+                fs::write(&result_path, &bytes)
+                    .map_err(|e| format!("Failed to write Grok extracted asset: {e}"))?;
+                bytes
+            }
+        };
+
+        let data_url = png_data_url(&bytes)?;
+        if cleanup_project_job {
+            cleanup_project_agent_job(&job_path);
+        }
+        emit_codex_progress(&app, &run_id, "Preparing the chroma matte for transparency");
+        Ok(DecoupleImageResult {
+            layers: vec![DecoupledLayerResult {
+                name,
+                data_url,
+                alpha_mask_data_url: None,
+                key_color: Some(AI_CHROMA_KEY_HEX.into()),
+                x: None,
+                y: None,
+                opacity: Some(1.0),
+                visible: Some(true),
+                asset: None,
+            }],
+            thread_id: None,
+            notes: Some(
+                "Grok generated one keyed asset; PaintNode converted the border-connected matte to transparency before saving."
+                    .into(),
+            ),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
 }
 
 #[tauri::command]
@@ -3006,6 +3194,37 @@ mod tests {
         let text = serde_json::to_string(&body).unwrap();
         assert!(!text.contains("1024x1024"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asset_extraction_prompt_uses_the_fixed_matte_without_canvas_geometry() {
+        let prompt = grok_asset_extraction_prompt(
+            "kilchoman-loch-gorm-bottle",
+            "Isolate the complete bottle and preserve its label.",
+            &["references/reference-1-source.png".into()],
+        );
+        assert!(prompt.contains("<IMAGE_0>"));
+        assert!(prompt.contains("kilchoman-loch-gorm-bottle"));
+        assert!(prompt.contains("#00ff00"));
+        assert!(prompt.contains("border-connected matte"));
+        assert!(prompt.contains("never an index sheet"));
+        assert!(!prompt.contains("1024"));
+        assert!(!prompt.contains("pixel dimensions"));
+    }
+
+    #[test]
+    fn asset_extraction_prompt_labels_additional_inputs_as_support() {
+        let prompt = grok_asset_extraction_prompt(
+            "product",
+            "Extract the product.",
+            &[
+                "references/reference-1-source.png".into(),
+                "references/reference-2-annotations.png".into(),
+            ],
+        );
+        assert!(prompt.contains("<IMAGE_0>: the primary source image"));
+        assert!(prompt.contains("<IMAGE_1>: an additional source or annotated support image"));
+        assert!(!prompt.contains("INDEX SHEET GUIDELINE"));
     }
 
     #[test]
