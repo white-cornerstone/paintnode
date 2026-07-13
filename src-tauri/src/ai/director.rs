@@ -1067,6 +1067,63 @@ mod tests {
     }
 
     #[test]
+    fn director_observes_image_tool_error_and_retries_with_a_revised_prompt() {
+        let job = TempJobDir::new("paintnode-director-tool-error-test").expect("temp dir");
+        let mut actions = VecDeque::from([
+            r#"{ "action": "generateCandidate", "prompt": "blocked prompt" }"#,
+            r#"{ "action": "generateCandidate", "prompt": "compliant revision" }"#,
+        ]);
+        let mut turn_two_observation = None;
+
+        let accepted = run_candidate_director_loop(
+            job.path(),
+            DirectorLoopSpec {
+                provider_label: "Grok",
+                involvement: AiDirectorInvolvement::EnsureCompletion,
+                keep_debug_artifacts: true,
+                legacy_request_file: "paintnode-image-request.json",
+                base_prompt_text: "direct the upscale",
+                review_criteria: workflow_review_criteria("upscale"),
+                ensure_completion_acceptance_note: "completed",
+            },
+            |turn, _, _, _| {
+                if turn == 2 {
+                    turn_two_observation =
+                        fs::read_to_string(job.path().join(PAINTNODE_DIRECTOR_OBSERVATION_FILE))
+                            .ok();
+                }
+                fs::write(
+                    job.path().join(PAINTNODE_DIRECTOR_ACTION_FILE),
+                    actions.pop_front().expect("next Director action"),
+                )
+                .expect("write Director action");
+                Ok(successful_agent_run())
+            },
+            |_| None,
+            |_, _, _, _| Err("test did not expect user input".into()),
+            |turn, _, prompt| {
+                if turn == 1 {
+                    return Err("Generated image rejected by content moderation.".into());
+                }
+                assert_eq!(prompt, "compliant revision");
+                let candidate_file = director_candidate_file(turn);
+                fs::write(job.path().join(&candidate_file), b"candidate")
+                    .map_err(|error| error.to_string())?;
+                Ok(DirectorCandidate {
+                    result: turn,
+                    file_name: candidate_file,
+                })
+            },
+        )
+        .expect("revised candidate accepted");
+
+        assert_eq!(accepted, 2);
+        let observation = turn_two_observation.expect("second turn observation");
+        assert!(observation.contains("toolError"));
+        assert!(observation.contains("content moderation"));
+    }
+
+    #[test]
     fn director_session_record_is_scoped_to_provider_and_valid_uuid() {
         let job = TempJobDir::new("paintnode-director-session-scope-test").expect("temp dir");
         let session_id = "af9de5e1-8b05-4790-9ea0-c70b427963f1";

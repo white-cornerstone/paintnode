@@ -7,6 +7,7 @@ import {
   antigravityConfigFromRunOptions,
   claudeConfigFromRunOptions,
   codexConfigFromRunOptions,
+  grokConfigFromRunOptions,
   parseProjectAssetMaterialEnvelope,
   resolveProjectAssetMaterial,
 } from './desktop';
@@ -77,6 +78,27 @@ describe('codexConfigFromRunOptions', () => {
     expect(codexConfigFromRunOptions(custom).bin).toBe('/bin/codex');
     expect(claudeConfigFromRunOptions(custom).bin).toBe('/bin/claude');
     expect(antigravityConfigFromRunOptions(custom).bin).toBe('/bin/agy');
+  });
+});
+
+describe('grokConfigFromRunOptions', () => {
+  it('forwards the Grok Director settings used by AI Upscale', () => {
+    const options = {
+      ...defaultAiRunOptions(),
+      directorMode: 'force' as const,
+      directorProvider: 'grok' as const,
+      directorInvolvement: 'fullReview' as const,
+      grokModel: 'grok-4.5' as const,
+      grokReasoningEffort: 'high' as const,
+    };
+
+    const config = grokConfigFromRunOptions(options);
+
+    expect(config.directorMode).toBe('force');
+    expect(config.directorProvider).toBe('grok');
+    expect(config.directorInvolvement).toBe('fullReview');
+    expect(config.directorModel).toBe('grok-4.5');
+    expect(config.directorReasoningEffort).toBe('high');
   });
 });
 
