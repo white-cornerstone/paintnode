@@ -10,6 +10,9 @@
     ANTIGRAVITY_SAFETY_CATEGORY_OPTIONS,
     ANTIGRAVITY_SAFETY_FILTERING_OPTIONS,
     ANTIGRAVITY_SAFETY_THRESHOLD_OPTIONS,
+    GROK_IMAGE_MODEL_OPTIONS,
+    GROK_IMAGE_RESOLUTION_OPTIONS,
+    GROK_REASONING_EFFORT_OPTIONS,
     type AiDirectorProvider,
     type AiProvider,
     type AiRunOptions,
@@ -29,6 +32,10 @@
     type AntigravitySafetyCategorySetting,
     type AntigravitySafetyFiltering,
     type AntigravitySafetyThreshold,
+    type GrokImageModelId,
+    type GrokImageResolution,
+    type GrokModelId,
+    type GrokReasoningEffort,
     type ReasoningEffort,
     type ServiceTier,
     aiProfileOptionsFromRunOptions,
@@ -40,6 +47,7 @@
     FALLBACK_CODEX_CAPABILITIES,
     FALLBACK_CLAUDE_CAPABILITIES,
     FALLBACK_ANTIGRAVITY_CAPABILITIES,
+    FALLBACK_GROK_CAPABILITIES,
     claudeEffortForModel,
     claudeReasoningOptions,
     codexEffortForModel,
@@ -48,6 +56,7 @@
     loadCodexCapabilities,
     loadClaudeCapabilities,
     loadAntigravityCapabilities,
+    loadGrokCapabilities,
     providerModelOptions,
   } from '../ai/providerCapabilities';
   import { directorProviderLabel, providerLabel } from '../ai/taskSupport';
@@ -133,6 +142,7 @@
   let codexCapabilities = $state(FALLBACK_CODEX_CAPABILITIES);
   let claudeCapabilities = $state(FALLBACK_CLAUDE_CAPABILITIES);
   let antigravityCapabilities = $state(FALLBACK_ANTIGRAVITY_CAPABILITIES);
+  let grokCapabilities = $state(FALLBACK_GROK_CAPABILITIES);
   let submenu = $state<
     | 'autonomy'
     | 'imageProvider'
@@ -141,6 +151,10 @@
     | 'model'
     | 'claudeModel'
     | 'claudeEffort'
+    | 'grokModel'
+    | 'grokReasoningEffort'
+    | 'grokImageModel'
+    | 'grokImageResolution'
     | 'speed'
     | 'quality'
     | 'moderation'
@@ -183,6 +197,7 @@
       (showImage && (!showDirector || !directorEnabled) && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
   );
   const showClaudeDirectorOptions = $derived(showDirector && directorEnabled && directorProvider === 'claude');
+  const showGrokDirectorOptions = $derived(showDirector && directorEnabled && directorProvider === 'grok');
   const availableCodexModels = $derived(codexModelOptions(codexCapabilities, options.model));
   const availableReasoningEfforts = $derived(
     codexReasoningOptions(codexCapabilities, options.model, options.reasoningEffort),
@@ -240,6 +255,21 @@
   const claudeEffortLabel = $derived(
     claudeEffortOptions.find((item) => item.value === options.claudeEffort)?.label ?? options.claudeEffort,
   );
+  const grokModelOptions = $derived(providerModelOptions(grokCapabilities, options.grokModel));
+  const grokModelLabel = $derived(
+    grokModelOptions.find((item) => item.id === options.grokModel)?.label ?? options.grokModel,
+  );
+  const grokReasoningEffortLabel = $derived(
+    GROK_REASONING_EFFORT_OPTIONS.find((item) => item.id === options.grokReasoningEffort)?.label
+      ?? options.grokReasoningEffort,
+  );
+  const grokImageModelLabel = $derived(
+    GROK_IMAGE_MODEL_OPTIONS.find((item) => item.id === options.grokImageModel)?.label ?? options.grokImageModel,
+  );
+  const grokImageResolutionLabel = $derived(
+    GROK_IMAGE_RESOLUTION_OPTIONS.find((item) => item.id === options.grokImageResolution)?.label
+      ?? options.grokImageResolution,
+  );
 
   const summary = $derived.by(() => {
     const imageName = providerLabel(imageProvider);
@@ -254,7 +284,7 @@
     const imageDetail = imageProvider === 'codex'
       ? `Image: Codex, ${imageQualityShort} quality`
       : imageProvider === 'grok'
-        ? 'Image: Grok'
+        ? `Image: Grok, ${grokImageModelLabel}, ${grokImageResolutionLabel}`
         : `Image: Antigravity, ${antigravityImageSizeLabel}`;
     if (!showDirector) return imageDetail;
     if (!directorEnabled) return showImage ? `Director: Off. ${imageDetail}` : 'Director: Off';
@@ -263,7 +293,7 @@
       : directorProvider === 'claude'
         ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Claude, ${claudeModelLabel}, ${claudeEffortLabel} effort`
       : directorProvider === 'grok'
-        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Grok`
+        ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Grok, ${grokModelLabel}, ${grokReasoningEffortLabel} reasoning`
         : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
     return showImage ? `${directorDetail}. ${imageDetail}` : directorDetail;
   });
@@ -286,7 +316,7 @@
         : provider === 'claude'
           ? 'claudeModel'
           : provider === 'grok'
-            ? null
+            ? 'grokModel'
             : 'antigravityModel';
   }
 
@@ -301,7 +331,7 @@
 
   function setImageProvider(provider: AiProvider): void {
     applyOptions({ ...options, provider, imageProvider: provider }, 'image');
-    submenu = provider === 'codex' ? 'quality' : provider === 'grok' ? null : 'antigravityImageModel';
+    submenu = provider === 'codex' ? 'quality' : provider === 'grok' ? 'grokImageModel' : 'antigravityImageModel';
   }
 
   function applyProfile(profileId: string): void {
@@ -361,6 +391,22 @@
 
   function setClaudeEffort(claudeEffort: ClaudeEffort): void {
     applyOptions({ ...options, claudeEffort }, 'director');
+  }
+
+  function setGrokModel(grokModel: GrokModelId): void {
+    applyOptions({ ...options, grokModel }, 'director');
+  }
+
+  function setGrokReasoningEffort(grokReasoningEffort: GrokReasoningEffort): void {
+    applyOptions({ ...options, grokReasoningEffort }, 'director');
+  }
+
+  function setGrokImageModel(grokImageModel: GrokImageModelId): void {
+    applyOptions({ ...options, grokImageModel }, 'image');
+  }
+
+  function setGrokImageResolution(grokImageResolution: GrokImageResolution): void {
+    applyOptions({ ...options, grokImageResolution }, 'image');
   }
 
   function setServiceTier(serviceTier: ServiceTier): void {
@@ -521,6 +567,15 @@
       options.claudeExecutableMode === 'custom' ? options.claudeBin : '',
     ).then((capabilities) => {
       claudeCapabilities = capabilities;
+    });
+  });
+
+  $effect(() => {
+    if (!showGrokDirectorOptions) return;
+    void loadGrokCapabilities(
+      options.grokExecutableMode === 'custom' ? options.grokBin : '',
+    ).then((capabilities) => {
+      grokCapabilities = capabilities;
     });
   });
 
@@ -795,6 +850,45 @@
           {/if}
         {/if}
 
+        {#if showGrokDirectorOptions}
+          <div class="separator"></div>
+          <div class="menu-title">Grok Director</div>
+          <button type="button" onclick={() => (submenu = submenu === 'grokModel' ? null : 'grokModel')}>
+            <span>Model</span>
+            <span class="value">{grokModelLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'grokModel'}
+            <div class="subitems">
+              {#each grokModelOptions as item (item.id)}
+                <button type="button" class:active={options.grokModel === item.id} onclick={() => setGrokModel(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.grokModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'grokReasoningEffort' ? null : 'grokReasoningEffort')}>
+            <span>Reasoning effort</span>
+            <span class="value">{grokReasoningEffortLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'grokReasoningEffort'}
+            <div class="subitems">
+              {#each GROK_REASONING_EFFORT_OPTIONS as item (item.id)}
+                <button
+                  type="button"
+                  class:active={options.grokReasoningEffort === item.id}
+                  onclick={() => setGrokReasoningEffort(item.id)}
+                >
+                  <span>{item.label}</span>
+                  {#if options.grokReasoningEffort === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+
         {#if showImage && imageProvider === 'codex'}
           <div class="separator"></div>
           <div class="menu-title">Codex Image</div>
@@ -928,6 +1022,43 @@
                 </div>
               {/if}
             {/each}
+          {/if}
+        {:else if showImage && imageProvider === 'grok'}
+          <div class="separator"></div>
+          <div class="menu-title">Grok Image</div>
+          <button type="button" onclick={() => (submenu = submenu === 'grokImageModel' ? null : 'grokImageModel')}>
+            <span>Image model</span>
+            <span class="value">{grokImageModelLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'grokImageModel'}
+            <div class="subitems">
+              {#each GROK_IMAGE_MODEL_OPTIONS as item (item.id)}
+                <button type="button" class:active={options.grokImageModel === item.id} onclick={() => setGrokImageModel(item.id)}>
+                  <span>{item.label}</span>
+                  {#if options.grokImageModel === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <button type="button" onclick={() => (submenu = submenu === 'grokImageResolution' ? null : 'grokImageResolution')}>
+            <span>Image resolution</span>
+            <span class="value">{grokImageResolutionLabel}</span>
+            <Icon svg={ChevronRight} size={14} />
+          </button>
+          {#if submenu === 'grokImageResolution'}
+            <div class="subitems">
+              {#each GROK_IMAGE_RESOLUTION_OPTIONS as item (item.id)}
+                <button
+                  type="button"
+                  class:active={options.grokImageResolution === item.id}
+                  onclick={() => setGrokImageResolution(item.id)}
+                >
+                  <span>{item.label}</span>
+                  {#if options.grokImageResolution === item.id}<Icon svg={Checkmark} size={15} />{/if}
+                </button>
+              {/each}
+            </div>
           {/if}
         {/if}
     </div>
