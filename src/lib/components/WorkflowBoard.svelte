@@ -140,7 +140,9 @@
   };
 
   const desktop = isDesktop();
+  const inputCreatorDefinition = creatorNodeDefinition('input');
   const briefCreatorDefinition = creatorNodeDefinition('brief');
+  const artDirectionCreatorDefinition = creatorNodeDefinition('art-direction');
   const runOptions = $derived(resolveWorkflowNodeAiRunOptions(
     aiRunOptionsFromSettings(settings.value),
     workflow.aiDefaults,
@@ -2649,7 +2651,7 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
                 <WorkflowNodeTitle
                   name={node.name}
-                  typeLabel="Asset"
+                  typeLabel={inputCreatorDefinition.label}
                   fallback="Untitled"
                 />
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
@@ -2779,6 +2781,18 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>
                 <WorkflowNodeTitle name={brief.name} typeLabel={briefCreatorDefinition.label} />
               </span>
+              <div class="node-tools">
+                <button
+                  type="button"
+                  aria-label={`Remove ${brief.name}`}
+                  use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.removeNode(brief.id);
+                  }}
+                ><Icon svg={Delete} size={13} /></button>
+              </div>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
@@ -3247,7 +3261,7 @@
           tabindex="-1"
           data-workflow-node="composition"
           data-creator-node-type="art-direction"
-          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
+          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; height:${workflow.compositionHeight}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
           onfocus={() => workflow.select({ kind: 'composition' })}
           onpointerdown={(event) => {
             workflow.select({ kind: 'composition' });
@@ -3266,15 +3280,26 @@
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>
               <WorkflowNodeTitle
                 name={workflow.compositionName || 'Composition'}
-                typeLabel="Composition"
-                fallback="Composition"
+                typeLabel={artDirectionCreatorDefinition.label}
+                fallback={artDirectionCreatorDefinition.defaultTitle}
               />
             </span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
+              <button
+                type="button"
+                aria-label={`Remove ${workflow.compositionName || artDirectionCreatorDefinition.defaultTitle}`}
+                use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                onpointerdown={(event) => event.stopPropagation()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  workflow.removeNode('composition');
+                }}
+              ><Icon svg={Delete} size={13} /></button>
             </div>
           </div>
           <WorkflowNodePreflight entry={preflightForNode('composition')} />
+          <div class="prompt-node-body">
           {#if compositionGraphNode}<div class="composition-summary"><WorkflowNodeAiOptions node={compositionGraphNode} /></div>{/if}
           <div
             class="storyboard"
@@ -3390,6 +3415,7 @@
           </div>
           <textarea
             class="composition-text"
+            aria-label={`${workflow.compositionName || artDirectionCreatorDefinition.defaultTitle} direction prompt`}
             placeholder="A girl on the beach standing in front of an ice cream truck, holding an ice cream..."
             value={workflow.prompt}
             onpointerdown={(event) => event.stopPropagation()}
@@ -3448,6 +3474,7 @@
             </p>
           {/if}
           {#if error}<p class="err">{error}</p>{/if}
+          </div>
         </article>
         {/if}
 
@@ -3715,6 +3742,7 @@
   .brief-node,
   .creator-node,
   .unsupported-node,
+  .prompt-node,
   .output-node {
     display: flex;
     flex-direction: column;
@@ -3802,8 +3830,8 @@
   .storyboard-head button {
     display: grid;
     place-items: center;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     padding: 0;
   }
   .node-head button.active,
@@ -3890,14 +3918,18 @@
   }
   .asset-node textarea,
   .brief-node textarea,
-  .prompt-node textarea {
+  .prompt-node textarea,
+  .creator-node textarea {
     width: 100%;
     min-height: 52px;
-    border: none;
-    border-top: 1px solid #4b4d52;
-    border-radius: 0;
-    resize: vertical;
+    padding: 6px 8px;
+    border: 1px solid #4b4d52;
+    border-radius: 4px;
+    resize: none;
     background: #242528;
+    color: var(--text);
+    font: inherit;
+    line-height: 1.35;
   }
   .slot-picker {
     display: grid;
@@ -3916,17 +3948,28 @@
   }
   .brief-node p {
     margin: 0;
-    padding: 9px 9px 5px;
+    padding: 0;
     color: var(--text-dim);
     font-size: 10px;
     line-height: 1.35;
   }
+  .brief-node-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px;
+  }
+  .brief-node-body textarea {
+    flex: 1 1 auto;
+  }
   .creator-node-body {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     flex: 1 1 auto;
     gap: 8px;
     min-height: 0;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: 9px;
     color: var(--text-dim);
     font-size: 10px;
@@ -3935,6 +3978,13 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .prompt-node-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
     overscroll-behavior: contain;
   }
   .asset-node-body,
@@ -3958,6 +4008,10 @@
   .output-node-body .output-actions,
   .output-node-body .generate-block {
     flex: none;
+  }
+  .asset-node-body textarea {
+    width: calc(100% - 16px);
+    margin: 8px;
   }
   .creator-node-body > p {
     margin: 0;
@@ -4047,10 +4101,6 @@
     flex: none;
     border-radius: 3px;
     object-fit: cover;
-  }
-  .asset-node textarea,
-  .brief-node textarea {
-    resize: none;
   }
   .creator-port-list {
     display: grid;
@@ -4187,7 +4237,6 @@
     margin: 0;
   }
   .candidate-branch-head,
-  .candidate-branch-controls,
   .candidate-branch-controls label,
   .candidate-group li {
     display: flex;
@@ -4203,9 +4252,12 @@
     color: var(--text-dim);
   }
   .candidate-branch-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 5px;
   }
   .candidate-branch-controls label {
+    min-width: 0;
     gap: 3px;
     color: var(--text-dim);
     font-size: 9px;
@@ -4222,6 +4274,10 @@
     min-width: 0;
     padding: 4px 6px;
     font-size: 10px;
+  }
+  .candidate-branch-controls button {
+    grid-column: 1 / -1;
+    width: 100%;
   }
   .candidate-group {
     display: grid;
@@ -4361,8 +4417,10 @@
   .storyboard.editing canvas {
     cursor: crosshair;
   }
-  .composition-text {
+  .prompt-node .composition-text {
+    width: calc(100% - 16px);
     min-height: 86px;
+    margin: 8px;
   }
   .prompt-node label {
     display: grid;
