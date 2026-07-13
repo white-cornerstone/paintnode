@@ -28,6 +28,11 @@
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
   import { wheelZoomFactor } from '../engine/zoomGesture';
+  import {
+    clampWorkflowPan as clampWorkflowPanGeometry,
+    workflowMapBounds as workflowMapNavigationBounds,
+    type WorkflowMapBounds,
+  } from '../workflow/viewportGeometry';
   import { compositeToCanvas } from '../engine/compositor';
   import { saveOra } from '../ora/save';
   import { loadOra } from '../ora/load';
@@ -123,7 +128,6 @@
     color: string;
     included?: boolean;
   };
-  type WorkflowMapBounds = { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number };
   type WorkflowMapModel = {
     items: WorkflowMapRect[];
     viewport: WorkflowMapRect;
@@ -170,9 +174,6 @@
   let panning: { x: number; y: number } | null = null;
   let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
   let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
-  let overscrollX = $state(0);
-  let overscrollY = $state(0);
-  let overscrollReturning = $state(false);
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
@@ -213,14 +214,10 @@
   let selectiveError = $state('');
   let lastSelectiveContextIdentity = '';
   let boardDestroyed = false;
-  let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
-  let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
   let handledFocusRequest = 0;
 
   const ASSET_NODE_W = 205;
   const MAP_EDGE_PADDING = 260;
-  const MAX_OVERSCROLL = 32;
-  const OVERSCROLL_DAMPING = 0.14;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -326,8 +323,6 @@
     boardDestroyed = true;
     reviewVerificationCoordinator.reset();
     endStoryboardEditSession();
-    if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
-    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
 
   onMount(() => {
@@ -449,7 +444,7 @@
         workflow.zoomBy(wheelZoomFactor(event.deltaY, event.deltaMode), event.clientX - rect.left, event.clientY - rect.top);
         clampWorkflowPan();
       } else {
-        panBoardBy(-event.deltaX, -event.deltaY, true, 'idle');
+        panBoardBy(-event.deltaX, -event.deltaY);
       }
     };
     board.addEventListener('wheel', onWheel, { passive: false });
@@ -861,7 +856,7 @@
       return;
     }
     if (panning) {
-      panBoardBy(event.clientX - panning.x, event.clientY - panning.y, true, 'manual');
+      panBoardBy(event.clientX - panning.x, event.clientY - panning.y);
       panning = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -890,7 +885,6 @@
     if (drawing) {
       commitDrawing();
     }
-    releaseOverscroll();
     connecting = null;
     dragging = null;
     panning = null;
@@ -1012,7 +1006,13 @@
     return {
       items,
       viewport,
-      bounds: mapBoundsFor(items, MAP_EDGE_PADDING),
+      bounds: workflowMapNavigationBounds(
+        items,
+        boardWidth,
+        boardHeight,
+        workflow.zoom,
+        MAP_EDGE_PADDING,
+      ) ?? mapBoundsFor([viewport], MAP_EDGE_PADDING),
     };
   }
 
@@ -1035,70 +1035,22 @@
     ].join(';');
   }
 
-  function clampWorkflowPan(): { rejectedX: number; rejectedY: number } {
-    const bounds = workflowMapModel.bounds;
-    const zoom = Math.max(0.001, workflow.zoom);
-    const viewportW = boardWidth / zoom;
-    const viewportH = boardHeight / zoom;
-    const attemptedPanX = workflow.panX;
-    const attemptedPanY = workflow.panY;
-    const worldLeft = -workflow.panX / zoom;
-    const worldTop = -workflow.panY / zoom;
-    const nextLeft = clampViewportOrigin(worldLeft, viewportW, bounds.minX, bounds.maxX);
-    const nextTop = clampViewportOrigin(worldTop, viewportH, bounds.minY, bounds.maxY);
-    const nextPanX = -nextLeft * zoom;
-    const nextPanY = -nextTop * zoom;
-    const dx = nextPanX - workflow.panX;
-    const dy = nextPanY - workflow.panY;
-    if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) workflow.panBy(dx, dy);
-    return {
-      rejectedX: attemptedPanX - workflow.panX,
-      rejectedY: attemptedPanY - workflow.panY,
-    };
+  function clampWorkflowPan(): void {
+    const next = clampWorkflowPanGeometry(
+      { panX: workflow.panX, panY: workflow.panY },
+      workflowMapItems(),
+      boardWidth,
+      boardHeight,
+      workflow.zoom,
+    );
+    const dx = next.panX - workflow.panX;
+    const dy = next.panY - workflow.panY;
+    if (Math.abs(dx) > 0.0001 || Math.abs(dy) > 0.0001) workflow.panBy(dx, dy);
   }
 
-  function clampViewportOrigin(origin: number, viewportSize: number, min: number, max: number): number {
-    const size = Math.max(1, max - min);
-    if (viewportSize >= size) return min + (size - viewportSize) / 2;
-    return Math.min(Math.max(origin, min), max - viewportSize);
-  }
-
-  function panBoardBy(dx: number, dy: number, bounce = true, releaseMode: 'idle' | 'manual' = 'idle'): void {
+  function panBoardBy(dx: number, dy: number): void {
     workflow.panBy(dx, dy);
-    const rejected = clampWorkflowPan();
-    if (bounce) {
-      if (Math.abs(rejected.rejectedX) >= 0.5 || Math.abs(rejected.rejectedY) >= 0.5) {
-        applyOverscroll(rejected.rejectedX, rejected.rejectedY, releaseMode);
-      } else if (overscrollX !== 0 || overscrollY !== 0 || overscrollReturning) {
-        clearOverscroll();
-      }
-    }
-  }
-
-  function applyOverscroll(rejectedX: number, rejectedY: number, releaseMode: 'idle' | 'manual'): void {
-    const nextX = dampOverscroll(rejectedX);
-    const nextY = dampOverscroll(rejectedY);
-    if (nextX === 0 && nextY === 0) return;
-    if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
-    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
-    overscrollReturning = false;
-    overscrollX = nextX;
-    overscrollY = nextY;
-    overscrollEndTimer = null;
-    if (releaseMode === 'idle') {
-      overscrollIdleTimer = setTimeout(() => {
-        overscrollIdleTimer = null;
-        releaseOverscroll();
-      }, 110);
-    } else {
-      overscrollIdleTimer = null;
-    }
-  }
-
-  function dampOverscroll(value: number): number {
-    if (Math.abs(value) < 0.5) return 0;
-    const magnitude = Math.min(MAX_OVERSCROLL, Math.abs(value) * OVERSCROLL_DAMPING);
-    return Math.sign(value) * magnitude;
+    clampWorkflowPan();
   }
 
   function setViewportOrigin(left: number, top: number): void {
@@ -1107,7 +1059,6 @@
     const nextPanY = -top * zoom;
     workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
-    clearOverscroll();
   }
 
   function centerBoardAt(worldX: number, worldY: number): void {
@@ -1115,40 +1066,6 @@
     const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
     workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
-    clearOverscroll();
-  }
-
-  function clearOverscroll(): void {
-    if (overscrollIdleTimer) {
-      clearTimeout(overscrollIdleTimer);
-      overscrollIdleTimer = null;
-    }
-    if (overscrollEndTimer) {
-      clearTimeout(overscrollEndTimer);
-      overscrollEndTimer = null;
-    }
-    overscrollX = 0;
-    overscrollY = 0;
-    overscrollReturning = false;
-  }
-
-  function releaseOverscroll(): void {
-    if (overscrollIdleTimer) {
-      clearTimeout(overscrollIdleTimer);
-      overscrollIdleTimer = null;
-    }
-    if (overscrollX === 0 && overscrollY === 0) {
-      overscrollReturning = false;
-      return;
-    }
-    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
-    overscrollReturning = true;
-    overscrollX = 0;
-    overscrollY = 0;
-    overscrollEndTimer = setTimeout(() => {
-      overscrollReturning = false;
-      overscrollEndTimer = null;
-    }, 210);
   }
 
   function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
@@ -1208,7 +1125,6 @@
     if (!mapDragging) return;
     const point = mapPoint(event, map);
     if (!point) return;
-    clearOverscroll();
     setViewportOrigin(point.x - mapDragging.offsetX, point.y - mapDragging.offsetY);
   }
 
@@ -2557,13 +2473,12 @@
       class:zooming={workflow.tool === 'zoom'}
       class:zoom-in={workflow.tool === 'zoom' && effectiveZoomMode === 'in'}
       class:zoom-out={workflow.tool === 'zoom' && effectiveZoomMode === 'out'}
-      class:overscrolling={overscrollReturning}
       role="application"
       aria-label="Workflow composition board"
       tabindex="-1"
       data-workflow-board
       bind:this={boardEl}
-      style={`background-position:${workflow.panX + overscrollX}px ${workflow.panY + overscrollY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
+      style={`background-position:${workflow.panX}px ${workflow.panY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
       onpointerdown={onBoardPointerDown}
       onpointerleave={onPointerLeave}
       onpointermove={onPointerMove}
@@ -2573,7 +2488,7 @@
       {#if workflow.connectionError}
         <p class="connection-error" role="status" aria-live="polite">{workflow.connectionError}</p>
       {/if}
-      <div class="board-world" style={`transform:translate(${workflow.panX + overscrollX}px, ${workflow.panY + overscrollY}px) scale(${workflow.zoom})`}>
+      <div class="board-world" style={`transform:translate(${workflow.panX}px, ${workflow.panY}px) scale(${workflow.zoom})`}>
         <svg class="links" aria-label="Workflow connections">
           {#each graphConnections as connection (connection.id)}
             {@const path = connectionPath(connection)}
@@ -3771,17 +3686,11 @@
   .board.zooming.zoom-out {
     cursor: zoom-out;
   }
-  .board.overscrolling {
-    transition: background-position 210ms cubic-bezier(0.2, 0.9, 0.28, 1);
-  }
   .board-world {
     position: absolute;
     inset: 0;
     transform-origin: top left;
     will-change: transform;
-  }
-  .board.overscrolling .board-world {
-    transition: transform 210ms cubic-bezier(0.2, 0.9, 0.28, 1);
   }
   .links {
     position: absolute;
