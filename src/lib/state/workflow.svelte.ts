@@ -906,6 +906,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.removeNode(id));
     if ((this.selection?.kind === 'asset' || this.selection?.kind === 'creator' || this.selection?.kind === 'unsupported' || this.selection?.kind === 'output')
       && this.selection.id === id) this.selection = null;
+    if (this.selection?.kind === 'composition' && id === 'composition') this.selection = null;
   }
 
   moveNode(id: string, x: number, y: number): void {
