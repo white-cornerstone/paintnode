@@ -1,5 +1,7 @@
 export const WORKFLOW_GRAPH_VERSION = 2 as const;
 
+import { parseWorkflowAiDefaults, type WorkflowAiDefaultsV1 } from './aiRoles';
+
 import {
   isProjectRelativeWorkflowReference,
   safeWorkflowIdentifier,
@@ -12,6 +14,7 @@ export type WorkflowNodeType =
   | 'input'
   | 'brief'
   | 'art-direction'
+  | 'extract-assets'
   | 'transform'
   | 'review'
   | 'output'
@@ -159,6 +162,26 @@ export interface WorkflowReviewPromotionV1 {
   supersedesPromotionId?: string;
 }
 
+export interface WorkflowReviewRecommendationV1 {
+  version: 1;
+  id: string;
+  reviewNodeId: string;
+  reviewNodeRevision: string;
+  instructionsHash: string;
+  candidateSetHash: string;
+  rankings: Array<{
+    candidateId: string;
+    candidateRunId: string;
+    materialKey: string;
+    contentHash: string;
+    rank: number;
+    reason: string;
+  }>;
+  recommendedCandidateId: string;
+  provider: WorkflowRunProvider;
+  createdAt: number;
+}
+
 export interface WorkflowEditorRevisionSourceV1 {
   kind: 'run-output' | 'editor-revision';
   id: string;
@@ -200,6 +223,10 @@ export interface WorkflowRunRecordV1 extends WorkflowMinimalRunReference {
   sourceAssets: WorkflowRunSourceAsset[];
   prompt: WorkflowRunPrompt;
   provider: WorkflowRunProvider;
+  roles?: {
+    director: WorkflowRunProvider | null;
+    image: WorkflowRunProvider | null;
+  };
   executor: WorkflowRunExecutor;
   target: WorkflowRunTarget;
   startedAt: number;
@@ -226,6 +253,7 @@ export interface WorkflowGraphV2 {
     name: string;
     sourceVersion: number | null;
     migrations: WorkflowMigrationRecord[];
+    ai?: WorkflowAiDefaultsV1;
   };
   viewport: {
     panX: number;
@@ -238,6 +266,8 @@ export interface WorkflowGraphV2 {
   runRecords: WorkflowRunReference[];
   /** Append-only review decisions. Missing in early v2 files and preserved as absent. */
   reviewPromotions?: WorkflowReviewPromotionV1[];
+  /** Append-only AI recommendations. Recommendations never promote candidates. */
+  reviewRecommendations?: WorkflowReviewRecommendationV1[];
   /** Append-only manual editor descendants. Missing in early v2 files and preserved as absent. */
   editorRevisions?: WorkflowEditorRevisionV1[];
   /** Strict append-only current-head bindings. Missing in early v2 files and preserved as absent. */
@@ -282,6 +312,7 @@ const nodeTypes = new Set<WorkflowNodeType>([
   'input',
   'brief',
   'art-direction',
+  'extract-assets',
   'transform',
   'review',
   'output',
@@ -651,6 +682,33 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
       severity: 'error',
     });
   }
+  const rolesValue = value.roles;
+  let parsedRoles: WorkflowRunRecordV1['roles'];
+  if (rolesValue !== undefined) {
+    if (!isRecord(rolesValue)) {
+      issues.push({ path: `${path}.roles`, message: `${path}.roles must be an object`, severity: 'error' });
+    } else {
+      const parseRole = (role: unknown, rolePath: string): WorkflowRunProvider | null => {
+        if (role === null) return null;
+        if (!isRecord(role)) {
+          issues.push({ path: rolePath, message: `${rolePath} must be a provider object or null`, severity: 'error' });
+          return null;
+        }
+        let options: Record<string, unknown> = {};
+        try { options = safeWorkflowProviderOptions(role.effectiveOptions); }
+        catch (error) { issues.push({ path: `${rolePath}.effectiveOptions`, message: (error as Error).message, severity: 'error' }); }
+        const model = role.model === null || typeof role.model === 'string' ? role.model : null;
+        if (role.model !== null && typeof role.model !== 'string') {
+          issues.push({ path: `${rolePath}.model`, message: `${rolePath}.model must be a string or null`, severity: 'error' });
+        }
+        return { id: readString(role, 'id', `${rolePath}.id`, issues), model, effectiveOptions: options };
+      };
+      parsedRoles = {
+        director: parseRole(rolesValue.director, `${path}.roles.director`),
+        image: parseRole(rolesValue.image, `${path}.roles.image`),
+      };
+    }
+  }
   const executor = isRecord(value.executor) ? value.executor : {};
   if (!isRecord(value.executor)) {
     issues.push({ path: `${path}.executor`, message: `${path}.executor must be an object`, severity: 'error' });
@@ -749,6 +807,7 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
       model: provider.model === null || typeof provider.model === 'string' ? provider.model : null,
       effectiveOptions,
     },
+    ...(parsedRoles ? { roles: parsedRoles } : {}),
     executor: {
       id: readString(executor, 'id', `${path}.executor.id`, issues),
       version: readString(executor, 'version', `${path}.executor.version`, issues),
@@ -1022,6 +1081,109 @@ function validateReviewPromotions(graph: WorkflowGraphV2, issues: WorkflowValida
       issues.push({ path: `${path}.promotedAt`, message: 'Promotion times must be monotonic per Review node', severity: 'error' });
     }
     latestByReview.set(promotion.reviewNodeId, promotion);
+  }
+}
+
+function parseReviewRecommendations(value: unknown, issues: WorkflowValidationIssue[]): WorkflowReviewRecommendationV1[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    issues.push({ path: 'reviewRecommendations', message: 'reviewRecommendations must be an array', severity: 'error' });
+    return [];
+  }
+  return value.map((item, index) => {
+    const path = `reviewRecommendations[${index}]`;
+    const record = isRecord(item) ? item : {};
+    const providerRecord = isRecord(record.provider) ? record.provider : {};
+    const rawRankings = Array.isArray(record.rankings) ? record.rankings : [];
+    if (!isRecord(item)) issues.push({ path, message: `${path} must be an object`, severity: 'error' });
+    if (record.version !== 1) issues.push({ path: `${path}.version`, message: 'Recommendation version must be 1', severity: 'error' });
+    if (!isRecord(record.provider)) issues.push({ path: `${path}.provider`, message: 'provider must be an object', severity: 'error' });
+    if (!Array.isArray(record.rankings) || rawRankings.length === 0 || rawRankings.length > 64) {
+      issues.push({ path: `${path}.rankings`, message: 'rankings must contain 1 to 64 items', severity: 'error' });
+    }
+    let providerOptions: Record<string, unknown> = {};
+    try { providerOptions = safeWorkflowProviderOptions(providerRecord.effectiveOptions ?? {}); }
+    catch (error) { issues.push({ path: `${path}.provider.effectiveOptions`, message: (error as Error).message, severity: 'error' }); }
+    const recommendation: WorkflowReviewRecommendationV1 = {
+      version: 1,
+      id: readString(record, 'id', `${path}.id`, issues),
+      reviewNodeId: readString(record, 'reviewNodeId', `${path}.reviewNodeId`, issues),
+      reviewNodeRevision: readString(record, 'reviewNodeRevision', `${path}.reviewNodeRevision`, issues),
+      instructionsHash: readString(record, 'instructionsHash', `${path}.instructionsHash`, issues),
+      candidateSetHash: readString(record, 'candidateSetHash', `${path}.candidateSetHash`, issues),
+      rankings: rawRankings.map((ranking, rankingIndex) => {
+        const rankingPath = `${path}.rankings[${rankingIndex}]`;
+        const rankingRecord = isRecord(ranking) ? ranking : {};
+        if (!isRecord(ranking)) issues.push({ path: rankingPath, message: `${rankingPath} must be an object`, severity: 'error' });
+        return {
+          candidateId: readString(rankingRecord, 'candidateId', `${rankingPath}.candidateId`, issues),
+          candidateRunId: readString(rankingRecord, 'candidateRunId', `${rankingPath}.candidateRunId`, issues),
+          materialKey: readString(rankingRecord, 'materialKey', `${rankingPath}.materialKey`, issues),
+          contentHash: readString(rankingRecord, 'contentHash', `${rankingPath}.contentHash`, issues),
+          rank: readNonnegativeInteger(rankingRecord, 'rank', `${rankingPath}.rank`, issues),
+          reason: readString(rankingRecord, 'reason', `${rankingPath}.reason`, issues),
+        };
+      }),
+      recommendedCandidateId: readString(record, 'recommendedCandidateId', `${path}.recommendedCandidateId`, issues),
+      provider: {
+        id: readString(providerRecord, 'id', `${path}.provider.id`, issues),
+        model: providerRecord.model === null ? null : readString(providerRecord, 'model', `${path}.provider.model`, issues),
+        effectiveOptions: providerOptions,
+      },
+      createdAt: readNonnegativeInteger(record, 'createdAt', `${path}.createdAt`, issues),
+    };
+    for (const [key, identifier] of [
+      ['id', recommendation.id], ['reviewNodeId', recommendation.reviewNodeId],
+      ['recommendedCandidateId', recommendation.recommendedCandidateId], ['provider.id', recommendation.provider.id],
+      ...recommendation.rankings.flatMap((ranking) => [
+        ['candidateId', ranking.candidateId] as const, ['candidateRunId', ranking.candidateRunId] as const,
+      ]),
+    ] as const) {
+      try { safeWorkflowIdentifier(identifier, `Recommendation ${key}`); }
+      catch (error) { issues.push({ path: `${path}.${key}`, message: (error as Error).message, severity: 'error' }); }
+    }
+    for (const [key, hash] of [
+      ['reviewNodeRevision', recommendation.reviewNodeRevision], ['instructionsHash', recommendation.instructionsHash],
+      ['candidateSetHash', recommendation.candidateSetHash],
+      ...recommendation.rankings.flatMap((ranking) => [
+        ['contentHash', ranking.contentHash] as const,
+      ]),
+    ] as const) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(hash)) {
+        issues.push({ path: `${path}.${key}`, message: `${key} must be a canonical digest`, severity: 'error' });
+      }
+    }
+    for (const ranking of recommendation.rankings) {
+      if (!/^workflow-cache-v1:(?:sha256:)?[0-9a-f]{64}$/.test(ranking.materialKey)) {
+        issues.push({ path: `${path}.materialKey`, message: 'materialKey must be a canonical workflow cache identity', severity: 'error' });
+      }
+    }
+    if (recommendation.provider.model !== null) {
+      try { safeWorkflowModel(recommendation.provider.model, 'Recommendation provider model'); }
+      catch (error) { issues.push({ path: `${path}.provider.model`, message: (error as Error).message, severity: 'error' }); }
+    }
+    const ids = new Set(recommendation.rankings.map((ranking) => ranking.candidateId));
+    const ranks = new Set(recommendation.rankings.map((ranking) => ranking.rank));
+    if (ids.size !== recommendation.rankings.length || ranks.size !== recommendation.rankings.length
+      || recommendation.rankings.some((ranking) => ranking.rank < 1 || ranking.rank > recommendation.rankings.length)) {
+      issues.push({ path: `${path}.rankings`, message: 'Recommendation rankings must contain unique contiguous ranks and candidates', severity: 'error' });
+    }
+    if (!ids.has(recommendation.recommendedCandidateId)) {
+      issues.push({ path: `${path}.recommendedCandidateId`, message: 'Recommended candidate must appear in rankings', severity: 'error' });
+    }
+    return recommendation;
+  });
+}
+
+function validateReviewRecommendations(graph: WorkflowGraphV2, issues: WorkflowValidationIssue[]): void {
+  const ids = new Set<string>();
+  for (const [index, recommendation] of (graph.reviewRecommendations ?? []).entries()) {
+    const path = `reviewRecommendations[${index}]`;
+    if (ids.has(recommendation.id)) issues.push({ path: `${path}.id`, message: 'Recommendation IDs must be unique', severity: 'error' });
+    ids.add(recommendation.id);
+    if (!graph.nodes.some((node) => node.id === recommendation.reviewNodeId && node.type === 'review')) {
+      issues.push({ path: `${path}.reviewNodeId`, message: 'Recommendation Review node must exist', severity: 'error' });
+    }
   }
 }
 
@@ -1306,6 +1468,14 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
       name: readString(metadata, 'name', 'metadata.name', issues),
       sourceVersion: sourceVersion === null || typeof sourceVersion === 'number' ? sourceVersion : null,
       migrations: parseMigrations(metadata.migrations, issues),
+      ...(metadata.ai === undefined
+        ? {}
+        : parseWorkflowAiDefaults(metadata.ai)
+          ? { ai: parseWorkflowAiDefaults(metadata.ai)! }
+          : (() => {
+              issues.push({ path: 'metadata.ai', message: 'metadata.ai must be a valid portable workflow AI configuration', severity: 'error' });
+              return {};
+            })()),
     },
     viewport: {
       panX: readNumber(viewport, 'panX', 'viewport.panX', issues),
@@ -1319,6 +1489,9 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
     ...(input.reviewPromotions === undefined
       ? {}
       : { reviewPromotions: parseReviewPromotions(input.reviewPromotions, issues) }),
+    ...(input.reviewRecommendations === undefined
+      ? {}
+      : { reviewRecommendations: parseReviewRecommendations(input.reviewRecommendations, issues) }),
     ...(input.editorRevisions === undefined
       ? {}
       : { editorRevisions: parseEditorRevisions(input.editorRevisions, issues) }),
@@ -1330,6 +1503,7 @@ export function parseWorkflowGraphV2(input: unknown): WorkflowParseResult {
   validateRunRetryLinks(value, issues);
   validateCandidateBranchGroups(value, issues);
   validateReviewPromotions(value, issues);
+  validateReviewRecommendations(value, issues);
   validateEditorRevisions(value, issues);
   validateWorkflowRoundTrips(value, issues);
 

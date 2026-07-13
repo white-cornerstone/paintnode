@@ -20,6 +20,7 @@
   import CharacterPanel from './lib/components/CharacterPanel.svelte';
   import ParagraphPanel from './lib/components/ParagraphPanel.svelte';
   import ProjectPanel from './lib/components/ProjectPanel.svelte';
+  import WorkflowPanels from './lib/components/WorkflowPanels.svelte';
   import TasksPanel from './lib/components/TasksPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import LongRunningTaskToast from './lib/components/LongRunningTaskToast.svelte';
@@ -52,6 +53,7 @@
   import { installKeyboard } from './lib/state/keyboard';
   import {
     autosaveOpenDocuments,
+    closeWorkflowCommand,
     exportPngCommand,
     exportPsdCommand,
     importImageCommand,
@@ -120,6 +122,7 @@
   // Hide the custom titlebar while the OS window is in native fullscreen.
   let isFullscreen = $state(false);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
+  const hasWorkflowBoard = $derived(ui.activeSurface === 'workflow' && workflow.active && !workflow.storyboardEditing);
   const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
   let nativeMenuStateKey = '';
 
@@ -280,6 +283,10 @@
     return editor.documentFileName(session);
   }
 
+  function workflowNeedsSave(): boolean {
+    return workflow.active && (workflow.dirty || workflow.savedPath === null);
+  }
+
   function unsavedWorkItems(): UnsavedWorkItem[] {
     const items: UnsavedWorkItem[] = editor.documents
       .filter((session) => editor.hasUnsavedChanges(session))
@@ -288,7 +295,7 @@
         id: session.id,
         name: documentDisplayName(session),
       }));
-    if (workflow.active && workflow.dirty) {
+    if (workflowNeedsSave()) {
       items.push({ kind: 'workflow', name: workflow.name || 'Untitled Workflow' });
     }
     return items;
@@ -330,7 +337,7 @@
 
   async function closeActiveDocument(): Promise<void> {
     if (ui.activeSurface === 'workflow') {
-      if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
+      await closeWorkflowCommand();
       return;
     }
     const session = editor.activeDocument;
@@ -341,7 +348,7 @@
   async function saveWorkflowForClose(): Promise<boolean> {
     workflow.show();
     await saveWorkflowCommand();
-    return !workflow.dirty;
+    return !workflowNeedsSave();
   }
 
   async function confirmUnsavedWorkBeforeClose(items = unsavedWorkItems()): Promise<boolean> {
@@ -352,7 +359,7 @@
         const session = editor.documents.find((documentSession) => documentSession.id === item.id);
         if (!session || !editor.hasUnsavedChanges(session)) continue;
         editor.switchDocument(item.id);
-      } else if (!workflow.active || !workflow.dirty) {
+      } else if (!workflowNeedsSave()) {
         continue;
       } else {
         workflow.show();
@@ -542,7 +549,8 @@
         editor.copy();
         break;
       case 'app:paste':
-        if (editor.clipboard) editor.paste();
+        if (ui.activeSurface === 'workflow') ui.requestWorkflowPaste();
+        else if (editor.clipboard) editor.paste();
         break;
       case 'app:fill-foreground':
         editor.fillActive(editor.foreground);
@@ -990,7 +998,7 @@
     <MenuBar />
   {/if}
   <div class="middle">
-    {#if !ui.workspaceFocusMode}
+    {#if !ui.workspaceFocusMode && !hasWorkflowBoard}
       <Toolbar />
     {/if}
     <div class="workspace">
@@ -1068,6 +1076,9 @@
               </div>
             {/if}
           </aside>
+        {/if}
+        {#if hasWorkflowBoard && !ui.workspaceFocusMode}
+          <WorkflowPanels />
         {/if}
         {#if !ui.workspaceFocusMode}
           <aside class="project-side" class:collapsed={panels.value.projectCollapsed}>

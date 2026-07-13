@@ -4,10 +4,27 @@
   import { workflow, type WorkflowTool } from '../state/workflow.svelte';
   import type { SelectionMode } from '../engine/selection';
   import { effectiveAiRetouchMaskMode } from '../engine/aiRetouch';
+  import { isDesktop } from '../integrations/desktop';
+  import type { CreatorNodeType } from '../workflow';
   import Icon from './Icon.svelte';
+  import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import { tooltip } from '../actions/tooltip';
-  import { Add, Dismiss, Info, MarqueeRect, SquareMultiple } from '../icons';
+  import {
+    Add,
+    ArrowSync,
+    Board,
+    Dismiss,
+    Hand,
+    ImageAdd,
+    Info,
+    MarqueeRect,
+    Open,
+    Search,
+    Sparkle,
+    SquareMultiple,
+  } from '../icons';
 
+  const desktop = isDesktop();
   const tool = $derived(editor.activeToolId);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
   const hasWorkflow = $derived(ui.activeSurface === 'workflow' && workflow.active);
@@ -34,23 +51,14 @@
           ? 'Flow'
           : 'Strength',
   );
-  const workflowToolNames: Record<WorkflowTool, string> = {
-    hand: 'Hand',
-    zoom: 'Zoom',
-    asset: 'Asset Node',
-    composition: 'Composition Node',
-    output: 'Output Node',
-  };
+  const workflowTools: Array<{ id: WorkflowTool; label: string; icon: string }> = [
+    { id: 'hand', label: 'Hand tool', icon: Hand },
+    { id: 'asset', label: 'Draw asset node', icon: ImageAdd },
+    { id: 'composition', label: 'Place composition node', icon: Board },
+    { id: 'output', label: 'Place output node', icon: Open },
+    { id: 'zoom', label: 'Zoom workflow canvas', icon: Search },
+  ];
   const nodePalettes = ['#3a3c42', '#3e4f7a', '#3e6b57', '#74583c', '#70435f', '#5b4f7a'];
-  const selectedKindLabel = $derived(
-    workflow.selection?.kind === 'asset'
-      ? 'Asset'
-      : workflow.selection?.kind === 'composition'
-        ? 'Composition'
-        : workflow.selection?.kind === 'output'
-          ? 'Output'
-          : 'None',
-  );
   const selectedOutput = $derived(workflow.selectedOutputNode());
   const selectionModes: { id: SelectionMode; label: string; icon: string }[] = [
     { id: 'new', label: 'New', icon: MarqueeRect },
@@ -59,6 +67,8 @@
     { id: 'intersect', label: 'Intersect', icon: SquareMultiple },
   ];
   let activeTip = $state<string | null>(null);
+  let workflowPaletteOpen = $state(false);
+  let workflowPaletteButton = $state<HTMLButtonElement>();
 
   function closeTipOnOutsidePointer(event: PointerEvent): void {
     if (!activeTip) return;
@@ -72,6 +82,40 @@
     document.addEventListener('pointerdown', closeTipOnOutsidePointer, true);
     return () => document.removeEventListener('pointerdown', closeTipOnOutsidePointer, true);
   });
+
+  $effect(() => {
+    if (!workflowPaletteOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.workflow-node-toolbar')) return;
+      workflowPaletteOpen = false;
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeWorkflowPalette();
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    document.addEventListener('keydown', closeOnEscape, true);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+      document.removeEventListener('keydown', closeOnEscape, true);
+    };
+  });
+
+  function requestWorkflowBoardAction(action: 'draft' | 'revise'): void {
+    window.dispatchEvent(new CustomEvent('paintnode:workflow-board-action', { detail: { action } }));
+  }
+
+  function addWorkflowNode(type: CreatorNodeType): void {
+    window.dispatchEvent(new CustomEvent('paintnode:workflow-add-node', { detail: { type } }));
+    workflowPaletteOpen = false;
+  }
+
+  function closeWorkflowPalette(): void {
+    workflowPaletteOpen = false;
+    requestAnimationFrame(() => workflowPaletteButton?.focus());
+  }
 
   function commitAiRetouchBrushFeather(): void {
     const value = Number.isFinite(editor.aiRetouchBrushFeather) ? editor.aiRetouchBrushFeather : 0;
@@ -143,7 +187,20 @@
 
 <div class="options">
   {#if hasWorkflow && !hasStoryboardEdit}
-    <span class="tool-name">{workflowToolNames[workflow.tool]}</span>
+    <div class="workflow-tool-strip" role="toolbar" aria-label="Workflow board tools">
+      {#each workflowTools as workflowTool (workflowTool.id)}
+        <button
+          type="button"
+          class:active={workflow.tool === workflowTool.id}
+          aria-label={workflowTool.label}
+          aria-pressed={workflow.tool === workflowTool.id}
+          use:tooltip={{ text: workflowTool.label, placement: 'bottom' }}
+          onclick={() => workflow.setTool(workflowTool.id)}
+        >
+          <Icon svg={workflowTool.icon} size={14} />
+        </button>
+      {/each}
+    </div>
     {#if workflow.tool === 'zoom'}
       <span class="divider"></span>
       <div class="seg">
@@ -154,10 +211,44 @@
     {/if}
 
     <span class="divider"></span>
-    <div class="opt">
-      Type
-      <span class="pill">{selectedKindLabel}</span>
+    <div class="workflow-node-toolbar" role="toolbar" aria-label="Workflow nodes">
+      <span class="workflow-toolbar-label">Nodes</span>
+      {#if desktop}
+        <button
+          type="button"
+          aria-label="Revise current workflow"
+          use:tooltip={{ text: 'Revise current workflow', placement: 'bottom' }}
+          onclick={() => requestWorkflowBoardAction('revise')}
+        >
+          <Icon svg={ArrowSync} size={13} />
+        </button>
+      {/if}
+      <button
+        type="button"
+        aria-label="Draft with AI Director"
+        use:tooltip={{ text: 'Draft with AI Director', placement: 'bottom' }}
+        onclick={() => requestWorkflowBoardAction('draft')}
+      >
+        <Icon svg={Sparkle} size={13} />
+      </button>
+      <button
+        bind:this={workflowPaletteButton}
+        type="button"
+        class:active={workflowPaletteOpen}
+        aria-label="Add workflow node"
+        aria-haspopup="dialog"
+        aria-expanded={workflowPaletteOpen}
+        use:tooltip={{ text: 'Add workflow node', placement: 'bottom' }}
+        onclick={() => (workflowPaletteOpen = !workflowPaletteOpen)}
+      >
+        <Icon svg={Add} size={13} />
+      </button>
+      {#if workflowPaletteOpen}
+        <WorkflowNodePalette onAdd={addWorkflowNode} onClose={closeWorkflowPalette} />
+      {/if}
     </div>
+
+    <span class="divider"></span>
     <label class="opt">
       Name
       <input
@@ -481,6 +572,51 @@
     border-bottom: 1px solid var(--border);
     overflow: visible;
     white-space: nowrap;
+  }
+  .workflow-tool-strip,
+  .workflow-node-toolbar {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+  }
+  .workflow-node-toolbar {
+    position: relative;
+  }
+  .workflow-tool-strip > button,
+  .workflow-node-toolbar > button {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text);
+  }
+  .workflow-tool-strip > button:hover,
+  .workflow-node-toolbar > button:hover,
+  .workflow-tool-strip > button.active,
+  .workflow-node-toolbar > button.active {
+    background: var(--bg-elevated);
+    color: var(--text-bright);
+  }
+  .workflow-tool-strip > button.active {
+    background: color-mix(in srgb, var(--accent) 72%, var(--bg-elevated));
+    color: #fff;
+  }
+  .workflow-toolbar-label {
+    margin-right: 3px;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .workflow-node-toolbar :global(.node-palette) {
+    top: 29px;
+    left: -8px;
   }
   .tool-name {
     font-weight: 600;

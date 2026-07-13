@@ -7,8 +7,10 @@ import {
   antigravityConfigFromRunOptions,
   claudeConfigFromRunOptions,
   codexConfigFromRunOptions,
+  grokConfigFromRunOptions,
   parseProjectAssetMaterialEnvelope,
   resolveProjectAssetMaterial,
+  storeProjectClipboardImage,
 } from './desktop';
 import { defaultAiRunOptions } from '../state/settings';
 
@@ -80,7 +82,51 @@ describe('codexConfigFromRunOptions', () => {
   });
 });
 
+describe('grokConfigFromRunOptions', () => {
+  it('forwards the Grok Director settings used by AI Upscale', () => {
+    const options = {
+      ...defaultAiRunOptions(),
+      directorMode: 'force' as const,
+      directorProvider: 'grok' as const,
+      directorInvolvement: 'fullReview' as const,
+      grokModel: 'grok-4.5' as const,
+      grokReasoningEffort: 'high' as const,
+    };
+
+    const config = grokConfigFromRunOptions(options);
+
+    expect(config.directorMode).toBe('force');
+    expect(config.directorProvider).toBe('grok');
+    expect(config.directorInvolvement).toBe('fullReview');
+    expect(config.directorModel).toBe('grok-4.5');
+    expect(config.directorReasoningEffort).toBe('high');
+  });
+});
+
 describe('project asset material boundary', () => {
+  it('stores a native clipboard image directly in the selected project', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const stored = {
+      dataUrl: 'data:image/png;base64,AA==',
+      asset: {
+        id: 'asset-clipboard', kind: 'imported', name: 'Clipboard Image.png',
+        relativePath: 'assets/imported/clipboard.png', createdAt: 1, exists: true,
+        width: 2, height: 1, mime: 'image/png',
+      },
+    };
+    api.invoke.mockResolvedValueOnce(stored);
+    try {
+      await expect(storeProjectClipboardImage('/virtual/project')).resolves.toEqual(stored);
+      expect(api.invoke).toHaveBeenCalledWith('project_store_clipboard_image', {
+        projectPath: '/virtual/project',
+        name: 'Clipboard Image.png',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      api.invoke.mockReset();
+    }
+  });
+
   it('requests material by asset ID and preserves exact bytes and hash', async () => {
     vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
     api.invoke.mockResolvedValueOnce(materialEnvelope(new Uint8Array([1, 2, 3, 4])).buffer);

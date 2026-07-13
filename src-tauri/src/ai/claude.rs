@@ -261,6 +261,95 @@ pub(crate) fn run_claude_workflow_revision_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_claude_workflow_review_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Claude)?;
+    let options = claude_command_options(bin, model, effort);
+    let mut command = build_claude_agent_command_with_session(
+        &options,
+        job_path,
+        prompt_text,
+        &[],
+        None,
+        Some(output_file),
+        Some("workflow-review"),
+    );
+    let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Claude at '{}': {error}",
+                claude_command_label(&options)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_claude_agent_message(&run.output) {
+        Err(format!(
+            "Claude workflow candidate review failed.\n\n{message}"
+        ))
+    } else {
+        Err(claude_command_failure(
+            "Claude workflow candidate review",
+            &run.output,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_claude_workflow_extraction_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    source_image: &Path,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Claude)?;
+    let options = claude_command_options(bin, model, effort);
+    let mut command = build_claude_agent_command_with_session(
+        &options,
+        job_path,
+        prompt_text,
+        &[source_image.to_path_buf()],
+        None,
+        Some(output_file),
+        Some("workflow-extraction"),
+    );
+    let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Claude at '{}': {error}",
+                claude_command_label(&options)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_claude_agent_message(&run.output) {
+        Err(format!(
+            "Claude workflow extraction planning failed.\n\n{message}"
+        ))
+    } else {
+        Err(claude_command_failure(
+            "Claude workflow extraction planning",
+            &run.output,
+        ))
+    }
+}
+
 pub(crate) fn run_claude_with_progress(
     command: &mut Command,
     app: AppHandle,
@@ -734,6 +823,57 @@ mod tests {
         assert!(schema < delimiter);
         assert_eq!(args[schema + 1], "workflow-revision");
         assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_review_uses_dedicated_ranking_schema_before_prompt() {
+        let job = TempJobDir::new("paintnode-claude-workflow-review-test").expect("temp dir");
+        let command = build_claude_agent_command_with_session(
+            &claude_command_options(None, None, None),
+            job.path(),
+            "review candidates",
+            &[],
+            None,
+            Some("paintnode-workflow-review.json"),
+            Some("workflow-review"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let delimiter = args.iter().position(|arg| arg == "--").expect("delimiter");
+        let schema = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema");
+        assert!(schema < delimiter);
+        assert_eq!(args[schema + 1], "workflow-review");
+        assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_extraction_uses_dedicated_schema_and_source_image() {
+        let job = TempJobDir::new("paintnode-claude-workflow-extraction-test").expect("temp dir");
+        let source_image = job.path().join("extraction-source.png");
+        let command = build_claude_agent_command_with_session(
+            &claude_command_options(None, None, None),
+            job.path(),
+            "plan asset extraction",
+            std::slice::from_ref(&source_image),
+            None,
+            Some("paintnode-asset-extraction-plan.json"),
+            Some("workflow-extraction"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-extraction" }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--image" && pair[1] == source_image.to_string_lossy() }));
     }
 
     #[test]

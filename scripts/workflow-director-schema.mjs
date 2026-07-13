@@ -49,6 +49,11 @@ export const workflowDirectorGraphDraftSchema = {
           }, ['assetId', 'role', 'required']),
           strictNode('brief', { objective: longText, guidance: longText }, ['objective', 'guidance']),
           strictNode('art-direction', { prompt: longText }, ['prompt']),
+          strictNode('extract-assets', {
+            prompt: editableText,
+            mode: { type: 'string', enum: ['quality', 'fast'] },
+            assetsPerSheet: { type: 'integer', enum: [1, 2, 4, 8] },
+          }, ['prompt', 'mode', 'assetsPerSheet']),
           strictNode('transform', {
             capability: { type: 'string', minLength: 1, maxLength: 80 },
             instructions: longText,
@@ -105,6 +110,11 @@ const inputConfig = strictConfig({
 });
 const briefConfig = strictConfig({ objective: editableText, guidance: editableText });
 const artDirectionConfig = strictConfig({ prompt: editableText });
+const extractAssetsConfig = strictConfig({
+  prompt: editableText,
+  mode: { type: 'string', enum: ['quality', 'fast'] },
+  assetsPerSheet: { type: 'integer', enum: [1, 2, 4, 8] },
+});
 const transformConfig = strictConfig({
   capability: { type: 'string', minLength: 1, maxLength: 80 },
   instructions: editableText,
@@ -118,7 +128,7 @@ const outputConfig = strictConfig({
   finalHeight: { type: 'integer', minimum: 64, maximum: 16384 },
 });
 const authoringConfig = {
-  anyOf: [inputConfig, briefConfig, artDirectionConfig, transformConfig, reviewConfig, outputConfig],
+  anyOf: [inputConfig, briefConfig, artDirectionConfig, extractAssetsConfig, transformConfig, reviewConfig, outputConfig],
 };
 
 /**
@@ -139,6 +149,7 @@ const patchNode = {
     strictPatchNode('input', inputConfig),
     strictPatchNode('brief', briefConfig),
     strictPatchNode('art-direction', artDirectionConfig),
+    strictPatchNode('extract-assets', extractAssetsConfig),
     strictPatchNode('transform', transformConfig),
     strictPatchNode('review', reviewConfig),
     strictPatchNode('output', outputConfig),
@@ -202,4 +213,52 @@ export const workflowDirectorRevisionSchema = {
     operations: { type: 'array', maxItems: 128, items: revisionOperation },
   },
   required: ['version', 'sourceGraphRevision', 'summary', 'operations'],
+};
+
+export const workflowDirectorExtractionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    version: { type: 'integer', const: 1 },
+    items: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 32,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 160 },
+          name: shortText,
+          instruction: longText,
+        },
+        required: ['id', 'name', 'instruction'],
+      },
+    },
+    notes: { type: 'string', maxLength: 4000 },
+  },
+  required: ['version', 'items', 'notes'],
+};
+
+export const workflowDirectorReviewSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    rankings: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 64,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          candidateId: { type: 'string', minLength: 1, maxLength: 160 },
+          reason: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+        required: ['candidateId', 'reason'],
+      },
+    },
+    recommendedCandidateId: { type: 'string', minLength: 1, maxLength: 160 },
+  },
+  required: ['rankings', 'recommendedCandidateId'],
 };

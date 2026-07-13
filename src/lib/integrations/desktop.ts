@@ -418,6 +418,16 @@ export interface GrokGeneratorConfig {
   fillAspectRatio?: string | null;
   /** Result-check strictness for fill/retouch candidates (0 = off, 1 = drift only, 2-3 = + seam continuity). */
   editChecksLevel?: number | null;
+  /** Whether the AI Director participates in workflows that support it. */
+  directorMode?: AiDirectorMode | null;
+  /** Reasoning provider selected to act as AI Director. */
+  directorProvider?: AiDirectorProvider | null;
+  /** How far the AI Director should stay involved after planning. */
+  directorInvolvement?: AiDirectorInvolvement | null;
+  /** Grok chat model used when Grok is the selected AI Director. */
+  directorModel?: GrokModelId | null;
+  /** Grok reasoning effort used when Grok is the selected AI Director. */
+  directorReasoningEffort?: GrokReasoningEffort | null;
 }
 
 function grokInvokeConfig(config: GrokGeneratorConfig) {
@@ -449,6 +459,11 @@ export function grokConfigFromRunOptions(
     imageResolution: options.grokImageResolution,
     fillAspectRatio: options.fillAspectRatio ?? null,
     editChecksLevel: options.editChecksLevel,
+    directorMode: options.directorMode ?? options.plannerMode ?? 'auto',
+    directorProvider: options.directorProvider ?? options.plannerProvider ?? 'codex',
+    directorInvolvement: options.directorInvolvement ?? 'fullReview',
+    directorModel: options.grokModel,
+    directorReasoningEffort: options.grokReasoningEffort,
   };
 }
 
@@ -1060,6 +1075,11 @@ export async function upscaleGrokImage(
     sourcePng: Array.from(sourcePng),
     scalePercent: Math.round(scalePercent),
     keepComposedResult,
+    directorMode: config.directorMode ?? 'auto',
+    directorProvider: config.directorProvider ?? 'codex',
+    directorInvolvement: config.directorInvolvement ?? 'fullReview',
+    directorModel: config.directorModel ?? null,
+    directorReasoningEffort: config.directorReasoningEffort ?? null,
     runId,
   });
 }
@@ -1251,6 +1271,14 @@ export async function storeProjectAssetBytes(args: {
     ...args,
     bytes: Array.from(args.bytes),
   });
+}
+
+export async function storeProjectClipboardImage(
+  projectPath: string,
+  name = 'Clipboard Image.png',
+): Promise<StoredAssetResult | null> {
+  if (!isDesktop()) throw new Error('Clipboard image import is available only in the PaintNode desktop app.');
+  return invoke<StoredAssetResult | null>('project_store_clipboard_image', { projectPath, name });
 }
 
 export async function commitWorkflowEditorReturn(args: {

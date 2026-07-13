@@ -10,7 +10,7 @@ import {
 } from './registry';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2 } from './schema';
 
-const types: CreatorNodeType[] = ['input', 'brief', 'art-direction', 'transform', 'review', 'output'];
+const types: CreatorNodeType[] = ['input', 'brief', 'art-direction', 'extract-assets', 'transform', 'review', 'output'];
 
 describe('creator node registry', () => {
   it('defines each creator-facing node exactly once with valid metadata, geometry, ports, and defaults', () => {
@@ -85,7 +85,9 @@ describe('creator node registry', () => {
       capability: 'generate',
       reason: null,
     });
-    expect(creatorNodeDefinition('review').executor.status).toBe('draft-only');
+    expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('sourceAssetIds');
+    expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('supportAssetIds');
+    expect(creatorNodeDefinition('review').executor.status).toBe('available');
   });
 
   it('validates creator configuration without rejecting deliberately empty readiness fields', () => {

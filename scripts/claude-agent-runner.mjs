@@ -5,7 +5,9 @@ import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { directorActionSchema } from './director-action-schema.mjs';
 import {
+  workflowDirectorExtractionSchema,
   workflowDirectorGraphDraftSchema,
+  workflowDirectorReviewSchema,
   workflowDirectorRevisionSchema,
 } from './workflow-director-schema.mjs';
 
@@ -22,7 +24,7 @@ function writeStructuredOutput(path, value, schemaName) {
 }
 
 function usage() {
-  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
+  return `Usage: claude-agent-runner.mjs --cwd DIR [--session-id UUID] [--output-file PATH] [--output-schema director-action|workflow-draft|workflow-revision|workflow-review|workflow-extraction] [--claude-path BIN] [--model MODEL] [--effort LEVEL] [--image PATH ...] -- PROMPT`;
 }
 
 function requireValue(args, index, flag) {
@@ -83,7 +85,7 @@ function parseArgs(argv) {
       index += 2;
     } else if (arg === '--output-schema') {
       options.outputSchema = requireValue(argv, index, arg);
-      if (!['director-action', 'workflow-draft', 'workflow-revision'].includes(options.outputSchema)) {
+      if (!['director-action', 'workflow-draft', 'workflow-revision', 'workflow-review', 'workflow-extraction'].includes(options.outputSchema)) {
         throw new Error(`Unknown output schema: ${options.outputSchema}`);
       }
       index += 2;
@@ -252,6 +254,8 @@ async function main() {
               'director-action': directorActionSchema,
               'workflow-draft': workflowDirectorGraphDraftSchema,
               'workflow-revision': workflowDirectorRevisionSchema,
+              'workflow-review': workflowDirectorReviewSchema,
+              'workflow-extraction': workflowDirectorExtractionSchema,
             }[options.outputSchema],
           }
         : undefined,

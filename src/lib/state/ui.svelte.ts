@@ -57,6 +57,7 @@ class UiState {
   contextualTaskBarVisible = $state(true);
   contextualTaskBarResetToken = $state(0);
   workflowFocusRequest = $state(0);
+  workflowPasteRequest = $state(0);
 
   // Background waits (project scan, document decode) surfaced in the status bar.
   // Null until a wait outlives the tracker's anti-flash delay, so short waits
@@ -88,6 +89,9 @@ class UiState {
   }
   requestWorkflowFocus(): void {
     this.workflowFocusRequest += 1;
+  }
+  requestWorkflowPaste(): void {
+    this.workflowPasteRequest += 1;
   }
   openAiGenerate(prefillPrompt: string | null = null): void {
     this.aiGeneratePrefill = prefillPrompt;

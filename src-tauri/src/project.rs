@@ -1667,6 +1667,71 @@ pub(crate) async fn project_store_asset_bytes(
     .map_err(|e| format!("Task error: {e}"))?
 }
 
+fn clipboard_rgba_png(
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let width =
+        u32::try_from(width).map_err(|_| "Clipboard image width is too large.".to_string())?;
+    let height =
+        u32::try_from(height).map_err(|_| "Clipboard image height is too large.".to_string())?;
+    if width == 0 || height == 0 {
+        return Err("Clipboard image dimensions are invalid.".into());
+    }
+    let image = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| "Clipboard image pixel data is invalid.".to_string())?;
+    Ok((encode_rgba_png(image, "clipboard image")?, width, height))
+}
+
+#[tauri::command]
+pub(crate) async fn project_store_clipboard_image(
+    project_path: String,
+    name: String,
+) -> Result<Option<StoredAssetResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<StoredAssetResult>, String> {
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|error| format!("Clipboard unavailable: {error}"))?;
+        let clipboard_image = match clipboard.get_image() {
+            Ok(image) => image,
+            Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+            Err(error) => return Err(format!("Clipboard image could not be read: {error}")),
+        };
+        let width = clipboard_image.width;
+        let height = clipboard_image.height;
+        let rgba = clipboard_image.bytes.into_owned();
+        let (bytes, width, height) = clipboard_rgba_png(width, height, rgba)?;
+        let project_dir = PathBuf::from(project_path.trim());
+        let name = if name.trim().is_empty() {
+            "Clipboard Image.png".to_string()
+        } else {
+            name.trim().to_string()
+        };
+        let (id, relative_path) = write_asset_file(&project_dir, "imported", &name, "png", &bytes)?;
+        let asset = add_asset(
+            &project_dir,
+            ProjectAsset {
+                id,
+                kind: "imported".into(),
+                name: name.clone(),
+                relative_path,
+                created_at: now_id(),
+                prompt: None,
+                source_file_name: Some(name),
+                width: Some(width),
+                height: Some(height),
+                mime: Some("image/png".into()),
+            },
+        )?;
+        let data_url = png_data_url_from_bytes(&bytes).ok_or_else(|| {
+            "Clipboard image could not be previewed after PNG encoding.".to_string()
+        })?;
+        Ok(Some(StoredAssetResult { data_url, asset }))
+    })
+    .await
+    .map_err(|e| format!("Task error: {e}"))?
+}
+
 #[tauri::command]
 pub(crate) async fn project_read_asset(
     project_path: String,
@@ -1943,6 +2008,21 @@ mod tests {
     use super::*;
     use crate::png::file_has_png_signature;
     use crate::test_util::{png_dimensions_from_data_url, ONE_PIXEL_PNG};
+
+    #[test]
+    fn clipboard_rgba_is_validated_and_normalized_to_png() {
+        let pixels = vec![255, 0, 0, 255, 0, 128, 255, 64];
+        let (png, width, height) = clipboard_rgba_png(2, 1, pixels).expect("clipboard png");
+
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(crate::png::png_dimensions_from_bytes(&png), Some((2, 1)));
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode clipboard png")
+            .to_rgba8();
+        assert_eq!(decoded.into_raw(), vec![255, 0, 0, 255, 0, 128, 255, 64]);
+        assert!(clipboard_rgba_png(2, 1, vec![0; 4]).is_err());
+        assert!(clipboard_rgba_png(0, 1, Vec::new()).is_err());
+    }
 
     fn workflow_editor_ora_bytes() -> Vec<u8> {
         let cursor = std::io::Cursor::new(Vec::new());

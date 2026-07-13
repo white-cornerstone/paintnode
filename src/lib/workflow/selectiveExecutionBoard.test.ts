@@ -49,7 +49,7 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('workflowCandidateProgressLabel');
     expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
     expect(boardSource).toContain('candidate-result-summary');
-    expect(boardSource).toContain("onchange={(event) => workflow.assignAsset");
+    expect(boardSource).toContain("onchange={(event) => void assignWorkflowAsset");
     expect(boardSource).toContain('Selected ${asset.name}');
     expect(boardSource).toContain('review-candidate-preview');
     expect(boardSource).toContain("'Checking for reusable output…'");
@@ -98,8 +98,9 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('Retry Review verification');
     expect(boardSource).toContain('workflow.invalidateReviewState(reviewNodeIds)');
     expect(boardSource).toContain('reviewVerificationCoordinator.reset()');
-    expect(boardSource).toContain('aria-label="Refresh workflow assets and Review verification"');
+    expect(boardSource).toContain("window.addEventListener('paintnode:workflow-refresh'");
     expect(boardSource).not.toContain('aria-label="Refresh project"');
     expect(projectPanelSource).toContain('aria-label="Refresh project files and assets"');
+    expect(projectPanelSource).toContain("window.dispatchEvent(new CustomEvent('paintnode:workflow-refresh'))");
   });
 });

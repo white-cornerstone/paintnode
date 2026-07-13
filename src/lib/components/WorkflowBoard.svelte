@@ -2,19 +2,25 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
-  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import {
     codexConfigFromRunOptions,
     antigravityConfigFromRunOptions,
     grokConfigFromRunOptions,
     cancelAiRun,
+    decoupleAntigravityImage,
+    decoupleCodexImage,
+    generateAntigravityRetouchImage,
+    generateCodexRetouchImage,
+    generateGrokRetouchImage,
     isDesktop,
     providerQaMode,
+    readProjectAsset,
     readProjectFile,
     resolveProjectAssetMaterial,
     storeProjectAssetBytes,
     type ProjectAsset,
+    type ProjectFile,
   } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
@@ -23,6 +29,7 @@
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
   import { wheelZoomFactor } from '../engine/zoomGesture';
+  import { clampWorkflowPan as clampWorkflowPanGeometry } from '../workflow/viewportGeometry';
   import { compositeToCanvas } from '../engine/compositor';
   import { saveOra } from '../ora/save';
   import { loadOra } from '../ora/load';
@@ -30,7 +37,8 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { workflowBoardViewport } from '../state/workflowBoardViewport.svelte';
+  import { directorModeFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
   import { aiTasks } from '../state/aiTasks.svelte';
   import {
@@ -72,16 +80,29 @@
     type WorkflowStoryboardDescriptor,
     type WorkflowReviewVerificationState,
     WorkflowReviewVerificationCoordinator,
+    resolveWorkflowNodeAiRunOptions,
+    type WorkflowNodeV2,
   } from '../workflow';
+  import {
+    canvasPngBlob,
+    assetSheetGuidelineDataUrl,
+    composeAssetExtractionSources,
+    cropAssetIndexSheet,
+    decoupledLayerCanvas,
+    workflowAssetExtractionPrompt,
+    type AssetSheetCount,
+  } from '../workflow/assetExtraction';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
+  import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
+  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
-  import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
-  import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
+  import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
+  import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
+  import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
     createCodexWorkflowTransformExecutor,
@@ -95,10 +116,14 @@
   import WorkflowDirectorRevisionDialog from './WorkflowDirectorRevisionDialog.svelte';
   import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
   import { createConfiguredWorkflowRevisionRequester } from '../integrations/workflowDirectorRevisionAdapters';
+  import { reviewWorkflowCandidates, workflowAiReviewProvider } from '../integrations/workflowReviewAdapters';
+  import { createWorkflowAssetExtractionManifest, planWorkflowAssetExtraction, workflowExtractionCapability } from '../integrations/workflowExtractionAdapters';
+  import { workflowReviewCandidateSetHash } from '../workflow/reviewRecommendation';
   import type { WorkflowDirectorRevisionRequester } from '../workflow';
 
-  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
+  type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported';
   type WorkflowNodeId = string;
+  type AssetPreviewMenu = { nodeId: string; x: number; y: number };
   type WorkflowMapRect = {
     id: string;
     kind: WorkflowMapKind;
@@ -109,19 +134,18 @@
     color: string;
     included?: boolean;
   };
-  type WorkflowMapBounds = { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number };
-  type WorkflowMapModel = {
-    items: WorkflowMapRect[];
-    viewport: WorkflowMapRect;
-    bounds: WorkflowMapBounds;
-  };
 
   const desktop = isDesktop();
   const briefCreatorDefinition = creatorNodeDefinition('brief');
-  let runOptions = $state(aiRunOptionsFromSettings(settings.value));
+  const runOptions = $derived(resolveWorkflowNodeAiRunOptions(
+    aiRunOptionsFromSettings(settings.value),
+    workflow.aiDefaults,
+    { type: 'input', config: {} },
+  ));
   let busy = $state(false);
   let progress = $state('');
   let candidateResultMessages = $state<Record<string, string>>({});
+  let assetExtractionStates = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
@@ -130,6 +154,7 @@
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
   let selectedReviewCandidates = $state<Record<string, string>>({});
+  let aiReviewMessages = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let reviewVerificationState = $state<WorkflowReviewVerificationState>({
     status: 'idle', identity: null, message: '', canRetry: false,
   });
@@ -147,20 +172,16 @@
   const providerSelection = $derived(workflowProviderSelection(qaModeResolved, qaMode, imageProvider));
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
-  let mapDragging = $state<{ offsetX: number; offsetY: number } | null>(null);
   let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
-  let overscrollX = $state(0);
-  let overscrollY = $state(0);
-  let overscrollReturning = $state(false);
   let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
   let boardEl = $state<HTMLDivElement>();
-  let paletteButton = $state<HTMLButtonElement>();
-  let paletteOpen = $state(false);
   let directorOpen = $state(false);
   let revisionDirectorOpen = $state(false);
   let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
+  let revisionDirectorInstruction = $state('Refine this workflow while preserving accepted candidates and run history.');
+  let revisionDirectorTitle = $state('Revise current workflow');
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -192,24 +213,28 @@
   let selectiveError = $state('');
   let lastSelectiveContextIdentity = '';
   let boardDestroyed = false;
-  let overscrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
-  let overscrollEndTimer: ReturnType<typeof setTimeout> | null = null;
   let handledFocusRequest = 0;
+  let handledPasteRequest = 0;
+  let clipboardImporting = $state(false);
+  let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
 
   const ASSET_NODE_W = 205;
-  const MAP_EDGE_PADDING = 260;
-  const MAX_OVERSCROLL = 32;
-  const OVERSCROLL_DAMPING = 0.14;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
+  const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
+  const oraVariantCache = new Map<string, Promise<{ referenceDataUrl: string; annotationDataUrl: string | null; hasAnnotations: boolean }>>();
+  let lastOraPortSyncIdentity = '';
   const effectiveZoomMode = $derived(
     altDown
       ? workflow.zoomMode === 'in' ? 'out' : 'in'
       : workflow.zoomMode,
   );
-  const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
+  const hasCompositionNode = $derived.by(() => {
+    workflow.rev;
+    return workflow.graphSnapshot().nodes.some((node) => node.id === 'composition');
+  });
   const reviewReadinessSnapshot = $derived.by(() => {
     workflow.rev;
     project.current;
@@ -243,6 +268,15 @@
     workflow.rev;
     project.identity;
     if (!busy) error = '';
+  });
+
+  $effect(() => {
+    const request = ui.workflowPasteRequest;
+    if (request === 0 || request === handledPasteRequest) return;
+    handledPasteRequest = request;
+    const nodeId = selectedAssetNodeId();
+    if (nodeId) void pasteClipboardImage(nodeId);
+    else editor.flash('Select a Visual Input node before pasting an image');
   });
 
   function outputReadiness(outputNodeId: string) {
@@ -302,8 +336,6 @@
     boardDestroyed = true;
     reviewVerificationCoordinator.reset();
     endStoryboardEditSession();
-    if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
-    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
   });
 
   onMount(() => {
@@ -338,11 +370,34 @@
       ].slice(-24);
       workflow.setStoryboardAnnotations(next);
     };
+    const handleWorkflowBoardAction = (event: Event) => {
+      const action = (event as CustomEvent<{ action?: string }>).detail?.action;
+      if (action === 'draft') directorOpen = true;
+      else if (action === 'revise') openRevisionDirector();
+    };
+    const handleWorkflowAddNode = (event: Event) => {
+      const type = (event as CustomEvent<{ type?: CreatorNodeType }>).detail?.type;
+      if (type) void addCreatorNodeFromPalette(type);
+    };
+    const handleWorkflowNodeDirectorAction = (event: Event) => {
+      const nodeId = (event as CustomEvent<{ nodeId?: string }>).detail?.nodeId;
+      const node = nodeId ? workflow.graphSnapshot().nodes.find((item) => item.id === nodeId) : null;
+      if (node) openNodeDirectorAction(node);
+    };
+    const handleWorkflowRefresh = () => void refreshWorkflowAssetsAndReview();
     window.addEventListener('paintnode:workflow-before-save', flushBeforeSave);
     window.addEventListener('paintnode:annotation-created', recordAnnotation);
+    window.addEventListener('paintnode:workflow-board-action', handleWorkflowBoardAction);
+    window.addEventListener('paintnode:workflow-add-node', handleWorkflowAddNode);
+    window.addEventListener('paintnode:workflow-node-director-action', handleWorkflowNodeDirectorAction);
+    window.addEventListener('paintnode:workflow-refresh', handleWorkflowRefresh);
     return () => {
       window.removeEventListener('paintnode:workflow-before-save', flushBeforeSave);
       window.removeEventListener('paintnode:annotation-created', recordAnnotation);
+      window.removeEventListener('paintnode:workflow-board-action', handleWorkflowBoardAction);
+      window.removeEventListener('paintnode:workflow-add-node', handleWorkflowAddNode);
+      window.removeEventListener('paintnode:workflow-node-director-action', handleWorkflowNodeDirectorAction);
+      window.removeEventListener('paintnode:workflow-refresh', handleWorkflowRefresh);
     };
   });
 
@@ -409,6 +464,7 @@
       resizeFrame = null;
       boardWidth = Math.max(1, board.clientWidth);
       boardHeight = Math.max(1, board.clientHeight);
+      workflowBoardViewport.setSize(boardWidth, boardHeight);
       clampWorkflowPan();
     };
     const scheduleResize = () => {
@@ -425,7 +481,7 @@
         workflow.zoomBy(wheelZoomFactor(event.deltaY, event.deltaMode), event.clientX - rect.left, event.clientY - rect.top);
         clampWorkflowPan();
       } else {
-        panBoardBy(-event.deltaX, -event.deltaY, true, 'idle');
+        panBoardBy(-event.deltaX, -event.deltaY);
       }
     };
     board.addEventListener('wheel', onWheel, { passive: false });
@@ -438,6 +494,402 @@
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
+  }
+
+  function oraFor(node: WorkflowAssetNode): ProjectFile | null {
+    return node.oraRelativePath
+      ? oraDocuments.find((file) => file.relativePath === node.oraRelativePath) ?? null
+      : null;
+  }
+
+  async function oraVariants(file: ProjectFile): Promise<{ referenceDataUrl: string; annotationDataUrl: string | null; hasAnnotations: boolean }> {
+    const key = `${project.identity}:${file.relativePath}:${file.modifiedAt}`;
+    let cached = oraVariantCache.get(key);
+    if (!cached) {
+      cached = (async () => {
+        const bytes = await project.readFile(file);
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        const doc = await loadOra(buffer);
+        const reference = compositeToCanvas(doc);
+        const annotations = visibleAnnotations(doc.annotations);
+        return {
+          referenceDataUrl: reference.toDataURL('image/png'),
+          annotationDataUrl: doc.annotations.length > 0
+            ? renderAnnotatedCanvas(reference, annotations).toDataURL('image/png')
+            : null,
+          hasAnnotations: doc.annotations.length > 0,
+        };
+      })();
+      oraVariantCache.set(key, cached);
+    }
+    return cached;
+  }
+
+  async function assignWorkflowAsset(nodeId: string, value: string): Promise<void> {
+    if (value.startsWith('asset:')) {
+      workflow.assignAsset(nodeId, assets.find((item) => item.id === value.slice(6)) ?? null);
+      return;
+    }
+    if (value.startsWith('ora:')) {
+      const file = oraDocuments.find((item) => item.relativePath === value.slice(4));
+      if (!file) return;
+      try {
+        const variants = await oraVariants(file);
+        workflow.assignOraDocument(nodeId, file, variants.hasAnnotations);
+      } catch (e) {
+        editor.flash(`Could not inspect ${file.name}: ${(e as Error)?.message ?? String(e)}`);
+      }
+      return;
+    }
+    workflow.assignAsset(nodeId, null);
+  }
+
+  function selectedAssetNodeId(): string | null {
+    const selection = workflow.selection;
+    if (selection?.kind !== 'asset') return null;
+    return workflow.nodes.some((node) => node.id === selection.id) ? selection.id : null;
+  }
+
+  function openAssetPreviewMenu(event: MouseEvent, nodeId: string): void {
+    event.preventDefault();
+    event.stopPropagation();
+    showAssetPreviewMenu(nodeId, event.clientX, event.clientY);
+  }
+
+  function showAssetPreviewMenu(nodeId: string, clientX: number, clientY: number): void {
+    workflow.select({ kind: 'asset', id: nodeId });
+    assetPreviewMenu = {
+      nodeId,
+      x: Math.min(clientX, window.innerWidth - 214),
+      y: Math.min(clientY, window.innerHeight - (project.path ? 44 : 70)),
+    };
+  }
+
+  async function pasteClipboardImage(nodeId: string): Promise<void> {
+    assetPreviewMenu = null;
+    if (clipboardImporting) return;
+    if (!desktop) {
+      error = 'Clipboard image import is available only in the PaintNode desktop app.';
+      editor.flash(error);
+      return;
+    }
+    if (!project.path) {
+      error = 'Open a project folder before pasting an image.';
+      editor.flash(error);
+      return;
+    }
+    const projectIdentity = project.identity;
+    const workflowId = workflow.graphSnapshot().id;
+    clipboardImporting = true;
+    error = '';
+    try {
+      const asset = await ui.withLoading('Pasting clipboard image…', () => project.storeClipboardImage());
+      if (!asset) {
+        editor.flash('The clipboard does not contain an image');
+        return;
+      }
+      if (project.identity !== projectIdentity || workflow.graphSnapshot().id !== workflowId
+        || !workflow.nodes.some((node) => node.id === nodeId)) {
+        editor.flash('Clipboard image was imported, but the workflow changed before it could be assigned');
+        return;
+      }
+      workflow.assignAsset(nodeId, asset);
+      workflow.select({ kind: 'asset', id: nodeId });
+      editor.flash(`Pasted ${asset.name}`);
+    } catch (cause) {
+      error = (cause as Error)?.message ?? String(cause);
+      editor.flash(`Paste image failed: ${error}`);
+    } finally {
+      clipboardImporting = false;
+    }
+  }
+
+  $effect(() => {
+    workflow.rev;
+    const identity = JSON.stringify({
+      project: project.identity,
+      files: oraDocuments.map((file) => [file.relativePath, file.modifiedAt]),
+      nodes: workflow.nodes.filter((node) => node.oraRelativePath).map((node) => [
+        node.id,
+        node.oraRelativePath,
+        workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation'),
+      ]),
+    });
+    if (identity === lastOraPortSyncIdentity) return;
+    lastOraPortSyncIdentity = identity;
+    const expectedProjectIdentity = project.identity;
+    void Promise.all(workflow.nodes.map(async (node) => {
+      if (!node.oraRelativePath) return;
+      const file = oraDocuments.find((item) => item.relativePath === node.oraRelativePath);
+      if (!file) return;
+      try {
+        const variants = await oraVariants(file);
+        if (project.identity !== expectedProjectIdentity) return;
+        const hasPort = workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation');
+        if (hasPort !== variants.hasAnnotations) workflow.assignOraDocument(node.id, file, variants.hasAnnotations);
+      } catch {
+        // Keep the last valid port contract while a document is temporarily unreadable.
+      }
+    }));
+  });
+
+  type ExtractedAssetLink = { id: string; name: string; relativePath: string };
+
+  function extractedAssetLinks(config: Record<string, unknown>): ExtractedAssetLink[] {
+    const value = config.resultAssets;
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
+      const record = item as Record<string, unknown>;
+      return typeof record.id === 'string' && typeof record.name === 'string' && typeof record.relativePath === 'string'
+        ? [{ id: record.id, name: record.name, relativePath: record.relativePath }]
+        : [];
+    });
+  }
+
+  function extractionQuickLinks(): Array<ExtractedAssetLink & { nodeName: string }> {
+    return workflow.creatorNodes.flatMap((node) => node.type === 'extract-assets'
+      ? extractedAssetLinks(node.config).map((asset) => ({ ...asset, nodeName: node.name }))
+      : []);
+  }
+
+  function extractionConnectedCount(nodeId: string, portId: 'sources' | 'support'): number {
+    return workflow.incoming(nodeId).filter((connection) => connection.targetPortId === portId).length;
+  }
+
+  async function extractionMaskPng(sourcePng: Uint8Array): Promise<Uint8Array> {
+    const bitmap = await bytesToBitmap(sourcePng);
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Could not prepare the extraction mask.');
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvasToPngBytes(canvas);
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  async function runAssetExtraction(nodeId: string): Promise<void> {
+    const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
+    if (!node) return;
+    const graphNode = workflow.graphSnapshot().nodes.find((item) => item.id === nodeId);
+    if (!graphNode) return;
+    const extractionRunOptions = resolveWorkflowNodeAiRunOptions(
+      aiRunOptionsFromSettings(settings.value), workflow.aiDefaults, graphNode,
+    );
+    const extractionProvider = imageProviderFromRunOptions(extractionRunOptions);
+    const incoming = workflow.incoming(nodeId);
+    const mode = node.config.mode === 'fast' ? 'fast' : 'quality';
+    const assetsPerSheet = ([1, 2, 4, 8].includes(node.config.assetsPerSheet as number)
+      ? node.config.assetsPerSheet
+      : 4) as AssetSheetCount;
+    if (!desktop) {
+      assetExtractionStates[nodeId] = { running: false, message: '', error: 'Asset extraction is available only in the desktop app.' };
+      return;
+    }
+    if (!project.path) {
+      assetExtractionStates[nodeId] = { running: false, message: '', error: 'Open a project folder before extracting assets.' };
+      return;
+    }
+    const taskProjectPath = project.path;
+    const taskProjectIdentity = project.identity;
+    const extractionCapability = workflowExtractionCapability(
+      extractionProvider,
+      directorModeFromRunOptions(extractionRunOptions) !== 'skip',
+    );
+    if (!extractionCapability.supported) {
+      assetExtractionStates[nodeId] = {
+        running: false,
+        message: '',
+        error: extractionCapability.reason ?? 'This extraction provider combination is unsupported.',
+      };
+      return;
+    }
+    const extractionController = new AbortController();
+    let activeExtractionRunId: string | null = null;
+    const extractionTask = aiTasks.create({
+      projectPath: taskProjectPath,
+      kind: 'workflow',
+      title: `Extract assets: ${node.name}`,
+      subtitle: `${extractionRunOptions.directorProvider} → ${extractionProvider}`,
+      progress: 'Preparing source and support images…',
+      detail: { kind: 'workflow', providerLabel: extractionProvider, outputName: node.name },
+    });
+    aiTasks.setCancel(extractionTask.id, async () => {
+      extractionController.abort();
+      if (activeExtractionRunId) await cancelAiRun(activeExtractionRunId);
+    });
+    assetExtractionStates[nodeId] = { running: true, message: 'Preparing source and support images…', error: '' };
+    try {
+      const combined: Array<{ name: string; dataUrl: string; role: 'source' | 'support' }> = [];
+      for (const connection of incoming.filter((item) => item.targetPortId === 'sources' || item.targetPortId === 'support')) {
+        const inputNode = workflow.nodes.find((item) => item.id === connection.from);
+        if (!inputNode) continue;
+        const role = connection.targetPortId === 'support' ? 'support' as const : 'source' as const;
+        if (inputNode.oraRelativePath) {
+          const file = oraDocuments.find((item) => item.relativePath === inputNode.oraRelativePath);
+          if (!file) throw new Error(`The connected OpenRaster document "${inputNode.name}" is unavailable.`);
+          const variants = await oraVariants(file);
+          const annotated = connection.sourcePortId === 'annotation';
+          const dataUrl = annotated ? variants.annotationDataUrl : variants.referenceDataUrl;
+          if (!dataUrl) throw new Error(`The connected OpenRaster document "${file.name}" has no annotation overview.`);
+          combined.push({
+            name: annotated ? `${file.name} · annotations` : `${file.name} · reference`,
+            dataUrl,
+            role,
+          });
+          continue;
+        }
+        const asset = assetFor(inputNode);
+        if (!asset) continue;
+        combined.push({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role });
+      }
+      if (!combined.some((item) => item.role === 'source')) {
+        throw new Error('Connect at least one source image to the Source images input.');
+      }
+      if (mode === 'fast') {
+        combined.push({
+          name: `INDEX SHEET GUIDELINE · ${assetsPerSheet} cells`,
+          dataUrl: assetSheetGuidelineDataUrl(assetsPerSheet),
+          role: 'support',
+        });
+      }
+      const inputPng = await composeAssetExtractionSources(combined);
+      const runId = createRunId();
+      activeExtractionRunId = runId;
+      const prompt = workflowAssetExtractionPrompt(creatorConfigString(node.config, 'prompt'), mode, assetsPerSheet);
+      assetExtractionStates[nodeId] = { running: true, message: mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…', error: '' };
+      let extractionNotes = '';
+      let prepared: Array<{ canvas: HTMLCanvasElement; name: string }>;
+      let plannedStored: ExtractedAssetLink[] | null = null;
+      let extractionManifest: ReturnType<typeof createWorkflowAssetExtractionManifest> | null = null;
+      if (directorModeFromRunOptions(extractionRunOptions) === 'skip') {
+        const result = extractionProvider === 'antigravity'
+          ? await decoupleAntigravityImage(
+              antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
+              inputPng, prompt, false,
+            )
+          : await decoupleCodexImage(
+              codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
+              inputPng, prompt, false,
+            );
+        if (result.layers.length === 0) throw new Error('The image model did not return any extracted assets.');
+        extractionNotes = result.notes ?? '';
+        prepared = mode === 'fast'
+          ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0]), assetsPerSheet).map((canvas, index) => ({
+              canvas, name: `${node.name} ${String(index + 1).padStart(2, '0')}`,
+            }))
+          : await Promise.all(result.layers.map(async (layer, index) => ({
+              canvas: await decoupledLayerCanvas(layer),
+              name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
+            })));
+      } else {
+        assetExtractionStates[nodeId] = { running: true, message: 'AI Director is planning the asset inventory…', error: '' };
+        const plan = await planWorkflowAssetExtraction(extractionRunOptions, {
+          sourcePng: inputPng,
+          guidance: creatorConfigString(node.config, 'prompt'),
+          mode,
+          maximumAssets: mode === 'fast' ? assetsPerSheet : 16,
+        }, { signal: extractionController.signal, runId: () => runId });
+        extractionNotes = plan.notes;
+        const maskPng = await extractionMaskPng(inputPng);
+        const successes: Array<ExtractedAssetLink & { itemId: string }> = [];
+        const failures: Array<{ itemId: string; message: string }> = [];
+        for (const [index, item] of plan.items.entries()) {
+          if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
+          if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
+          assetExtractionStates[nodeId] = {
+            running: true,
+            message: `Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`,
+            error: '',
+          };
+          const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset, preserve its visual identity and complete edges, and make everything outside the asset transparent.`;
+          const itemRunId = `${runId}-${index + 1}`;
+          activeExtractionRunId = itemRunId;
+          try {
+            const generated = extractionProvider === 'antigravity'
+              ? await generateAntigravityRetouchImage(
+                  { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                  inputPng, inputPng, maskPng, null, null, itemPrompt,
+                )
+              : extractionProvider === 'grok'
+                ? await generateGrokRetouchImage(
+                    { ...grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                    inputPng, inputPng, maskPng, null, null, itemPrompt,
+                  )
+                : await generateCodexRetouchImage(
+                    { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                    inputPng, inputPng, maskPng, null, null, itemPrompt,
+                  );
+            if (!generated.asset) throw new Error('The image provider did not save the extracted asset.');
+            successes.push({ itemId: item.id, id: generated.asset.id, name: item.name, relativePath: generated.asset.relativePath });
+          } catch (cause) {
+            failures.push({ itemId: item.id, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+          }
+        }
+        if (successes.length === 0) throw new Error(`The image model could not extract any planned assets. ${failures.map((failure) => failure.message).join(' ')}`);
+        if (failures.length > 0) extractionNotes = [
+          extractionNotes,
+          `Partial result: ${failures.length} of ${plan.items.length} planned assets could not be produced.`,
+        ].filter(Boolean).join('\n');
+        plannedStored = successes.map(({ id, name, relativePath }) => ({ id, name, relativePath }));
+        const directorRole = workflowAiReviewProvider(extractionRunOptions);
+        const imageModel = extractionProvider === 'antigravity'
+          ? extractionRunOptions.antigravityImageModel
+          : extractionProvider === 'grok'
+            ? extractionRunOptions.grokImageModel
+            : null;
+        extractionManifest = createWorkflowAssetExtractionManifest(plan, {
+          outputs: successes.map((success) => ({
+            itemId: success.itemId, name: success.name, assetId: success.id, relativePath: success.relativePath,
+          })),
+          failedItemIds: failures.map((failure) => failure.itemId),
+          director: { provider: directorRole.id, model: directorRole.model },
+          image: { provider: extractionProvider, model: imageModel },
+          completedAt: Date.now(),
+        });
+        prepared = [];
+      }
+      assetExtractionStates[nodeId] = { running: true, message: 'Saving labelled assets to the project…', error: '' };
+      if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
+        throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
+      }
+      const stored: ExtractedAssetLink[] = plannedStored ?? [];
+      if (!plannedStored) {
+        for (const item of prepared) {
+          const asset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            await canvasPngBlob(item.canvas),
+            `${item.name}.png`,
+            prompt,
+            item.canvas.width,
+            item.canvas.height,
+          );
+          if (asset) stored.push({ id: asset.id, name: asset.name, relativePath: asset.relativePath });
+        }
+      }
+      if (plannedStored) await project.refresh(taskProjectPath);
+      if (project.identity !== taskProjectIdentity) {
+        throw new Error('The active project changed while asset extraction was running. The saved assets were not linked to this workflow.');
+      }
+      workflow.configureCreatorNode(nodeId, { resultAssets: stored, notes: extractionNotes, extractionManifest });
+      assetExtractionStates[nodeId] = { running: false, message: `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`, error: '' };
+      aiTasks.complete(extractionTask.id, `Extracted ${stored.length} assets`);
+      editor.flash(`Extracted ${stored.length} assets`);
+    } catch (e) {
+      const cancelled = extractionController.signal.aborted;
+      const message = cancelled ? 'Asset extraction was cancelled.' : (e as Error)?.message ?? String(e);
+      assetExtractionStates[nodeId] = { running: false, message: '', error: message };
+      if (cancelled) aiTasks.markCancelled(extractionTask.id);
+      else aiTasks.fail(extractionTask.id, message);
+      editor.flash(cancelled ? 'Asset extraction cancelled' : 'Asset extraction failed');
+    } finally {
+      aiTasks.setCancel(extractionTask.id, null);
+    }
   }
 
   async function chooseProjectFolder(trigger: HTMLElement): Promise<void> {
@@ -475,6 +927,133 @@
     revisionDirectorRequester = qaMode === 'provider-free'
       ? createProviderFreeWorkflowRevisionRequester()
       : createConfiguredWorkflowRevisionRequester(runOptions);
+    revisionDirectorInstruction = 'Refine this workflow while preserving accepted candidates and run history.';
+    revisionDirectorTitle = 'Revise current workflow';
+    revisionDirectorOpen = true;
+  }
+
+  async function reviewPreviewPng(asset: ProjectAsset): Promise<Uint8Array> {
+    const stored = await project.readAsset(asset);
+    const bytes = new Uint8Array(await (await fetch(stored.dataUrl)).arrayBuffer());
+    const bitmap = await bytesToBitmap(bytes);
+    try {
+      const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Could not prepare a candidate preview.');
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      return canvasToPngBytes(canvas);
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  async function runAiReview(node: WorkflowNodeV2): Promise<void> {
+    if (node.type !== 'review' || node.config.mode !== 'ai' || busy) return;
+    const candidates = workflow.reviewCandidates(node.id, assets, true, project.identity);
+    if (candidates.length === 0 || candidates.some((candidate) => candidate.state !== 'eligible' || !candidate.output)) {
+      aiReviewMessages[node.id] = {
+        running: false, message: '',
+        error: 'AI Review requires every connected candidate to be current, verified, and available.',
+      };
+      return;
+    }
+    const options = resolveWorkflowNodeAiRunOptions(aiRunOptionsFromSettings(settings.value), workflow.aiDefaults, node);
+    const expectedWorkflowRevision = workflow.rev;
+    const expectedProjectIdentity = project.identity;
+    const expectedCandidateSet = workflowReviewCandidateSetHash(candidates);
+    const controller = new AbortController();
+    const task = aiTasks.create({
+      projectPath: project.path,
+      kind: 'workflow',
+      title: `AI Review: ${node.title}`,
+      subtitle: options.directorProvider,
+      progress: 'Preparing candidate previews…',
+      detail: { kind: 'workflow', providerLabel: options.directorProvider, outputName: 'Candidate recommendation' },
+    });
+    busy = true;
+    aiReviewMessages[node.id] = { running: true, message: 'Preparing candidate previews…', error: '' };
+    aiTasks.setCancel(task.id, async () => controller.abort());
+    try {
+      const prepared = await Promise.all(candidates.map(async (candidate) => {
+        const output = candidate.output!;
+        const asset = assets.find((item) => item.id === output.assetId && item.relativePath === output.relativePath);
+        if (!asset) throw new Error(`Candidate ${candidate.ordinal} output is unavailable.`);
+        return {
+          candidateId: candidate.candidateId,
+          candidateRunId: candidate.latestRunId,
+          materialKey: candidate.materialKey,
+          contentHash: output.contentHash,
+          providerId: candidate.providerId,
+          model: candidate.model,
+          previewPng: await reviewPreviewPng(asset),
+        };
+      }));
+      aiReviewMessages[node.id] = { running: true, message: 'AI Director is ranking candidates…', error: '' };
+      aiTasks.setProgress(task.id, 'AI Director is ranking candidates…');
+      const result = qaMode === 'provider-free'
+        ? {
+            rankings: candidates.map((candidate) => ({
+              candidateId: candidate.candidateId,
+              reason: `Deterministic QA ranking for Candidate ${candidate.ordinal}.`,
+            })),
+            recommendedCandidateId: candidates[0].candidateId,
+          }
+        : await reviewWorkflowCandidates(options, {
+            reviewNodeId: node.id,
+            instructions: creatorConfigString(node.config, 'instructions'),
+            candidates: prepared,
+          }, { signal: controller.signal });
+      const currentCandidates = workflow.reviewCandidates(node.id, assets, true, project.identity);
+      if (workflow.rev !== expectedWorkflowRevision || project.identity !== expectedProjectIdentity
+        || workflowReviewCandidateSetHash(currentCandidates) !== expectedCandidateSet) {
+        throw new Error('The workflow or candidates changed while AI Review was running. The recommendation was discarded.');
+      }
+      workflow.appendReviewRecommendation({
+        id: `recommendation-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+        reviewNodeId: node.id,
+        result,
+        provider: qaMode === 'provider-free'
+          ? { id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' } }
+          : workflowAiReviewProvider(options),
+        createdAt: Date.now(),
+      });
+      selectedReviewCandidates[node.id] = result.recommendedCandidateId;
+      aiReviewMessages[node.id] = { running: false, message: 'Recommendation saved. Promotion still requires your confirmation.', error: '' };
+      aiTasks.complete(task.id, 'Recommendation saved');
+    } catch (cause) {
+      const cancelled = controller.signal.aborted;
+      const message = cancelled ? 'AI Review was cancelled.' : (cause as Error)?.message ?? String(cause);
+      aiReviewMessages[node.id] = { running: false, message: '', error: message };
+      if (cancelled) aiTasks.markCancelled(task.id);
+      else aiTasks.fail(task.id, message);
+    } finally {
+      aiTasks.setCancel(task.id, null);
+      busy = false;
+    }
+  }
+
+  function openNodeDirectorAction(node: WorkflowNodeV2): void {
+    if (node.type === 'review') {
+      void runAiReview(node);
+      return;
+    }
+    const options = resolveWorkflowNodeAiRunOptions(aiRunOptionsFromSettings(settings.value), workflow.aiDefaults, node);
+    revisionDirectorRequester = qaMode === 'provider-free'
+      ? createProviderFreeWorkflowRevisionRequester()
+      : createConfiguredWorkflowRevisionRequester(options);
+    revisionDirectorInstruction = node.type === 'brief'
+      ? `Enhance only Brief node "${node.id}". Improve its objective and guidance while preserving the user's intent. Do not add, remove, reconnect, move, or configure any other node.`
+      : node.type === 'art-direction'
+        ? `Develop only Art Direction node "${node.id}". Improve its textual prompt using connected briefs and visual inputs. Do not generate a storyboard image and do not change any other node or connection.`
+        : '';
+    revisionDirectorTitle = node.type === 'brief'
+      ? 'Enhance Brief'
+      : node.type === 'art-direction'
+        ? 'Develop Art Direction'
+        : 'Revise node';
     revisionDirectorOpen = true;
   }
 
@@ -577,7 +1156,7 @@
       return;
     }
     if (panning) {
-      panBoardBy(event.clientX - panning.x, event.clientY - panning.y, true, 'manual');
+      panBoardBy(event.clientX - panning.x, event.clientY - panning.y);
       panning = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -606,7 +1185,6 @@
     if (drawing) {
       commitDrawing();
     }
-    releaseOverscroll();
     connecting = null;
     dragging = null;
     panning = null;
@@ -664,25 +1242,16 @@
         height: node.height,
         color: node.color,
       })),
-      {
+      ...(hasCompositionNode ? [{
         id: 'composition',
-        kind: 'composition',
+        kind: 'composition' as const,
         x: workflow.promptX,
         y: workflow.promptY,
         width: workflow.compositionWidth,
         height: workflow.compositionHeight,
         color: workflow.compositionColor,
-      },
-      {
-        id: 'output',
-        kind: 'output',
-        x: workflow.outputX,
-        y: workflow.outputY,
-        width: workflow.outputWidth,
-        height: workflow.outputHeight,
-        color: workflow.outputColor,
-      },
-      ...workflow.outputNodes.filter((node) => node.id !== 'output').map((node) => ({
+      }] : []),
+      ...workflow.outputNodes.map((node) => ({
         id: node.id,
         kind: 'output' as const,
         x: node.x,
@@ -694,136 +1263,22 @@
     ];
   }
 
-  function mapBoundsFor(items: WorkflowMapRect[], padding: number): WorkflowMapBounds {
-    const minX = Math.min(...items.map((rect) => rect.x)) - padding;
-    const minY = Math.min(...items.map((rect) => rect.y)) - padding;
-    const maxX = Math.max(...items.map((rect) => rect.x + rect.width)) + padding;
-    const maxY = Math.max(...items.map((rect) => rect.y + rect.height)) + padding;
-    return {
-      minX,
-      minY,
-      maxX,
-      maxY,
-      width: Math.max(1, maxX - minX),
-      height: Math.max(1, maxY - minY),
-    };
+  function clampWorkflowPan(): void {
+    const next = clampWorkflowPanGeometry(
+      { panX: workflow.panX, panY: workflow.panY },
+      workflowMapItems(),
+      boardWidth,
+      boardHeight,
+      workflow.zoom,
+    );
+    const dx = next.panX - workflow.panX;
+    const dy = next.panY - workflow.panY;
+    if (Math.abs(dx) > 0.0001 || Math.abs(dy) > 0.0001) workflow.panBy(dx, dy);
   }
 
-  function workflowViewportRect(): WorkflowMapRect {
-    const zoom = Math.max(0.001, workflow.zoom);
-    return {
-      id: 'viewport',
-      kind: 'viewport',
-      x: -workflow.panX / zoom,
-      y: -workflow.panY / zoom,
-      width: boardWidth / zoom,
-      height: boardHeight / zoom,
-      color: 'var(--accent)',
-    };
-  }
-
-  function workflowMap(): WorkflowMapModel {
-    const items = workflowMapItems();
-    const viewport = workflowViewportRect();
-    return {
-      items,
-      viewport,
-      bounds: mapBoundsFor(items, MAP_EDGE_PADDING),
-    };
-  }
-
-  function mapX(x: number, map: WorkflowMapModel): number {
-    return ((x - map.bounds.minX) / map.bounds.width) * 100;
-  }
-
-  function mapY(y: number, map: WorkflowMapModel): number {
-    return ((y - map.bounds.minY) / map.bounds.height) * 100;
-  }
-
-  function mapRectStyle(rect: WorkflowMapRect, map: WorkflowMapModel): string {
-    const minSize = rect.kind === 'viewport' ? 8 : 5;
-    return [
-      `left:${mapX(rect.x, map)}%`,
-      `top:${mapY(rect.y, map)}%`,
-      `width:max(${minSize}px, ${(rect.width / map.bounds.width) * 100}%)`,
-      `height:max(${minSize}px, ${(rect.height / map.bounds.height) * 100}%)`,
-      `--mini-color:${rect.color}`,
-    ].join(';');
-  }
-
-  function clampWorkflowPan(): { rejectedX: number; rejectedY: number } {
-    const bounds = workflowMapModel.bounds;
-    const zoom = Math.max(0.001, workflow.zoom);
-    const viewportW = boardWidth / zoom;
-    const viewportH = boardHeight / zoom;
-    const attemptedPanX = workflow.panX;
-    const attemptedPanY = workflow.panY;
-    const worldLeft = -workflow.panX / zoom;
-    const worldTop = -workflow.panY / zoom;
-    const nextLeft = clampViewportOrigin(worldLeft, viewportW, bounds.minX, bounds.maxX);
-    const nextTop = clampViewportOrigin(worldTop, viewportH, bounds.minY, bounds.maxY);
-    const nextPanX = -nextLeft * zoom;
-    const nextPanY = -nextTop * zoom;
-    const dx = nextPanX - workflow.panX;
-    const dy = nextPanY - workflow.panY;
-    if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) workflow.panBy(dx, dy);
-    return {
-      rejectedX: attemptedPanX - workflow.panX,
-      rejectedY: attemptedPanY - workflow.panY,
-    };
-  }
-
-  function clampViewportOrigin(origin: number, viewportSize: number, min: number, max: number): number {
-    const size = Math.max(1, max - min);
-    if (viewportSize >= size) return min + (size - viewportSize) / 2;
-    return Math.min(Math.max(origin, min), max - viewportSize);
-  }
-
-  function panBoardBy(dx: number, dy: number, bounce = true, releaseMode: 'idle' | 'manual' = 'idle'): void {
+  function panBoardBy(dx: number, dy: number): void {
     workflow.panBy(dx, dy);
-    const rejected = clampWorkflowPan();
-    if (bounce) {
-      if (Math.abs(rejected.rejectedX) >= 0.5 || Math.abs(rejected.rejectedY) >= 0.5) {
-        applyOverscroll(rejected.rejectedX, rejected.rejectedY, releaseMode);
-      } else if (overscrollX !== 0 || overscrollY !== 0 || overscrollReturning) {
-        clearOverscroll();
-      }
-    }
-  }
-
-  function applyOverscroll(rejectedX: number, rejectedY: number, releaseMode: 'idle' | 'manual'): void {
-    const nextX = dampOverscroll(rejectedX);
-    const nextY = dampOverscroll(rejectedY);
-    if (nextX === 0 && nextY === 0) return;
-    if (overscrollIdleTimer) clearTimeout(overscrollIdleTimer);
-    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
-    overscrollReturning = false;
-    overscrollX = nextX;
-    overscrollY = nextY;
-    overscrollEndTimer = null;
-    if (releaseMode === 'idle') {
-      overscrollIdleTimer = setTimeout(() => {
-        overscrollIdleTimer = null;
-        releaseOverscroll();
-      }, 110);
-    } else {
-      overscrollIdleTimer = null;
-    }
-  }
-
-  function dampOverscroll(value: number): number {
-    if (Math.abs(value) < 0.5) return 0;
-    const magnitude = Math.min(MAX_OVERSCROLL, Math.abs(value) * OVERSCROLL_DAMPING);
-    return Math.sign(value) * magnitude;
-  }
-
-  function setViewportOrigin(left: number, top: number): void {
-    const zoom = Math.max(0.001, workflow.zoom);
-    const nextPanX = -left * zoom;
-    const nextPanY = -top * zoom;
-    workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
-    clearOverscroll();
   }
 
   function centerBoardAt(worldX: number, worldY: number): void {
@@ -831,105 +1286,6 @@
     const nextPanY = boardHeight / 2 - worldY * workflow.zoom;
     workflow.panBy(nextPanX - workflow.panX, nextPanY - workflow.panY);
     clampWorkflowPan();
-    clearOverscroll();
-  }
-
-  function clearOverscroll(): void {
-    if (overscrollIdleTimer) {
-      clearTimeout(overscrollIdleTimer);
-      overscrollIdleTimer = null;
-    }
-    if (overscrollEndTimer) {
-      clearTimeout(overscrollEndTimer);
-      overscrollEndTimer = null;
-    }
-    overscrollX = 0;
-    overscrollY = 0;
-    overscrollReturning = false;
-  }
-
-  function releaseOverscroll(): void {
-    if (overscrollIdleTimer) {
-      clearTimeout(overscrollIdleTimer);
-      overscrollIdleTimer = null;
-    }
-    if (overscrollX === 0 && overscrollY === 0) {
-      overscrollReturning = false;
-      return;
-    }
-    if (overscrollEndTimer) clearTimeout(overscrollEndTimer);
-    overscrollReturning = true;
-    overscrollX = 0;
-    overscrollY = 0;
-    overscrollEndTimer = setTimeout(() => {
-      overscrollReturning = false;
-      overscrollEndTimer = null;
-    }, 210);
-  }
-
-  function mapLinkStyle(connection: WorkflowConnection, map: WorkflowMapModel): string {
-    const source = outputPortPoint(connection.from, connection.sourcePortId);
-    const target = inputPortPoint(connection.to, connection.targetPortId);
-    if (!source || !target) return 'display:none';
-    const x1 = mapX(source.x, map);
-    const y1 = mapY(source.y, map);
-    const x2 = mapX(target.x, map);
-    const y2 = mapY(target.y, map);
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const length = Math.hypot(dx, dy);
-    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-    return `left:${x1}%; top:${y1}%; width:${length}%; transform:rotate(${angle}deg)`;
-  }
-
-  function centerBoardFromMap(event: PointerEvent, map: WorkflowMapModel): void {
-    const point = mapPoint(event, map);
-    if (!point) return;
-    centerBoardAt(point.x, point.y);
-  }
-
-  function mapPoint(event: PointerEvent, map: WorkflowMapModel): { x: number; y: number } | null {
-    if (!(event.currentTarget instanceof HTMLElement)) return null;
-    const rect = event.currentTarget.getBoundingClientRect();
-    return {
-      x: map.bounds.minX + ((event.clientX - rect.left) / rect.width) * map.bounds.width,
-      y: map.bounds.minY + ((event.clientY - rect.top) / rect.height) * map.bounds.height,
-    };
-  }
-
-  function rectContainsPoint(rect: WorkflowMapRect, point: { x: number; y: number }): boolean {
-    return point.x >= rect.x
-      && point.x <= rect.x + rect.width
-      && point.y >= rect.y
-      && point.y <= rect.y + rect.height;
-  }
-
-  function startMapDrag(event: PointerEvent, map: WorkflowMapModel): void {
-    if (!(event.currentTarget instanceof HTMLElement)) return;
-    const point = mapPoint(event, map);
-    if (!point) return;
-    event.preventDefault();
-    if (rectContainsPoint(map.viewport, point)) {
-      mapDragging = {
-        offsetX: point.x - map.viewport.x,
-        offsetY: point.y - map.viewport.y,
-      };
-      event.currentTarget.setPointerCapture(event.pointerId);
-      return;
-    }
-    centerBoardFromMap(event, map);
-  }
-
-  function moveMapDrag(event: PointerEvent, map: WorkflowMapModel): void {
-    if (!mapDragging) return;
-    const point = mapPoint(event, map);
-    if (!point) return;
-    clearOverscroll();
-    setViewportOrigin(point.x - mapDragging.offsetX, point.y - mapDragging.offsetY);
-  }
-
-  function stopMapDrag(): void {
-    mapDragging = null;
   }
 
   function workflowNodeRect(nodeId: WorkflowNodeId): { x: number; y: number; width: number; height: number } | null {
@@ -1003,12 +1359,6 @@
     })[0];
   }
 
-  async function closeNodePalette(): Promise<void> {
-    paletteOpen = false;
-    await tick();
-    paletteButton?.focus();
-  }
-
   async function addCreatorNodeFromPalette(type: CreatorNodeType): Promise<void> {
     const definition = creatorNodeDefinition(type);
     const preferred = {
@@ -1024,7 +1374,6 @@
     };
     const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, workflowMapItems(), 20, visibleBounds);
     const nodeId = workflow.addCreatorNode(type, position);
-    paletteOpen = false;
     if (!creatorNodeFitsPlacementBounds(position, definition.defaultSize, visibleBounds)) {
       centerBoardAt(
         position.x + definition.defaultSize.width / 2,
@@ -1069,6 +1418,7 @@
   function onBoardPointerDown(event: PointerEvent): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     if (event.button !== 0) return;
+    if (!(event.target instanceof Element) || !event.target.closest('article')) workflow.select(null);
     if (workflow.tool === 'zoom') {
       if (!boardEl) return;
       const rect = boardEl.getBoundingClientRect();
@@ -1105,10 +1455,6 @@
       workflow.select({ kind: 'output', id: node.id });
     }
     drawing = null;
-  }
-
-  function assetTitle(node: WorkflowAssetNode): string {
-    return `Asset - ${node.name || 'Untitled'}`;
   }
 
   function compositionTitle(): string {
@@ -2039,6 +2385,22 @@
     void promoteReviewCandidate(node.id);
   }
 
+  function workflowKeyboardShortcut(event: KeyboardEvent): void {
+    if (!isTypingTarget(event.target)
+      && (event.metaKey || event.ctrlKey)
+      && !event.altKey
+      && !event.shiftKey
+      && event.key.toLowerCase() === 'v') {
+      const nodeId = selectedAssetNodeId();
+      if (nodeId) {
+        event.preventDefault();
+        void pasteClipboardImage(nodeId);
+        return;
+      }
+    }
+    reviewKeyboardShortcut(event);
+  }
+
   async function promoteReviewCandidate(nodeId: string): Promise<void> {
     const candidate = selectedReviewCandidate(nodeId);
     if (!candidate || candidate.state !== 'eligible') return;
@@ -2146,9 +2508,15 @@
 </script>
 
 <svelte:window
+  onpointerdowncapture={(event) => {
+    if (assetPreviewMenu && event.target instanceof Element && !event.target.closest('.asset-preview-menu')) {
+      assetPreviewMenu = null;
+    }
+  }}
   onkeydown={(event) => {
     if (event.key === 'Alt') altDown = true;
-    reviewKeyboardShortcut(event);
+    if (event.key === 'Escape') assetPreviewMenu = null;
+    workflowKeyboardShortcut(event);
   }}
   onkeyup={(event) => {
     if (event.key === 'Alt') altDown = false;
@@ -2158,114 +2526,6 @@
 
 <section class="workflow-shell">
   <div class="workflow-main">
-    <aside class="asset-tray">
-      <div class="tray-head node-library">
-        <span>Nodes</span>
-        <div class="tray-head-actions">
-          {#if qaModeResolved && (qaMode === 'provider-free' || desktop)}
-            <button
-              type="button"
-              aria-label="Revise current workflow"
-              aria-haspopup="dialog"
-              use:tooltip={{
-                text: `Revise current workflow · ${qaMode === 'provider-free' ? 'QA Fake' : runOptions.directorProvider}`,
-                placement: 'right',
-              }}
-              onclick={openRevisionDirector}
-            >
-              <Icon svg={ArrowSync} size={14} />
-            </button>
-          {/if}
-          <button
-            type="button"
-            aria-label="Draft with AI Director"
-            aria-haspopup="dialog"
-            use:tooltip={{ text: 'Draft with AI Director', placement: 'right' }}
-            onclick={() => (directorOpen = true)}
-          >
-            <Icon svg={Sparkle} size={14} />
-          </button>
-          <button
-            bind:this={paletteButton}
-            type="button"
-            aria-label="Add workflow node"
-            aria-haspopup="dialog"
-            aria-expanded={paletteOpen}
-            use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
-            onclick={() => (paletteOpen = !paletteOpen)}
-          >
-            <Icon svg={Add} size={14} />
-          </button>
-        </div>
-      </div>
-      {#if paletteOpen}
-        <WorkflowNodePalette
-          onAdd={(type) => void addCreatorNodeFromPalette(type)}
-          onClose={() => void closeNodePalette()}
-        />
-      {/if}
-      <div class="tray-head">
-        <span>Assets</span>
-        <button
-          aria-label="Refresh workflow assets and Review verification"
-          use:tooltip={{ text: 'Refresh workflow assets and Review verification', placement: 'right' }}
-          onclick={() => void refreshWorkflowAssetsAndReview()}
-        >
-          <Icon svg={ArrowSync} size={14} />
-        </button>
-      </div>
-      {#if !project.path}
-        <p class="empty">Open a project folder to use generated and imported assets.</p>
-      {:else}
-        <div class="asset-list">
-          {#each assets as asset (asset.id)}
-            <button class="asset-item" onclick={() => workflow.addAsset(asset)}>
-              {#if asset.previewDataUrl}<img src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={20} />{/if}
-              <span>{asset.name}</span>
-              <Icon svg={Add} size={14} />
-            </button>
-          {/each}
-        </div>
-      {/if}
-
-      <div class="tray-head workflows">
-        <span>Map</span>
-      </div>
-      <div class="workflow-map">
-        <button
-          class="workflow-map-canvas"
-          class:dragging={mapDragging}
-          aria-label="Workflow map. Drag the viewport frame or click to center the workflow canvas."
-          onpointerdown={(event) => startMapDrag(event, workflowMapModel)}
-          onpointermove={(event) => moveMapDrag(event, workflowMapModel)}
-          onpointerup={stopMapDrag}
-          onpointercancel={stopMapDrag}
-        >
-          {#each graphConnections as connection (connection.id)}
-            <span class="map-link" style={mapLinkStyle(connection, workflowMapModel)}></span>
-          {/each}
-          {#each workflowMapModel.items as item (item.id)}
-            <span
-              class="map-node"
-              class:asset={item.kind === 'asset'}
-              class:brief={item.kind === 'brief'}
-              class:composition={item.kind === 'composition'}
-              class:creator={item.kind === 'creator'}
-              class:output={item.kind === 'output'}
-              class:unsupported={item.kind === 'unsupported'}
-              class:included={item.included}
-              style={mapRectStyle(item, workflowMapModel)}
-            ></span>
-          {/each}
-          <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
-        </button>
-        <div class="map-meta">
-          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + 1 + workflow.outputNodes.length} nodes</span>
-          <span>{Math.round(workflow.zoom * 100)}%</span>
-        </div>
-      </div>
-    </aside>
-
     <div
       class="board"
       class:adding={workflow.tool !== 'hand' && workflow.tool !== 'zoom'}
@@ -2273,13 +2533,12 @@
       class:zooming={workflow.tool === 'zoom'}
       class:zoom-in={workflow.tool === 'zoom' && effectiveZoomMode === 'in'}
       class:zoom-out={workflow.tool === 'zoom' && effectiveZoomMode === 'out'}
-      class:overscrolling={overscrollReturning}
       role="application"
       aria-label="Workflow composition board"
       tabindex="-1"
       data-workflow-board
       bind:this={boardEl}
-      style={`background-position:${workflow.panX + overscrollX}px ${workflow.panY + overscrollY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
+      style={`background-position:${workflow.panX}px ${workflow.panY}px; background-size:${24 * workflow.zoom}px ${24 * workflow.zoom}px`}
       onpointerdown={onBoardPointerDown}
       onpointerleave={onPointerLeave}
       onpointermove={onPointerMove}
@@ -2289,7 +2548,7 @@
       {#if workflow.connectionError}
         <p class="connection-error" role="status" aria-live="polite">{workflow.connectionError}</p>
       {/if}
-      <div class="board-world" style={`transform:translate(${workflow.panX + overscrollX}px, ${workflow.panY + overscrollY}px) scale(${workflow.zoom})`}>
+      <div class="board-world" style={`transform:translate(${workflow.panX}px, ${workflow.panY}px) scale(${workflow.zoom})`}>
         <svg class="links" aria-label="Workflow connections">
           {#each graphConnections as connection (connection.id)}
             {@const path = connectionPath(connection)}
@@ -2327,6 +2586,7 @@
 
         {#each workflow.nodes as node (node.id)}
           {@const asset = assetFor(node)}
+          {@const oraDocument = oraFor(node)}
           {@const ports = workflowNodePorts(node.id)}
           <article
             class="asset-node"
@@ -2352,7 +2612,11 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
-                {assetTitle(node)}
+                <WorkflowNodeTitle
+                  name={node.name}
+                  typeLabel="Asset"
+                  fallback="Untitled"
+                />
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
               </span>
               <div class="node-tools">
@@ -2385,24 +2649,60 @@
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="specialized-node-body asset-node-body">
-              <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
-                {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+              <div
+                class="node-preview"
+                class:can-paste={!asset && !oraDocument}
+                style={`height:${Math.max(64, node.height - 150)}px`}
+                role="button"
+                tabindex="0"
+                aria-haspopup="menu"
+                aria-label={`Image preview for ${node.name}. Right-click to paste an image.`}
+                oncontextmenu={(event) => openAssetPreviewMenu(event, node.id)}
+                onkeydown={(event) => {
+                  if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  showAssetPreviewMenu(node.id, rect.left + 20, rect.top + 20);
+                }}
+              >
+                {#if (asset?.previewDataUrl ?? oraDocument?.previewDataUrl)}
+                  <img class="preview-image" src={asset?.previewDataUrl ?? oraDocument?.previewDataUrl ?? ''} alt="" />
+                {:else}
+                  <span class="paste-placeholder"><Icon svg={Image} size={28} /><small>Right-click or ⌘V to paste</small></span>
+                {/if}
               </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
                 <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
                 <select
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
-                  value={asset?.id ?? ''}
-                  onchange={(event) => workflow.assignAsset(
-                    node.id,
-                    assets.find((item) => item.id === event.currentTarget.value) ?? null,
-                  )}
+                  value={asset ? `asset:${asset.id}` : oraDocument ? `ora:${oraDocument.relativePath}` : ''}
+                  onchange={(event) => void assignWorkflowAsset(node.id, event.currentTarget.value)}
                 >
                   <option value="">Choose from project…</option>
-                  {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+                  {#if extractionQuickLinks().some((link) => assets.some((item) => item.id === link.id))}
+                    <optgroup label="Extract Assets results">
+                      {#each extractionQuickLinks().filter((link) => assets.some((item) => item.id === link.id)) as option (option.id)}
+                        <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
+                      {/each}
+                    </optgroup>
+                  {/if}
+                  <optgroup label="Project assets">
+                  {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
+                  </optgroup>
+                  {#if oraDocuments.length > 0}
+                    <optgroup label="OpenRaster documents">
+                      {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
+                    </optgroup>
+                  {/if}
                 </select>
-                <small aria-live="polite">{asset ? `Selected ${asset.name}` : 'No asset selected'}</small>
+                <small aria-live="polite">
+                  {asset
+                    ? `Selected ${asset.name}`
+                    : oraDocument
+                      ? `${oraDocument.name}${node.oraRelativePath && workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation') ? ' · annotation output available' : ''}`
+                      : 'No asset selected'}
+                </small>
               </label>
               <textarea
                 aria-label={`Role for ${node.name}`}
@@ -2419,6 +2719,7 @@
 
         {#each workflow.briefNodes as brief (brief.id)}
           {@const ports = workflowNodePorts(brief.id)}
+          {@const briefGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === brief.id)}
           <article
             class="brief-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === brief.id}
@@ -2441,12 +2742,14 @@
               onFinish={(event, portId) => finishConnection(event, brief.id, portId)}
             />
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
-              <small>{briefCreatorDefinition.label}</small>
+              <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>
+                <WorkflowNodeTitle name={brief.name} typeLabel={briefCreatorDefinition.label} />
+              </span>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
               <p>{brief.guidance}</p>
+              {#if briefGraphNode}<WorkflowNodeAiOptions node={briefGraphNode} />{/if}
               <textarea
                 aria-label={`${brief.name} objective`}
                 placeholder="Outcome, audience, and non-negotiables…"
@@ -2461,6 +2764,9 @@
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
+          {@const extractionResults = extractedAssetLinks(node.config)}
+          {@const extractionState = assetExtractionStates[node.id]}
+          {@const creatorGraphNode = workflow.graphSnapshot().nodes.find((item) => item.id === node.id)}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -2485,8 +2791,7 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node }}>
-                {node.name}
-                <small>{definition.label}</small>
+                <WorkflowNodeTitle name={node.name} typeLabel={definition.label} />
               </span>
               <div class="node-tools">
                 <button
@@ -2504,6 +2809,7 @@
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>{definition.description}</p>
+              {#if creatorGraphNode}<WorkflowNodeAiOptions node={creatorGraphNode} />{/if}
               {#if node.type === 'art-direction'}
                 <label class="creator-config-field">
                   Direction prompt
@@ -2513,6 +2819,71 @@
                     oninput={(event) => workflow.configureCreatorNode(node.id, { prompt: event.currentTarget.value })}
                   ></textarea>
                 </label>
+              {:else if node.type === 'extract-assets'}
+                <div class="extract-asset-summary">
+                  <Icon svg={ImageMultiple} size={16} />
+                  <span>
+                    {extractionConnectedCount(node.id, 'sources')} source ·
+                    {extractionConnectedCount(node.id, 'support')} support
+                  </span>
+                </div>
+                <label class="creator-config-field">
+                  Extraction guidance
+                  <textarea
+                    aria-label={`${node.name} extraction guidance`}
+                    placeholder="What to extract, refine, or reconstruct…"
+                    value={creatorConfigString(node.config, 'prompt')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { prompt: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+                <div class="extract-mode-row">
+                  <label>
+                    Mode
+                    <select
+                      aria-label={`${node.name} extraction mode`}
+                      value={node.config.mode === 'fast' ? 'fast' : 'quality'}
+                      onchange={(event) => workflow.configureCreatorNode(node.id, { mode: event.currentTarget.value })}
+                    >
+                      <option value="quality">Quality · one file per object</option>
+                      <option value="fast">Fast · crop an index sheet</option>
+                    </select>
+                  </label>
+                  {#if node.config.mode === 'fast'}
+                    <label>
+                      Assets per sheet
+                      <select
+                        aria-label={`${node.name} assets per index sheet`}
+                        value={String(node.config.assetsPerSheet ?? 4)}
+                        onchange={(event) => workflow.configureCreatorNode(node.id, { assetsPerSheet: Number(event.currentTarget.value) })}
+                      >
+                        <option value="1">1 per sheet</option>
+                        <option value="2">2 per sheet</option>
+                        <option value="4">4 per sheet</option>
+                        <option value="8">8 per sheet</option>
+                      </select>
+                    </label>
+                  {/if}
+                </div>
+                <button
+                  type="button"
+                  class="extract-run"
+                  disabled={!!extractionState?.running || extractionConnectedCount(node.id, 'sources') === 0 || !project.path}
+                  onclick={() => void runAssetExtraction(node.id)}
+                >{extractionState?.running ? extractionState.message : 'Extract assets'}</button>
+                {#if extractionState?.error}<p class="extract-error" role="alert">{extractionState.error}</p>{/if}
+                {#if !extractionState?.running && extractionState?.message}<p class="extract-status" aria-live="polite">{extractionState.message}</p>{/if}
+                {#if extractionResults.length > 0}
+                  <div class="extract-results" aria-label="Extracted asset results">
+                    <strong>Results</strong>
+                    {#each extractionResults as result (result.id)}
+                      {@const resultAsset = assets.find((asset) => asset.id === result.id)}
+                      <span>
+                        {#if resultAsset?.previewDataUrl}<img src={resultAsset.previewDataUrl} alt="" />{/if}
+                        {result.name}
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
               {:else if node.type === 'transform'}
                 <label class="creator-config-field">
                   Capability
@@ -2545,7 +2916,7 @@
                     onchange={(event) => workflow.configureCreatorNode(node.id, { mode: event.currentTarget.value })}
                   >
                     <option value="human">Human review</option>
-                    <option value="ai">AI-assisted review (draft)</option>
+                    <option value="ai">AI-assisted review</option>
                   </select>
                 </label>
                 <label class="creator-config-field">
@@ -2559,6 +2930,7 @@
                 {@const reviewCandidates = workflow.reviewCandidates(node.id, assets, true, project.identity)}
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
                 {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
+                {@const aiRecommendation = workflow.reviewRecommendation(node.id)}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
                   <p class="review-keyboard-hint">Keyboard: R focuses candidates; P promotes the selected eligible candidate. F7/F8 and Alt+R/Ctrl+Enter are also available.</p>
                   <button
@@ -2571,6 +2943,23 @@
                       ? `Promoted Candidate ${reviewCandidates.find((candidate) => candidate.candidateId === reviewResolution.promotion.candidateId)?.ordinal ?? ''}`
                       : reviewResolution.reason.message}
                   </p>
+                  {#if aiReviewMessages[node.id]?.message}
+                    <p class="ai-review-status" role="status">{aiReviewMessages[node.id].message}</p>
+                  {/if}
+                  {#if aiReviewMessages[node.id]?.error}
+                    <p class="ai-review-status failed" role="alert">{aiReviewMessages[node.id].error}</p>
+                  {/if}
+                  {#if aiRecommendation.state === 'ready'}
+                    <div class="ai-review-recommendation" aria-label="AI Review recommendation">
+                      <strong>AI recommendation · {aiRecommendation.recommendation.provider.id}</strong>
+                      {#each aiRecommendation.recommendation.rankings as ranking}
+                        <p><b>#{ranking.rank}</b> {reviewCandidates.find((candidate) => candidate.candidateId === ranking.candidateId)?.ordinal ?? ranking.candidateId}: {ranking.reason}</p>
+                      {/each}
+                      <small>Recommendation only. Select and promote a candidate yourself.</small>
+                    </div>
+                  {:else if aiRecommendation.state === 'stale'}
+                    <p class="ai-review-status failed">Saved AI recommendation is stale: {aiRecommendation.reason}</p>
+                  {/if}
                   {#if reviewResolution.state === 'ready'}
                     <button
                       type="button"
@@ -2600,7 +2989,7 @@
                         tabindex={candidate.candidateId === reviewCandidate?.candidateId ? 0 : -1}
                         data-candidate-state={candidate.state}
                         onclick={() => { selectedReviewCandidates[node.id] = candidate.candidateId; }}
-                      >Candidate {candidate.ordinal} · {candidate.state}</button>
+                      >Candidate {candidate.ordinal} · {candidate.state}{aiRecommendation.state === 'ready' && aiRecommendation.recommendation.recommendedCandidateId === candidate.candidateId ? ' · recommended' : ''}</button>
                     {/each}
                   </div>
                   {#if reviewCandidate}
@@ -2659,7 +3048,7 @@
                   {/each}
                 </div>
               {/if}
-              {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+              {#if node.type === 'transform' && definition.executor.status === 'available'}
                 {#if acceptedEditorResult}
                   <button
                     type="button"
@@ -2771,11 +3160,6 @@
                     </div>
                   {/each}
                 </section>
-              {:else if node.type === 'transform' && definition.executor.status === 'available'}
-                <p class="draft-reason" id={`draft-reason-${node.id}`}>
-                  Only the Generate capability is executable in this slice. Configure this Transform as Generate to run it.
-                </p>
-                <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
               {/if}
               {#if definition.executor.status === 'draft-only' && node.type !== 'review'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
@@ -2800,8 +3184,9 @@
             }}
           >
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>{node.name}</span>
-              <small>Unsupported</small>
+              <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>
+                <WorkflowNodeTitle name={node.name} typeLabel="Unsupported" />
+              </span>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
@@ -2820,6 +3205,8 @@
           </article>
         {/each}
 
+        {#if hasCompositionNode}
+        {@const compositionGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === 'composition')}
         <article
           class="prompt-node"
           class:selected={workflow.selection?.kind === 'composition'}
@@ -2842,12 +3229,19 @@
             onFinish={(event, portId) => finishConnection(event, 'composition', portId)}
           />
           <div class="node-head">
-            <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
+            <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>
+              <WorkflowNodeTitle
+                name={workflow.compositionName || 'Composition'}
+                typeLabel="Composition"
+                fallback="Composition"
+              />
+            </span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
           </div>
           <WorkflowNodePreflight entry={preflightForNode('composition')} />
+          {#if compositionGraphNode}<div class="composition-summary"><WorkflowNodeAiOptions node={compositionGraphNode} /></div>{/if}
           <div
             class="storyboard"
             class:editing={workflow.storyboardEditing}
@@ -2967,39 +3361,21 @@
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if !providerSelection.qaFake && imageProvider === 'antigravity'}
-            <label>
-              <span>Antigravity auth helper</span>
-              <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
-            </label>
+          {#if providerSelection.qaFake}
+            <div class="composition-ai-options qa-fake-banner" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+              <div role="status"><strong>QA Fake</strong><span>Deterministic provider-free output. No AI provider or authentication is used.</span></div>
+              <label>
+                <span>Native QA scenario</span>
+                <select aria-label="QA Fake scenario" value={qaScenario} onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}>
+                  <option value="success">Standard checkpoint</option>
+                  <option value="slow-success">Slow / cancellable</option>
+                  <option value="failure">Failure / retry</option>
+                  <option value="branch-one-failure">Branch recovery checkpoint</option>
+                  <option value="format-recovery-checkpoint">Format recovery checkpoint</option>
+                </select>
+              </label>
+            </div>
           {/if}
-          <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
-            {#if providerSelection.qaFake}
-              <div class="qa-fake-banner">
-                <div role="status">
-                  <strong>QA Fake</strong>
-                  <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
-                </div>
-                <label>
-                  <span>Native QA scenario</span>
-                  <select
-                    aria-label="QA Fake scenario"
-                    disabled={busy || selectiveUiState.busy}
-                    value={qaScenario}
-                    onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}
-                  >
-                    <option value="success">Standard checkpoint</option>
-                    <option value="slow-success">Slow / cancellable</option>
-                    <option value="failure">Failure / retry</option>
-                    <option value="branch-one-failure">Branch recovery checkpoint</option>
-                    <option value="format-recovery-checkpoint">Format recovery checkpoint</option>
-                  </select>
-                </label>
-              </div>
-            {:else}
-              <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveUiState.busy || !providerSelection.ready} />
-            {/if}
-          </div>
           {#if reviewVerificationState.status === 'verifying' || reviewVerificationState.status === 'failed'}
             <div
               class:failed={reviewVerificationState.status === 'failed'}
@@ -3039,6 +3415,7 @@
           {/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
+        {/if}
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
@@ -3067,7 +3444,13 @@
               onFinish={(event, portId) => finishConnection(event, outputNode.id, portId)}
             />
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
+              <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>
+                <WorkflowNodeTitle
+                  name={outputNode.name}
+                  typeLabel="Output"
+                  fallback="Untitled"
+                />
+              </span>
               <div class="node-tools">
                 <button
                   type="button"
@@ -3146,11 +3529,34 @@
 {#if revisionDirectorOpen && revisionDirectorRequester}
   <WorkflowDirectorRevisionDialog
     requester={revisionDirectorRequester}
+    initialInstruction={revisionDirectorInstruction}
+    title={revisionDirectorTitle}
     onClose={() => {
       revisionDirectorOpen = false;
       revisionDirectorRequester = null;
     }}
   />
+{/if}
+
+{#if assetPreviewMenu}
+  <div
+    class="asset-preview-menu"
+    style={`left:${assetPreviewMenu.x}px;top:${assetPreviewMenu.y}px`}
+    role="menu"
+    tabindex="-1"
+    aria-label="Visual Input image actions"
+    onpointerdown={(event) => event.stopPropagation()}
+  >
+    <button
+      type="button"
+      role="menuitem"
+      disabled={clipboardImporting || !desktop || !project.path}
+      onclick={() => void pasteClipboardImage(assetPreviewMenu!.nodeId)}
+    >
+      <span>{clipboardImporting ? 'Pasting image…' : 'Paste image'}</span><kbd>⌘V</kbd>
+    </button>
+    {#if !desktop}<small>Available in the PaintNode desktop app.</small>{:else if !project.path}<small>Open a project folder first.</small>{/if}
+  </div>
 {/if}
 
 <style>
@@ -3173,166 +3579,18 @@
     flex: 1;
     min-height: 0;
   }
-  .asset-tray {
-    position: relative;
-    width: 248px;
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-right: 1px solid var(--border);
-    background: var(--bg-panel);
-  }
-  .tray-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex: none;
-    padding: 8px;
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-  .tray-head-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .workflows {
-    border-top: 1px solid var(--border);
-  }
-  .node-library {
-    border-bottom: 1px solid var(--border);
-  }
-  .asset-list {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    overflow: auto;
-    padding: 0 8px 8px;
-  }
-  .asset-item {
-    display: grid;
-    grid-template-columns: 34px minmax(0, 1fr) 16px;
-    align-items: center;
-    gap: 7px;
-    width: 100%;
-    padding: 5px;
-    text-align: left;
-  }
-  .asset-item img {
-    width: 34px;
-    height: 34px;
-    object-fit: cover;
-    background: var(--bg-input);
-  }
-  .asset-item span,
+  .composition-summary { margin: 8px; }
   .node-head span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .workflow-map {
-    flex: none;
-    display: grid;
-    gap: 6px;
-    padding: 0 8px 10px;
-  }
-  .workflow-map-canvas {
-    position: relative;
-    display: block;
-    width: 100%;
-    aspect-ratio: 1;
-    min-height: 148px;
-    padding: 0;
-    overflow: hidden;
-    border: 1px solid #3b3d41;
-    border-radius: 6px;
-    background:
-      linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
-    background-color: #202225;
-    background-size: 18px 18px;
-    cursor: grab;
-    touch-action: none;
-  }
-  .workflow-map-canvas:hover {
-    border-color: color-mix(in srgb, var(--accent) 50%, #3b3d41);
-  }
-  .workflow-map-canvas.dragging {
-    cursor: grabbing;
-  }
-  .map-node,
-  .map-viewport,
-  .map-link {
-    position: absolute;
-    display: block;
-    pointer-events: none;
-  }
-  .map-node {
-    border: 1px solid color-mix(in srgb, var(--mini-color) 58%, #65686f);
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--mini-color) 40%, #4b4d52);
-    opacity: 0.78;
-  }
-  .map-node.asset:not(.included) {
-    opacity: 0.38;
-  }
-  .map-node.composition {
-    background: color-mix(in srgb, var(--accent) 28%, #4b4d52);
-    border-color: color-mix(in srgb, var(--accent) 65%, #65686f);
-  }
-  .map-node.brief {
-    background: color-mix(in srgb, #a77ad1 30%, #4b4d52);
-    border-color: color-mix(in srgb, #a77ad1 68%, #65686f);
-  }
-  .map-node.creator {
-    background: color-mix(in srgb, #59a2c8 28%, #4b4d52);
-    border-color: color-mix(in srgb, #59a2c8 64%, #65686f);
-  }
-  .map-node.unsupported {
-    border-style: dashed;
-    background: color-mix(in srgb, #d08b67 22%, #4b4d52);
-    border-color: color-mix(in srgb, #d08b67 65%, #65686f);
-  }
-  .map-node.output {
-    background: color-mix(in srgb, #6b7cff 28%, #4b4d52);
-  }
-  .map-viewport {
-    border: 2px solid var(--accent);
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-    box-shadow:
-      0 0 0 1px rgba(0, 0, 0, 0.35),
-      0 0 10px color-mix(in srgb, var(--accent) 32%, transparent);
-  }
-  .map-link {
-    height: 1px;
-    transform-origin: 0 50%;
-    border-top: 1px solid color-mix(in srgb, var(--accent) 72%, transparent);
-    opacity: 0.66;
-  }
-  .map-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    color: var(--text-dim);
-    font-size: 11px;
-  }
-  .empty,
   .err,
   .progress {
     margin: 8px;
     color: var(--text-dim);
     font-size: 12px;
     line-height: 1.4;
-  }
-  .asset-tray > .empty {
-    flex: 1 1 auto;
-    min-height: 0;
   }
   .err {
     color: #ffb0b0;
@@ -3366,17 +3624,11 @@
   .board.zooming.zoom-out {
     cursor: zoom-out;
   }
-  .board.overscrolling {
-    transition: background-position 210ms cubic-bezier(0.2, 0.9, 0.28, 1);
-  }
   .board-world {
     position: absolute;
     inset: 0;
     transform-origin: top left;
     will-change: transform;
-  }
-  .board.overscrolling .board-world {
-    transition: transform 210ms cubic-bezier(0.2, 0.9, 0.28, 1);
   }
   .links {
     position: absolute;
@@ -3477,10 +3729,7 @@
     flex: 1 1 auto;
     cursor: grab;
   }
-  .node-drag-region small,
-  .brief-node .node-head small,
-  .creator-node .node-head small,
-  .unsupported-node .node-head small {
+  .node-drag-region small {
     margin-left: 7px;
     color: var(--text-dim);
     font-size: 9px;
@@ -3558,6 +3807,53 @@
     object-fit: contain;
     object-position: center;
   }
+  .node-preview.can-paste {
+    cursor: context-menu;
+  }
+  .paste-placeholder {
+    display: grid;
+    place-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    text-align: center;
+  }
+  .paste-placeholder small {
+    font-size: 9px;
+  }
+  .asset-preview-menu {
+    position: fixed;
+    z-index: 1200;
+    display: grid;
+    min-width: 202px;
+    padding: 4px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 10px 26px rgb(0 0 0 / 35%);
+  }
+  .asset-preview-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    width: 100%;
+    padding: 6px 8px;
+    border-color: transparent;
+    background: transparent;
+    text-align: left;
+  }
+  .asset-preview-menu button:not(:disabled):hover {
+    background: var(--accent);
+  }
+  .asset-preview-menu kbd {
+    color: var(--text-dim);
+    font: inherit;
+  }
+  .asset-preview-menu small {
+    padding: 3px 8px 5px;
+    color: var(--text-dim);
+    font-size: 10px;
+  }
   .asset-node textarea,
   .brief-node textarea,
   .prompt-node textarea {
@@ -3630,6 +3926,71 @@
   .creator-config-field textarea {
     min-height: 54px;
     resize: none;
+  }
+  .extract-asset-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-bright);
+  }
+  .extract-run {
+    min-width: 0;
+    padding: 4px 6px;
+    font-size: 9px;
+  }
+  .extract-mode-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .extract-mode-row label {
+    display: grid;
+    gap: 3px;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .extract-mode-row select {
+    width: 100%;
+    min-width: 0;
+    font-size: 9px;
+  }
+  .extract-error,
+  .extract-status {
+    padding: 5px;
+    border-radius: 4px;
+  }
+  .extract-error {
+    background: color-mix(in srgb, #e35b5b 12%, transparent);
+    color: #ffb7b7;
+  }
+  .extract-status {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--text);
+  }
+  .extract-results {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .extract-results strong {
+    grid-column: 1 / -1;
+    color: var(--text-bright);
+  }
+  .extract-results span {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .extract-results img {
+    width: 24px;
+    height: 24px;
+    flex: none;
+    border-radius: 3px;
+    object-fit: cover;
   }
   .asset-node textarea,
   .brief-node textarea {
@@ -3713,6 +4074,21 @@
     padding-top: 8px;
     border-top: 1px solid var(--border);
   }
+
+  .ai-review-status,
+  .ai-review-recommendation {
+    margin: 0;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .ai-review-status.failed { border-color: #805356; color: #ffb7b7; }
+  .ai-review-recommendation { display: grid; gap: 4px; }
+  .ai-review-recommendation p { margin: 0; }
 
   .review-candidate-tabs {
     display: flex;

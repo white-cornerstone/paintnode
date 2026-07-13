@@ -9,7 +9,7 @@ import {
 import { creatorNodeDefinition } from './registry';
 
 const cases: Array<[WorkflowTemplateId, string, number]> = [
-  ['blank', 'Blank Workflow', 1],
+  ['blank', 'Blank Workflow', 0],
   ['asset-composition', 'Asset Composition', 1],
   ['campaign-composer', 'Campaign Composer', 3],
 ];
@@ -25,7 +25,7 @@ function goldenHash(value: string): string {
 
 describe('workflow templates', () => {
   it.each([
-    ['blank', '05ec353fb4ef34ad'],
+    ['blank', '8b988e92a66fe9ed'],
     ['asset-composition', 'ff5fdd72010519eb'],
     ['campaign-composer', 'e838d7818d9d9865'],
   ] as const)('keeps the exact persisted v2 golden for %s', (id, expectedHash) => {
@@ -44,8 +44,8 @@ describe('workflow templates', () => {
     expect(first).not.toBe(second);
     expect(first.version).toBe(2);
     expect(first.metadata).toEqual({ name: defaultName, sourceVersion: null, migrations: [] });
-    expect(first.nodes.filter((node) => node.type === 'brief')).toHaveLength(1);
-    expect(first.nodes.filter((node) => node.type === 'art-direction')).toHaveLength(1);
+    expect(first.nodes.filter((node) => node.type === 'brief')).toHaveLength(id === 'blank' ? 0 : 1);
+    expect(first.nodes.filter((node) => node.type === 'art-direction')).toHaveLength(id === 'blank' ? 0 : 1);
     expect(first.nodes.filter((node) => node.type === 'output')).toHaveLength(outputCount);
     expect(first.nodes.filter((node) => node.type === 'transform')).toHaveLength(id === 'campaign-composer' ? 3 : 0);
     expect(first.nodes.filter((node) => node.type === 'review')).toHaveLength(id === 'campaign-composer' ? 1 : 0);
@@ -86,9 +86,8 @@ describe('workflow templates', () => {
     const composition = instantiateWorkflowTemplate('asset-composition');
     const campaign = instantiateWorkflowTemplate('campaign-composer');
 
-    expect(blank.nodes.filter((node) => node.type === 'input').map((node) => node.title)).toEqual([
-      'Primary Image',
-    ]);
+    expect(blank.nodes).toEqual([]);
+    expect(blank.edges).toEqual([]);
     expect(composition.nodes.filter((node) => node.type === 'input').map((node) => [node.title, node.config.required])).toEqual([
       ['Subject', true],
       ['Background', false],
@@ -122,18 +121,22 @@ describe('workflow templates', () => {
       const domain = new WorkflowGraphDomain(graph);
       expect(graph.metadata.name).toBe(`Test ${definition.name}`);
       expect(domain.graph.edges).toHaveLength(
-        graph.nodes.filter((node) => node.type === 'input').length
-          + 1
-          + definition.outputs.length
-          + (definition.id === 'campaign-composer' ? 4 : 0),
+        definition.id === 'blank'
+          ? 0
+          : graph.nodes.filter((node) => node.type === 'input').length
+            + 1
+            + definition.outputs.length
+            + (definition.id === 'campaign-composer' ? 4 : 0),
       );
-      expect(domain.graph.nodes.find((node) => node.type === 'brief')?.ports.outputs).toEqual([
-        { id: 'prompt', label: 'Brief', dataType: 'prompt' },
-      ]);
-      expect(domain.graph.nodes.find((node) => node.type === 'art-direction')?.ports.inputs).toEqual([
-        { id: 'assets', label: 'Visual inputs', dataType: 'asset-reference', multiple: true },
-        { id: 'brief', label: 'Brief', dataType: 'prompt', required: true },
-      ]);
+      if (definition.id !== 'blank') {
+        expect(domain.graph.nodes.find((node) => node.type === 'brief')?.ports.outputs).toEqual([
+          { id: 'prompt', label: 'Brief', dataType: 'prompt' },
+        ]);
+        expect(domain.graph.nodes.find((node) => node.type === 'art-direction')?.ports.inputs).toEqual([
+          { id: 'assets', label: 'Visual inputs', dataType: 'asset-reference', multiple: true },
+          { id: 'brief', label: 'Brief', dataType: 'prompt', required: true },
+        ]);
+      }
       for (const node of graph.nodes) {
         const definition = creatorNodeDefinition(node.type as Exclude<typeof node.type, 'unsupported'>);
         expect(node.ports.inputs.map(({ id, dataType }) => ({ id, dataType }))).toEqual(

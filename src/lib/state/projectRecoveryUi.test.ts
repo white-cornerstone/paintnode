@@ -16,9 +16,12 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain("event.code === 'KeyW' && workflowFiles.length");
   });
 
-  it('distinguishes layer placement from candidate inspection and requires an image document', () => {
+  it('routes project assets to the active surface and only requires a document for layer placement', () => {
     expect(projectPanelSource).toContain("'Place as layer'");
-    expect(projectPanelSource).toContain("disabled={actionLabel === 'Place' && !editor.doc}");
+    expect(projectPanelSource).toContain("'Add to workflow'");
+    expect(projectPanelSource).toContain('const canUsePlaceActions = $derived(!!editor.doc || workflowBoardActive)');
+    expect(projectPanelSource).toContain("disabled={actionLabel === 'Place' && !canUsePlaceActions}");
+    expect(projectPanelSource).toContain('workflow.addAsset(asset)');
   });
 
   it('offers a guarded keyboard path to place the latest saved workflow edit after restart', () => {
@@ -29,11 +32,11 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain('placeLatestWorkflowEdit()');
   });
 
-  it('prevents dirty generated workflow state from being replaced by an older saved file', () => {
+  it('guards workflow replacement and routes tab close through the save confirmation command', () => {
     expect(projectPanelSource).toContain('workflow.active && workflow.dirty');
     expect(projectPanelSource).toContain('Save it before opening another saved workflow.');
     expect(projectPanelSource).toContain('workflow.savedPath === file.relativePath');
-    expect(documentTabsSource).toContain('if (workflow.dirty)');
-    expect(documentTabsSource).toContain('generated candidates and outputs are preserved');
+    expect(documentTabsSource).toContain('closeWorkflowCommand');
+    expect(documentTabsSource).not.toContain('if (workflow.dirty)');
   });
 });

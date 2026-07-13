@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import { tooltip } from '../../actions/tooltip';
-  import { CheckmarkCircle, Dismiss, Document, Image, Open, PaintBrush, Sparkle } from '../../icons';
+  import { CheckmarkCircle, Dismiss, Document, Image, ImageMultiple, Open, PaintBrush, Sparkle } from '../../icons';
   import {
     filterCreatorNodeDefinitions,
     paletteIndexAfterKey,
@@ -33,6 +33,7 @@
 
   function iconFor(key: CreatorNodeIconKey): string {
     if (key === 'image') return Image;
+    if (key === 'image-multiple') return ImageMultiple;
     if (key === 'document') return Document;
     if (key === 'paint-brush') return PaintBrush;
     if (key === 'sparkle') return Sparkle;
@@ -128,6 +129,7 @@
     border-radius: 6px;
     background: var(--bg-panel);
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42);
+    white-space: normal;
   }
   header {
     display: flex;
@@ -152,6 +154,7 @@
   }
   .node-options {
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
   }
   .node-options button {
@@ -183,6 +186,7 @@
     color: var(--text-dim);
     font-size: 10px;
     line-height: 1.25;
+    overflow-wrap: anywhere;
   }
   .node-options em {
     justify-self: start;

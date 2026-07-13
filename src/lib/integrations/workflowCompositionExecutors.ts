@@ -2,11 +2,18 @@ import {
   composeAntigravityWorkflow,
   composeCodexWorkflow,
   composeGrokWorkflow,
+  generateAntigravityRetouchImage,
+  generateCodexRetouchImage,
+  generateGrokRetouchImage,
+  upscaleAntigravityImage,
+  upscaleCodexImage,
+  upscaleGrokImage,
   type AntigravityGeneratorConfig,
   type CodexGeneratorConfig,
   type GeneratedImageResult,
   type GrokGeneratorConfig,
 } from './desktop';
+import { bytesToBitmap, canvasToPngBytes } from '../io';
 import { listen } from '@tauri-apps/api/event';
 import {
   createWorkflowCompositionExecutor,
@@ -100,17 +107,21 @@ function codexConfigForRequest(
   request: Readonly<WorkflowTransformExecutionRequest>,
 ): CodexGeneratorConfig {
   const advanced = request.transform.advanced;
+  const director = request.transform.ai?.director;
+  const image = request.transform.ai?.image;
   const options = record(advanced.options);
   return {
     ...config,
-    model: stringOverride(advanced.model, config.model),
+    model: stringOverride(director?.provider === 'codex' ? director.model : advanced.model, config.model),
     reasoningEffort: stringOverride(options.reasoningEffort, config.reasoningEffort),
     serviceTier: stringOverride(options.serviceTier, config.serviceTier),
-    imageQuality: stringOverride(options.imageQuality, config.imageQuality),
-    imageModeration: stringOverride(options.imageModeration, config.imageModeration),
     autonomyLevel: stringOverride(options.autonomyLevel, config.autonomyLevel),
     editChecksLevel: numberOverride(options.editChecksLevel, config.editChecksLevel),
-    directorMode: 'skip',
+    directorMode: director?.mode ?? config.directorMode,
+    directorProvider: director?.provider ?? config.directorProvider,
+    directorInvolvement: director?.involvement ?? config.directorInvolvement,
+    imageQuality: stringOverride(image?.options.imageQuality, stringOverride(options.imageQuality, config.imageQuality)),
+    imageModeration: stringOverride(image?.options.imageModeration, stringOverride(options.imageModeration, config.imageModeration)),
   };
 }
 
@@ -119,16 +130,18 @@ function antigravityConfigForRequest(
   request: Readonly<WorkflowTransformExecutionRequest>,
 ): AntigravityGeneratorConfig {
   const advanced = request.transform.advanced;
+  const director = request.transform.ai?.director;
+  const image = request.transform.ai?.image;
   const options = record(advanced.options);
   return {
     ...config,
-    model: stringOverride(options.agentModel, config.model),
-    approvalMode: stringOverride(options.approvalMode, config.approvalMode),
-    imageModel: stringOverride(advanced.model, config.imageModel),
-    imageSize: stringOverride(options.imageSize, config.imageSize),
-    personGeneration: stringOverride(options.personGeneration, config.personGeneration),
-    prominentPeople: stringOverride(options.prominentPeople, config.prominentPeople),
-    compressionQuality: numberOverride(options.compressionQuality, config.compressionQuality),
+    model: stringOverride(director?.provider === 'antigravity' ? director.model : options.agentModel, config.model),
+    approvalMode: stringOverride(director?.options.approvalMode, stringOverride(options.approvalMode, config.approvalMode)),
+    imageModel: stringOverride(image?.model ?? advanced.model, config.imageModel),
+    imageSize: stringOverride(image?.options.imageSize, stringOverride(options.imageSize, config.imageSize)),
+    personGeneration: stringOverride(image?.options.personGeneration, stringOverride(options.personGeneration, config.personGeneration)),
+    prominentPeople: stringOverride(image?.options.prominentPeople, stringOverride(options.prominentPeople, config.prominentPeople)),
+    compressionQuality: numberOverride(image?.options.compressionQuality, numberOverride(options.compressionQuality, config.compressionQuality)),
     advancedJson: stringOverride(options.advancedJson, config.advancedJson),
     safetyFiltering: stringOverride(options.safetyFiltering, config.safetyFiltering),
     safetyHarassment: stringOverride(options.safetyHarassment, config.safetyHarassment),
@@ -137,7 +150,9 @@ function antigravityConfigForRequest(
     safetyDangerousContent: stringOverride(options.safetyDangerousContent, config.safetyDangerousContent),
     autonomyLevel: stringOverride(options.autonomyLevel, config.autonomyLevel),
     editChecksLevel: numberOverride(options.editChecksLevel, config.editChecksLevel),
-    directorMode: 'skip',
+    directorMode: director?.mode ?? config.directorMode,
+    directorProvider: director?.provider ?? config.directorProvider,
+    directorInvolvement: director?.involvement ?? config.directorInvolvement,
   };
 }
 
@@ -146,12 +161,13 @@ function grokConfigForRequest(
   request: Readonly<WorkflowTransformExecutionRequest>,
 ): GrokGeneratorConfig {
   const advanced = request.transform.advanced;
+  const image = request.transform.ai?.image;
   const options = record(advanced.options);
   return {
     ...config,
-    imageModel: stringOverride(advanced.model, config.imageModel),
-    imageResolution: stringOverride(options.imageResolution, config.imageResolution),
-    editChecksLevel: numberOverride(options.editChecksLevel, config.editChecksLevel),
+    imageModel: stringOverride(image?.model ?? advanced.model, config.imageModel),
+    imageResolution: stringOverride(image?.options.imageResolution, stringOverride(options.imageResolution, config.imageResolution)),
+    editChecksLevel: numberOverride(image?.options.editChecksLevel, numberOverride(options.editChecksLevel, config.editChecksLevel)),
   };
 }
 
@@ -167,6 +183,48 @@ function providerSources(request: Readonly<WorkflowTransformExecutionRequest>) {
       bytes: source.bytes,
     })),
   ];
+}
+
+async function editableWorkflowFrame(request: Readonly<WorkflowTransformExecutionRequest>): Promise<{
+  bytes: Uint8Array;
+  mask: Uint8Array;
+  scalePercent: number;
+}> {
+  const bytes = request.storyboard?.source?.bytes ?? request.sources[0]?.bytes;
+  if (!bytes?.length) {
+    throw new WorkflowTransformExecutionError(
+      'MISSING_ASSET',
+      `${request.transform.capability} needs a connected source image or storyboard.`,
+      'Connect a source image',
+    );
+  }
+  const bitmap = await bytesToBitmap(bytes);
+  try {
+    const mask = document.createElement('canvas');
+    mask.width = bitmap.width;
+    mask.height = bitmap.height;
+    const context = mask.getContext('2d');
+    if (!context) throw new Error('Could not prepare the workflow edit mask.');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, mask.width, mask.height);
+    const scalePercent = Math.max(100, Math.round(Math.max(
+      request.output.width / Math.max(1, bitmap.width),
+      request.output.height / Math.max(1, bitmap.height),
+    ) * 100));
+    return { bytes, mask: await canvasToPngBytes(mask), scalePercent };
+  } finally {
+    bitmap.close();
+  }
+}
+
+function editPrompt(request: Readonly<WorkflowTransformExecutionRequest>): string {
+  if (request.transform.capability === 'remove-background') {
+    return `${request.prompt}\n\nRemove the background cleanly and preserve the complete foreground subject with natural edges and transparency where supported.`;
+  }
+  if (request.transform.capability === 'relight') {
+    return `${request.prompt}\n\nRelight the connected image as instructed while preserving subject identity, composition, and geometry.`;
+  }
+  return request.prompt;
 }
 
 async function resultAsset(result: GeneratedImageResult) {
@@ -195,13 +253,17 @@ export function createCodexWorkflowTransformExecutor(
 ): WorkflowNodeExecutor {
   return createWorkflowCompositionExecutor('codex', async (request, context) => {
     const runId = providerRunId(config.runId, context);
-    return resultAsset(await executeObservedProvider(runId, context, () => composeCodexWorkflow(
-      codexConfigForRequest({ ...config, runId }, request),
-      request.prompt,
-      providerSources(request),
-      request.output,
-    ), dependencies));
+    const effective = codexConfigForRequest({ ...config, runId }, request);
+    return resultAsset(await executeObservedProvider(runId, context, async () => {
+      if (request.transform.capability === 'generate') {
+        return composeCodexWorkflow(effective, request.prompt, providerSources(request), request.output);
+      }
+      const frame = await editableWorkflowFrame(request);
+      if (request.transform.capability === 'upscale') return upscaleCodexImage(effective, frame.bytes, frame.scalePercent);
+      return generateCodexRetouchImage(effective, frame.bytes, frame.bytes, frame.mask, null, null, editPrompt(request), providerSources(request));
+    }, dependencies));
   }, {
+    capabilities: ['generate', 'edit', 'remove-background', 'relight', 'upscale'],
     executor: { id: 'paintnode-codex-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
       const effective = codexConfigForRequest(config, request);
@@ -218,6 +280,24 @@ export function createCodexWorkflowTransformExecutor(
         ]),
       };
     },
+    describeRoles: (request) => {
+      const effective = codexConfigForRequest(config, request);
+      const directorProvider = effective.directorProvider ?? 'codex';
+      return {
+        director: effective.directorMode === 'skip' ? null : {
+          id: directorProvider,
+          model: request.transform.ai?.director?.model ?? (directorProvider === 'codex' ? effective.model ?? null : null),
+          effectiveOptions: definedOptions([
+            ['reasoningEffort', directorProvider === 'codex' ? effective.reasoningEffort : undefined],
+            ['serviceTier', directorProvider === 'codex' ? effective.serviceTier : undefined],
+          ]),
+        },
+        image: {
+          id: 'codex', model: null,
+          effectiveOptions: definedOptions([['imageQuality', effective.imageQuality], ['imageModeration', effective.imageModeration]]),
+        },
+      };
+    },
   });
 }
 
@@ -227,13 +307,17 @@ export function createAntigravityWorkflowTransformExecutor(
 ): WorkflowNodeExecutor {
   return createWorkflowCompositionExecutor('antigravity', async (request, context) => {
     const runId = providerRunId(config.runId, context);
-    return resultAsset(await executeObservedProvider(runId, context, () => composeAntigravityWorkflow(
-      antigravityConfigForRequest({ ...config, runId }, request),
-      request.prompt,
-      providerSources(request),
-      request.output,
-    ), dependencies));
+    const effective = antigravityConfigForRequest({ ...config, runId }, request);
+    return resultAsset(await executeObservedProvider(runId, context, async () => {
+      if (request.transform.capability === 'generate') {
+        return composeAntigravityWorkflow(effective, request.prompt, providerSources(request), request.output);
+      }
+      const frame = await editableWorkflowFrame(request);
+      if (request.transform.capability === 'upscale') return upscaleAntigravityImage(effective, frame.bytes, frame.scalePercent);
+      return generateAntigravityRetouchImage(effective, frame.bytes, frame.bytes, frame.mask, null, null, editPrompt(request), providerSources(request));
+    }, dependencies));
   }, {
+    capabilities: ['generate', 'edit', 'remove-background', 'relight', 'upscale'],
     executor: { id: 'paintnode-antigravity-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
       const effective = antigravityConfigForRequest(config, request);
@@ -257,6 +341,21 @@ export function createAntigravityWorkflowTransformExecutor(
         ]),
       };
     },
+    describeRoles: (request) => {
+      const effective = antigravityConfigForRequest(config, request);
+      const directorProvider = effective.directorProvider ?? 'antigravity';
+      return {
+        director: effective.directorMode === 'skip' ? null : {
+          id: directorProvider,
+          model: request.transform.ai?.director?.model ?? (directorProvider === 'antigravity' ? effective.model ?? null : null),
+          effectiveOptions: definedOptions([['approvalMode', directorProvider === 'antigravity' ? effective.approvalMode : undefined]]),
+        },
+        image: {
+          id: 'antigravity', model: effective.imageModel ?? null,
+          effectiveOptions: definedOptions([['imageSize', effective.imageSize], ['editChecksLevel', effective.editChecksLevel]]),
+        },
+      };
+    },
   });
 }
 
@@ -266,12 +365,17 @@ export function createGrokWorkflowTransformExecutor(
 ): WorkflowNodeExecutor {
   return createWorkflowCompositionExecutor('grok', async (request, context) => {
     const runId = providerRunId(config.runId, context);
-    return resultAsset(await executeObservedProvider(runId, context, () => composeGrokWorkflow(
-      grokConfigForRequest({ ...config, runId }, request),
-      request.prompt,
-      providerSources(request),
-    ), dependencies));
+    const effective = grokConfigForRequest({ ...config, runId }, request);
+    return resultAsset(await executeObservedProvider(runId, context, async () => {
+      if (request.transform.capability === 'generate') {
+        return composeGrokWorkflow(effective, request.prompt, providerSources(request));
+      }
+      const frame = await editableWorkflowFrame(request);
+      if (request.transform.capability === 'upscale') return upscaleGrokImage(effective, frame.bytes, frame.scalePercent);
+      return generateGrokRetouchImage(effective, frame.bytes, frame.bytes, frame.mask, null, null, editPrompt(request), providerSources(request));
+    }, dependencies));
   }, {
+    capabilities: ['generate', 'edit', 'remove-background', 'relight', 'upscale'],
     executor: { id: 'paintnode-grok-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
       const effective = grokConfigForRequest(config, request);
@@ -282,6 +386,21 @@ export function createGrokWorkflowTransformExecutor(
           ['imageResolution', effective.imageResolution],
           ['editChecksLevel', effective.editChecksLevel],
         ]),
+      };
+    },
+    describeRoles: (request) => {
+      const effective = grokConfigForRequest(config, request);
+      const directorProvider = effective.directorProvider ?? 'codex';
+      return {
+        director: effective.directorMode === 'skip' ? null : {
+          id: directorProvider,
+          model: request.transform.ai?.director?.model ?? effective.directorModel ?? null,
+          effectiveOptions: definedOptions([['grokReasoningEffort', effective.directorReasoningEffort]]),
+        },
+        image: {
+          id: 'grok', model: effective.imageModel ?? null,
+          effectiveOptions: definedOptions([['imageResolution', effective.imageResolution], ['editChecksLevel', effective.editChecksLevel]]),
+        },
       };
     },
   });

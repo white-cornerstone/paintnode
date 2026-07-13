@@ -8,7 +8,7 @@ import type {
 
 export type CreatorNodeType = Exclude<WorkflowNodeType, 'unsupported'>;
 export type CreatorNodeCategory = 'inputs' | 'direction' | 'actions' | 'review' | 'outputs';
-export type CreatorNodeIconKey = 'image' | 'document' | 'paint-brush' | 'sparkle' | 'review' | 'output';
+export type CreatorNodeIconKey = 'image' | 'image-multiple' | 'document' | 'paint-brush' | 'sparkle' | 'review' | 'output';
 export type CreatorExecutorStatus = 'not-required' | 'available' | 'draft-only';
 
 export interface CreatorExecutorAvailability {
@@ -148,6 +148,38 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     executor: noExecutor,
   },
   {
+    type: 'extract-assets',
+    label: 'Extract Assets',
+    description: 'Extract labelled reusable assets from multiple source and annotated support images.',
+    category: 'actions',
+    iconKey: 'image-multiple',
+    keywords: ['extract', 'assets', 'objects', 'index sheet', 'grid', 'fast', 'support images', 'annotations'],
+    defaultTitle: 'Extract Assets',
+    defaultSize: { width: 280, height: 330 },
+    defaultColor: '#3d4654',
+    ports: {
+      inputs: [
+        { id: 'sources', label: 'Source images', dataType: 'asset-reference', multiple: true },
+        { id: 'support', label: 'Annotated support', dataType: 'asset-reference', multiple: true },
+        { id: 'prompt', label: 'Extraction guidance', dataType: 'prompt' },
+      ],
+      outputs: [{ id: 'assets', label: 'Extracted assets', dataType: 'asset-reference', multiple: true }],
+    },
+    defaultConfig: {
+      creatorRole: 'extract-assets',
+      prompt: '',
+      mode: 'quality',
+      assetsPerSheet: 4,
+      resultAssets: [],
+      notes: '',
+    },
+    executor: {
+      status: 'available',
+      capability: 'extract-assets',
+      reason: null,
+    },
+  },
+  {
     type: 'transform',
     label: 'Transform',
     description: 'Configure a creator action such as generate, edit, remove background, relight, or upscale.',
@@ -192,9 +224,9 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     },
     defaultConfig: { creatorRole: 'review', mode: 'human', instructions: '' },
     executor: {
-      status: 'draft-only',
+      status: 'available',
       capability: 'candidate-review',
-      reason: 'Candidate review execution is not available yet. This node can document the intended quality gate.',
+      reason: null,
     },
   },
   {
@@ -262,6 +294,17 @@ export function validateCreatorNodeConfig(
     requireString('guidance');
   } else if (type === 'art-direction') {
     requireString('prompt');
+  } else if (type === 'extract-assets') {
+    requireString('prompt');
+    if (config.mode !== 'quality' && config.mode !== 'fast') {
+      issues.push({ path: 'config.mode', message: 'mode must be quality or fast.' });
+    }
+    if (![1, 2, 4, 8].includes(config.assetsPerSheet as number)) {
+      issues.push({ path: 'config.assetsPerSheet', message: 'assetsPerSheet must be 1, 2, 4, or 8.' });
+    }
+    if (!Array.isArray(config.resultAssets)) {
+      issues.push({ path: 'config.resultAssets', message: 'resultAssets must be an array.' });
+    }
   } else if (type === 'transform') {
     requireString('capability', false);
     if (typeof config.advanced !== 'object' || config.advanced === null || Array.isArray(config.advanced)) {

@@ -37,6 +37,9 @@ const PROVIDER_OPTION_VALIDATORS: Record<string, OptionValidator> = {
   approvalMode: enumValue('default', 'skipPermissions'),
   agentModel: safeModelOption,
   imageSize: enumValue('auto', '1K', '2K', '4K'),
+  imageResolution: enumValue('auto', '1k', '2k'),
+  claudeEffort: enumValue('auto', 'low', 'medium', 'high', 'xhigh', 'max'),
+  grokReasoningEffort: enumValue('auto', 'low', 'high'),
   personGeneration: enumValue('auto', 'ALLOW_NONE', 'ALLOW_ADULT', 'ALLOW_ALL'),
   prominentPeople: enumValue('auto', 'BLOCK_PROMINENT_PEOPLE'),
   compressionQuality: integerRange(0, 100),
@@ -116,6 +119,10 @@ interface WorkflowRunRecordSafetyShape {
   attempt: number;
   sourceAssets: Array<{ nodeId: string; assetId: string; relativePath: string; contentHash: string; name: string; role: string }>;
   provider: { id: string; model: string | null; effectiveOptions: Record<string, unknown> };
+  roles?: {
+    director: { id: string; model: string | null; effectiveOptions: Record<string, unknown> } | null;
+    image: { id: string; model: string | null; effectiveOptions: Record<string, unknown> } | null;
+  };
   executor: { id: string; version: string; requestSchemaVersion: string };
   target: { nodeId: string; title: string; width: number; height: number };
   startedAt: number;
@@ -143,6 +150,12 @@ export function validateWorkflowRunRecordSafety(record: WorkflowRunRecordSafetyS
   safeWorkflowIdentifier(record.provider.id, 'Provider ID');
   safeWorkflowModel(record.provider.model, 'Provider model');
   safeWorkflowProviderOptions(record.provider.effectiveOptions);
+  for (const [label, role] of [['Director', record.roles?.director], ['Image', record.roles?.image]] as const) {
+    if (!role) continue;
+    safeWorkflowIdentifier(role.id, `${label} provider ID`);
+    safeWorkflowModel(role.model, `${label} model`);
+    safeWorkflowProviderOptions(role.effectiveOptions);
+  }
   safeWorkflowIdentifier(record.executor.id, 'Executor ID');
   safeWorkflowIdentifier(record.executor.version, 'Executor version');
   safeWorkflowIdentifier(record.executor.requestSchemaVersion, 'Request schema version');

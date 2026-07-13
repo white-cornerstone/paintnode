@@ -41,18 +41,11 @@ export const WORKFLOW_TEMPLATES: readonly WorkflowTemplateDefinition[] = [
   {
     id: 'blank',
     name: 'Blank Workflow',
-    description: 'Start with one required image, then write the brief and art direction yourself.',
+    description: 'Start with an empty board and add only the nodes your workflow needs.',
     brief: '',
     artDirection: '',
-    slots: [
-      {
-        id: 'primary-image',
-        name: 'Primary Image',
-        required: true,
-        guidance: 'Choose the main image or visual reference that generation must use.',
-      },
-    ],
-    outputs: [{ id: 'square', name: 'Square 1:1', width: 1024, height: 1024 }],
+    slots: [],
+    outputs: [],
   },
   {
     id: 'asset-composition',
@@ -236,6 +229,22 @@ export function instantiateWorkflowTemplate(
   options: { name?: string; graphId?: string } = {},
 ): WorkflowGraphV2 {
   const definition = workflowTemplate(id);
+  if (id === 'blank') {
+    return new WorkflowGraphDomain({
+      version: WORKFLOW_GRAPH_VERSION,
+      id: options.graphId?.trim() || freshWorkflowGraphId(),
+      metadata: {
+        name: options.name?.trim() || definition.name,
+        sourceVersion: null,
+        migrations: [],
+      },
+      viewport: { panX: 10, panY: 10, zoom: 1 },
+      nodes: [],
+      edges: [],
+      assetReferences: [],
+      runRecords: [],
+    }).graph;
+  }
   const slots = definition.slots.map(assetSlotNode);
   const brief = briefNode(definition);
   const artDirection = artDirectionNode(definition);

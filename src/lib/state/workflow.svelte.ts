@@ -1,6 +1,8 @@
-import type { ProjectAsset, WorkflowEditorReturnResult } from '../integrations/desktop';
+import type { ProjectAsset, ProjectFile, WorkflowEditorReturnResult } from '../integrations/desktop';
 import { project } from './project.svelte';
 import { ui } from './ui.svelte';
+import { settings } from './settings.svelte';
+import { aiRunOptionsFromSettings } from './settings';
 import { coerceAnnotations, type AnnotationItem } from '../engine/annotations';
 import {
   WORKFLOW_GRAPH_VERSION,
@@ -70,6 +72,16 @@ import {
   type WorkflowEditableResultIdentity,
   type WorkflowEditorRevisionV1,
   type WorkflowRoundTripBindingV1,
+  workflowAiDefaultsFromRunOptions,
+  copyWorkflowAiDefaults,
+  type WorkflowAiDefaultsV1,
+  parseWorkflowNodeAiOverrides,
+  type WorkflowNodeAiOverridesV1,
+  appendWorkflowReviewRecommendation,
+  resolveWorkflowReviewRecommendation,
+  type WorkflowAiReviewResult,
+  type WorkflowReviewRecommendationResolution,
+  type WorkflowRunProvider,
 } from '../workflow';
 import {
   bindWorkflowRoundTripAuthority,
@@ -204,6 +216,7 @@ export interface WorkflowAssetNode {
   assetId: string | null;
   name: string;
   relativePath: string;
+  oraRelativePath: string | null;
   x: number;
   y: number;
   width: number;
@@ -231,7 +244,7 @@ export interface WorkflowBriefNode {
 
 export interface WorkflowCreatorNode {
   id: string;
-  type: 'art-direction' | 'transform' | 'review';
+  type: 'art-direction' | 'extract-assets' | 'transform' | 'review';
   name: string;
   x: number;
   y: number;
@@ -309,6 +322,10 @@ function recordValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function currentWorkflowAiDefaults(): WorkflowAiDefaultsV1 {
+  return workflowAiDefaultsFromRunOptions(aiRunOptionsFromSettings(settings.value));
+}
+
 function defaultOutputNode(): WorkflowOutputNode {
   return {
     id: 'output',
@@ -366,6 +383,7 @@ function immutableWorkflowHistoryBytes(graph: WorkflowGraphV2): string {
     assetReferences: graph.assetReferences,
     runRecords: graph.runRecords,
     reviewPromotions: graph.reviewPromotions,
+    reviewRecommendations: graph.reviewRecommendations,
     editorRevisions: graph.editorRevisions,
     workflowRoundTrips: graph.workflowRoundTrips,
     runRecordLinks: graph.nodes
@@ -435,6 +453,7 @@ export class WorkflowStore {
   savedRev = $state(0);
   transformExecutions = $state<Record<string, WorkflowTransformExecutionState>>({});
   reviewVerifications = $state<Record<string, WorkflowReviewVerification>>({});
+  aiDefaults = $state<WorkflowAiDefaultsV1>(currentWorkflowAiDefaults());
   private graphDomain: WorkflowGraphDomain | null = null;
   private readonly graphIdGenerator: WorkflowIdGenerator | undefined;
   private readonly workflowGraphIdGenerator: (() => string) | undefined;
@@ -625,6 +644,7 @@ export class WorkflowStore {
     this.migrationSourcePath = null;
     this.requiresExplicitSave = false;
     this.connectionError = null;
+    this.aiDefaults = currentWorkflowAiDefaults();
     this.tool = 'hand';
     this.zoomMode = 'in';
     this.selection = { kind: 'composition' };
@@ -676,10 +696,14 @@ export class WorkflowStore {
   newFromTemplate(templateId: WorkflowTemplateId, name?: string): void {
     this.assertWorkflowReplacementAllowed();
     this.beginWorkflowSession();
-    const graph = instantiateWorkflowTemplate(templateId, {
+    const templateGraph = instantiateWorkflowTemplate(templateId, {
       name,
       graphId: this.workflowGraphIdGenerator?.(),
     });
+    const graph: WorkflowGraphV2 = {
+      ...templateGraph,
+      metadata: { ...templateGraph.metadata, ai: currentWorkflowAiDefaults() },
+    };
     this.active = true;
     ui.showWorkflow();
     this.name = graph.metadata.name;
@@ -687,9 +711,10 @@ export class WorkflowStore {
     this.migrationSourcePath = null;
     this.requiresExplicitSave = false;
     this.connectionError = null;
+    this.aiDefaults = graph.metadata.ai ?? currentWorkflowAiDefaults();
     this.tool = 'hand';
     this.zoomMode = 'in';
-    this.selection = { kind: 'composition' };
+    this.selection = graph.nodes.some((node) => node.id === 'composition') ? { kind: 'composition' } : null;
     this.storyboardEditing = false;
     this.storyboardTool = 'brush';
     this.panX = graph.viewport.panX;
@@ -769,6 +794,14 @@ export class WorkflowStore {
     this.bump();
   }
 
+  setAiDefaults(value: WorkflowAiDefaultsV1): void {
+    const current = JSON.stringify(this.aiDefaults);
+    const next = copyWorkflowAiDefaults(value);
+    if (current === JSON.stringify(next)) return;
+    this.aiDefaults = next;
+    this.bump();
+  }
+
   setTool(tool: WorkflowTool): void {
     this.tool = tool;
   }
@@ -796,7 +829,8 @@ export class WorkflowStore {
   addAsset(asset: ProjectAsset): void {
     const index = this.nodes.length;
     const domain = this.requireGraphDomain();
-    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+    const draft: WorkflowNodeV2 = {
+      id: this.nextGraphId('node'),
       type: 'input',
       title: asset.name.replace(/\.[^.]+$/, '') || 'Asset',
       position: { x: 80 + (index % 3) * 230, y: 110 + Math.floor(index / 3) * 160 },
@@ -805,18 +839,23 @@ export class WorkflowStore {
       ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
       config: { legacyKind: 'asset', assetId: asset.id, relativePath: asset.relativePath, note: '' },
       runRecordIds: [],
-    }, {
-      direction: 'outgoing',
-      nodePortId: 'asset',
-      other: { nodeId: 'composition', portId: 'assets' },
-    }));
-    this.selection = { kind: 'asset', id: added.node.id };
+    };
+    const added = domain.node('composition')
+      ? domain.addNodeWithEdge(draft, {
+          direction: 'outgoing',
+          nodePortId: 'asset',
+          other: { nodeId: 'composition', portId: 'assets' },
+        }).node
+      : domain.addNode(draft);
+    this.publishGraphMutation(domain, added);
+    this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
 
   addBlankAsset(x: number, y: number, width: number, height: number): void {
     const domain = this.requireGraphDomain();
-    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+    const draft: WorkflowNodeV2 = {
+      id: this.nextGraphId('node'),
       type: 'input',
       title: `Asset ${this.nodes.length + 1}`,
       position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
@@ -825,12 +864,16 @@ export class WorkflowStore {
       ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
       config: { legacyKind: 'asset', assetId: null, relativePath: '', note: '' },
       runRecordIds: [],
-    }, {
-      direction: 'outgoing',
-      nodePortId: 'asset',
-      other: { nodeId: 'composition', portId: 'assets' },
-    }));
-    this.selection = { kind: 'asset', id: added.node.id };
+    };
+    const added = domain.node('composition')
+      ? domain.addNodeWithEdge(draft, {
+          direction: 'outgoing',
+          nodePortId: 'asset',
+          other: { nodeId: 'composition', portId: 'assets' },
+        }).node
+      : domain.addNode(draft);
+    this.publishGraphMutation(domain, added);
+    this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
 
@@ -1193,17 +1236,65 @@ export class WorkflowStore {
     const node = this.requireGraphDomain().node(id);
     if (!node || node.type !== 'input') return;
     const domain = this.requireGraphDomain();
+    domain.updateNodePorts(id, {
+      inputs: node.ports.inputs,
+      outputs: node.ports.outputs.filter((port) => port.id !== 'annotation'),
+    });
     this.publishGraphMutation(domain, domain.configureNode(id, {
       ...node.config,
       assetId: asset?.id ?? null,
       relativePath: asset?.relativePath ?? null,
+      oraRelativePath: null,
+      hasAnnotations: false,
     }));
+  }
+
+  assignOraDocument(id: string, file: ProjectFile, hasAnnotations: boolean): void {
+    const node = this.requireGraphDomain().node(id);
+    if (!node || node.type !== 'input') return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, {
+      ...node.config,
+      assetId: null,
+      relativePath: file.relativePath,
+      oraRelativePath: file.relativePath,
+      hasAnnotations,
+    }));
+    const baseOutput = node.ports.outputs.find((port) => port.id === 'asset') ?? {
+      id: 'asset', label: 'Asset reference', dataType: 'asset-reference' as const,
+    };
+    domain.updateNodePorts(id, {
+      inputs: node.ports.inputs,
+      outputs: [
+        { ...baseOutput, label: 'Asset reference' },
+        ...(hasAnnotations ? [{ id: 'annotation', label: 'Annotation', dataType: 'asset-reference' as const }] : []),
+      ],
+    });
+    this.publishGraphMutation(domain, undefined);
   }
 
   configureCreatorNode(id: string, update: Record<string, unknown>): void {
     const node = this.requireGraphDomain().node(id);
     if (!node || node.type === 'unsupported') return;
     const config = { ...node.config, ...update };
+    const issues = validateCreatorNodeConfig(node.type, config);
+    if (issues.length > 0) {
+      throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
+    }
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, config));
+  }
+
+  setNodeAiOverrides(id: string, value: WorkflowNodeAiOverridesV1 | null): void {
+    const node = this.requireGraphDomain().node(id);
+    if (!node || node.type === 'unsupported' || node.type === 'input' || node.type === 'output') return;
+    const config = { ...node.config };
+    if (value === null) delete config.ai;
+    else {
+      const portable = parseWorkflowNodeAiOverrides(value);
+      if (!portable) throw new Error('Node AI overrides are invalid.');
+      config.ai = portable;
+    }
     const issues = validateCreatorNodeConfig(node.type, config);
     if (issues.length > 0) {
       throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
@@ -1314,7 +1405,7 @@ export class WorkflowStore {
     const graph = this.requireGraphDomain().graph;
     return new WorkflowGraphDomain({
       ...graph,
-      metadata: { ...graph.metadata, name: this.name },
+      metadata: { ...graph.metadata, name: this.name, ai: copyWorkflowAiDefaults(this.aiDefaults) },
       viewport: { panX: this.panX, panY: this.panY, zoom: this.zoom },
     }).graph;
   }
@@ -1773,6 +1864,24 @@ export class WorkflowStore {
           )),
       } : {}),
     });
+  }
+
+  reviewRecommendation(reviewNodeId: string): WorkflowReviewRecommendationResolution {
+    return resolveWorkflowReviewRecommendation(this.serialize(), reviewNodeId);
+  }
+
+  appendReviewRecommendation(request: Readonly<{
+    id: string;
+    reviewNodeId: string;
+    result: WorkflowAiReviewResult;
+    provider: WorkflowRunProvider;
+    createdAt: number;
+  }>): void {
+    const domain = this.requireGraphDomain();
+    const next = appendWorkflowReviewRecommendation(domain.graph, request);
+    const recommendation = next.reviewRecommendations?.at(-1);
+    if (!recommendation) throw new Error('AI Review did not create a recommendation.');
+    this.publishGraphMutation(domain, domain.appendReviewRecommendation(recommendation));
   }
 
   reviewResolution(
@@ -2288,6 +2397,7 @@ export class WorkflowStore {
     this.storyboardEditing = false;
     this.storyboardTool = 'brush';
     this.name = result.graph.metadata.name || cleanWorkflowName(fallbackName);
+    this.aiDefaults = result.graph.metadata.ai ?? currentWorkflowAiDefaults();
     this.savedPath = result.requiresExplicitSave ? null : savedPath;
     this.migrationSourcePath = result.requiresExplicitSave ? savedPath : null;
     this.requiresExplicitSave = result.requiresExplicitSave;
@@ -2301,7 +2411,7 @@ export class WorkflowStore {
     this.syncReactiveGraph(this.graphDomain, legacyProjection);
     this.rev = result.requiresExplicitSave ? 1 : 0;
     this.savedRev = 0;
-    if (!result.requiresExplicitSave) this.captureCurrentSavedBaseline();
+    if (!result.requiresExplicitSave && result.graph.metadata.ai) this.captureCurrentSavedBaseline();
   }
 
   async save(): Promise<string | null> {
@@ -2888,7 +2998,7 @@ export class WorkflowStore {
     return {
       version: WORKFLOW_GRAPH_VERSION,
       id: 'workflow-active',
-      metadata: { name: this.name, sourceVersion: null, migrations: [] },
+      metadata: { name: this.name, sourceVersion: null, migrations: [], ai: copyWorkflowAiDefaults(this.aiDefaults) },
       viewport: { panX: this.panX, panY: this.panY, zoom: this.zoom },
       nodes: [...assets, composition, ...outputs],
       edges: this.connections.map((connection) => ({
@@ -2908,6 +3018,7 @@ export class WorkflowStore {
   }
 
   private syncReactiveGraph(domain: WorkflowGraphDomain, roundLegacyGeometry = false): void {
+    this.aiDefaults = domain.graph.metadata.ai ?? this.aiDefaults;
     const composition = domain.node('composition');
     if (composition) {
       const storyboard = recordValue(composition.config.storyboard);
@@ -2955,6 +3066,7 @@ export class WorkflowStore {
           assetId: typeof node.config.assetId === 'string' ? node.config.assetId : reference?.assetId ?? null,
           name: node.title,
           relativePath: typeof node.config.relativePath === 'string' ? node.config.relativePath : reference?.relativePath ?? '',
+          oraRelativePath: typeof node.config.oraRelativePath === 'string' ? node.config.oraRelativePath : null,
           x: roundLegacyGeometry ? roundWorkflowNumber(node.position.x) : node.position.x,
           y: roundLegacyGeometry ? roundWorkflowNumber(node.position.y) : node.position.y,
           width: node.size.width,
@@ -2986,6 +3098,7 @@ export class WorkflowStore {
     this.creatorNodes = domain.graph.nodes
       .filter((node): node is WorkflowNodeV2 & { type: WorkflowCreatorNode['type'] } => (
         node.type === 'transform'
+        || node.type === 'extract-assets'
         || node.type === 'review'
         || (node.type === 'art-direction' && node.id !== 'composition')
       ))

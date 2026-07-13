@@ -20,7 +20,7 @@ import {
 import { WORKFLOW_TEMPLATES, instantiateWorkflowTemplate } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
-import type { ProjectAsset } from '../integrations/desktop';
+import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
 import { bindWorkflowRoundTripAuthority, clearWorkflowRoundTripAuthority } from './workflowEditorSession';
 import { project } from './project.svelte';
 import {
@@ -1063,19 +1063,50 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.rev).toBe(0);
     expect(store.savedRev).toBe(0);
     expect(store.dirty).toBe(false);
-    expect(store.briefNodes).toHaveLength(1);
+    expect(store.briefNodes).toHaveLength(template.id === 'blank' ? 0 : 1);
+    expect(store.selection).toEqual(template.id === 'blank' ? null : { kind: 'composition' });
     expect(store.nodes.map((node) => node.name)).toEqual(template.slots.map((slot) => slot.name));
     expect(store.outputNodes.map((node) => [node.name, node.finalWidth, node.finalHeight])).toEqual(
       template.outputs.map((output) => [output.name, output.width, output.height]),
     );
 
     const graph = store.serialize();
-    expect(graph.metadata).toEqual({ name: `My ${template.name}`, sourceVersion: null, migrations: [] });
+    expect(graph.metadata).toMatchObject({ name: `My ${template.name}`, sourceVersion: null, migrations: [] });
+    expect(graph.metadata.ai).toMatchObject({ version: 1, director: { provider: 'codex' }, image: { provider: 'codex' } });
     const reopened = new WorkflowStore({ idGenerator: ids() });
     reopened.openFromBytes(store.toBytes(), null, 'Fallback');
     expect(reopened.serialize()).toEqual(graph);
     expect(reopened.briefNodes).toEqual(store.briefNodes);
     expect(reopened.rev).toBe(0);
+  });
+
+  it('serializes workflow AI defaults when browser reactivity wraps them in proxies', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('blank', 'Proxy-safe workflow');
+    const defaults = store.aiDefaults;
+    store.aiDefaults = new Proxy({
+      ...defaults,
+      director: new Proxy({ ...defaults.director, options: new Proxy({ ...defaults.director.options }, {}) }, {}),
+      image: new Proxy({ ...defaults.image, options: new Proxy({ ...defaults.image.options }, {}) }, {}),
+    }, {});
+
+    expect(store.serialize().metadata.ai).toEqual(defaults);
+    expect(() => store.toBytes()).not.toThrow();
+  });
+
+  it('keeps Blank Workflow empty and allows unconnected nodes to be added deliberately', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('blank', 'Extraction scratchpad');
+
+    expect(store.graphSnapshot().nodes).toEqual([]);
+    expect(store.graphSnapshot().edges).toEqual([]);
+    expect(store.selection).toBeNull();
+
+    store.addAsset(campaignProduct);
+    store.addCreatorNode('extract-assets', { x: 320, y: 40 });
+
+    expect(store.graphSnapshot().nodes.map((node) => node.type)).toEqual(['input', 'extract-assets']);
+    expect(store.graphSnapshot().edges).toEqual([]);
   });
 
   it('persists guided slot assignments and brief edits as graph configuration', () => {
@@ -1175,6 +1206,40 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.nodes).toEqual([]);
     expect(store.connections.every((connection) => connection.from !== assetId && connection.to !== assetId)).toBe(true);
     expect(store.rev).toBe(7);
+  });
+
+  it('adds and removes the annotation output for annotated OpenRaster asset nodes', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Annotated ORA');
+    store.addBlankAsset(20, 20, 220, 180);
+    const assetNodeId = store.nodes[0].id;
+    const oraFile: ProjectFile = {
+      kind: 'document',
+      name: 'Storyboard.ora',
+      relativePath: 'documents/Storyboard.ora',
+      createdAt: 1,
+      modifiedAt: 2,
+      size: 4096,
+      mime: 'image/openraster',
+      exists: true,
+    };
+
+    store.assignOraDocument(assetNodeId, oraFile, true);
+    expect(store.nodes[0]).toMatchObject({
+      assetId: null,
+      relativePath: 'documents/Storyboard.ora',
+      oraRelativePath: 'documents/Storyboard.ora',
+    });
+    expect(store.graphSnapshot().nodes.find((node) => node.id === assetNodeId)?.ports.outputs).toEqual([
+      { id: 'asset', label: 'Asset reference', dataType: 'asset-reference' },
+      { id: 'annotation', label: 'Annotation', dataType: 'asset-reference' },
+    ]);
+
+    store.assignAsset(assetNodeId, campaignProduct);
+    expect(store.nodes[0].oraRelativePath).toBeNull();
+    expect(store.graphSnapshot().nodes.find((node) => node.id === assetNodeId)?.ports.outputs).toEqual([
+      { id: 'asset', label: 'Asset reference', dataType: 'asset-reference' },
+    ]);
   });
 
   it('rolls back every compound store add when injected edge generation collides', () => {

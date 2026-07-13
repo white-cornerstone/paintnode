@@ -23,26 +23,30 @@ const TOOL_KEYS: Record<string, string> = {
   z: 'zoom',
 };
 
+function modalKeyboardScopeActive(): boolean {
+  return document.querySelector('[aria-modal="true"]') !== null;
+}
+
 /** Install global keyboard shortcuts. Returns a cleanup function. */
 export function installKeyboard(): () => void {
   const onCopy = (e: ClipboardEvent) => {
-    if (isTypingTarget(e.target) || !editor.activeLayer) return;
+    if (modalKeyboardScopeActive() || isTypingTarget(e.target) || !editor.activeLayer) return;
     e.preventDefault();
     editor.copy();
   };
   const onCut = (e: ClipboardEvent) => {
     const layer = editor.activeLayer;
-    if (isTypingTarget(e.target) || !layer || layer.locked) return;
+    if (modalKeyboardScopeActive() || isTypingTarget(e.target) || !layer || layer.locked) return;
     e.preventDefault();
     editor.cut();
   };
   const onPaste = (e: ClipboardEvent) => {
-    if (isTypingTarget(e.target) || ui.activeSurface !== 'document' || !editor.doc || !editor.clipboard) return;
+    if (modalKeyboardScopeActive() || isTypingTarget(e.target) || ui.activeSurface !== 'document' || !editor.doc || !editor.clipboard) return;
     e.preventDefault();
     editor.paste();
   };
   const onKey = (e: KeyboardEvent) => {
-    if (isTypingTarget(e.target)) return;
+    if (modalKeyboardScopeActive() || isTypingTarget(e.target)) return;
 
     if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
@@ -93,6 +97,7 @@ export function installKeyboard(): () => void {
           editor.cut();
           return;
         case 'v':
+          if (ui.activeSurface === 'workflow') return;
           e.preventDefault();
           editor.paste();
           return;

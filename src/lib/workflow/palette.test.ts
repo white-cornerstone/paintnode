@@ -14,7 +14,7 @@ describe('creator node palette model', () => {
     expect(filterCreatorNodeDefinitions('compare candidates').map((item) => item.type)).toEqual(['review']);
     expect(filterCreatorNodeDefinitions('codex antigravity claude')).toEqual([]);
     expect(filterCreatorNodeDefinitions('').map((item) => item.type)).toEqual([
-      'input', 'brief', 'art-direction', 'transform', 'review', 'output',
+      'input', 'brief', 'art-direction', 'extract-assets', 'transform', 'review', 'output',
     ]);
   });
 

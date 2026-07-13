@@ -42,27 +42,33 @@ use crate::ai::canvas::{
     AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
     AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
+use crate::ai::director::{
+    director_candidate_file, director_prompt_with_image_paths, director_uses_agentic_loop,
+    run_candidate_director_loop, workflow_review_criteria, DirectorCandidate, DirectorLoopSpec,
+    PAINTNODE_DIRECTOR_ACTION_FILE,
+};
 use crate::ai::placement::{
     ai_part_geometry_note, ai_part_progress_message, ai_part_prompt_context,
     ai_upscale_part_geometry_note, ai_upscale_target_dimensions, correct_part_result_drift,
     cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
     plan_ai_edit_placement, plan_ai_fill_placement, plan_ai_restore_placement,
     plan_ai_upscale_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, validate_upscale_part_structure, AiEditComposer, AiEditProvider,
-    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    reuse_part_result, upscale_structure_guide_png, validate_upscale_part_structure,
+    AiEditComposer, AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
+    ai_director_involvement, ai_director_mode, ai_director_provider, ai_director_restore_contract,
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
     clean_option, cleanup_ai_process_tree_after_bridge_exit, cleanup_project_agent_job,
     clear_ai_run_cancelled, command_failure, configure_ai_process_group, emit_codex_part_progress,
     emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, join_output_readers_bounded,
     now_id, output_tail, project_or_temp_job_path, remove_legacy_generative_fill_agent_inputs,
-    should_keep_job_dir, spawn_output_reader, terminate_ai_process_tree, track_ai_process_tree,
-    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_ai_job_settings,
-    write_reference_pngs, AgentRunResult, AiDirectorProvider, AiModelCapability,
-    AiProviderCapabilitiesResult, CodexDetectionResult, GeneratedImageLayerResult,
-    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, GROK_RUNS_DIR,
-    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    request_ai_director_input, should_keep_job_dir, spawn_output_reader, terminate_ai_process_tree,
+    track_ai_process_tree, validate_reference_pngs, watched_job_files, write_ai_job_prompt,
+    write_ai_job_settings, write_reference_pngs, AgentRunResult, AiDirectorInvolvement,
+    AiDirectorMode, AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult,
+    CodexDetectionResult, GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage,
+    AI_RUN_STOPPED_MESSAGE, GROK_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{safe_stem, store_generated_png_asset};
@@ -86,6 +92,7 @@ const GROK_FALLBACK_CLI_VERSION: &str = "0.2.93";
 /// `<IMAGE_1>`, ... in the prompt; treat three as the practical maximum.
 const GROK_MAX_EDIT_REFERENCE_IMAGES: usize = 3;
 const GROK_MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+const GROK_DIRECTOR_LEGACY_REQUEST_FILE: &str = "paintnode-grok-director-image-request.json";
 
 /// `~/.grok/auth.json` — the CLI's OIDC credential store.
 fn grok_auth_json_path() -> Option<PathBuf> {
@@ -925,6 +932,11 @@ pub(crate) async fn generate_grok_image(
                     "Generated image restoration",
                     false,
                     true,
+                    AiDirectorMode::Skip,
+                    AiDirectorProvider::Grok,
+                    AiDirectorInvolvement::FullReview,
+                    None,
+                    None,
                 )?;
                 bytes = restored.ok_or_else(|| {
                     "Generated image restoration did not return a composed result.".to_string()
@@ -1001,6 +1013,7 @@ impl GrokEditAttachments {
 }
 
 const GROK_OVERVIEW_ATTACHMENT_NOTE: &str = "a downscaled preview of the surrounding document content with the editable region outlined in red (`overview.png`). Use it only as non-editable composition and continuity guidance; never copy its pixels, its resolution, or the red outline into the output.";
+const GROK_UPSCALE_STRUCTURE_ATTACHMENT_NOTE: &str = "an automatically derived edge-only spatial registration guide (`structure-guide.png`). Bright lines trace boundaries already present in <IMAGE_0>; use them only to keep silhouettes, locations, scale, pose, depth, and overlaps fixed. Do not render the guide, line art, monochrome treatment, outlines, or any guide pixels in the output.";
 
 /// Generative fill prompt for one placement part. Equivalent wording to the
 /// Antigravity fill prompt, adapted to positional edit-endpoint attachments.
@@ -1084,6 +1097,48 @@ Required output:
     )
 }
 
+fn grok_restore_director_prompt(
+    geometry_note: &str,
+    director_mode: AiDirectorMode,
+    director_involvement: AiDirectorInvolvement,
+) -> String {
+    let director_contract = ai_director_restore_contract(
+        AiDirectorProvider::Grok,
+        director_mode,
+        director_involvement,
+    );
+    format!(
+        r#"Act as PaintNode's AI Director for one fixed-canvas image-detail restoration region.
+
+This is a fixed-canvas image refinement task, not a new image generation task.
+
+Inputs in the current working directory:
+- `source.png` is the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
+- `structure-guide.png` is an automatically derived edge-only spatial registration guide. Bright lines trace boundaries already present in `source.png`; use it only to keep silhouettes, locations, scale, pose, depth, and overlaps fixed. The image generator receives these as <IMAGE_0> and <IMAGE_1>, respectively.
+
+{geometry_note}
+
+{director_contract}
+
+Director tool protocol:
+- Inspect the input images before deciding.
+- Write `{PAINTNODE_DIRECTOR_ACTION_FILE}` as UTF-8 JSON in the current working directory.
+- For the first turn, write one `generateCandidate` action with `baseImage` set to `source.png` and a complete, safety-compliant image-edit prompt.
+- The prompt must ask for exactly one full-frame PNG that restores only fine detail while preserving all visible content, identity, framing, camera geometry, color, lighting, style, and intentional texture.
+- If the image tool reports moderation or another prompt rejection, use the next observation to make the smallest faithful compliant rephrasing and write another `generateCandidate` action.
+- Do not invoke image-generation tools yourself, do not create `result.png`, and do not edit files other than `{PAINTNODE_DIRECTOR_ACTION_FILE}`.
+
+Action schema:
+{{ "version": 1, "action": "generateCandidate", "baseImage": "source.png", "prompt": "complete revised prompt", "constraints": [], "avoid": [], "notes": "reason" }}"#
+    )
+}
+
+fn grok_content_moderation_blocked(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("content moderation")
+        || error.contains("generated image rejected by content moderation")
+}
+
 /// Multi-asset workflow composition prompt. Equivalent wording to the
 /// Antigravity workflow prompt, adapted to positional attachments.
 fn grok_workflow_prompt(prompt: &str, attachments_note: &str) -> String {
@@ -1108,6 +1163,14 @@ const GROK_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejec
 - The previous candidate repainted pixels outside the editable mask, which means the scene was regenerated instead of edited in place. PaintNode discarded it.
 - This is a strict in-place edit of <IMAGE_0>: apply the requested change only inside the white mask area of <IMAGE_1> and reproduce every pixel outside the mask exactly as it appears in <IMAGE_0>.
 - If the requested change cannot be honored inside the mask, make the closest faithful change possible rather than re-imagining the scene."#;
+
+/// Appended after an upscale candidate changes local low-frequency structure.
+/// The structure gate, rather than prompt compliance alone, decides whether
+/// the image is safe to import.
+const GROK_UPSCALE_STRUCTURE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejected:
+- The previous candidate moved or rescaled visible content instead of restoring the attached frame in place. PaintNode discarded it.
+- Use <IMAGE_0> as a locked spatial plate. Every subject and object silhouette, center, size, depth, pose, and overlap must remain at the same location and scale.
+- Add only fine surface detail that follows the existing pixels. When the source is ambiguous, preserve its soft structure instead of resolving it into a different face, body, object, or edge."#;
 
 /// Deterministic post-processing notes recorded in the part folder for
 /// debugging; the Grok image backend never sees this file.
@@ -1144,6 +1207,11 @@ fn grok_restore_image_details(
     label: &str,
     upscale_layers: bool,
     return_composed: bool,
+    director_mode: AiDirectorMode,
+    director_provider: AiDirectorProvider,
+    director_involvement: AiDirectorInvolvement,
+    director_model: Option<&str>,
+    director_reasoning_effort: Option<&str>,
 ) -> Result<(Option<Vec<u8>>, Vec<GeneratedImageLayerResult>), String> {
     let dimensions = png_dimensions_from_bytes(enlarged_png)
         .ok_or_else(|| format!("{label} PNG dimensions are invalid."))?;
@@ -1211,7 +1279,16 @@ fn grok_restore_image_details(
             part_path.join("source.png"),
             "the image region to restore (`source.png`). It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.",
         );
-        if !upscale_layers {
+        if upscale_layers {
+            let structure_guide =
+                upscale_structure_guide_png(&inputs.source_png, "Grok upscale structure guide")?;
+            fs::write(part_path.join("structure-guide.png"), structure_guide)
+                .map_err(|e| format!("Failed to write {label} structure guide: {e}"))?;
+            attachments.push(
+                part_path.join("structure-guide.png"),
+                GROK_UPSCALE_STRUCTURE_ATTACHMENT_NOTE,
+            );
+        } else {
             attachments.push(
                 part_path.join("mask.png"),
                 "an editable-area mask over <IMAGE_0> (`mask.png`). White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades the result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged. The mask itself must never appear in the output.",
@@ -1233,8 +1310,16 @@ fn grok_restore_image_details(
         } else {
             ai_part_geometry_note(&placement, part_index)
         };
-        let prompt_text = grok_restore_prompt(&attachments.notes_block(), &geometry_note);
-        write_ai_job_prompt(&part_path, &prompt_text, label)?;
+        let base_prompt_text = grok_restore_prompt(&attachments.notes_block(), &geometry_note);
+        let use_grok_director = upscale_layers
+            && director_provider == AiDirectorProvider::Grok
+            && director_uses_agentic_loop(director_mode, director_involvement);
+        let job_prompt_text = if use_grok_director {
+            grok_restore_director_prompt(&geometry_note, director_mode, director_involvement)
+        } else {
+            base_prompt_text.clone()
+        };
+        write_ai_job_prompt(&part_path, &job_prompt_text, label)?;
         emit_codex_part_progress(
             app,
             run_id,
@@ -1243,36 +1328,158 @@ fn grok_restore_image_details(
             ai_part_progress_message(&placement, part_index, "Restoring image detail with Grok"),
         );
         let result_path = part_path.join("result.png");
-        let bytes = run_grok_direct_edit(
-            app,
-            run_id,
-            grok_bin,
-            &part_path,
-            grok_edit_spec_for_working(
-                prompt_text.clone(),
-                attachments.paths,
-                &part.working,
-                image_resolution,
-            ),
-            image_model,
-            keep_debug_artifacts,
-        )
-        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        fs::write(&result_path, &bytes).map_err(|e| {
-            ai_part_progress_message(
-                &placement,
-                part_index,
-                &format!("Failed to write Grok detail restoration result: {e}"),
-            )
-        })?;
-        let (bytes, _result_dimensions, _normalized) =
-            read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        let _ = fs::remove_file(&result_path);
+        let run_candidate = |prompt_text: &str| -> Result<Vec<u8>, String> {
+            let candidate = run_grok_direct_edit(
+                app,
+                run_id,
+                grok_bin,
+                &part_path,
+                grok_edit_spec_for_working(
+                    prompt_text.to_string(),
+                    attachments.paths.clone(),
+                    &part.working,
+                    image_resolution,
+                ),
+                image_model,
+                keep_debug_artifacts,
+            )?;
+            fs::write(&result_path, &candidate)
+                .map_err(|e| format!("Failed to write Grok detail restoration result: {e}"))?;
+            let (candidate, _result_dimensions, _normalized) =
+                read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)?;
+            let _ = fs::remove_file(&result_path);
+            if upscale_layers {
+                validate_upscale_part_structure(&inputs.source_png, &candidate, label)?;
+            }
+            Ok(candidate)
+        };
+        let bytes = if use_grok_director {
+            let mut director_image_paths = attachments.paths.clone();
+            let directed_result = run_candidate_director_loop(
+                &part_path,
+                DirectorLoopSpec {
+                    provider_label: AiDirectorProvider::Grok.label(),
+                    involvement: director_involvement,
+                    keep_debug_artifacts,
+                    legacy_request_file: GROK_DIRECTOR_LEGACY_REQUEST_FILE,
+                    base_prompt_text: &job_prompt_text,
+                    review_criteria: workflow_review_criteria("upscale"),
+                    ensure_completion_acceptance_note:
+                        "Candidate completed; ensure-completion mode does not run a separate quality review.",
+                },
+                |_, turn_prompt_text, candidate_path, session_id| {
+                    if let Some(candidate_path) = candidate_path {
+                        director_image_paths.push(candidate_path.to_path_buf());
+                    }
+                    let director_prompt = director_prompt_with_image_paths(
+                        turn_prompt_text,
+                        &director_image_paths,
+                        &part_path,
+                    );
+                    let run = run_grok_director_request(
+                        app,
+                        run_id,
+                        Some(grok_bin.path.clone()),
+                        director_model.map(str::to_string),
+                        director_reasoning_effort.map(str::to_string),
+                        keep_debug_artifacts,
+                        &part_path,
+                        &director_prompt,
+                        session_id,
+                    )?;
+                    if candidate_path.is_some() {
+                        director_image_paths.pop();
+                    }
+                    Ok(run)
+                },
+                |run| final_grok_agent_message(&run.output),
+                |turn, question, options, allow_custom| {
+                    request_ai_director_input(
+                        app,
+                        run_id,
+                        AiDirectorProvider::Grok.label(),
+                        turn,
+                        question,
+                        options,
+                        allow_custom,
+                    )
+                },
+                |turn, _request, candidate_prompt| {
+                    let candidate = run_candidate(candidate_prompt)?;
+                    let candidate_file = director_candidate_file(turn);
+                    fs::write(part_path.join(&candidate_file), &candidate).map_err(|e| {
+                        format!("Failed to write {label} Director candidate: {e}")
+                    })?;
+                    Ok(DirectorCandidate {
+                        result: candidate,
+                        file_name: candidate_file,
+                    })
+                },
+            );
+            match directed_result {
+                Ok(candidate) => candidate,
+                Err(error) if grok_content_moderation_blocked(&error) => {
+                    emit_codex_progress(
+                        app,
+                        run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            "Grok declined this source crop after Director retries; keeping the deterministic upscaled pixels for this part and continuing",
+                        ),
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(ai_part_progress_message(&placement, part_index, &error));
+                }
+            }
+        } else {
+            let max_attempts = if upscale_layers {
+                AI_PROTECTED_DRIFT_MAX_ATTEMPTS
+            } else {
+                1
+            };
+            let mut accepted = None;
+            for attempt in 0..max_attempts {
+                let prompt_text = if attempt == 0 {
+                    base_prompt_text.clone()
+                } else {
+                    format!("{base_prompt_text}\n\n{GROK_UPSCALE_STRUCTURE_RETRY_NOTE}")
+                };
+                write_ai_job_prompt(&part_path, &prompt_text, label)?;
+                match run_candidate(&prompt_text) {
+                    Ok(candidate) => {
+                        accepted = Some(candidate);
+                        break;
+                    }
+                    Err(error) if attempt + 1 < max_attempts => {
+                        emit_codex_progress(
+                            app,
+                            run_id,
+                            ai_part_progress_message(
+                                &placement,
+                                part_index,
+                                &format!(
+                                    "Rejected Grok upscale candidate: {error}; retrying with stricter preservation instructions"
+                                ),
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        return Err(ai_part_progress_message(&placement, part_index, &error));
+                    }
+                }
+            }
+            accepted.ok_or_else(|| {
+                ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    "Grok did not return an acceptable upscale candidate.",
+                )
+            })?
+        };
         let unaligned_bytes = bytes.clone();
-        if upscale_layers {
-            validate_upscale_part_structure(&inputs.source_png, &bytes, label)?;
-        }
         let (bytes, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &bytes, label)?;
         if let Some(correction) = drift_correction {
@@ -2032,6 +2239,11 @@ pub(crate) async fn upscale_grok_image(
     run_id: String,
     image_model: Option<String>,
     image_resolution: Option<String>,
+    director_mode: Option<String>,
+    director_provider: Option<String>,
+    director_involvement: Option<String>,
+    director_model: Option<String>,
+    director_reasoning_effort: Option<String>,
 ) -> Result<GeneratedImageResult, String> {
     if !is_png(&source_png) {
         return Err("AI upscale source is not a PNG image.".into());
@@ -2046,6 +2258,9 @@ pub(crate) async fn upscale_grok_image(
         let grok_bin = configured_or_default_grok_bin(bin)?;
         let image_model = configured_or_default_grok_image_model(image_model);
         let keep_debug_artifacts = keep_debug_artifacts.unwrap_or(false);
+        let director_mode = ai_director_mode(director_mode);
+        let director_provider = ai_director_provider(director_provider);
+        let director_involvement = ai_director_involvement(director_involvement);
         let run_id = if run_id.trim().is_empty() {
             format!("grok-upscale-{}", now_id())
         } else {
@@ -2094,6 +2309,11 @@ pub(crate) async fn upscale_grok_image(
             "AI upscale",
             true,
             keep_composed_result,
+            director_mode,
+            director_provider,
+            director_involvement,
+            director_model.as_deref(),
+            director_reasoning_effort.as_deref(),
         )?;
         let data_url = png_data_url(composed_bytes.as_deref().unwrap_or(&enlarged_png))?;
         let mut assets = Vec::new();
@@ -2639,6 +2859,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn upscale_director_prompt_requires_moderation_rephrasing_and_owned_tool_action() {
+        let prompt = grok_restore_director_prompt(
+            &ai_upscale_part_geometry_note(),
+            AiDirectorMode::Force,
+            AiDirectorInvolvement::FullReview,
+        );
+
+        assert!(prompt.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+        assert!(prompt.contains("reports moderation"));
+        assert!(prompt.contains("smallest faithful compliant rephrasing"));
+        assert!(prompt.contains("generateCandidate"));
+        assert!(prompt.contains("Do not invoke image-generation tools yourself"));
+    }
+
+    #[test]
+    fn moderation_classifier_recognizes_grok_image_rejection_without_part_prefixes() {
+        assert!(grok_content_moderation_blocked(
+            "Grok blocked this prompt during content moderation. Try a different prompt.\n\nGenerated image rejected by content moderation."
+        ));
+        assert!(!grok_content_moderation_blocked(
+            "Grok image request timed out while contacting xAI."
+        ));
+    }
+
+    #[test]
     fn auth_json_token_reads_key_and_expiry_and_tolerates_extra_entries() {
         // exp = 4102444800 (2100-01-01); base64url payload of {"exp":4102444800}
         let payload = BASE64_URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
@@ -2761,6 +3006,23 @@ mod tests {
         let text = serde_json::to_string(&body).unwrap();
         assert!(!text.contains("1024x1024"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upscale_structure_attachment_is_registration_only() {
+        let attachments = format!(
+            "- <IMAGE_0>: the source image.\n- <IMAGE_1>: {GROK_UPSCALE_STRUCTURE_ATTACHMENT_NOTE}"
+        );
+        let prompt = grok_restore_prompt(
+            &attachments,
+            "PaintNode upscale geometry:\n- Refine only the attached fixed crop.",
+        );
+        assert!(prompt.contains("edge-only spatial registration guide"));
+        assert!(
+            prompt.contains("keep silhouettes, locations, scale, pose, depth, and overlaps fixed")
+        );
+        assert!(prompt.contains("Do not render the guide"));
+        assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
     }
 
     #[test]

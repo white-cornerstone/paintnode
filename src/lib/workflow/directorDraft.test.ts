@@ -123,7 +123,7 @@ describe('Workflow Director context boundary', () => {
     }]);
     expect(JSON.stringify(value)).not.toMatch(/relativePath|previewDataUrl|private prompt|runRecord|viewport|provider/i);
     expect(value.registry.map((item) => item.type)).toEqual([
-      'input', 'brief', 'art-direction', 'transform', 'review', 'output',
+      'input', 'brief', 'art-direction', 'extract-assets', 'transform', 'review', 'output',
     ]);
     for (const item of value.registry) {
       const definition = creatorNodeDefinition(item.type);

@@ -13,6 +13,7 @@ import {
   finalizeWorkflowEditorReturn,
   saveProjectDocumentAs,
   storeProjectAssetBytes,
+  storeProjectClipboardImage,
   writeProjectDocumentPath,
   writeProjectDocument,
   type ProjectAsset,
@@ -116,6 +117,15 @@ class ProjectStore {
       height,
       mime: file.type || null,
     });
+    await this.refresh(path);
+    return result.asset;
+  }
+
+  async storeClipboardImage(name = 'Clipboard Image.png'): Promise<ProjectAsset | null> {
+    const path = this.path;
+    if (!path) throw new Error('Open a project folder before pasting an image.');
+    const result = await storeProjectClipboardImage(path, name);
+    if (!result) return null;
     await this.refresh(path);
     return result.asset;
   }

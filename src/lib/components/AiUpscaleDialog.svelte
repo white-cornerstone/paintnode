@@ -178,6 +178,8 @@
               );
         if (generated.asset || (generated.assets?.length ?? 0) > 0) await project.refresh(taskProjectPath);
         const layerResults = generated.layers ?? [];
+        const expectedPartCount = aiTasks.find(task.id)?.partProgress?.total ?? layerResults.length;
+        const unchangedPartCount = Math.max(0, expectedPartCount - layerResults.length);
         let upscaledDoc: PaintDocument;
         if (layerResults.length) {
           const targetWidth = Math.round((activeDoc.width * scale) / 100);
@@ -224,8 +226,15 @@
           upscaledDoc.activeLayerId = layer.id;
         }
         editor.openDocument(upscaledDoc);
-        editor.flash(layerResults.length ? 'AI upscale added as masked layers' : 'AI upscale added as a new document');
-        aiTasks.complete(task.id, 'AI upscale completed');
+        if (unchangedPartCount > 0) {
+          const partLabel = unchangedPartCount === 1 ? 'part' : 'parts';
+          const message = `AI upscale completed with ${unchangedPartCount} moderated ${partLabel} left unchanged`;
+          editor.flash(message);
+          aiTasks.complete(task.id, message);
+        } else {
+          editor.flash(layerResults.length ? 'AI upscale added as masked layers' : 'AI upscale added as a new document');
+          aiTasks.complete(task.id, 'AI upscale completed');
+        }
       } catch (e) {
         const message = (e as Error)?.message ?? String(e);
         error = message;

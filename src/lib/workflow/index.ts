@@ -23,3 +23,5 @@ export * from './candidateBranches';
 export * from './candidatePromotion';
 export * from './editorRoundTrip';
 export * from './storyboardRead';
+export * from './aiRoles';
+export * from './reviewRecommendation';

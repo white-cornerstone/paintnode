@@ -55,8 +55,8 @@ use crate::ai::placement::{
     fill_placement_returns_layer_results, normalize_storyboard_draft_png, plan_ai_edit_placement,
     plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
     prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result,
-    validate_upscale_part_structure, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
-    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    upscale_structure_guide_png, validate_upscale_part_structure, AiEditComposer, AiEditPlacement,
+    AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
@@ -679,6 +679,97 @@ pub(crate) fn run_codex_workflow_revision_request(
         Err(format!("Codex workflow revision failed.\n\n{message}"))
     } else {
         Err(command_failure("Codex workflow revision", &run.output))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_workflow_review_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
+    let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        &[],
+        &options,
+        None,
+        Some(output_file),
+        Some("workflow-review"),
+    );
+    let run = run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.to_string())
+        .map_err(|error| {
+            format!(
+                "Failed to run Codex at '{}': {error}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!(
+            "Codex workflow candidate review failed.\n\n{message}"
+        ))
+    } else {
+        Err(command_failure(
+            "Codex workflow candidate review",
+            &run.output,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_codex_workflow_extraction_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    source_image: &Path,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    let codex_bin = configured_codex_bin_or_sdk_default(bin)?;
+    let options = codex_command_options(model, reasoning_effort, service_tier, None, None);
+    let mut command = build_codex_sdk_command_with_session(
+        &codex_bin,
+        job_path,
+        prompt_text,
+        &[source_image.to_path_buf()],
+        &options,
+        None,
+        Some(output_file),
+        Some("workflow-extraction"),
+    );
+    let run = run_codex_with_progress(&mut command, &codex_bin, app.clone(), run_id.to_string())
+        .map_err(|error| {
+            format!(
+                "Failed to run Codex at '{}': {error}",
+                codex_command_label(&codex_bin)
+            )
+        })?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_codex_agent_message(&run.output) {
+        Err(format!(
+            "Codex workflow extraction planning failed.\n\n{message}"
+        ))
+    } else {
+        Err(command_failure(
+            "Codex workflow extraction planning",
+            &run.output,
+        ))
     }
 }
 
@@ -3171,6 +3262,7 @@ fn codex_direct_restore_prompt(
 ) -> String {
     codex_direct_restore_director_prompt(
         geometry_note,
+        false,
         AiDirectorProvider::Codex,
         director_mode,
         director_involvement,
@@ -3179,12 +3271,18 @@ fn codex_direct_restore_prompt(
 
 fn codex_direct_restore_director_prompt(
     geometry_note: &str,
+    has_structure_guide: bool,
     director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
 ) -> String {
     let director_contract =
         ai_director_restore_contract(director_provider, director_mode, director_involvement);
+    let structure_note = if has_structure_guide {
+        "\n3. `structure-guide.png` is an automatically derived edge-only spatial registration guide. Bright lines trace boundaries already present in `source.png`; use them only to keep silhouettes, locations, scale, pose, depth, and overlaps fixed. Do not render the guide, line art, monochrome treatment, outlines, or any guide pixels in the output."
+    } else {
+        ""
+    };
     let agentic_tool_loop = director_uses_agentic_loop(director_mode, director_involvement);
     let director_tool_contract = if agentic_tool_loop {
         format!(
@@ -3215,7 +3313,7 @@ This is a fixed-canvas image refinement task, not a new image generation task.
 
 Attached images:
 1. `source.png` is the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
-2. `mask.png` marks the editable area. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.
+2. `mask.png` marks the editable area. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.{structure_note}
 
 {geometry_note}
 {director_contract}
@@ -3321,6 +3419,12 @@ fn codex_restore_image_details(
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
+        if upscale_layers {
+            let structure_guide =
+                upscale_structure_guide_png(&inputs.source_png, "Codex upscale structure guide")?;
+            fs::write(part_path.join("structure-guide.png"), structure_guide)
+                .map_err(|e| format!("Failed to write {label} structure guide: {e}"))?;
+        }
         let has_overview = placement.is_split() && !upscale_layers;
         if has_overview {
             fs::write(
@@ -3337,6 +3441,7 @@ fn codex_restore_image_details(
         };
         let prompt_text = codex_direct_restore_director_prompt(
             &geometry_note,
+            upscale_layers,
             director_provider,
             director_mode,
             director_involvement,
@@ -3354,6 +3459,9 @@ fn codex_restore_image_details(
             ),
         );
         let mut image_paths = vec![part_path.join("source.png"), part_path.join("mask.png")];
+        if upscale_layers {
+            image_paths.push(part_path.join("structure-guide.png"));
+        }
         if has_overview {
             image_paths.push(part_path.join("overview.png"));
         }
@@ -5263,6 +5371,55 @@ mod tests {
     }
 
     #[test]
+    fn workflow_review_command_uses_dedicated_ranking_schema_without_images() {
+        let job = TempJobDir::new("paintnode-codex-workflow-review-test").expect("temp dir");
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "review candidates",
+            &[],
+            &CodexCommandOptions::default(),
+            None,
+            Some("paintnode-workflow-review.json"),
+            Some("workflow-review"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-review" }));
+        assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_extraction_command_uses_dedicated_schema_and_source_image() {
+        let job = TempJobDir::new("paintnode-codex-workflow-extraction-test").expect("temp dir");
+        let source_image = job.path().join("extraction-source.png");
+        let command = build_codex_sdk_command_with_session(
+            "",
+            job.path(),
+            "plan asset extraction",
+            std::slice::from_ref(&source_image),
+            &CodexCommandOptions::default(),
+            None,
+            Some("paintnode-asset-extraction-plan.json"),
+            Some("workflow-extraction"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--output-schema" && pair[1] == "workflow-extraction" }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--image" && pair[1] == source_image.to_string_lossy() }));
+    }
+
+    #[test]
     fn capability_parser_keeps_image_models_and_advertised_effort_order() {
         let capabilities = parse_codex_capabilities_payload(br#"{"data":[{"model":"vision-a","displayName":"Vision A","inputModalities":["text","image"],"supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"},{"reasoningEffort":"high","description":"Deep"}],"defaultReasoningEffort":"high","isDefault":true},{"model":"text-only","displayName":"Text only","inputModalities":["text"],"supportedReasoningEfforts":[],"isDefault":false}]}"#)
             .expect("capabilities");
@@ -5896,6 +6053,24 @@ mod tests {
         assert!(!prompt.contains("User retouch prompt"));
         assert!(!prompt.contains("$imagegen"));
         assert!(!prompt.contains("generated-images cache"));
+    }
+
+    #[test]
+    fn codex_upscale_prompt_uses_structure_guide_only_for_registration() {
+        let prompt = codex_direct_restore_director_prompt(
+            TEST_GEOMETRY_NOTE,
+            true,
+            AiDirectorProvider::Codex,
+            AiDirectorMode::Auto,
+            AiDirectorInvolvement::FullReview,
+        );
+
+        assert!(prompt.contains("`structure-guide.png`"));
+        assert!(prompt.contains("edge-only spatial registration guide"));
+        assert!(
+            prompt.contains("keep silhouettes, locations, scale, pose, depth, and overlaps fixed")
+        );
+        assert!(prompt.contains("Do not render the guide"));
     }
 
     #[test]

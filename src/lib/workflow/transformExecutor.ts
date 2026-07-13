@@ -18,6 +18,7 @@ import type {
   WorkflowRunProvider,
   WorkflowRunRecordV1,
 } from './schema';
+import { workflowNodeAiOverrides, type WorkflowNodeAiOverridesV1 } from './aiRoles';
 import type { WorkflowCacheHash } from './execution';
 import {
   requireProjectRelativeWorkflowReference,
@@ -91,6 +92,7 @@ export interface WorkflowTransformExecutionRequest {
     capability: string;
     instructions: string;
     advanced: Readonly<Record<string, unknown>>;
+    ai?: Readonly<WorkflowNodeAiOverridesV1> | null;
   };
   prompt: string;
   sources: readonly WorkflowTransformSource[];
@@ -138,6 +140,7 @@ export interface WorkflowNodeExecutor {
   materialization?: 'visual-bytes' | 'metadata-only';
   executor: WorkflowRunExecutor;
   describeRun(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunProvider;
+  describeRoles?(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunRecordV1['roles'];
   execute(
     request: Readonly<WorkflowTransformExecutionRequest>,
     context?: Readonly<WorkflowNodeExecutionContext>,
@@ -417,13 +420,15 @@ export function createWorkflowCompositionExecutor(
   service: WorkflowCompositionService,
   options: {
     materialization?: 'visual-bytes' | 'metadata-only';
+    capabilities?: readonly string[];
     executor?: WorkflowRunExecutor;
     describeRun?: (request: Readonly<WorkflowTransformExecutionRequest>) => WorkflowRunProvider;
+    describeRoles?: (request: Readonly<WorkflowTransformExecutionRequest>) => WorkflowRunRecordV1['roles'];
   } = {},
 ): WorkflowNodeExecutor {
   return Object.freeze({
     provider,
-    capabilities: Object.freeze(['generate']),
+    capabilities: Object.freeze([...(options.capabilities ?? ['generate'])]),
     materialization: options.materialization ?? 'visual-bytes',
     executor: Object.freeze(options.executor ?? {
       id: 'campaign-generate', version: '1', requestSchemaVersion: '1',
@@ -437,6 +442,7 @@ export function createWorkflowCompositionExecutor(
         ? cloneValue(request.transform.advanced.options as Record<string, unknown>)
         : {},
     })),
+    ...(options.describeRoles ? { describeRoles: options.describeRoles } : {}),
     execute: async (
       request: Readonly<WorkflowTransformExecutionRequest>,
       context: Readonly<WorkflowNodeExecutionContext> = Object.freeze({
@@ -490,15 +496,18 @@ async function campaignGenerateTransform(
     );
   }
   const capability = textConfig(transform, 'capability');
-  if (capability !== 'generate') {
+  const supportedCapabilities = new Set(['generate', 'edit', 'remove-background', 'relight', 'upscale']);
+  if (!supportedCapabilities.has(capability)) {
     throw new WorkflowTransformExecutionError(
       'INVALID_TRANSFORM_PATH',
-      'This thin slice can run only a Transform configured with the Generate capability.',
-      'Configure this Transform as Generate',
+      `The Transform capability “${capability || 'empty'}” is not supported.`,
+      'Choose Generate, Edit, Remove Background, Relight, or Upscale',
     );
   }
   const advanced = recordConfig(transform, 'advanced');
-  const configuredProvider = typeof advanced.provider === 'string' ? advanced.provider.trim() : '';
+  const nodeAi = workflowNodeAiOverrides(transform);
+  const configuredProvider = nodeAi?.image?.provider
+    ?? (typeof advanced.provider === 'string' ? advanced.provider.trim() : '');
   const effectiveProvider = configuredProvider || options.provider;
   const executor = options.executors.find((candidate) => (
     candidate.provider === effectiveProvider && candidate.capabilities.includes(capability)
@@ -632,7 +641,7 @@ async function campaignGenerateTransform(
     projectPath: options.projectPath,
     brief: briefText,
     artDirection: artDirectionText,
-    transform: { capability, instructions: transformInstructions, advanced },
+    transform: { capability, instructions: transformInstructions, advanced, ai: nodeAi },
     prompt: preMaterialPrompt,
     sources: [],
     storyboard: storyboard ? { ...storyboard, placementConstraints, source: null } : null,
@@ -648,6 +657,7 @@ async function campaignGenerateTransform(
       effectivePrompt: preMaterialPrompt,
     },
     provider: executor.describeRun(deepFreeze(cloneValue(preMaterialRequest)) as Readonly<WorkflowTransformExecutionRequest>),
+    ...(executor.describeRoles ? { roles: executor.describeRoles(preMaterialRequest) } : {}),
     executor: executor.executor,
     output: outputRequest,
   };
@@ -842,7 +852,7 @@ async function campaignGenerateTransform(
     projectPath: options.projectPath,
     brief: briefText,
     artDirection: artDirectionText,
-    transform: { capability, instructions: transformInstructions, advanced },
+    transform: { capability, instructions: transformInstructions, advanced, ai: nodeAi },
     prompt,
     sources,
     storyboard: materializedStoryboard,
@@ -876,6 +886,7 @@ async function campaignGenerateTransform(
       effectivePrompt: prompt,
     },
     provider: executor.describeRun(deepFreeze(cloneValue(request)) as Readonly<WorkflowTransformExecutionRequest>),
+    ...(executor.describeRoles ? { roles: executor.describeRoles(request) } : {}),
     executor: executor.executor,
     output: request.output,
   };

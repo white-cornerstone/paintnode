@@ -85,7 +85,7 @@ describe('desktop workflow composition adapters', () => {
     expect(services.codex).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'saved-codex-model', reasoningEffort: 'high', serviceTier: 'fast',
-        imageQuality: 'high', projectPath: '/virtual/project', directorMode: 'skip',
+        imageQuality: 'high', projectPath: '/virtual/project',
       }),
       expect.any(String),
       [
@@ -125,7 +125,7 @@ describe('desktop workflow composition adapters', () => {
       expect.objectContaining({
         model: 'saved-agent-model', imageModel: 'gemini-3.1-flash-image', imageSize: '2K',
         compressionQuality: 88, safetyFiltering: 'moreRestrictive',
-        projectPath: '/virtual/project', directorMode: 'skip',
+        projectPath: '/virtual/project',
       }),
       'Use the storyboard as the primary spatial plan.',
       [

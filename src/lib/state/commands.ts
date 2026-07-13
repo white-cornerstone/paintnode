@@ -15,6 +15,7 @@ import { workflow } from './workflow.svelte';
 import { isDesktop, readNativeDroppedFile } from '../integrations/desktop';
 import { fileDocumentSourceKey, nativePathDocumentSourceKey, type DocumentSourceKey } from './documentSource';
 import { returnActiveDocumentToWorkflow } from './workflowEditorCommands';
+import { requestWorkflowClose } from './workflowClose';
 
 /** Distinct font families used by the document's text layers. */
 function textFamilies(doc: PaintDocument): string[] {
@@ -466,6 +467,27 @@ export async function saveWorkflowAsCommand(): Promise<void> {
     editor.flash(relativePath ? `Saved ${relativePath}` : 'Open a project folder to save workflow');
   } catch (e) {
     editor.flash('Workflow save failed: ' + ((e as Error)?.message ?? String(e)));
+  }
+}
+
+let workflowCloseRunning = false;
+
+export async function closeWorkflowCommand(): Promise<void> {
+  if (workflowCloseRunning || !workflow.active) return;
+  workflowCloseRunning = true;
+  try {
+    const result = await requestWorkflowClose({
+      name: () => workflow.name || 'Untitled Workflow',
+      needsSave: () => workflow.dirty || workflow.savedPath === null,
+      askSaveChanges: (prompt) => ui.askSaveChanges(prompt),
+      saveWorkflow: saveWorkflowCommand,
+      closeWorkflow: () => workflow.close(),
+    });
+    if (result === 'blocked') {
+      editor.flash('Close workflow-linked editor tabs before closing the workflow.');
+    }
+  } finally {
+    workflowCloseRunning = false;
   }
 }
 

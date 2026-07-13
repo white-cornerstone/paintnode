@@ -214,13 +214,29 @@
     pickImagePreset(preset);
   }
 
+  function onImagePresetKeydown(event: KeyboardEvent, preset: ImagePreset): void {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    chooseImagePreset(preset);
+  }
+
   function pickWorkflowPreset(preset: WorkflowTemplateDefinition): void {
     selectedWorkflowId = preset.id;
     workflowName = preset.name === 'Blank Workflow' ? 'Untitled Workflow' : preset.name;
   }
 
   function chooseWorkflowPreset(preset: WorkflowTemplateDefinition): void {
+    if (selectedWorkflowId === preset.id) {
+      createWorkflow();
+      return;
+    }
     pickWorkflowPreset(preset);
+  }
+
+  function onWorkflowPresetKeydown(event: KeyboardEvent, preset: WorkflowTemplateDefinition): void {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    chooseWorkflowPreset(preset);
   }
 
   function createImage(): void {
@@ -325,10 +341,10 @@
 <Modal title="New" {onClose} width={980} height={680} minWidth={720} minHeight={460} resizable>
   <div class="new-dialog" role="presentation" onkeydown={onDialogKeydown}>
     <div class="tabs" role="tablist" aria-label="New item type">
-      <button id="new-tab-image" class:active={tab === 'image'} onclick={() => selectTab('image')} onkeydown={(event) => onTabKeydown(event, 'image')} role="tab" aria-selected={tab === 'image'} aria-controls="new-panel-image" tabindex={tab === 'image' ? 0 : -1} data-autofocus={tab === 'image' ? '' : undefined}>
+      <button id="new-tab-image" class:active={tab === 'image'} onclick={() => selectTab('image')} onkeydown={(event) => onTabKeydown(event, 'image')} role="tab" aria-selected={tab === 'image'} aria-controls="new-panel-image" tabindex={tab === 'image' ? 0 : -1}>
         <Icon svg={ImageAdd} size={17} /><span>Image</span>
       </button>
-      <button id="new-tab-workflow" class:active={tab === 'workflow'} onclick={() => selectTab('workflow')} onkeydown={(event) => onTabKeydown(event, 'workflow')} role="tab" aria-selected={tab === 'workflow'} aria-controls="new-panel-workflow" tabindex={tab === 'workflow' ? 0 : -1} data-autofocus={tab === 'workflow' ? '' : undefined}>
+      <button id="new-tab-workflow" class:active={tab === 'workflow'} onclick={() => selectTab('workflow')} onkeydown={(event) => onTabKeydown(event, 'workflow')} role="tab" aria-selected={tab === 'workflow'} aria-controls="new-panel-workflow" tabindex={tab === 'workflow' ? 0 : -1}>
         <Icon svg={Board} size={17} /><span>Workflow</span>
       </button>
       <button id="new-tab-project" class:active={tab === 'project'} onclick={() => selectTab('project')} onkeydown={(event) => onTabKeydown(event, 'project')} role="tab" aria-selected={tab === 'project'} aria-controls="new-panel-project" tabindex={tab === 'project' ? 0 : -1} data-autofocus={tab === 'project' ? '' : undefined}>
@@ -360,6 +376,8 @@
                 class="preset-tile image-preset-tile"
                 class:selected={selectedImageId === preset.id}
                 onclick={() => chooseImagePreset(preset)}
+                onkeydown={(event) => onImagePresetKeydown(event, preset)}
+                data-autofocus={selectedImageId === preset.id ? '' : undefined}
               >
                 <span class="preset-preview" aria-hidden="true">
                   <span
@@ -389,11 +407,13 @@
                 class="preset-tile"
                 class:selected={selectedWorkflowId === preset.id}
                 onclick={() => chooseWorkflowPreset(preset)}
+                onkeydown={(event) => onWorkflowPresetKeydown(event, preset)}
+                data-autofocus={selectedWorkflowId === preset.id ? '' : undefined}
               >
                 <Icon svg={Board} size={44} />
                 <span>{preset.name}</span>
                 <small>{preset.description}</small>
-                <span class="template-counts">{preset.slots.length} inputs · {preset.outputs.length} outputs</span>
+                <span class="template-counts">{preset.id === 'blank' ? '0 nodes' : `${preset.slots.length} inputs · ${preset.outputs.length} outputs`}</span>
               </button>
             {/each}
           </div>
@@ -453,17 +473,28 @@
             <span>{selectedWorkflow.name}</span>
             <small>{selectedWorkflow.description}</small>
           </div>
-          <div class="workflow-plan" aria-label="Template contents">
-            <strong>Inputs</strong>
-            <span>{selectedWorkflow.slots.map((slot) => `${slot.name}${slot.required ? ' (required)' : ' (optional)'}`).join(', ')}</span>
-            <strong>Outputs</strong>
-            <span>{selectedWorkflow.outputs.map((output) => `${output.name} · ${output.width}×${output.height}`).join(', ')}</span>
-          </div>
+          {#if selectedWorkflow.id === 'blank'}
+            <div class="workflow-plan" aria-label="Template contents">
+              <strong>Empty board</strong>
+              <span>Add Input, Extract Assets, Transform, Art Direction, or Output nodes only when they are useful.</span>
+            </div>
+          {:else}
+            <div class="workflow-plan" aria-label="Template contents">
+              <strong>Inputs</strong>
+              <span>{selectedWorkflow.slots.map((slot) => `${slot.name}${slot.required ? ' (required)' : ' (optional)'}`).join(', ')}</span>
+              <strong>Outputs</strong>
+              <span>{selectedWorkflow.outputs.map((output) => `${output.name} · ${output.width}×${output.height}`).join(', ')}</span>
+            </div>
+          {/if}
           <div class="project-requirement" class:ready={!!project.path}>
-            <strong>{project.path ? 'Project folder ready' : 'Project folder required for Generate'}</strong>
+            <strong>{project.path ? 'Project folder ready' : selectedWorkflow.id === 'blank' ? 'Project folder optional to start' : 'Project folder required for Generate'}</strong>
             <span>{project.path ?? (desktop
-              ? 'You can create the board now, but Generate and Save stay blocked until a project folder is open.'
-              : 'Open this workflow in the PaintNode desktop app to choose a project folder, Save, and Generate.')}</span>
+              ? selectedWorkflow.id === 'blank'
+                ? 'Create the empty board now. Saving, importing, extraction, and generation become available after a project folder is open.'
+                : 'You can create the board now, but Generate and Save stay blocked until a project folder is open.'
+              : selectedWorkflow.id === 'blank'
+                ? 'Create the empty board now. Open it in the PaintNode desktop app when you need project-backed import, extraction, saving, or generation.'
+                : 'Open this workflow in the PaintNode desktop app to choose a project folder, Save, and Generate.')}</span>
             <button type="button" onclick={(event) => void chooseWorkflowProject(event.currentTarget)} disabled={projectBusy || !desktop}>
               {projectBusy ? 'Opening…' : project.path ? 'Change folder…' : 'Choose or create folder…'}
             </button>

@@ -57,6 +57,8 @@
   });
   const files = $derived(project.current?.files ?? []);
   const assets = $derived(project.current?.assets ?? []);
+  const workflowBoardActive = $derived(ui.activeSurface === 'workflow' && workflow.active && !workflow.storyboardEditing);
+  const canUsePlaceActions = $derived(!!editor.doc || workflowBoardActive);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
   const documentFiles = $derived(files.filter((file) => file.kind === 'document'));
   const storyboardFiles = $derived(files.filter((file) => file.kind === 'storyboard'));
@@ -85,6 +87,10 @@
 
   function assetFor(file: ProjectFile): ProjectAsset | null {
     return assetByPath.get(file.relativePath) ?? null;
+  }
+
+  function placeActionLabel(): string {
+    return workflowBoardActive ? 'Add to workflow' : 'Place as layer';
   }
 
   function isOra(file: ProjectFile): boolean {
@@ -267,6 +273,13 @@
     }
 
     if (isImage(file)) {
+      if (workflowBoardActive) {
+        const asset = assetFor(file);
+        if (!asset) throw new Error('This project image is not available as a workflow asset. Refresh the Project panel and try again.');
+        workflow.addAsset(asset);
+        editor.flash(`Added ${file.name} to workflow`);
+        return;
+      }
       const bytes = await project.readFile(file);
       const bmp = await bytesToBitmap(bytes, file.mime ?? 'image/png');
       try {
@@ -365,10 +378,17 @@
       editor.flash('Import image failed: ' + ((e as Error)?.message ?? String(e)));
     }
   }
+
+  async function refreshProjectFiles(): Promise<void> {
+    await ui.withLoading('Refreshing project files and assets…', () => project.refresh());
+    if (workflowBoardActive) {
+      window.dispatchEvent(new CustomEvent('paintnode:workflow-refresh'));
+    }
+  }
 </script>
 
 {#snippet fileThumb(file: ProjectFile, actionLabel: 'Open' | 'Place')}
-  <button class="thumb" aria-label={`${actionLabel === 'Place' ? 'Place as layer' : actionLabel} ${file.name}`} disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>
+  <button class="thumb" aria-label={`${actionLabel === 'Place' ? placeActionLabel() : actionLabel} ${file.name}`} disabled={actionLabel === 'Place' && !canUsePlaceActions} onclick={() => void openFile(file)}>
     {#if file.previewDataUrl}
       <img src={file.previewDataUrl} alt="" />
     {:else}
@@ -406,13 +426,13 @@
       oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}
     >
       {@render fileThumb(file, actionLabel)}
-      <button class="file-name" use:croppedNameTooltip={file.name} disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>{file.name}</button>
+      <button class="file-name" use:croppedNameTooltip={file.name} disabled={actionLabel === 'Place' && !canUsePlaceActions} onclick={() => void openFile(file)}>{file.name}</button>
     </div>
   {:else}
     <div class="file-row" role="listitem" oncontextmenu={(event) => openFileMenu(event, file, allowDelete)}>
       {@render fileThumb(file, actionLabel)}
       <div class="meta">
-        <button class="file-name" disabled={actionLabel === 'Place' && !editor.doc} onclick={() => void openFile(file)}>{file.name}</button>
+        <button class="file-name" disabled={actionLabel === 'Place' && !canUsePlaceActions} onclick={() => void openFile(file)}>{file.name}</button>
         <span>{metaFor(file)}</span>
       </div>
       {@render fileActions(file, allowDelete)}
@@ -580,7 +600,7 @@
           <button
             aria-label="Refresh project files and assets"
             use:tooltip={{ text: 'Refresh project files and assets', placement: 'left' }}
-            onclick={() => void ui.withLoading('Refreshing project files and assets…', () => project.refresh())}
+            onclick={() => void refreshProjectFiles()}
           >
             <Icon svg={ArrowSync} size={15} />
           </button>
