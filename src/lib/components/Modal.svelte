@@ -66,6 +66,10 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    // Modal controls own their keyboard events. In particular, keep Tab from
+    // reaching workspace-level shortcuts while still allowing normal focus
+    // movement inside the dialog.
+    e.stopPropagation();
     if (e.key === 'Escape') {
       e.preventDefault();
       onClose();
@@ -82,10 +86,8 @@
     const nextIndex = e.shiftKey
       ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
       : activeIndex < 0 || activeIndex === focusable.length - 1 ? 0 : activeIndex + 1;
-    if ((e.shiftKey && activeIndex <= 0) || (!e.shiftKey && (activeIndex < 0 || activeIndex === focusable.length - 1))) {
-      e.preventDefault();
-      focusable[nextIndex]?.focus();
-    }
+    e.preventDefault();
+    focusable[nextIndex]?.focus();
   }
 
   onMount(async () => {

@@ -214,6 +214,12 @@
     pickImagePreset(preset);
   }
 
+  function onImagePresetKeydown(event: KeyboardEvent, preset: ImagePreset): void {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    chooseImagePreset(preset);
+  }
+
   function pickWorkflowPreset(preset: WorkflowTemplateDefinition): void {
     selectedWorkflowId = preset.id;
     workflowName = preset.name === 'Blank Workflow' ? 'Untitled Workflow' : preset.name;
@@ -225,6 +231,12 @@
       return;
     }
     pickWorkflowPreset(preset);
+  }
+
+  function onWorkflowPresetKeydown(event: KeyboardEvent, preset: WorkflowTemplateDefinition): void {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    chooseWorkflowPreset(preset);
   }
 
   function createImage(): void {
@@ -329,10 +341,10 @@
 <Modal title="New" {onClose} width={980} height={680} minWidth={720} minHeight={460} resizable>
   <div class="new-dialog" role="presentation" onkeydown={onDialogKeydown}>
     <div class="tabs" role="tablist" aria-label="New item type">
-      <button id="new-tab-image" class:active={tab === 'image'} onclick={() => selectTab('image')} onkeydown={(event) => onTabKeydown(event, 'image')} role="tab" aria-selected={tab === 'image'} aria-controls="new-panel-image" tabindex={tab === 'image' ? 0 : -1} data-autofocus={tab === 'image' ? '' : undefined}>
+      <button id="new-tab-image" class:active={tab === 'image'} onclick={() => selectTab('image')} onkeydown={(event) => onTabKeydown(event, 'image')} role="tab" aria-selected={tab === 'image'} aria-controls="new-panel-image" tabindex={tab === 'image' ? 0 : -1}>
         <Icon svg={ImageAdd} size={17} /><span>Image</span>
       </button>
-      <button id="new-tab-workflow" class:active={tab === 'workflow'} onclick={() => selectTab('workflow')} onkeydown={(event) => onTabKeydown(event, 'workflow')} role="tab" aria-selected={tab === 'workflow'} aria-controls="new-panel-workflow" tabindex={tab === 'workflow' ? 0 : -1} data-autofocus={tab === 'workflow' ? '' : undefined}>
+      <button id="new-tab-workflow" class:active={tab === 'workflow'} onclick={() => selectTab('workflow')} onkeydown={(event) => onTabKeydown(event, 'workflow')} role="tab" aria-selected={tab === 'workflow'} aria-controls="new-panel-workflow" tabindex={tab === 'workflow' ? 0 : -1}>
         <Icon svg={Board} size={17} /><span>Workflow</span>
       </button>
       <button id="new-tab-project" class:active={tab === 'project'} onclick={() => selectTab('project')} onkeydown={(event) => onTabKeydown(event, 'project')} role="tab" aria-selected={tab === 'project'} aria-controls="new-panel-project" tabindex={tab === 'project' ? 0 : -1} data-autofocus={tab === 'project' ? '' : undefined}>
@@ -364,6 +376,8 @@
                 class="preset-tile image-preset-tile"
                 class:selected={selectedImageId === preset.id}
                 onclick={() => chooseImagePreset(preset)}
+                onkeydown={(event) => onImagePresetKeydown(event, preset)}
+                data-autofocus={selectedImageId === preset.id ? '' : undefined}
               >
                 <span class="preset-preview" aria-hidden="true">
                   <span
@@ -393,6 +407,8 @@
                 class="preset-tile"
                 class:selected={selectedWorkflowId === preset.id}
                 onclick={() => chooseWorkflowPreset(preset)}
+                onkeydown={(event) => onWorkflowPresetKeydown(event, preset)}
+                data-autofocus={selectedWorkflowId === preset.id ? '' : undefined}
               >
                 <Icon svg={Board} size={44} />
                 <span>{preset.name}</span>
