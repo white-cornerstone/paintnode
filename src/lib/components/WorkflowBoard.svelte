@@ -711,19 +711,24 @@
     }
     const extractionController = new AbortController();
     let activeExtractionRunId: string | null = null;
+    const initialProgress = 'Preparing source and support images…';
     const extractionTask = aiTasks.create({
       projectPath: taskProjectPath,
       kind: 'workflow',
       title: `Extract assets: ${node.name}`,
       subtitle: `${extractionRunOptions.directorProvider} → ${extractionProvider}`,
-      progress: 'Preparing source and support images…',
+      progress: initialProgress,
       detail: { kind: 'workflow', providerLabel: extractionProvider, outputName: node.name },
     });
     aiTasks.setCancel(extractionTask.id, async () => {
       extractionController.abort();
       if (activeExtractionRunId) await cancelAiRun(activeExtractionRunId);
     });
-    assetExtractionStates[nodeId] = { running: true, message: 'Preparing source and support images…', error: '' };
+    const setExtractionProgress = (message: string): void => {
+      assetExtractionStates[nodeId] = { running: true, message, error: '' };
+      aiTasks.setProgress(extractionTask.id, message);
+    };
+    setExtractionProgress(initialProgress);
     try {
       const combined: Array<{ name: string; dataUrl: string; role: 'source' | 'support' }> = [];
       for (const connection of incoming.filter((item) => item.targetPortId === 'sources' || item.targetPortId === 'support')) {
@@ -762,7 +767,7 @@
       const runId = createRunId();
       activeExtractionRunId = runId;
       const prompt = workflowAssetExtractionPrompt(creatorConfigString(node.config, 'prompt'), mode, assetsPerSheet);
-      assetExtractionStates[nodeId] = { running: true, message: mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…', error: '' };
+      setExtractionProgress(mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…');
       let extractionNotes = '';
       let prepared: Array<{ canvas: HTMLCanvasElement; name: string }>;
       let plannedStored: ExtractedAssetLink[] | null = null;
@@ -788,7 +793,7 @@
               name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
             })));
       } else {
-        assetExtractionStates[nodeId] = { running: true, message: 'AI Director is planning the asset inventory…', error: '' };
+        setExtractionProgress('AI Director is planning the asset inventory…');
         const plan = await planWorkflowAssetExtraction(extractionRunOptions, {
           sourcePng: inputPng,
           guidance: creatorConfigString(node.config, 'prompt'),
@@ -802,11 +807,7 @@
         for (const [index, item] of plan.items.entries()) {
           if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
           if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
-          assetExtractionStates[nodeId] = {
-            running: true,
-            message: `Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`,
-            error: '',
-          };
+          setExtractionProgress(`Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`);
           const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset, preserve its visual identity and complete edges, and make everything outside the asset transparent.`;
           const itemRunId = `${runId}-${index + 1}`;
           activeExtractionRunId = itemRunId;
@@ -854,7 +855,7 @@
         });
         prepared = [];
       }
-      assetExtractionStates[nodeId] = { running: true, message: 'Saving labelled assets to the project…', error: '' };
+      setExtractionProgress('Saving labelled assets to the project…');
       if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
         throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
       }
@@ -877,8 +878,9 @@
         throw new Error('The active project changed while asset extraction was running. The saved assets were not linked to this workflow.');
       }
       workflow.configureCreatorNode(nodeId, { resultAssets: stored, notes: extractionNotes, extractionManifest });
-      assetExtractionStates[nodeId] = { running: false, message: `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`, error: '' };
-      aiTasks.complete(extractionTask.id, `Extracted ${stored.length} assets`);
+      const completionMessage = `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`;
+      assetExtractionStates[nodeId] = { running: false, message: completionMessage, error: '' };
+      aiTasks.complete(extractionTask.id, completionMessage);
       editor.flash(`Extracted ${stored.length} assets`);
     } catch (e) {
       const cancelled = extractionController.signal.aborted;
