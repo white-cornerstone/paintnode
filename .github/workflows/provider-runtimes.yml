@@ -84,7 +84,7 @@ jobs:
             --platform darwin \
             --arch "${{ matrix.arch }}" \
             --node "$PWD/node-v${NODE_VERSION}-darwin-${{ matrix.arch }}/bin/node"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: runtime-${{ matrix.provider }}-${{ matrix.arch }}
           path: dist/managed-runtimes/*
