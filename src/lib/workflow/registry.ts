@@ -224,9 +224,9 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     },
     defaultConfig: { creatorRole: 'review', mode: 'human', instructions: '' },
     executor: {
-      status: 'draft-only',
+      status: 'available',
       capability: 'candidate-review',
-      reason: 'Candidate review execution is not available yet. This node can document the intended quality gate.',
+      reason: null,
     },
   },
   {

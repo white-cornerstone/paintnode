@@ -87,7 +87,7 @@ describe('creator node registry', () => {
     });
     expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('sourceAssetIds');
     expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('supportAssetIds');
-    expect(creatorNodeDefinition('review').executor.status).toBe('draft-only');
+    expect(creatorNodeDefinition('review').executor.status).toBe('available');
   });
 
   it('validates creator configuration without rejecting deliberately empty readiness fields', () => {

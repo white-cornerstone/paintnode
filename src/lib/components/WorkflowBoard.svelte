@@ -2,7 +2,6 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { getSmoothStepPath, Position } from '@xyflow/system';
   import Icon from './Icon.svelte';
-  import AiRunOptionsControl from './AiRunOptionsControl.svelte';
   import { tooltip } from '../actions/tooltip';
   import {
     codexConfigFromRunOptions,
@@ -11,6 +10,9 @@
     cancelAiRun,
     decoupleAntigravityImage,
     decoupleCodexImage,
+    generateAntigravityRetouchImage,
+    generateCodexRetouchImage,
+    generateGrokRetouchImage,
     isDesktop,
     providerQaMode,
     readProjectAsset,
@@ -39,7 +41,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { directorModeFromRunOptions, directorProviderFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { directorModeFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
   import { aiTasks } from '../state/aiTasks.svelte';
   import {
@@ -81,6 +83,9 @@
     type WorkflowStoryboardDescriptor,
     type WorkflowReviewVerificationState,
     WorkflowReviewVerificationCoordinator,
+    resolveWorkflowNodeAiRunOptions,
+    workflowAiRoleSummary,
+    type WorkflowNodeV2,
   } from '../workflow';
   import {
     canvasPngBlob,
@@ -99,6 +104,7 @@
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
+  import WorkflowPropertiesPanel from './workflow/WorkflowPropertiesPanel.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
@@ -113,6 +119,9 @@
   import WorkflowDirectorRevisionDialog from './WorkflowDirectorRevisionDialog.svelte';
   import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
   import { createConfiguredWorkflowRevisionRequester } from '../integrations/workflowDirectorRevisionAdapters';
+  import { reviewWorkflowCandidates, workflowAiReviewProvider } from '../integrations/workflowReviewAdapters';
+  import { createWorkflowAssetExtractionManifest, planWorkflowAssetExtraction, workflowExtractionCapability } from '../integrations/workflowExtractionAdapters';
+  import { workflowReviewCandidateSetHash } from '../workflow/reviewRecommendation';
   import type { WorkflowDirectorRevisionRequester } from '../workflow';
 
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
@@ -135,18 +144,27 @@
 
   const desktop = isDesktop();
   const briefCreatorDefinition = creatorNodeDefinition('brief');
-  let runOptions = $state(aiRunOptionsFromSettings(settings.value));
+  const runOptions = $derived(resolveWorkflowNodeAiRunOptions(
+    aiRunOptionsFromSettings(settings.value),
+    workflow.aiDefaults,
+    { type: 'input', config: {} },
+  ));
   let busy = $state(false);
   let progress = $state('');
   let candidateResultMessages = $state<Record<string, string>>({});
   let assetExtractionStates = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
-  const extractionProvider = $derived.by(() => {
-    const directorProvider = directorProviderFromRunOptions(runOptions);
-    return directorModeFromRunOptions(runOptions) === 'skip' || directorProvider === 'claude'
-      ? imageProviderFromRunOptions(runOptions)
-      : directorProvider;
+  const propertiesNode = $derived.by((): WorkflowNodeV2 | null => {
+    workflow.rev;
+    const selection = workflow.selection;
+    if (!selection) return null;
+    const nodeId = selection.kind === 'composition'
+      ? 'composition'
+      : selection.kind === 'creator' || selection.kind === 'asset' || selection.kind === 'output'
+        ? selection.id
+        : null;
+    return nodeId ? workflow.graphSnapshot().nodes.find((node) => node.id === nodeId) ?? null : null;
   });
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
   let qaModeResolved = $state(!desktop);
@@ -154,6 +172,7 @@
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
   let selectedReviewCandidates = $state<Record<string, string>>({});
+  let aiReviewMessages = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let reviewVerificationState = $state<WorkflowReviewVerificationState>({
     status: 'idle', identity: null, message: '', canRetry: false,
   });
@@ -182,6 +201,8 @@
   let directorOpen = $state(false);
   let revisionDirectorOpen = $state(false);
   let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
+  let revisionDirectorInstruction = $state('Refine this workflow while preserving accepted candidates and run history.');
+  let revisionDirectorTitle = $state('Revise current workflow');
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -563,9 +584,31 @@
     return workflow.incoming(nodeId).filter((connection) => connection.targetPortId === portId).length;
   }
 
+  async function extractionMaskPng(sourcePng: Uint8Array): Promise<Uint8Array> {
+    const bitmap = await bytesToBitmap(sourcePng);
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Could not prepare the extraction mask.');
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvasToPngBytes(canvas);
+    } finally {
+      bitmap.close();
+    }
+  }
+
   async function runAssetExtraction(nodeId: string): Promise<void> {
     const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
     if (!node) return;
+    const graphNode = workflow.graphSnapshot().nodes.find((item) => item.id === nodeId);
+    if (!graphNode) return;
+    const extractionRunOptions = resolveWorkflowNodeAiRunOptions(
+      aiRunOptionsFromSettings(settings.value), workflow.aiDefaults, graphNode,
+    );
+    const extractionProvider = imageProviderFromRunOptions(extractionRunOptions);
     const incoming = workflow.incoming(nodeId);
     const mode = node.config.mode === 'fast' ? 'fast' : 'quality';
     const assetsPerSheet = ([1, 2, 4, 8].includes(node.config.assetsPerSheet as number)
@@ -581,10 +624,32 @@
     }
     const taskProjectPath = project.path;
     const taskProjectIdentity = project.identity;
-    if (extractionProvider === 'grok') {
-      assetExtractionStates[nodeId] = { running: false, message: '', error: 'Grok asset extraction is not available yet. Choose Codex or Antigravity.' };
+    const extractionCapability = workflowExtractionCapability(
+      extractionProvider,
+      directorModeFromRunOptions(extractionRunOptions) !== 'skip',
+    );
+    if (!extractionCapability.supported) {
+      assetExtractionStates[nodeId] = {
+        running: false,
+        message: '',
+        error: extractionCapability.reason ?? 'This extraction provider combination is unsupported.',
+      };
       return;
     }
+    const extractionController = new AbortController();
+    let activeExtractionRunId: string | null = null;
+    const extractionTask = aiTasks.create({
+      projectPath: taskProjectPath,
+      kind: 'workflow',
+      title: `Extract assets: ${node.name}`,
+      subtitle: `${extractionRunOptions.directorProvider} → ${extractionProvider}`,
+      progress: 'Preparing source and support images…',
+      detail: { kind: 'workflow', providerLabel: extractionProvider, outputName: node.name },
+    });
+    aiTasks.setCancel(extractionTask.id, async () => {
+      extractionController.abort();
+      if (activeExtractionRunId) await cancelAiRun(activeExtractionRunId);
+    });
     assetExtractionStates[nodeId] = { running: true, message: 'Preparing source and support images…', error: '' };
     try {
       const combined: Array<{ name: string; dataUrl: string; role: 'source' | 'support' }> = [];
@@ -622,56 +687,135 @@
       }
       const inputPng = await composeAssetExtractionSources(combined);
       const runId = createRunId();
+      activeExtractionRunId = runId;
       const prompt = workflowAssetExtractionPrompt(creatorConfigString(node.config, 'prompt'), mode, assetsPerSheet);
       assetExtractionStates[nodeId] = { running: true, message: mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…', error: '' };
-      const result = extractionProvider === 'antigravity'
-        ? await decoupleAntigravityImage(
-            antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
-            inputPng,
-            prompt,
-            false,
-          )
-        : await decoupleCodexImage(
-            codexConfigFromRunOptions(runOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
-            inputPng,
-            prompt,
-            false,
-          );
-      if (result.layers.length === 0) throw new Error('The image model did not return any extracted assets.');
+      let extractionNotes = '';
+      let prepared: Array<{ canvas: HTMLCanvasElement; name: string }>;
+      let plannedStored: ExtractedAssetLink[] | null = null;
+      let extractionManifest: ReturnType<typeof createWorkflowAssetExtractionManifest> | null = null;
+      if (directorModeFromRunOptions(extractionRunOptions) === 'skip') {
+        const result = extractionProvider === 'antigravity'
+          ? await decoupleAntigravityImage(
+              antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
+              inputPng, prompt, false,
+            )
+          : await decoupleCodexImage(
+              codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
+              inputPng, prompt, false,
+            );
+        if (result.layers.length === 0) throw new Error('The image model did not return any extracted assets.');
+        extractionNotes = result.notes ?? '';
+        prepared = mode === 'fast'
+          ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0]), assetsPerSheet).map((canvas, index) => ({
+              canvas, name: `${node.name} ${String(index + 1).padStart(2, '0')}`,
+            }))
+          : await Promise.all(result.layers.map(async (layer, index) => ({
+              canvas: await decoupledLayerCanvas(layer),
+              name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
+            })));
+      } else {
+        assetExtractionStates[nodeId] = { running: true, message: 'AI Director is planning the asset inventory…', error: '' };
+        const plan = await planWorkflowAssetExtraction(extractionRunOptions, {
+          sourcePng: inputPng,
+          guidance: creatorConfigString(node.config, 'prompt'),
+          mode,
+          maximumAssets: mode === 'fast' ? assetsPerSheet : 16,
+        }, { signal: extractionController.signal, runId: () => runId });
+        extractionNotes = plan.notes;
+        const maskPng = await extractionMaskPng(inputPng);
+        const successes: Array<ExtractedAssetLink & { itemId: string }> = [];
+        const failures: Array<{ itemId: string; message: string }> = [];
+        for (const [index, item] of plan.items.entries()) {
+          if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
+          if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
+          assetExtractionStates[nodeId] = {
+            running: true,
+            message: `Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`,
+            error: '',
+          };
+          const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset, preserve its visual identity and complete edges, and make everything outside the asset transparent.`;
+          const itemRunId = `${runId}-${index + 1}`;
+          activeExtractionRunId = itemRunId;
+          try {
+            const generated = extractionProvider === 'antigravity'
+              ? await generateAntigravityRetouchImage(
+                  { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                  inputPng, inputPng, maskPng, null, null, itemPrompt,
+                )
+              : extractionProvider === 'grok'
+                ? await generateGrokRetouchImage(
+                    { ...grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                    inputPng, inputPng, maskPng, null, null, itemPrompt,
+                  )
+                : await generateCodexRetouchImage(
+                    { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                    inputPng, inputPng, maskPng, null, null, itemPrompt,
+                  );
+            if (!generated.asset) throw new Error('The image provider did not save the extracted asset.');
+            successes.push({ itemId: item.id, id: generated.asset.id, name: item.name, relativePath: generated.asset.relativePath });
+          } catch (cause) {
+            failures.push({ itemId: item.id, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+          }
+        }
+        if (successes.length === 0) throw new Error(`The image model could not extract any planned assets. ${failures.map((failure) => failure.message).join(' ')}`);
+        if (failures.length > 0) extractionNotes = [
+          extractionNotes,
+          `Partial result: ${failures.length} of ${plan.items.length} planned assets could not be produced.`,
+        ].filter(Boolean).join('\n');
+        plannedStored = successes.map(({ id, name, relativePath }) => ({ id, name, relativePath }));
+        const directorRole = workflowAiReviewProvider(extractionRunOptions);
+        const imageModel = extractionProvider === 'antigravity'
+          ? extractionRunOptions.antigravityImageModel
+          : extractionProvider === 'grok'
+            ? extractionRunOptions.grokImageModel
+            : null;
+        extractionManifest = createWorkflowAssetExtractionManifest(plan, {
+          outputs: successes.map((success) => ({
+            itemId: success.itemId, name: success.name, assetId: success.id, relativePath: success.relativePath,
+          })),
+          failedItemIds: failures.map((failure) => failure.itemId),
+          director: { provider: directorRole.id, model: directorRole.model },
+          image: { provider: extractionProvider, model: imageModel },
+          completedAt: Date.now(),
+        });
+        prepared = [];
+      }
       assetExtractionStates[nodeId] = { running: true, message: 'Saving labelled assets to the project…', error: '' };
-      const prepared = mode === 'fast'
-        ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0]), assetsPerSheet).map((canvas, index) => ({
-            canvas,
-            name: `${node.name} ${String(index + 1).padStart(2, '0')}`,
-          }))
-        : await Promise.all(result.layers.map(async (layer, index) => ({
-            canvas: await decoupledLayerCanvas(layer),
-            name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
-          })));
       if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
         throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
       }
-      const stored: ExtractedAssetLink[] = [];
-      for (const item of prepared) {
-        const asset = await project.storeGeneratedBlobAt(
-          taskProjectPath,
-          await canvasPngBlob(item.canvas),
-          `${item.name}.png`,
-          prompt,
-          item.canvas.width,
-          item.canvas.height,
-        );
-        if (asset) stored.push({ id: asset.id, name: asset.name, relativePath: asset.relativePath });
+      const stored: ExtractedAssetLink[] = plannedStored ?? [];
+      if (!plannedStored) {
+        for (const item of prepared) {
+          const asset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            await canvasPngBlob(item.canvas),
+            `${item.name}.png`,
+            prompt,
+            item.canvas.width,
+            item.canvas.height,
+          );
+          if (asset) stored.push({ id: asset.id, name: asset.name, relativePath: asset.relativePath });
+        }
       }
+      if (plannedStored) await project.refresh(taskProjectPath);
       if (project.identity !== taskProjectIdentity) {
         throw new Error('The active project changed while asset extraction was running. The saved assets were not linked to this workflow.');
       }
-      workflow.configureCreatorNode(nodeId, { resultAssets: stored, notes: result.notes ?? '' });
+      workflow.configureCreatorNode(nodeId, { resultAssets: stored, notes: extractionNotes, extractionManifest });
       assetExtractionStates[nodeId] = { running: false, message: `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`, error: '' };
+      aiTasks.complete(extractionTask.id, `Extracted ${stored.length} assets`);
       editor.flash(`Extracted ${stored.length} assets`);
     } catch (e) {
-      assetExtractionStates[nodeId] = { running: false, message: '', error: (e as Error)?.message ?? String(e) };
-      editor.flash('Asset extraction failed');
+      const cancelled = extractionController.signal.aborted;
+      const message = cancelled ? 'Asset extraction was cancelled.' : (e as Error)?.message ?? String(e);
+      assetExtractionStates[nodeId] = { running: false, message: '', error: message };
+      if (cancelled) aiTasks.markCancelled(extractionTask.id);
+      else aiTasks.fail(extractionTask.id, message);
+      editor.flash(cancelled ? 'Asset extraction cancelled' : 'Asset extraction failed');
+    } finally {
+      aiTasks.setCancel(extractionTask.id, null);
     }
   }
 
@@ -710,6 +854,133 @@
     revisionDirectorRequester = qaMode === 'provider-free'
       ? createProviderFreeWorkflowRevisionRequester()
       : createConfiguredWorkflowRevisionRequester(runOptions);
+    revisionDirectorInstruction = 'Refine this workflow while preserving accepted candidates and run history.';
+    revisionDirectorTitle = 'Revise current workflow';
+    revisionDirectorOpen = true;
+  }
+
+  async function reviewPreviewPng(asset: ProjectAsset): Promise<Uint8Array> {
+    const stored = await project.readAsset(asset);
+    const bytes = new Uint8Array(await (await fetch(stored.dataUrl)).arrayBuffer());
+    const bitmap = await bytesToBitmap(bytes);
+    try {
+      const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Could not prepare a candidate preview.');
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      return canvasToPngBytes(canvas);
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  async function runAiReview(node: WorkflowNodeV2): Promise<void> {
+    if (node.type !== 'review' || node.config.mode !== 'ai' || busy) return;
+    const candidates = workflow.reviewCandidates(node.id, assets, true, project.identity);
+    if (candidates.length === 0 || candidates.some((candidate) => candidate.state !== 'eligible' || !candidate.output)) {
+      aiReviewMessages[node.id] = {
+        running: false, message: '',
+        error: 'AI Review requires every connected candidate to be current, verified, and available.',
+      };
+      return;
+    }
+    const options = resolveWorkflowNodeAiRunOptions(aiRunOptionsFromSettings(settings.value), workflow.aiDefaults, node);
+    const expectedWorkflowRevision = workflow.rev;
+    const expectedProjectIdentity = project.identity;
+    const expectedCandidateSet = workflowReviewCandidateSetHash(candidates);
+    const controller = new AbortController();
+    const task = aiTasks.create({
+      projectPath: project.path,
+      kind: 'workflow',
+      title: `AI Review: ${node.title}`,
+      subtitle: options.directorProvider,
+      progress: 'Preparing candidate previews…',
+      detail: { kind: 'workflow', providerLabel: options.directorProvider, outputName: 'Candidate recommendation' },
+    });
+    busy = true;
+    aiReviewMessages[node.id] = { running: true, message: 'Preparing candidate previews…', error: '' };
+    aiTasks.setCancel(task.id, async () => controller.abort());
+    try {
+      const prepared = await Promise.all(candidates.map(async (candidate) => {
+        const output = candidate.output!;
+        const asset = assets.find((item) => item.id === output.assetId && item.relativePath === output.relativePath);
+        if (!asset) throw new Error(`Candidate ${candidate.ordinal} output is unavailable.`);
+        return {
+          candidateId: candidate.candidateId,
+          candidateRunId: candidate.latestRunId,
+          materialKey: candidate.materialKey,
+          contentHash: output.contentHash,
+          providerId: candidate.providerId,
+          model: candidate.model,
+          previewPng: await reviewPreviewPng(asset),
+        };
+      }));
+      aiReviewMessages[node.id] = { running: true, message: 'AI Director is ranking candidates…', error: '' };
+      aiTasks.setProgress(task.id, 'AI Director is ranking candidates…');
+      const result = qaMode === 'provider-free'
+        ? {
+            rankings: candidates.map((candidate) => ({
+              candidateId: candidate.candidateId,
+              reason: `Deterministic QA ranking for Candidate ${candidate.ordinal}.`,
+            })),
+            recommendedCandidateId: candidates[0].candidateId,
+          }
+        : await reviewWorkflowCandidates(options, {
+            reviewNodeId: node.id,
+            instructions: creatorConfigString(node.config, 'instructions'),
+            candidates: prepared,
+          }, { signal: controller.signal });
+      const currentCandidates = workflow.reviewCandidates(node.id, assets, true, project.identity);
+      if (workflow.rev !== expectedWorkflowRevision || project.identity !== expectedProjectIdentity
+        || workflowReviewCandidateSetHash(currentCandidates) !== expectedCandidateSet) {
+        throw new Error('The workflow or candidates changed while AI Review was running. The recommendation was discarded.');
+      }
+      workflow.appendReviewRecommendation({
+        id: `recommendation-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+        reviewNodeId: node.id,
+        result,
+        provider: qaMode === 'provider-free'
+          ? { id: 'qa-fake', model: null, effectiveOptions: { fixture: 'square' } }
+          : workflowAiReviewProvider(options),
+        createdAt: Date.now(),
+      });
+      selectedReviewCandidates[node.id] = result.recommendedCandidateId;
+      aiReviewMessages[node.id] = { running: false, message: 'Recommendation saved. Promotion still requires your confirmation.', error: '' };
+      aiTasks.complete(task.id, 'Recommendation saved');
+    } catch (cause) {
+      const cancelled = controller.signal.aborted;
+      const message = cancelled ? 'AI Review was cancelled.' : (cause as Error)?.message ?? String(cause);
+      aiReviewMessages[node.id] = { running: false, message: '', error: message };
+      if (cancelled) aiTasks.markCancelled(task.id);
+      else aiTasks.fail(task.id, message);
+    } finally {
+      aiTasks.setCancel(task.id, null);
+      busy = false;
+    }
+  }
+
+  function openNodeDirectorAction(node: WorkflowNodeV2): void {
+    if (node.type === 'review') {
+      void runAiReview(node);
+      return;
+    }
+    const options = resolveWorkflowNodeAiRunOptions(aiRunOptionsFromSettings(settings.value), workflow.aiDefaults, node);
+    revisionDirectorRequester = qaMode === 'provider-free'
+      ? createProviderFreeWorkflowRevisionRequester()
+      : createConfiguredWorkflowRevisionRequester(options);
+    revisionDirectorInstruction = node.type === 'brief'
+      ? `Enhance only Brief node "${node.id}". Improve its objective and guidance while preserving the user's intent. Do not add, remove, reconnect, move, or configure any other node.`
+      : node.type === 'art-direction'
+        ? `Develop only Art Direction node "${node.id}". Improve its textual prompt using connected briefs and visual inputs. Do not generate a storyboard image and do not change any other node or connection.`
+        : '';
+    revisionDirectorTitle = node.type === 'brief'
+      ? 'Enhance Brief'
+      : node.type === 'art-direction'
+        ? 'Develop Art Direction'
+        : 'Revise node';
     revisionDirectorOpen = true;
   }
 
@@ -1216,6 +1487,7 @@
   function onBoardPointerDown(event: PointerEvent): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     if (event.button !== 0) return;
+    if (!(event.target instanceof Element) || !event.target.closest('article')) workflow.select(null);
     if (workflow.tool === 'zoom') {
       if (!boardEl) return;
       const rect = boardEl.getBoundingClientRect();
@@ -2583,6 +2855,7 @@
 
         {#each workflow.briefNodes as brief (brief.id)}
           {@const ports = workflowNodePorts(brief.id)}
+          {@const briefGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === brief.id)}
           <article
             class="brief-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === brief.id}
@@ -2611,6 +2884,7 @@
             <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
               <p>{brief.guidance}</p>
+              {#if briefGraphNode}<small class="node-ai-summary">{workflowAiRoleSummary(workflow.aiDefaults, briefGraphNode)}</small>{/if}
               <textarea
                 aria-label={`${brief.name} objective`}
                 placeholder="Outcome, audience, and non-negotiables…"
@@ -2627,6 +2901,7 @@
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
           {@const extractionResults = extractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
+          {@const aiSummary = workflowAiRoleSummary(workflow.aiDefaults, workflow.graphSnapshot().nodes.find((item) => item.id === node.id) ?? { type: node.type, config: node.config })}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -2670,6 +2945,7 @@
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>{definition.description}</p>
+              {#if aiSummary}<small class="node-ai-summary">{aiSummary}</small>{/if}
               {#if node.type === 'art-direction'}
                 <label class="creator-config-field">
                   Direction prompt
@@ -2776,7 +3052,7 @@
                     onchange={(event) => workflow.configureCreatorNode(node.id, { mode: event.currentTarget.value })}
                   >
                     <option value="human">Human review</option>
-                    <option value="ai">AI-assisted review (draft)</option>
+                    <option value="ai">AI-assisted review</option>
                   </select>
                 </label>
                 <label class="creator-config-field">
@@ -2790,6 +3066,7 @@
                 {@const reviewCandidates = workflow.reviewCandidates(node.id, assets, true, project.identity)}
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
                 {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
+                {@const aiRecommendation = workflow.reviewRecommendation(node.id)}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
                   <p class="review-keyboard-hint">Keyboard: R focuses candidates; P promotes the selected eligible candidate. F7/F8 and Alt+R/Ctrl+Enter are also available.</p>
                   <button
@@ -2802,6 +3079,23 @@
                       ? `Promoted Candidate ${reviewCandidates.find((candidate) => candidate.candidateId === reviewResolution.promotion.candidateId)?.ordinal ?? ''}`
                       : reviewResolution.reason.message}
                   </p>
+                  {#if aiReviewMessages[node.id]?.message}
+                    <p class="ai-review-status" role="status">{aiReviewMessages[node.id].message}</p>
+                  {/if}
+                  {#if aiReviewMessages[node.id]?.error}
+                    <p class="ai-review-status failed" role="alert">{aiReviewMessages[node.id].error}</p>
+                  {/if}
+                  {#if aiRecommendation.state === 'ready'}
+                    <div class="ai-review-recommendation" aria-label="AI Review recommendation">
+                      <strong>AI recommendation · {aiRecommendation.recommendation.provider.id}</strong>
+                      {#each aiRecommendation.recommendation.rankings as ranking}
+                        <p><b>#{ranking.rank}</b> {reviewCandidates.find((candidate) => candidate.candidateId === ranking.candidateId)?.ordinal ?? ranking.candidateId}: {ranking.reason}</p>
+                      {/each}
+                      <small>Recommendation only. Select and promote a candidate yourself.</small>
+                    </div>
+                  {:else if aiRecommendation.state === 'stale'}
+                    <p class="ai-review-status failed">Saved AI recommendation is stale: {aiRecommendation.reason}</p>
+                  {/if}
                   {#if reviewResolution.state === 'ready'}
                     <button
                       type="button"
@@ -2831,7 +3125,7 @@
                         tabindex={candidate.candidateId === reviewCandidate?.candidateId ? 0 : -1}
                         data-candidate-state={candidate.state}
                         onclick={() => { selectedReviewCandidates[node.id] = candidate.candidateId; }}
-                      >Candidate {candidate.ordinal} · {candidate.state}</button>
+                      >Candidate {candidate.ordinal} · {candidate.state}{aiRecommendation.state === 'ready' && aiRecommendation.recommendation.recommendedCandidateId === candidate.candidateId ? ' · recommended' : ''}</button>
                     {/each}
                   </div>
                   {#if reviewCandidate}
@@ -2890,7 +3184,7 @@
                   {/each}
                 </div>
               {/if}
-              {#if node.type === 'transform' && definition.executor.status === 'available' && creatorConfigString(node.config, 'capability') === 'generate'}
+              {#if node.type === 'transform' && definition.executor.status === 'available'}
                 {#if acceptedEditorResult}
                   <button
                     type="button"
@@ -3002,11 +3296,6 @@
                     </div>
                   {/each}
                 </section>
-              {:else if node.type === 'transform' && definition.executor.status === 'available'}
-                <p class="draft-reason" id={`draft-reason-${node.id}`}>
-                  Only the Generate capability is executable in this slice. Configure this Transform as Generate to run it.
-                </p>
-                <button type="button" class="draft-run" disabled aria-describedby={`draft-reason-${node.id}`}>Run unavailable</button>
               {/if}
               {#if definition.executor.status === 'draft-only' && node.type !== 'review'}
                 <p class="draft-reason" id={`draft-reason-${node.id}`}>{definition.executor.reason}</p>
@@ -3052,6 +3341,7 @@
         {/each}
 
         {#if hasCompositionNode}
+        {@const compositionGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === 'composition')}
         <article
           class="prompt-node"
           class:selected={workflow.selection?.kind === 'composition'}
@@ -3080,6 +3370,7 @@
             </div>
           </div>
           <WorkflowNodePreflight entry={preflightForNode('composition')} />
+          {#if compositionGraphNode}<small class="node-ai-summary composition-summary">{workflowAiRoleSummary(workflow.aiDefaults, compositionGraphNode)}</small>{/if}
           <div
             class="storyboard"
             class:editing={workflow.storyboardEditing}
@@ -3199,39 +3490,21 @@
             onpointerdown={(event) => event.stopPropagation()}
             oninput={(event) => workflow.setPrompt(event.currentTarget.value)}
           ></textarea>
-          {#if !providerSelection.qaFake && imageProvider === 'antigravity'}
-            <label>
-              <span>Antigravity auth helper</span>
-              <input bind:value={runOptions.antigravityBin} placeholder="agy or full path" />
-            </label>
+          {#if providerSelection.qaFake}
+            <div class="composition-ai-options qa-fake-banner" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
+              <div role="status"><strong>QA Fake</strong><span>Deterministic provider-free output. No AI provider or authentication is used.</span></div>
+              <label>
+                <span>Native QA scenario</span>
+                <select aria-label="QA Fake scenario" value={qaScenario} onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}>
+                  <option value="success">Standard checkpoint</option>
+                  <option value="slow-success">Slow / cancellable</option>
+                  <option value="failure">Failure / retry</option>
+                  <option value="branch-one-failure">Branch recovery checkpoint</option>
+                  <option value="format-recovery-checkpoint">Format recovery checkpoint</option>
+                </select>
+              </label>
+            </div>
           {/if}
-          <div class="composition-ai-options" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
-            {#if providerSelection.qaFake}
-              <div class="qa-fake-banner">
-                <div role="status">
-                  <strong>QA Fake</strong>
-                  <span>Deterministic provider-free output. No AI provider or authentication is used.</span>
-                </div>
-                <label>
-                  <span>Native QA scenario</span>
-                  <select
-                    aria-label="QA Fake scenario"
-                    disabled={busy || selectiveUiState.busy}
-                    value={qaScenario}
-                    onchange={(event) => (qaScenario = event.currentTarget.value as ProviderFreeQaScenario)}
-                  >
-                    <option value="success">Standard checkpoint</option>
-                    <option value="slow-success">Slow / cancellable</option>
-                    <option value="failure">Failure / retry</option>
-                    <option value="branch-one-failure">Branch recovery checkpoint</option>
-                    <option value="format-recovery-checkpoint">Format recovery checkpoint</option>
-                  </select>
-                </label>
-              </div>
-            {:else}
-              <AiRunOptionsControl bind:options={runOptions} disabled={busy || selectiveUiState.busy || !providerSelection.ready} />
-            {/if}
-          </div>
           {#if reviewVerificationState.status === 'verifying' || reviewVerificationState.status === 'failed'}
             <div
               class:failed={reviewVerificationState.status === 'failed'}
@@ -3360,6 +3633,7 @@
         {/each}
       </div>
     </div>
+    <WorkflowPropertiesPanel node={propertiesNode} onDirectorAction={openNodeDirectorAction} />
   </div>
 </section>
 
@@ -3379,6 +3653,8 @@
 {#if revisionDirectorOpen && revisionDirectorRequester}
   <WorkflowDirectorRevisionDialog
     requester={revisionDirectorRequester}
+    initialInstruction={revisionDirectorInstruction}
+    title={revisionDirectorTitle}
     onClose={() => {
       revisionDirectorOpen = false;
       revisionDirectorRequester = null;
@@ -3406,6 +3682,8 @@
     flex: 1;
     min-height: 0;
   }
+  .node-ai-summary { display: block; padding: 5px 7px; border-radius: 4px; background: #25272a; color: var(--text-muted); font-size: 10px; }
+  .composition-summary { margin: 8px; }
   .asset-tray {
     position: relative;
     width: 248px;
@@ -4005,6 +4283,21 @@
     padding-top: 8px;
     border-top: 1px solid var(--border);
   }
+
+  .ai-review-status,
+  .ai-review-recommendation {
+    margin: 0;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .ai-review-status.failed { border-color: #805356; color: #ffb7b7; }
+  .ai-review-recommendation { display: grid; gap: 4px; }
+  .ai-review-recommendation p { margin: 0; }
 
   .review-candidate-tabs {
     display: flex;

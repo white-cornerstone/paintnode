@@ -1071,12 +1071,27 @@ describe('WorkflowStore graph adapter', () => {
     );
 
     const graph = store.serialize();
-    expect(graph.metadata).toEqual({ name: `My ${template.name}`, sourceVersion: null, migrations: [] });
+    expect(graph.metadata).toMatchObject({ name: `My ${template.name}`, sourceVersion: null, migrations: [] });
+    expect(graph.metadata.ai).toMatchObject({ version: 1, director: { provider: 'codex' }, image: { provider: 'codex' } });
     const reopened = new WorkflowStore({ idGenerator: ids() });
     reopened.openFromBytes(store.toBytes(), null, 'Fallback');
     expect(reopened.serialize()).toEqual(graph);
     expect(reopened.briefNodes).toEqual(store.briefNodes);
     expect(reopened.rev).toBe(0);
+  });
+
+  it('serializes workflow AI defaults when browser reactivity wraps them in proxies', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('blank', 'Proxy-safe workflow');
+    const defaults = store.aiDefaults;
+    store.aiDefaults = new Proxy({
+      ...defaults,
+      director: new Proxy({ ...defaults.director, options: new Proxy({ ...defaults.director.options }, {}) }, {}),
+      image: new Proxy({ ...defaults.image, options: new Proxy({ ...defaults.image.options }, {}) }, {}),
+    }, {});
+
+    expect(store.serialize().metadata.ai).toEqual(defaults);
+    expect(() => store.toBytes()).not.toThrow();
   });
 
   it('keeps Blank Workflow empty and allows unconnected nodes to be added deliberately', () => {

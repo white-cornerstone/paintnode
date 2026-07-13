@@ -29,6 +29,7 @@ export interface WorkflowRunMaterialDraft {
     effectivePrompt: string;
   };
   provider: WorkflowRunProvider;
+  roles?: WorkflowRunRecordV1['roles'];
   executor: WorkflowRunExecutor;
   output: { nodeId: string; title: string; width: number; height: number };
 }
@@ -117,6 +118,7 @@ function persistedMaterialConfig(config: Record<string, unknown>): Record<string
 function graphRevisionMaterial(graph: WorkflowGraphV2): unknown {
   return {
     id: graph.id,
+    ai: graph.metadata.ai ?? null,
     nodes: graph.nodes.map((node) => ({ ...node, config: persistedMaterialConfig(node.config), runRecordIds: [] })),
     edges: graph.edges,
   };
@@ -170,6 +172,18 @@ export function createWorkflowRunRecord(
     throw new Error('Failed and cancelled records require a failure and no outputs.');
   }
   const providerOptions = safeWorkflowProviderOptions(draft.material.provider.effectiveOptions);
+  const roles = draft.material.roles ? {
+    director: draft.material.roles.director ? {
+      id: safeWorkflowIdentifier(draft.material.roles.director.id, 'Director provider ID'),
+      model: safeWorkflowModel(draft.material.roles.director.model, 'Director model'),
+      effectiveOptions: safeWorkflowProviderOptions(draft.material.roles.director.effectiveOptions),
+    } : null,
+    image: draft.material.roles.image ? {
+      id: safeWorkflowIdentifier(draft.material.roles.image.id, 'Image provider ID'),
+      model: safeWorkflowModel(draft.material.roles.image.model, 'Image model'),
+      effectiveOptions: safeWorkflowProviderOptions(draft.material.roles.image.effectiveOptions),
+    } : null,
+  } : undefined;
   safeWorkflowIdentifier(draft.material.output.nodeId, 'Output target node ID');
   for (const source of draft.material.sourceAssets) {
     safeWorkflowIdentifier(source.nodeId, 'Source node ID');
@@ -262,6 +276,7 @@ export function createWorkflowRunRecord(
       id: draft.material.provider.id,
       model: safeWorkflowModel(draft.material.provider.model, 'Provider model'),
       effectiveOptions: providerOptions,
+      ...(roles ? { roles } : {}),
     },
   }, hash);
   const normalizedSourceAssets = draft.material.sourceAssets.map((source) => ({
@@ -291,6 +306,7 @@ export function createWorkflowRunRecord(
       model: safeWorkflowModel(draft.material.provider.model, 'Provider model'),
       effectiveOptions: providerOptions,
     },
+    ...(roles ? { roles: structuredClone(roles) } : {}),
     executor: structuredClone(draft.material.executor),
     target: structuredClone(draft.material.output),
     startedAt: draft.startedAt,

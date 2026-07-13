@@ -5,6 +5,7 @@ import {
   type WorkflowEdgeV2,
   type WorkflowGraphV2,
   type WorkflowNodeV2,
+  type WorkflowReviewRecommendationV1,
   type WorkflowPoint,
   type WorkflowSize,
   type WorkflowValidationIssue,
@@ -649,6 +650,14 @@ export class WorkflowGraphDomain {
     return this.#graph.edges.some(
       (edge) => edge.source.nodeId === sourceNodeId && edge.target.nodeId === targetNodeId,
     );
+  }
+
+  appendReviewRecommendation(recommendation: WorkflowReviewRecommendationV1): void {
+    ensureJsonSafe(recommendation, `reviewRecommendations.${recommendation.id}`);
+    this.commit({
+      ...this.#graph,
+      reviewRecommendations: [...(this.#graph.reviewRecommendations ?? []), recommendation],
+    });
   }
 
   validateConnection(endpoints: WorkflowConnectionEndpoints): WorkflowConnectionValidation {

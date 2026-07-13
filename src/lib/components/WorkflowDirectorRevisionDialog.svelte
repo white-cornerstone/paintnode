@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import { ArrowSync, CheckmarkCircle, ErrorCircle } from '../icons';
@@ -20,12 +20,16 @@
   let {
     onClose,
     requester = createProviderFreeWorkflowRevisionRequester(),
+    initialInstruction = 'Refine this workflow while preserving accepted candidates and run history.',
+    title = 'Revise current workflow',
   }: {
     onClose: () => void;
     requester?: WorkflowDirectorRevisionRequester;
+    initialInstruction?: string;
+    title?: string;
   } = $props();
 
-  let instruction = $state('Refine this workflow while preserving accepted candidates and run history.');
+  let instruction = $state(untrack(() => initialInstruction));
   let preview = $state<WorkflowDirectorRevisionPreview | null>(null);
   let requesting = $state(false);
   let error = $state('');
@@ -144,7 +148,7 @@
   });
 </script>
 
-<Modal title="Revise current workflow" onClose={closeDialog} width={760} height={650} minWidth={560} minHeight={480} resizable>
+<Modal {title} onClose={closeDialog} width={760} height={650} minWidth={560} minHeight={480} resizable>
   <div class="revision-dialog">
     <section class="request-panel" aria-labelledby="revision-request-heading">
       <div class="heading" id="revision-request-heading">

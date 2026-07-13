@@ -82,6 +82,20 @@ describe('workflow run provenance', () => {
       .not.toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
   });
 
+  it('records independent AI roles and includes them in the material identity', () => {
+    const baseline = draft();
+    baseline.material.roles = {
+      director: { id: 'claude', model: 'claude-sonnet', effectiveOptions: { claudeEffort: 'high' } },
+      image: { id: 'grok', model: 'grok-imagine', effectiveOptions: { quality: 'high' } },
+    };
+    const changed = structuredClone(baseline);
+    changed.material.roles!.image!.model = 'grok-imagine-v2';
+
+    const record = createWorkflowRunRecord(baseline, canonicalHash);
+    expect(record.roles).toEqual(baseline.material.roles);
+    expect(createWorkflowRunRecord(changed, canonicalHash).materialKey).not.toBe(record.materialKey);
+  });
+
   it('keeps persisted result pointers out of the next material key', () => {
     const baseline = draft();
     const completed = draft();

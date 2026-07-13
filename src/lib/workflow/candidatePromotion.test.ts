@@ -17,6 +17,7 @@ import { createWorkflowRevision, isFullWorkflowRunRecord, workflowSha256Bytes } 
 import { planSelectiveWorkflowExecution } from './selectiveExecution';
 import { appendWorkflowEditorRevision, resolveWorkflowEffectiveResult } from './editorRoundTrip';
 import { workflowReadiness } from './readiness';
+import { appendWorkflowReviewRecommendation, resolveWorkflowReviewRecommendation } from './reviewRecommendation';
 
 const bytes = new Uint8Array([137, 80, 78, 71, 81]);
 const product = {
@@ -62,6 +63,64 @@ async function reviewGraph() {
 }
 
 describe('workflow candidate promotion', () => {
+  it('persists AI rankings separately from promotion and marks them stale when review input changes', async () => {
+    const graph = await reviewGraph();
+    const candidates = deriveWorkflowReviewCandidates(graph, 'review-concepts');
+    const reviewed = appendWorkflowReviewRecommendation(graph, {
+      id: 'recommendation-1',
+      reviewNodeId: 'review-concepts',
+      result: {
+        rankings: [
+          { candidateId: candidates[1].candidateId, reason: 'Stronger hierarchy and cleaner product focus.' },
+          { candidateId: candidates[0].candidateId, reason: 'Usable, but the focal hierarchy is less clear.' },
+        ],
+        recommendedCandidateId: candidates[1].candidateId,
+      },
+      provider: { id: 'claude', model: 'sonnet', effectiveOptions: { claudeEffort: 'high' } },
+      createdAt: 500,
+    });
+
+    expect(reviewed.reviewPromotions).toBeUndefined();
+    expect(resolveWorkflowReviewTopology(reviewed, { reviewNodeId: 'review-concepts' }).state).toBe('blocked');
+    expect(resolveWorkflowReviewRecommendation(reviewed, 'review-concepts')).toMatchObject({
+      state: 'ready',
+      recommendation: { recommendedCandidateId: candidates[1].candidateId, provider: { id: 'claude' } },
+    });
+    const reopened = parseWorkflowGraphV2(JSON.parse(serializeWorkflowGraphV2(reviewed)));
+    expect(reopened.ok).toBe(true);
+    expect(reopened.value?.reviewRecommendations).toEqual(reviewed.reviewRecommendations);
+
+    const changed = structuredClone(reviewed);
+    changed.nodes.find((node) => node.id === 'review-concepts')!.config.instructions = 'Prefer the most restrained direction.';
+    expect(resolveWorkflowReviewRecommendation(changed, 'review-concepts')).toMatchObject({ state: 'stale' });
+    const changedCandidate = structuredClone(reviewed);
+    const candidateRun = changedCandidate.runRecords.find((record) => record.id === candidates[0].latestRunId)!;
+    if (isFullWorkflowRunRecord(candidateRun)) candidateRun.outputs[0].contentHash = `sha256:${'f'.repeat(64)}`;
+    expect(resolveWorkflowReviewRecommendation(changedCandidate, 'review-concepts')).toMatchObject({
+      state: 'stale', reason: expect.stringContaining('candidate set'),
+    });
+  });
+
+  it('rejects incomplete, duplicate, and unknown AI Review rankings', async () => {
+    const graph = await reviewGraph();
+    const candidates = deriveWorkflowReviewCandidates(graph, 'review-concepts');
+    const base = {
+      id: 'recommendation-invalid', reviewNodeId: 'review-concepts',
+      provider: { id: 'codex', model: null, effectiveOptions: {} }, createdAt: 500,
+    } as const;
+    expect(() => appendWorkflowReviewRecommendation(graph, {
+      ...base,
+      result: { rankings: [{ candidateId: candidates[0].candidateId, reason: 'Only one.' }], recommendedCandidateId: candidates[0].candidateId },
+    })).toThrow(/every eligible candidate/i);
+    expect(() => appendWorkflowReviewRecommendation(graph, {
+      ...base,
+      result: {
+        rankings: candidates.map(() => ({ candidateId: candidates[0].candidateId, reason: 'Duplicate.' })),
+        recommendedCandidateId: candidates[0].candidateId,
+      },
+    })).toThrow(/unknown|ineligible/i);
+  });
+
   it('keeps legacy graphs valid with an empty promotion ledger', () => {
     const legacy = instantiateWorkflowTemplate('campaign-composer', { graphId: 'legacy-review' });
     const parsed = parseWorkflowGraphV2(legacy);

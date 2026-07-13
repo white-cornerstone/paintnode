@@ -5,6 +5,7 @@ import {
   type WorkflowReviewTopologyResolution,
 } from './candidatePromotion';
 import type { WorkflowGraphV2, WorkflowNodeV2 } from './schema';
+import { workflowNodeAiOverrides } from './aiRoles';
 
 export type WorkflowReadinessCode =
   | 'desktop'
@@ -190,15 +191,16 @@ function transformReadiness(
   const hasResult = graph.edges.some((edge) => (
     edge.source.nodeId === transform.id && edge.source.portId === 'result'
   )) && Boolean(resolveWorkflowCampaignPath(graph, { outputNodeId: output.id, transformNodeId: transform.id }));
-  if (textConfig(transform, 'capability') !== 'generate' || !hasSource || !hasResult) {
+  const capability = textConfig(transform, 'capability');
+  if (!['generate', 'edit', 'remove-background', 'relight', 'upscale'].includes(capability) || !hasSource || !hasResult) {
     return blocked(
       'transform',
-      'Generate Transform',
-      `${transform.title} must connect Art Direction to ${output.title} with the Generate capability.`,
+      'Image Transform',
+      `${transform.title} must connect Art Direction to ${output.title} with a supported image capability.`,
       `Reconnect ${transform.title} to ${output.title}`,
     );
   }
-  return complete('transform', 'Generate Transform', `${transform.title} is configured for ${output.title}.`);
+  return complete('transform', 'Image Transform', `${transform.title} is configured for ${output.title}.`);
 }
 
 function reviewReadiness(
@@ -241,18 +243,18 @@ function providerReadiness(
   const transform = transformForOutput(graph, output);
   if (!transform) return null;
   const advanced = transform.config.advanced;
-  const configuredProvider = typeof advanced === 'object' && advanced !== null && !Array.isArray(advanced)
+  const configuredProvider = workflowNodeAiOverrides(transform)?.image?.provider ?? (typeof advanced === 'object' && advanced !== null && !Array.isArray(advanced)
     && typeof (advanced as Record<string, unknown>).provider === 'string'
     ? ((advanced as Record<string, unknown>).provider as string).trim()
-    : '';
+    : '');
   const provider = configuredProvider || options.provider?.trim() || '';
   if (!provider) {
-    return blocked('provider', 'Image provider', 'Choose an image provider for Generate.', 'Choose a supported image provider');
+    return blocked('provider', 'Image provider', 'Choose an image provider for this Transform.', 'Choose a supported image provider');
   }
   if (!(options.supportedProviders ?? []).includes(provider)) {
-    return blocked('provider', 'Image provider', `The provider “${provider}” cannot run this Generate Transform.`, 'Choose a supported image provider');
+    return blocked('provider', 'Image provider', `The provider “${provider}” cannot run this Transform.`, 'Choose a supported image provider');
   }
-  return complete('provider', 'Image provider', `${provider} can run this Generate Transform.`);
+  return complete('provider', 'Image provider', `${provider} can run this Transform.`);
 }
 
 function briefReadiness(
