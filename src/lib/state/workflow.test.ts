@@ -1063,7 +1063,8 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.rev).toBe(0);
     expect(store.savedRev).toBe(0);
     expect(store.dirty).toBe(false);
-    expect(store.briefNodes).toHaveLength(1);
+    expect(store.briefNodes).toHaveLength(template.id === 'blank' ? 0 : 1);
+    expect(store.selection).toEqual(template.id === 'blank' ? null : { kind: 'composition' });
     expect(store.nodes.map((node) => node.name)).toEqual(template.slots.map((slot) => slot.name));
     expect(store.outputNodes.map((node) => [node.name, node.finalWidth, node.finalHeight])).toEqual(
       template.outputs.map((output) => [output.name, output.width, output.height]),
@@ -1076,6 +1077,21 @@ describe('WorkflowStore graph adapter', () => {
     expect(reopened.serialize()).toEqual(graph);
     expect(reopened.briefNodes).toEqual(store.briefNodes);
     expect(reopened.rev).toBe(0);
+  });
+
+  it('keeps Blank Workflow empty and allows unconnected nodes to be added deliberately', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('blank', 'Extraction scratchpad');
+
+    expect(store.graphSnapshot().nodes).toEqual([]);
+    expect(store.graphSnapshot().edges).toEqual([]);
+    expect(store.selection).toBeNull();
+
+    store.addAsset(campaignProduct);
+    store.addCreatorNode('extract-assets', { x: 320, y: 40 });
+
+    expect(store.graphSnapshot().nodes.map((node) => node.type)).toEqual(['input', 'extract-assets']);
+    expect(store.graphSnapshot().edges).toEqual([]);
   });
 
   it('persists guided slot assignments and brief edits as graph configuration', () => {

@@ -690,7 +690,7 @@ export class WorkflowStore {
     this.connectionError = null;
     this.tool = 'hand';
     this.zoomMode = 'in';
-    this.selection = { kind: 'composition' };
+    this.selection = graph.nodes.some((node) => node.id === 'composition') ? { kind: 'composition' } : null;
     this.storyboardEditing = false;
     this.storyboardTool = 'brush';
     this.panX = graph.viewport.panX;
@@ -797,7 +797,8 @@ export class WorkflowStore {
   addAsset(asset: ProjectAsset): void {
     const index = this.nodes.length;
     const domain = this.requireGraphDomain();
-    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+    const draft: WorkflowNodeV2 = {
+      id: this.nextGraphId('node'),
       type: 'input',
       title: asset.name.replace(/\.[^.]+$/, '') || 'Asset',
       position: { x: 80 + (index % 3) * 230, y: 110 + Math.floor(index / 3) * 160 },
@@ -806,18 +807,23 @@ export class WorkflowStore {
       ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
       config: { legacyKind: 'asset', assetId: asset.id, relativePath: asset.relativePath, note: '' },
       runRecordIds: [],
-    }, {
-      direction: 'outgoing',
-      nodePortId: 'asset',
-      other: { nodeId: 'composition', portId: 'assets' },
-    }));
-    this.selection = { kind: 'asset', id: added.node.id };
+    };
+    const added = domain.node('composition')
+      ? domain.addNodeWithEdge(draft, {
+          direction: 'outgoing',
+          nodePortId: 'asset',
+          other: { nodeId: 'composition', portId: 'assets' },
+        }).node
+      : domain.addNode(draft);
+    this.publishGraphMutation(domain, added);
+    this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
 
   addBlankAsset(x: number, y: number, width: number, height: number): void {
     const domain = this.requireGraphDomain();
-    const added = this.publishGraphMutation(domain, domain.addNodeWithEdge({
+    const draft: WorkflowNodeV2 = {
+      id: this.nextGraphId('node'),
       type: 'input',
       title: `Asset ${this.nodes.length + 1}`,
       position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
@@ -826,12 +832,16 @@ export class WorkflowStore {
       ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
       config: { legacyKind: 'asset', assetId: null, relativePath: '', note: '' },
       runRecordIds: [],
-    }, {
-      direction: 'outgoing',
-      nodePortId: 'asset',
-      other: { nodeId: 'composition', portId: 'assets' },
-    }));
-    this.selection = { kind: 'asset', id: added.node.id };
+    };
+    const added = domain.node('composition')
+      ? domain.addNodeWithEdge(draft, {
+          direction: 'outgoing',
+          nodePortId: 'asset',
+          other: { nodeId: 'composition', portId: 'assets' },
+        }).node
+      : domain.addNode(draft);
+    this.publishGraphMutation(domain, added);
+    this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
 

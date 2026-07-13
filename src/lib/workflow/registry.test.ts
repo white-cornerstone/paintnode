@@ -85,6 +85,8 @@ describe('creator node registry', () => {
       capability: 'generate',
       reason: null,
     });
+    expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('sourceAssetIds');
+    expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('supportAssetIds');
     expect(creatorNodeDefinition('review').executor.status).toBe('draft-only');
   });
 

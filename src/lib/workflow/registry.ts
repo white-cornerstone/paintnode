@@ -155,7 +155,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'image-multiple',
     keywords: ['extract', 'assets', 'objects', 'index sheet', 'grid', 'fast', 'support images', 'annotations'],
     defaultTitle: 'Extract Assets',
-    defaultSize: { width: 280, height: 430 },
+    defaultSize: { width: 280, height: 330 },
     defaultColor: '#3d4654',
     ports: {
       inputs: [
@@ -168,8 +168,6 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     defaultConfig: {
       creatorRole: 'extract-assets',
       prompt: '',
-      sourceAssetIds: [],
-      supportAssetIds: [],
       mode: 'quality',
       assetsPerSheet: 4,
       resultAssets: [],
@@ -298,12 +296,6 @@ export function validateCreatorNodeConfig(
     requireString('prompt');
   } else if (type === 'extract-assets') {
     requireString('prompt');
-    if (!Array.isArray(config.sourceAssetIds) || config.sourceAssetIds.some((id) => typeof id !== 'string')) {
-      issues.push({ path: 'config.sourceAssetIds', message: 'sourceAssetIds must be an array of strings.' });
-    }
-    if (!Array.isArray(config.supportAssetIds) || config.supportAssetIds.some((id) => typeof id !== 'string')) {
-      issues.push({ path: 'config.supportAssetIds', message: 'supportAssetIds must be an array of strings.' });
-    }
     if (config.mode !== 'quality' && config.mode !== 'fast') {
       issues.push({ path: 'config.mode', message: 'mode must be quality or fast.' });
     }

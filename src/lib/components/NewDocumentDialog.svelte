@@ -397,7 +397,7 @@
                 <Icon svg={Board} size={44} />
                 <span>{preset.name}</span>
                 <small>{preset.description}</small>
-                <span class="template-counts">{preset.slots.length} inputs · {preset.outputs.length} outputs</span>
+                <span class="template-counts">{preset.id === 'blank' ? '0 nodes' : `${preset.slots.length} inputs · ${preset.outputs.length} outputs`}</span>
               </button>
             {/each}
           </div>
@@ -457,17 +457,28 @@
             <span>{selectedWorkflow.name}</span>
             <small>{selectedWorkflow.description}</small>
           </div>
-          <div class="workflow-plan" aria-label="Template contents">
-            <strong>Inputs</strong>
-            <span>{selectedWorkflow.slots.map((slot) => `${slot.name}${slot.required ? ' (required)' : ' (optional)'}`).join(', ')}</span>
-            <strong>Outputs</strong>
-            <span>{selectedWorkflow.outputs.map((output) => `${output.name} · ${output.width}×${output.height}`).join(', ')}</span>
-          </div>
+          {#if selectedWorkflow.id === 'blank'}
+            <div class="workflow-plan" aria-label="Template contents">
+              <strong>Empty board</strong>
+              <span>Add Input, Extract Assets, Transform, Art Direction, or Output nodes only when they are useful.</span>
+            </div>
+          {:else}
+            <div class="workflow-plan" aria-label="Template contents">
+              <strong>Inputs</strong>
+              <span>{selectedWorkflow.slots.map((slot) => `${slot.name}${slot.required ? ' (required)' : ' (optional)'}`).join(', ')}</span>
+              <strong>Outputs</strong>
+              <span>{selectedWorkflow.outputs.map((output) => `${output.name} · ${output.width}×${output.height}`).join(', ')}</span>
+            </div>
+          {/if}
           <div class="project-requirement" class:ready={!!project.path}>
-            <strong>{project.path ? 'Project folder ready' : 'Project folder required for Generate'}</strong>
+            <strong>{project.path ? 'Project folder ready' : selectedWorkflow.id === 'blank' ? 'Project folder optional to start' : 'Project folder required for Generate'}</strong>
             <span>{project.path ?? (desktop
-              ? 'You can create the board now, but Generate and Save stay blocked until a project folder is open.'
-              : 'Open this workflow in the PaintNode desktop app to choose a project folder, Save, and Generate.')}</span>
+              ? selectedWorkflow.id === 'blank'
+                ? 'Create the empty board now. Saving, importing, extraction, and generation become available after a project folder is open.'
+                : 'You can create the board now, but Generate and Save stay blocked until a project folder is open.'
+              : selectedWorkflow.id === 'blank'
+                ? 'Create the empty board now. Open it in the PaintNode desktop app when you need project-backed import, extraction, saving, or generation.'
+                : 'Open this workflow in the PaintNode desktop app to choose a project folder, Save, and Generate.')}</span>
             <button type="button" onclick={(event) => void chooseWorkflowProject(event.currentTarget)} disabled={projectBusy || !desktop}>
               {projectBusy ? 'Opening…' : project.path ? 'Change folder…' : 'Choose or create folder…'}
             </button>

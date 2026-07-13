@@ -55,7 +55,7 @@ describe('workflow readiness', () => {
       ['required-assets', 'blocked'],
       ['brief', 'blocked'],
       ['art-direction', 'blocked'],
-      ['outputs', 'complete'],
+      ['outputs', 'blocked'],
     ]);
     expect(result.nextAction).toMatchObject({ code: 'desktop', action: 'Open the desktop app' });
   });

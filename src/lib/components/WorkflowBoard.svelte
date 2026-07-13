@@ -21,7 +21,6 @@
     type ProjectFile,
   } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
-  import { openFiles } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
   import { modelToPlainText } from '../engine/text/model';
@@ -231,6 +230,10 @@
   );
   const workflowMapModel = $derived(workflowMap());
   const graphConnections = $derived(workflow.connections);
+  const hasCompositionNode = $derived.by(() => {
+    workflow.rev;
+    return workflow.graphSnapshot().nodes.some((node) => node.id === 'composition');
+  });
   const reviewReadinessSnapshot = $derived.by(() => {
     workflow.rev;
     project.current;
@@ -538,11 +541,6 @@
 
   type ExtractedAssetLink = { id: string; name: string; relativePath: string };
 
-  function creatorConfigStrings(config: Record<string, unknown>, key: string): string[] {
-    const value = config[key];
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
-  }
-
   function extractedAssetLinks(config: Record<string, unknown>): ExtractedAssetLink[] {
     const value = config.resultAssets;
     if (!Array.isArray(value)) return [];
@@ -561,53 +559,14 @@
       : []);
   }
 
-  function toggleExtractionAsset(nodeId: string, key: 'sourceAssetIds' | 'supportAssetIds', assetId: string, checked: boolean): void {
-    const node = workflow.creatorNodes.find((item) => item.id === nodeId);
-    if (!node) return;
-    const current = creatorConfigStrings(node.config, key);
-    const next = checked ? [...new Set([...current, assetId])] : current.filter((id) => id !== assetId);
-    workflow.configureCreatorNode(nodeId, { [key]: next });
-  }
-
   function extractionConnectedCount(nodeId: string, portId: 'sources' | 'support'): number {
     return workflow.incoming(nodeId).filter((connection) => connection.targetPortId === portId).length;
-  }
-
-  async function importExtractionImages(nodeId: string, key: 'sourceAssetIds' | 'supportAssetIds'): Promise<void> {
-    if (!project.path) return;
-    const files = await openFiles('image/png,image/jpeg,image/webp,image/gif', true);
-    if (files.length === 0) return;
-    const imported: string[] = [];
-    try {
-      for (const file of files) {
-        const bitmap = await createImageBitmap(file);
-        try {
-          const asset = await project.storeImportedFile(file, bitmap.width, bitmap.height);
-          if (asset) imported.push(asset.id);
-        } finally {
-          bitmap.close();
-        }
-      }
-      const node = workflow.creatorNodes.find((item) => item.id === nodeId);
-      if (!node) return;
-      workflow.configureCreatorNode(nodeId, {
-        [key]: [...new Set([...creatorConfigStrings(node.config, key), ...imported])],
-      });
-      editor.flash(`Imported ${imported.length} extraction image${imported.length === 1 ? '' : 's'}`);
-    } catch (e) {
-      editor.flash(`Import failed: ${(e as Error)?.message ?? String(e)}`);
-    }
   }
 
   async function runAssetExtraction(nodeId: string): Promise<void> {
     const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
     if (!node) return;
     const incoming = workflow.incoming(nodeId);
-    const sourceIds = [...new Set(creatorConfigStrings(node.config, 'sourceAssetIds'))];
-    const supportIds = [...new Set(creatorConfigStrings(node.config, 'supportAssetIds'))]
-      .filter((id) => !sourceIds.includes(id));
-    const sourceAssets = sourceIds.map((id) => assets.find((asset) => asset.id === id)).filter((asset): asset is ProjectAsset => !!asset);
-    const supportAssets = supportIds.map((id) => assets.find((asset) => asset.id === id)).filter((asset): asset is ProjectAsset => !!asset);
     const mode = node.config.mode === 'fast' ? 'fast' : 'quality';
     const assetsPerSheet = ([1, 2, 4, 8].includes(node.config.assetsPerSheet as number)
       ? node.config.assetsPerSheet
@@ -628,10 +587,7 @@
     }
     assetExtractionStates[nodeId] = { running: true, message: 'Preparing source and support images…', error: '' };
     try {
-      const combined = await Promise.all([
-        ...sourceAssets.map(async (asset) => ({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role: 'source' as const })),
-        ...supportAssets.map(async (asset) => ({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role: 'support' as const })),
-      ]);
+      const combined: Array<{ name: string; dataUrl: string; role: 'source' | 'support' }> = [];
       for (const connection of incoming.filter((item) => item.targetPortId === 'sources' || item.targetPortId === 'support')) {
         const inputNode = workflow.nodes.find((item) => item.id === connection.from);
         if (!inputNode) continue;
@@ -655,7 +611,7 @@
         combined.push({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role });
       }
       if (!combined.some((item) => item.role === 'source')) {
-        throw new Error('Choose, import, or connect at least one source image.');
+        throw new Error('Connect at least one source image to the Source images input.');
       }
       if (mode === 'fast') {
         combined.push({
@@ -942,25 +898,16 @@
         height: node.height,
         color: node.color,
       })),
-      {
+      ...(hasCompositionNode ? [{
         id: 'composition',
-        kind: 'composition',
+        kind: 'composition' as const,
         x: workflow.promptX,
         y: workflow.promptY,
         width: workflow.compositionWidth,
         height: workflow.compositionHeight,
         color: workflow.compositionColor,
-      },
-      {
-        id: 'output',
-        kind: 'output',
-        x: workflow.outputX,
-        y: workflow.outputY,
-        width: workflow.outputWidth,
-        height: workflow.outputHeight,
-        color: workflow.outputColor,
-      },
-      ...workflow.outputNodes.filter((node) => node.id !== 'output').map((node) => ({
+      }] : []),
+      ...workflow.outputNodes.map((node) => ({
         id: node.id,
         kind: 'output' as const,
         x: node.x,
@@ -2460,7 +2407,7 @@
           <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
         </button>
         <div class="map-meta">
-          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + 1 + workflow.outputNodes.length} nodes</span>
+          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + (hasCompositionNode ? 1 : 0) + workflow.outputNodes.length} nodes</span>
           <span>{Math.round(workflow.zoom * 100)}%</span>
         </div>
       </div>
@@ -2678,8 +2625,6 @@
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
-          {@const extractionSources = creatorConfigStrings(node.config, 'sourceAssetIds')}
-          {@const extractionSupport = creatorConfigStrings(node.config, 'supportAssetIds')}
           {@const extractionResults = extractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
           <article
@@ -2738,43 +2683,9 @@
                 <div class="extract-asset-summary">
                   <Icon svg={ImageMultiple} size={16} />
                   <span>
-                    {extractionSources.length + extractionConnectedCount(node.id, 'sources')} source ·
-                    {extractionSupport.length + extractionConnectedCount(node.id, 'support')} support
+                    {extractionConnectedCount(node.id, 'sources')} source ·
+                    {extractionConnectedCount(node.id, 'support')} support
                   </span>
-                </div>
-                <div class="extract-asset-columns">
-                  <fieldset>
-                    <legend>Source images</legend>
-                    <div class="extract-asset-options">
-                      {#each assets as asset (asset.id)}
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={extractionSources.includes(asset.id)}
-                            onchange={(event) => toggleExtractionAsset(node.id, 'sourceAssetIds', asset.id, event.currentTarget.checked)}
-                          />
-                          <span>{asset.name}</span>
-                        </label>
-                      {:else}<small>Import source images to begin.</small>{/each}
-                    </div>
-                    <button type="button" disabled={!project.path} onclick={() => void importExtractionImages(node.id, 'sourceAssetIds')}>Import images…</button>
-                  </fieldset>
-                  <fieldset>
-                    <legend>Annotated support</legend>
-                    <div class="extract-asset-options">
-                      {#each assets as asset (asset.id)}
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={extractionSupport.includes(asset.id)}
-                            onchange={(event) => toggleExtractionAsset(node.id, 'supportAssetIds', asset.id, event.currentTarget.checked)}
-                          />
-                          <span>{asset.name}</span>
-                        </label>
-                      {:else}<small>Optional reference images.</small>{/each}
-                    </div>
-                    <button type="button" disabled={!project.path} onclick={() => void importExtractionImages(node.id, 'supportAssetIds')}>Import support…</button>
-                  </fieldset>
                 </div>
                 <label class="creator-config-field">
                   Extraction guidance
@@ -2816,7 +2727,7 @@
                 <button
                   type="button"
                   class="extract-run"
-                  disabled={!!extractionState?.running || (extractionSources.length === 0 && extractionConnectedCount(node.id, 'sources') === 0) || !project.path}
+                  disabled={!!extractionState?.running || extractionConnectedCount(node.id, 'sources') === 0 || !project.path}
                   onclick={() => void runAssetExtraction(node.id)}
                 >{extractionState?.running ? extractionState.message : 'Extract assets'}</button>
                 {#if extractionState?.error}<p class="extract-error" role="alert">{extractionState.error}</p>{/if}
@@ -3140,6 +3051,7 @@
           </article>
         {/each}
 
+        {#if hasCompositionNode}
         <article
           class="prompt-node"
           class:selected={workflow.selection?.kind === 'composition'}
@@ -3359,6 +3271,7 @@
           {/if}
           {#if error}<p class="err">{error}</p>{/if}
         </article>
+        {/if}
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
@@ -3951,45 +3864,6 @@
     gap: 6px;
     color: var(--text-bright);
   }
-  .extract-asset-columns {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
-  }
-  .extract-asset-columns fieldset {
-    display: grid;
-    gap: 5px;
-    min-width: 0;
-    margin: 0;
-    padding: 6px;
-    border: 1px solid var(--border-soft);
-    border-radius: 4px;
-  }
-  .extract-asset-columns legend {
-    padding: 0 3px;
-    color: var(--text-bright);
-    font-size: 9px;
-    font-weight: 700;
-  }
-  .extract-asset-options {
-    display: grid;
-    gap: 3px;
-    max-height: 72px;
-    overflow: auto;
-  }
-  .extract-asset-options label {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-  }
-  .extract-asset-options label span {
-    overflow: hidden;
-    color: var(--text);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .extract-asset-columns button,
   .extract-run {
     min-width: 0;
     padding: 4px 6px;

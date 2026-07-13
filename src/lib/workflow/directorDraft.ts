@@ -585,8 +585,6 @@ function nodeConfig(node: WorkflowDirectorNodeDraft): Record<string, unknown> {
     return {
       creatorRole: 'extract-assets',
       prompt: node.prompt,
-      sourceAssetIds: [],
-      supportAssetIds: [],
       mode: node.mode,
       assetsPerSheet: node.assetsPerSheet,
       resultAssets: [],
