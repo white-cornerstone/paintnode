@@ -84,7 +84,6 @@
     type WorkflowReviewVerificationState,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
-    workflowAiRoleSummary,
     type WorkflowNodeV2,
   } from '../workflow';
   import {
@@ -97,6 +96,7 @@
     type AssetSheetCount,
   } from '../workflow/assetExtraction';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
+  import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
   import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
@@ -105,6 +105,8 @@
   import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import WorkflowPropertiesPanel from './workflow/WorkflowPropertiesPanel.svelte';
+  import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
+  import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
@@ -126,6 +128,7 @@
 
   type WorkflowMapKind = 'asset' | 'brief' | 'composition' | 'creator' | 'output' | 'unsupported' | 'viewport';
   type WorkflowNodeId = string;
+  type AssetPreviewMenu = { nodeId: string; x: number; y: number };
   type WorkflowMapRect = {
     id: string;
     kind: WorkflowMapKind;
@@ -235,6 +238,9 @@
   let lastSelectiveContextIdentity = '';
   let boardDestroyed = false;
   let handledFocusRequest = 0;
+  let handledPasteRequest = 0;
+  let clipboardImporting = $state(false);
+  let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
 
   const ASSET_NODE_W = 205;
   const MAP_EDGE_PADDING = 260;
@@ -288,6 +294,15 @@
     workflow.rev;
     project.identity;
     if (!busy) error = '';
+  });
+
+  $effect(() => {
+    const request = ui.workflowPasteRequest;
+    if (request === 0 || request === handledPasteRequest) return;
+    handledPasteRequest = request;
+    const nodeId = selectedAssetNodeId();
+    if (nodeId) void pasteClipboardImage(nodeId);
+    else editor.flash('Select a Visual Input node before pasting an image');
   });
 
   function outputReadiness(outputNodeId: string) {
@@ -529,6 +544,66 @@
       return;
     }
     workflow.assignAsset(nodeId, null);
+  }
+
+  function selectedAssetNodeId(): string | null {
+    const selection = workflow.selection;
+    if (selection?.kind !== 'asset') return null;
+    return workflow.nodes.some((node) => node.id === selection.id) ? selection.id : null;
+  }
+
+  function openAssetPreviewMenu(event: MouseEvent, nodeId: string): void {
+    event.preventDefault();
+    event.stopPropagation();
+    showAssetPreviewMenu(nodeId, event.clientX, event.clientY);
+  }
+
+  function showAssetPreviewMenu(nodeId: string, clientX: number, clientY: number): void {
+    workflow.select({ kind: 'asset', id: nodeId });
+    assetPreviewMenu = {
+      nodeId,
+      x: Math.min(clientX, window.innerWidth - 214),
+      y: Math.min(clientY, window.innerHeight - (project.path ? 44 : 70)),
+    };
+  }
+
+  async function pasteClipboardImage(nodeId: string): Promise<void> {
+    assetPreviewMenu = null;
+    if (clipboardImporting) return;
+    if (!desktop) {
+      error = 'Clipboard image import is available only in the PaintNode desktop app.';
+      editor.flash(error);
+      return;
+    }
+    if (!project.path) {
+      error = 'Open a project folder before pasting an image.';
+      editor.flash(error);
+      return;
+    }
+    const projectIdentity = project.identity;
+    const workflowId = workflow.graphSnapshot().id;
+    clipboardImporting = true;
+    error = '';
+    try {
+      const asset = await ui.withLoading('Pasting clipboard image…', () => project.storeClipboardImage());
+      if (!asset) {
+        editor.flash('The clipboard does not contain an image');
+        return;
+      }
+      if (project.identity !== projectIdentity || workflow.graphSnapshot().id !== workflowId
+        || !workflow.nodes.some((node) => node.id === nodeId)) {
+        editor.flash('Clipboard image was imported, but the workflow changed before it could be assigned');
+        return;
+      }
+      workflow.assignAsset(nodeId, asset);
+      workflow.select({ kind: 'asset', id: nodeId });
+      editor.flash(`Pasted ${asset.name}`);
+    } catch (cause) {
+      error = (cause as Error)?.message ?? String(cause);
+      editor.flash(`Paste image failed: ${error}`);
+    } finally {
+      clipboardImporting = false;
+    }
   }
 
   $effect(() => {
@@ -1526,10 +1601,6 @@
     drawing = null;
   }
 
-  function assetTitle(node: WorkflowAssetNode): string {
-    return `Asset - ${node.name || 'Untitled'}`;
-  }
-
   function compositionTitle(): string {
     return workflow.compositionName ? `Composition - ${workflow.compositionName}` : 'Composition';
   }
@@ -2458,6 +2529,22 @@
     void promoteReviewCandidate(node.id);
   }
 
+  function workflowKeyboardShortcut(event: KeyboardEvent): void {
+    if (!isTypingTarget(event.target)
+      && (event.metaKey || event.ctrlKey)
+      && !event.altKey
+      && !event.shiftKey
+      && event.key.toLowerCase() === 'v') {
+      const nodeId = selectedAssetNodeId();
+      if (nodeId) {
+        event.preventDefault();
+        void pasteClipboardImage(nodeId);
+        return;
+      }
+    }
+    reviewKeyboardShortcut(event);
+  }
+
   async function promoteReviewCandidate(nodeId: string): Promise<void> {
     const candidate = selectedReviewCandidate(nodeId);
     if (!candidate || candidate.state !== 'eligible') return;
@@ -2565,9 +2652,15 @@
 </script>
 
 <svelte:window
+  onpointerdowncapture={(event) => {
+    if (assetPreviewMenu && event.target instanceof Element && !event.target.closest('.asset-preview-menu')) {
+      assetPreviewMenu = null;
+    }
+  }}
   onkeydown={(event) => {
     if (event.key === 'Alt') altDown = true;
-    reviewKeyboardShortcut(event);
+    if (event.key === 'Escape') assetPreviewMenu = null;
+    workflowKeyboardShortcut(event);
   }}
   onkeyup={(event) => {
     if (event.key === 'Alt') altDown = false;
@@ -2771,7 +2864,16 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
-                {assetTitle(node)}
+                <span class="node-title-prefix">Asset -&nbsp;</span>
+                <WorkflowNodeTitle
+                  name={node.name}
+                  fallback="Untitled"
+                  onBegin={() => workflow.select({ kind: 'asset', id: node.id })}
+                  onCommit={(name) => {
+                    workflow.select({ kind: 'asset', id: node.id });
+                    workflow.setSelectedLabel(name);
+                  }}
+                />
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
               </span>
               <div class="node-tools">
@@ -2804,8 +2906,27 @@
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="specialized-node-body asset-node-body">
-              <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
-                {#if (asset?.previewDataUrl ?? oraDocument?.previewDataUrl)}<img class="preview-image" src={asset?.previewDataUrl ?? oraDocument?.previewDataUrl ?? ''} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+              <div
+                class="node-preview"
+                class:can-paste={!asset && !oraDocument}
+                style={`height:${Math.max(64, node.height - 150)}px`}
+                role="button"
+                tabindex="0"
+                aria-haspopup="menu"
+                aria-label={`Image preview for ${node.name}. Right-click to paste an image.`}
+                oncontextmenu={(event) => openAssetPreviewMenu(event, node.id)}
+                onkeydown={(event) => {
+                  if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  showAssetPreviewMenu(node.id, rect.left + 20, rect.top + 20);
+                }}
+              >
+                {#if (asset?.previewDataUrl ?? oraDocument?.previewDataUrl)}
+                  <img class="preview-image" src={asset?.previewDataUrl ?? oraDocument?.previewDataUrl ?? ''} alt="" />
+                {:else}
+                  <span class="paste-placeholder"><Icon svg={Image} size={28} /><small>Right-click or ⌘V to paste</small></span>
+                {/if}
               </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
                 <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
@@ -2878,13 +2999,22 @@
               onFinish={(event, portId) => finishConnection(event, brief.id, portId)}
             />
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>{brief.name}</span>
+              <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>
+                <WorkflowNodeTitle
+                  name={brief.name}
+                  onBegin={() => workflow.select({ kind: 'creator', id: brief.id })}
+                  onCommit={(name) => {
+                    workflow.select({ kind: 'creator', id: brief.id });
+                    workflow.setSelectedLabel(name);
+                  }}
+                />
+              </span>
               <small>{briefCreatorDefinition.label}</small>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
               <p>{brief.guidance}</p>
-              {#if briefGraphNode}<small class="node-ai-summary">{workflowAiRoleSummary(workflow.aiDefaults, briefGraphNode)}</small>{/if}
+              {#if briefGraphNode}<WorkflowNodeAiOptions node={briefGraphNode} />{/if}
               <textarea
                 aria-label={`${brief.name} objective`}
                 placeholder="Outcome, audience, and non-negotiables…"
@@ -2901,7 +3031,7 @@
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
           {@const extractionResults = extractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
-          {@const aiSummary = workflowAiRoleSummary(workflow.aiDefaults, workflow.graphSnapshot().nodes.find((item) => item.id === node.id) ?? { type: node.type, config: node.config })}
+          {@const creatorGraphNode = workflow.graphSnapshot().nodes.find((item) => item.id === node.id)}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -2926,7 +3056,14 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node }}>
-                {node.name}
+                <WorkflowNodeTitle
+                  name={node.name}
+                  onBegin={() => workflow.select({ kind: 'creator', id: node.id })}
+                  onCommit={(name) => {
+                    workflow.select({ kind: 'creator', id: node.id });
+                    workflow.setSelectedLabel(name);
+                  }}
+                />
                 <small>{definition.label}</small>
               </span>
               <div class="node-tools">
@@ -2945,7 +3082,7 @@
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
               <p>{definition.description}</p>
-              {#if aiSummary}<small class="node-ai-summary">{aiSummary}</small>{/if}
+              {#if creatorGraphNode}<WorkflowNodeAiOptions node={creatorGraphNode} />{/if}
               {#if node.type === 'art-direction'}
                 <label class="creator-config-field">
                   Direction prompt
@@ -3364,13 +3501,23 @@
             onFinish={(event, portId) => finishConnection(event, 'composition', portId)}
           />
           <div class="node-head">
-            <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>{compositionTitle()}</span>
+            <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>
+              <WorkflowNodeTitle
+                name={workflow.compositionName || 'Composition'}
+                fallback="Composition"
+                onBegin={() => workflow.select({ kind: 'composition' })}
+                onCommit={(name) => {
+                  workflow.select({ kind: 'composition' });
+                  workflow.setSelectedLabel(name);
+                }}
+              />
+            </span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
             </div>
           </div>
           <WorkflowNodePreflight entry={preflightForNode('composition')} />
-          {#if compositionGraphNode}<small class="node-ai-summary composition-summary">{workflowAiRoleSummary(workflow.aiDefaults, compositionGraphNode)}</small>{/if}
+          {#if compositionGraphNode}<div class="composition-summary"><WorkflowNodeAiOptions node={compositionGraphNode} /></div>{/if}
           <div
             class="storyboard"
             class:editing={workflow.storyboardEditing}
@@ -3573,7 +3720,18 @@
               onFinish={(event, portId) => finishConnection(event, outputNode.id, portId)}
             />
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>{outputTitle(outputNode)}</span>
+              <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>
+                <span class="node-title-prefix">Output -&nbsp;</span>
+                <WorkflowNodeTitle
+                  name={outputNode.name}
+                  fallback="Untitled"
+                  onBegin={() => workflow.select({ kind: 'output', id: outputNode.id })}
+                  onCommit={(name) => {
+                    workflow.select({ kind: 'output', id: outputNode.id });
+                    workflow.setSelectedLabel(name);
+                  }}
+                />
+              </span>
               <div class="node-tools">
                 <button
                   type="button"
@@ -3662,6 +3820,27 @@
   />
 {/if}
 
+{#if assetPreviewMenu}
+  <div
+    class="asset-preview-menu"
+    style={`left:${assetPreviewMenu.x}px;top:${assetPreviewMenu.y}px`}
+    role="menu"
+    tabindex="-1"
+    aria-label="Visual Input image actions"
+    onpointerdown={(event) => event.stopPropagation()}
+  >
+    <button
+      type="button"
+      role="menuitem"
+      disabled={clipboardImporting || !desktop || !project.path}
+      onclick={() => void pasteClipboardImage(assetPreviewMenu!.nodeId)}
+    >
+      <span>{clipboardImporting ? 'Pasting image…' : 'Paste image'}</span><kbd>⌘V</kbd>
+    </button>
+    {#if !desktop}<small>Available in the PaintNode desktop app.</small>{:else if !project.path}<small>Open a project folder first.</small>{/if}
+  </div>
+{/if}
+
 <style>
   .workflow-shell {
     display: flex;
@@ -3682,7 +3861,6 @@
     flex: 1;
     min-height: 0;
   }
-  .node-ai-summary { display: block; padding: 5px 7px; border-radius: 4px; background: #25272a; color: var(--text-muted); font-size: 10px; }
   .composition-summary { margin: 8px; }
   .asset-tray {
     position: relative;
@@ -3995,6 +4173,9 @@
   .node-drag-region small.required {
     color: #ffd38a;
   }
+  .node-title-prefix {
+    flex: none;
+  }
   .node-drag-region:active {
     cursor: grabbing;
   }
@@ -4062,6 +4243,53 @@
     min-height: 0;
     object-fit: contain;
     object-position: center;
+  }
+  .node-preview.can-paste {
+    cursor: context-menu;
+  }
+  .paste-placeholder {
+    display: grid;
+    place-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    text-align: center;
+  }
+  .paste-placeholder small {
+    font-size: 9px;
+  }
+  .asset-preview-menu {
+    position: fixed;
+    z-index: 1200;
+    display: grid;
+    min-width: 202px;
+    padding: 4px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 10px 26px rgb(0 0 0 / 35%);
+  }
+  .asset-preview-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    width: 100%;
+    padding: 6px 8px;
+    border-color: transparent;
+    background: transparent;
+    text-align: left;
+  }
+  .asset-preview-menu button:not(:disabled):hover {
+    background: var(--accent);
+  }
+  .asset-preview-menu kbd {
+    color: var(--text-dim);
+    font: inherit;
+  }
+  .asset-preview-menu small {
+    padding: 3px 8px 5px;
+    color: var(--text-dim);
+    font-size: 10px;
   }
   .asset-node textarea,
   .brief-node textarea,

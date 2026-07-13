@@ -214,6 +214,7 @@ pub fn run() {
             project::project_open_folder,
             project::project_refresh,
             project::project_store_asset_bytes,
+            project::project_store_clipboard_image,
             project::project_commit_workflow_editor_return,
             project::project_finalize_workflow_editor_return,
             project::project_rollback_workflow_editor_return,

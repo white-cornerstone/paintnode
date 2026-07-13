@@ -547,7 +547,8 @@
         editor.copy();
         break;
       case 'app:paste':
-        if (editor.clipboard) editor.paste();
+        if (ui.activeSurface === 'workflow') ui.requestWorkflowPaste();
+        else if (editor.clipboard) editor.paste();
         break;
       case 'app:fill-foreground':
         editor.fillActive(editor.foreground);

@@ -93,6 +93,7 @@ export function installKeyboard(): () => void {
           editor.cut();
           return;
         case 'v':
+          if (ui.activeSurface === 'workflow') return;
           e.preventDefault();
           editor.paste();
           return;

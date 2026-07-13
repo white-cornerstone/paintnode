@@ -59,7 +59,35 @@
     options = $bindable<AiRunOptions>(),
     disabled = false,
     antigravityModelScope = 'image',
-  }: { options: AiRunOptions; disabled?: boolean; antigravityModelScope?: AntigravityModelScope } = $props();
+    showProfiles = true,
+    showDirector = true,
+    showImage = true,
+    directorRequired = false,
+    imageRoleLabel = 'Image Generator',
+    controlLabel = 'AI generation flow',
+    compact = false,
+    directorInherited = false,
+    imageInherited = false,
+    onOptionsChange,
+    onInheritDirector,
+    onInheritImage,
+  }: {
+    options: AiRunOptions;
+    disabled?: boolean;
+    antigravityModelScope?: AntigravityModelScope;
+    showProfiles?: boolean;
+    showDirector?: boolean;
+    showImage?: boolean;
+    directorRequired?: boolean;
+    imageRoleLabel?: string;
+    controlLabel?: string;
+    compact?: boolean;
+    directorInherited?: boolean;
+    imageInherited?: boolean;
+    onOptionsChange?: (options: AiRunOptions, scope: 'director' | 'image' | 'both') => void;
+    onInheritDirector?: () => void;
+    onInheritImage?: () => void;
+  } = $props();
 
   const serviceTiers: { value: ServiceTier; label: string }[] = [
     { value: 'default', label: 'Default speed' },
@@ -134,7 +162,7 @@
   const floatingMenuClass = 'ai-run-options-floating-menu';
   const dismissLayerClass = 'ai-run-options-dismiss-layer';
 
-  const directorEnabled = $derived((options.directorMode ?? options.plannerMode) !== 'skip');
+  const directorEnabled = $derived(showDirector && (options.directorMode ?? options.plannerMode) !== 'skip');
   const imageProvider = $derived(options.imageProvider ?? options.provider ?? 'codex');
   const directorProvider = $derived(options.directorProvider ?? options.plannerProvider ?? 'codex');
   const directorMode = $derived(options.directorMode ?? options.plannerMode ?? 'auto');
@@ -146,12 +174,15 @@
   const directorInvolvementLabel = $derived(
     directorInvolvementLevels.find((item) => item.value === directorInvolvement)?.label ?? 'Full review',
   );
-  const showCodexAgentOptions = $derived((directorEnabled && directorProvider === 'codex') || (!directorEnabled && imageProvider === 'codex'));
-  const showAntigravityAgentOptions = $derived(
-    (directorEnabled && directorProvider === 'antigravity') ||
-      (!directorEnabled && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
+  const showCodexAgentOptions = $derived(
+    (showDirector && directorEnabled && directorProvider === 'codex')
+      || (showImage && (!showDirector || !directorEnabled) && imageProvider === 'codex'),
   );
-  const showClaudeDirectorOptions = $derived(directorEnabled && directorProvider === 'claude');
+  const showAntigravityAgentOptions = $derived(
+    (showDirector && directorEnabled && directorProvider === 'antigravity') ||
+      (showImage && (!showDirector || !directorEnabled) && imageProvider === 'antigravity' && antigravityModelScope === 'all'),
+  );
+  const showClaudeDirectorOptions = $derived(showDirector && directorEnabled && directorProvider === 'claude');
   const availableCodexModels = $derived(codexModelOptions(codexCapabilities, options.model));
   const availableReasoningEfforts = $derived(
     codexReasoningOptions(codexCapabilities, options.model, options.reasoningEffort),
@@ -212,10 +243,12 @@
 
   const summary = $derived.by(() => {
     const imageName = providerLabel(imageProvider);
-    if (!directorEnabled) return `Director: Off · Image: ${imageName}`;
+    const imageSummary = `Image: ${imageName}${imageInherited ? ' ↳' : ''}`;
+    if (!showDirector) return imageSummary;
+    if (!directorEnabled) return showImage ? `Director: Off${directorInherited ? ' ↳' : ''} · ${imageSummary}` : 'Director: Off';
     const directorName = directorProviderLabel(directorProvider);
-    if (directorProvider === imageProvider) return `Director: ${directorModeShort}, ${directorInvolvementShort} · Image: ${imageName}`;
-    return `Director: ${directorModeShort} ${directorName}, ${directorInvolvementShort} · Image: ${imageName}`;
+    const directorSummary = `Director: ${directorModeShort}${directorProvider === imageProvider && showImage ? '' : ` ${directorName}`}, ${directorInvolvementShort}${directorInherited ? ' ↳' : ''}`;
+    return showImage ? `${directorSummary} · ${imageSummary}` : directorSummary;
   });
   const detailedSummary = $derived.by(() => {
     const imageDetail = imageProvider === 'codex'
@@ -223,7 +256,8 @@
       : imageProvider === 'grok'
         ? 'Image: Grok'
         : `Image: Antigravity, ${antigravityImageSizeLabel}`;
-    if (!directorEnabled) return `Director: Off. ${imageDetail}`;
+    if (!showDirector) return imageDetail;
+    if (!directorEnabled) return showImage ? `Director: Off. ${imageDetail}` : 'Director: Off';
     const directorDetail = directorProvider === 'codex'
       ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Codex, ${reasoningShort} reasoning`
       : directorProvider === 'claude'
@@ -231,8 +265,13 @@
       : directorProvider === 'grok'
         ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Grok`
         : `Director: ${directorModeShort}, ${directorInvolvementLabel}, Antigravity, ${autonomyShort} autonomy`;
-    return `${directorDetail}. ${imageDetail}`;
+    return showImage ? `${directorDetail}. ${imageDetail}` : directorDetail;
   });
+
+  function applyOptions(next: AiRunOptions, scope: 'director' | 'image' | 'both'): void {
+    options = next;
+    onOptionsChange?.(next, scope);
+  }
 
   function activeDirectorMode(): 'auto' | 'force' {
     if (directorMode === 'force' || directorMode === 'auto') return directorMode;
@@ -240,7 +279,7 @@
   }
 
   function setDirectorProvider(provider: AiDirectorProvider): void {
-    options = { ...options, directorMode: activeDirectorMode(), directorProvider: provider, directorInvolvement };
+    applyOptions({ ...options, directorMode: activeDirectorMode(), directorProvider: provider, directorInvolvement }, 'director');
     submenu =
       provider === 'codex'
         ? 'reasoning'
@@ -252,27 +291,27 @@
   }
 
   function skipDirector(): void {
-    options = { ...options, directorMode: 'skip' };
+    applyOptions({ ...options, directorMode: 'skip' }, 'director');
     submenu = 'imageProvider';
   }
 
   function setDirectorInvolvement(next: AiDirectorInvolvement): void {
-    options = { ...options, directorMode: activeDirectorMode(), directorInvolvement: next };
+    applyOptions({ ...options, directorMode: activeDirectorMode(), directorInvolvement: next }, 'director');
   }
 
   function setImageProvider(provider: AiProvider): void {
-    options = { ...options, provider, imageProvider: provider };
+    applyOptions({ ...options, provider, imageProvider: provider }, 'image');
     submenu = provider === 'codex' ? 'quality' : provider === 'grok' ? null : 'antigravityImageModel';
   }
 
   function applyProfile(profileId: string): void {
-    options = aiProfileRunOptionsFromSettings(settings.value, profileId);
+    applyOptions(aiProfileRunOptionsFromSettings(settings.value, profileId), 'both');
     submenu = null;
     close();
   }
 
   function applySettingsDefaults(): void {
-    options = aiProviderDefaultsFromSettings(settings.value);
+    applyOptions(aiProviderDefaultsFromSettings(settings.value), 'both');
     submenu = null;
     close();
   }
@@ -301,78 +340,78 @@
   }
 
   function setReasoning(reasoningEffort: ReasoningEffort): void {
-    options = { ...options, reasoningEffort };
+    applyOptions({ ...options, reasoningEffort }, 'director');
   }
 
   function setCodexModel(model: CodexModelId): void {
-    options = {
+    applyOptions({
       ...options,
       model,
       reasoningEffort: codexEffortForModel(codexCapabilities, model, options.reasoningEffort),
-    };
+    }, 'director');
   }
 
   function setClaudeModel(claudeModel: ClaudeModelId): void {
-    options = {
+    applyOptions({
       ...options,
       claudeModel,
       claudeEffort: claudeEffortForModel(claudeCapabilities, claudeModel, options.claudeEffort),
-    };
+    }, 'director');
   }
 
   function setClaudeEffort(claudeEffort: ClaudeEffort): void {
-    options = { ...options, claudeEffort };
+    applyOptions({ ...options, claudeEffort }, 'director');
   }
 
   function setServiceTier(serviceTier: ServiceTier): void {
-    options = { ...options, serviceTier };
+    applyOptions({ ...options, serviceTier }, 'director');
   }
 
   function setImageQuality(imageQuality: CodexImageQuality): void {
-    options = { ...options, imageQuality };
+    applyOptions({ ...options, imageQuality }, 'image');
   }
 
   function setImageModeration(imageModeration: CodexImageModeration): void {
-    options = { ...options, imageModeration };
+    applyOptions({ ...options, imageModeration }, 'image');
   }
 
   function setAutonomy(autonomyLevel: AiAutonomyLevel): void {
-    options = { ...options, autonomyLevel };
+    applyOptions({ ...options, autonomyLevel }, 'director');
   }
 
   function setAntigravityModel(antigravityModel: AntigravityModelId): void {
-    options = { ...options, antigravityModel };
+    applyOptions({ ...options, antigravityModel }, 'director');
   }
 
   function setAntigravityApproval(antigravityApprovalMode: AntigravityApprovalMode): void {
-    options = { ...options, antigravityApprovalMode };
+    applyOptions({ ...options, antigravityApprovalMode }, 'director');
   }
 
   function setAntigravityImageModel(antigravityImageModel: AntigravityImageModelId): void {
-    options = { ...options, antigravityImageModel };
+    applyOptions({ ...options, antigravityImageModel }, 'image');
   }
 
   function setAntigravityImageSize(antigravityImageSize: AntigravityImageSize): void {
-    options = { ...options, antigravityImageSize };
+    applyOptions({ ...options, antigravityImageSize }, 'image');
   }
 
   function setAntigravityPersonGeneration(antigravityPersonGeneration: AntigravityPersonGeneration): void {
-    options = { ...options, antigravityPersonGeneration };
+    applyOptions({ ...options, antigravityPersonGeneration }, 'image');
   }
 
   function setAntigravityProminentPeople(antigravityProminentPeople: AntigravityProminentPeople): void {
-    options = { ...options, antigravityProminentPeople };
+    applyOptions({ ...options, antigravityProminentPeople }, 'image');
   }
 
   function setAntigravitySafetyFiltering(antigravitySafetyFiltering: AntigravitySafetyFiltering): void {
-    options = { ...options, antigravitySafetyFiltering };
+    applyOptions({ ...options, antigravitySafetyFiltering }, 'image');
   }
 
   function setAntigravitySafetyThreshold(
     setting: AntigravitySafetyCategorySetting,
     value: AntigravitySafetyThreshold,
   ): void {
-    options = { ...options, [setting]: value };
+    applyOptions({ ...options, [setting]: value }, 'image');
   }
 
   function antigravitySafetyCategoryValue(setting: AntigravitySafetyCategorySetting): AntigravitySafetyThreshold {
@@ -521,42 +560,53 @@
   onscroll={() => void updateMenuPosition()}
 />
 
-<div class="ai-options">
+<div class="ai-options" class:compact>
   {#if open}
     <div bind:this={menuElement} use:portal class="menu" style={menuStyle} role="presentation" onpointerdown={stopPointer}>
-      <div class="menu-title">Profile</div>
-      <button type="button" class="profile-choice" class:active={settingsDefaultsActive()} onclick={applySettingsDefaults}>
-        <span class="profile-choice-text">
-          <span>Settings Defaults</span>
-          <small>{profileMenuSummary(null)}</small>
-        </span>
-        {#if settingsDefaultsActive()}<Icon svg={Checkmark} size={15} />{/if}
-      </button>
-      {#if settings.value.ai.profiles.length}
-        {#each settings.value.ai.profiles as profile (profile.id)}
-          <button type="button" class="profile-choice" class:active={profileActive(profile.id)} onclick={() => applyProfile(profile.id)}>
-            <span class="profile-choice-text">
-              <span>{profile.name}</span>
-              <small>{profileMenuSummary(profile.id)}</small>
-            </span>
-            {#if settings.value.ai.defaultProfileId === profile.id}<span class="profile-default">Default</span>{/if}
-            {#if profileActive(profile.id)}<Icon svg={Checkmark} size={15} />{/if}
-          </button>
-        {/each}
-      {/if}
-      <div class="separator"></div>
-
-        <div class="menu-title">AI Director</div>
-        {#each directorProviders as provider (provider.value)}
-          <button type="button" class:active={directorEnabled && directorProvider === provider.value} onclick={() => setDirectorProvider(provider.value)}>
-            <span>{provider.label}</span>
-            {#if directorEnabled && directorProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
-          </button>
-        {/each}
-        <button type="button" class:active={!directorEnabled} onclick={skipDirector}>
-          <span>Skip</span>
-          {#if !directorEnabled}<Icon svg={Checkmark} size={15} />{/if}
+      {#if showProfiles}
+        <div class="menu-title">Profile</div>
+        <button type="button" class="profile-choice" class:active={settingsDefaultsActive()} onclick={applySettingsDefaults}>
+          <span class="profile-choice-text">
+            <span>Settings Defaults</span>
+            <small>{profileMenuSummary(null)}</small>
+          </span>
+          {#if settingsDefaultsActive()}<Icon svg={Checkmark} size={15} />{/if}
         </button>
+        {#if settings.value.ai.profiles.length}
+          {#each settings.value.ai.profiles as profile (profile.id)}
+            <button type="button" class="profile-choice" class:active={profileActive(profile.id)} onclick={() => applyProfile(profile.id)}>
+              <span class="profile-choice-text">
+                <span>{profile.name}</span>
+                <small>{profileMenuSummary(profile.id)}</small>
+              </span>
+              {#if settings.value.ai.defaultProfileId === profile.id}<span class="profile-default">Default</span>{/if}
+              {#if profileActive(profile.id)}<Icon svg={Checkmark} size={15} />{/if}
+            </button>
+          {/each}
+        {/if}
+        <div class="separator"></div>
+      {/if}
+
+      {#if showDirector}
+        <div class="menu-title">AI Director</div>
+        {#if onInheritDirector}
+          <button type="button" class:active={directorInherited} onclick={onInheritDirector}>
+            <span>Workflow default</span>
+            {#if directorInherited}<Icon svg={Checkmark} size={15} />{/if}
+          </button>
+        {/if}
+        {#each directorProviders as provider (provider.value)}
+          <button type="button" class:active={!directorInherited && directorEnabled && directorProvider === provider.value} onclick={() => setDirectorProvider(provider.value)}>
+            <span>{provider.label}</span>
+            {#if !directorInherited && directorEnabled && directorProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
+          </button>
+        {/each}
+        {#if !directorRequired}
+          <button type="button" class:active={!directorEnabled && !directorInherited} onclick={skipDirector}>
+            <span>Skip</span>
+            {#if !directorEnabled && !directorInherited}<Icon svg={Checkmark} size={15} />{/if}
+          </button>
+        {/if}
 
         {#if directorEnabled}
           <button type="button" onclick={() => (submenu = submenu === 'directorInvolvement' ? null : 'directorInvolvement')}>
@@ -577,13 +627,23 @@
         {/if}
 
         <div class="separator"></div>
-        <div class="menu-title">Image Generator</div>
+      {/if}
+
+      {#if showImage}
+        <div class="menu-title">{imageRoleLabel}</div>
+        {#if onInheritImage}
+          <button type="button" class:active={imageInherited} onclick={onInheritImage}>
+            <span>Workflow default</span>
+            {#if imageInherited}<Icon svg={Checkmark} size={15} />{/if}
+          </button>
+        {/if}
         {#each providers as provider (provider.value)}
-          <button type="button" class:active={imageProvider === provider.value} onclick={() => setImageProvider(provider.value)}>
+          <button type="button" class:active={!imageInherited && imageProvider === provider.value} onclick={() => setImageProvider(provider.value)}>
             <span>{provider.label}</span>
-            {#if imageProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
+            {#if !imageInherited && imageProvider === provider.value}<Icon svg={Checkmark} size={15} />{/if}
           </button>
         {/each}
+      {/if}
 
         {#if showCodexAgentOptions}
           <div class="separator"></div>
@@ -735,7 +795,7 @@
           {/if}
         {/if}
 
-        {#if imageProvider === 'codex'}
+        {#if showImage && imageProvider === 'codex'}
           <div class="separator"></div>
           <div class="menu-title">Codex Image</div>
           <button type="button" onclick={() => (submenu = submenu === 'quality' ? null : 'quality')}>
@@ -768,7 +828,7 @@
               {/each}
             </div>
           {/if}
-        {:else if imageProvider === 'antigravity'}
+        {:else if showImage && imageProvider === 'antigravity'}
           <div class="separator"></div>
           <div class="menu-title">Antigravity Image</div>
           <button type="button" onclick={() => (submenu = submenu === 'antigravityImageModel' ? null : 'antigravityImageModel')}>
@@ -878,8 +938,8 @@
     class="pill"
     type="button"
     disabled={disabled}
-    aria-label={`AI generation flow: ${detailedSummary}`}
-    use:tooltip={{ text: `AI generation flow: ${detailedSummary}`, placement: 'top' }}
+    aria-label={`${controlLabel}: ${detailedSummary}`}
+    use:tooltip={{ text: `${controlLabel}: ${detailedSummary}`, placement: 'top' }}
     onpointerdown={stopPointer}
     onclick={toggle}
   >
@@ -893,6 +953,10 @@
   .ai-options {
     position: relative;
     display: inline-flex;
+  }
+  .ai-options.compact {
+    display: flex;
+    width: 100%;
   }
   .pill {
     display: inline-flex;
@@ -910,6 +974,19 @@
     max-width: min(320px, 58vw);
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .compact .pill {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+    border-radius: 4px;
+    font-size: 10px;
+  }
+  .compact .pill span {
+    min-width: 0;
+    flex: 1;
+    max-width: none;
+    text-align: left;
   }
   :global(.ai-run-options-dismiss-layer) {
     position: fixed;

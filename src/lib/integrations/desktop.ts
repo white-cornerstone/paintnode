@@ -1273,6 +1273,14 @@ export async function storeProjectAssetBytes(args: {
   });
 }
 
+export async function storeProjectClipboardImage(
+  projectPath: string,
+  name = 'Clipboard Image.png',
+): Promise<StoredAssetResult | null> {
+  if (!isDesktop()) throw new Error('Clipboard image import is available only in the PaintNode desktop app.');
+  return invoke<StoredAssetResult | null>('project_store_clipboard_image', { projectPath, name });
+}
+
 export async function commitWorkflowEditorReturn(args: {
   projectPath: string;
   revisionId: string;

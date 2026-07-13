@@ -97,6 +97,14 @@
     if (checked) setNodeImage(undefined);
     else setNodeImage(copyWorkflowAiDefaults(workflow.aiDefaults).image);
   }
+
+  function setDirectorSource(value: string): void {
+    inheritDirector(value === 'inherit');
+  }
+
+  function setImageSource(value: string): void {
+    inheritImage(value === 'inherit');
+  }
 </script>
 
 <aside class="workflow-properties" aria-label="Workflow properties">
@@ -122,13 +130,28 @@
     <section>
       <div class="section-title">
         <strong>AI Director</strong>
-        {#if node}
-          <label class="inherit"><input type="checkbox" checked={!overrides?.director} onchange={(event) => inheritDirector(event.currentTarget.checked)} /> Inherit</label>
-        {/if}
       </div>
+      {#if node}
+        <label class="field role-source">
+          <span>Configuration</span>
+          <select
+            id={`workflow-role-source-${node.id}-director`}
+            aria-label={`${node.title} AI Director configuration`}
+            value={overrides?.director ? 'override' : 'inherit'}
+            onchange={(event) => setDirectorSource(event.currentTarget.value)}
+          >
+            <option value="inherit">Inherit workflow default</option>
+            <option value="override">Override for this node</option>
+          </select>
+        </label>
+        {#if !overrides?.director}
+          <p class="role-hint">Using the saved workflow Director. Choose an override to edit this node independently.</p>
+        {/if}
+      {/if}
       <label class="field">
         <span>Mode</span>
         <select
+          aria-label={node ? `${node.title} AI Director mode` : 'Workflow AI Director mode'}
           value={capabilities.director === 'required' && director.mode === 'skip' ? 'auto' : director.mode}
           disabled={!!node && !overrides?.director}
           onchange={(event) => updateDirector({ mode: event.currentTarget.value as AiDirectorMode })}
@@ -141,6 +164,7 @@
       <label class="field">
         <span>Provider</span>
         <select
+          aria-label={node ? `${node.title} AI Director provider` : 'Workflow AI Director provider'}
           value={director.provider}
           disabled={!!node && !overrides?.director}
           onchange={(event) => updateDirector({ provider: event.currentTarget.value as AiDirectorProvider, model: null })}
@@ -151,6 +175,7 @@
       <label class="field">
         <span>Involvement</span>
         <select
+          aria-label={node ? `${node.title} AI Director involvement` : 'Workflow AI Director involvement'}
           value={director.involvement}
           disabled={!!node && !overrides?.director}
           onchange={(event) => updateDirector({ involvement: event.currentTarget.value as AiDirectorInvolvement })}
@@ -163,6 +188,7 @@
       <label class="field">
         <span>Model</span>
         <input
+          aria-label={node ? `${node.title} AI Director model` : 'Workflow AI Director model'}
           value={director.model ?? ''}
           placeholder="Provider default"
           disabled={!!node && !overrides?.director}
@@ -183,14 +209,29 @@
     <section>
       <div class="section-title">
         <strong>Image Model</strong>
-        {#if node}
-          <label class="inherit"><input type="checkbox" checked={!overrides?.image} onchange={(event) => inheritImage(event.currentTarget.checked)} /> Inherit</label>
-        {/if}
       </div>
+      {#if node}
+        <label class="field role-source">
+          <span>Configuration</span>
+          <select
+            id={`workflow-role-source-${node.id}-image`}
+            aria-label={`${node.title} Image Model configuration`}
+            value={overrides?.image ? 'override' : 'inherit'}
+            onchange={(event) => setImageSource(event.currentTarget.value)}
+          >
+            <option value="inherit">Inherit workflow default</option>
+            <option value="override">Override for this node</option>
+          </select>
+        </label>
+        {#if !overrides?.image}
+          <p class="role-hint">Using the saved workflow Image Model. Choose an override to edit this node independently.</p>
+        {/if}
+      {/if}
       <small class="capability">{capabilities.image === 'generate' ? 'Image generation' : 'Image-to-image editing'}</small>
       <label class="field">
         <span>Provider</span>
         <select
+          aria-label={node ? `${node.title} Image Model provider` : 'Workflow Image Model provider'}
           value={image.provider}
           disabled={!!node && !overrides?.image}
           onchange={(event) => updateImage({ provider: event.currentTarget.value as AiProvider, model: null })}
@@ -211,6 +252,7 @@
       <label class="field">
         <span>Model</span>
         <input
+          aria-label={node ? `${node.title} Image Model model` : 'Workflow Image Model model'}
           value={image.model ?? ''}
           placeholder="Provider default"
           disabled={!!node && !overrides?.image}
@@ -241,10 +283,11 @@
   header small, .hint, .capability { color: var(--text-muted); font-size: 11px; }
   section { display: grid; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
   .section-title { display: flex; align-items: center; justify-content: space-between; color: var(--text-bright); font-size: 12px; }
-  .inherit { display: flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 10px; }
   .field { display: grid; gap: 4px; color: var(--text-muted); font-size: 11px; }
-  input, select { width: 100%; min-width: 0; height: 28px; border: 1px solid var(--border); border-radius: 4px; background: #1f2022; color: var(--text-bright); padding: 0 7px; box-sizing: border-box; font: inherit; }
-  input:disabled, select:disabled { opacity: .55; }
+  .field > input, .field > select { width: 100%; min-width: 0; height: 28px; border: 1px solid var(--border); border-radius: 4px; background: #1f2022; color: var(--text-bright); padding: 0 7px; box-sizing: border-box; font: inherit; }
+  .field > input:disabled, .field > select:disabled { opacity: .55; }
+  .role-source > select { border-color: #477eb6; background: #222b35; }
+  .role-hint { margin: -1px 0 1px; color: var(--text-muted); font-size: 10px; line-height: 1.4; }
   .warning { margin: 0; padding: 7px; border: 1px solid #765b32; border-radius: 4px; background: #3b3123; color: #f0c987; font-size: 10px; line-height: 1.35; }
   .ai-action { width: 100%; margin-top: 14px; min-height: 30px; border: 1px solid #477eb6; border-radius: 4px; background: #245b8f; color: white; font: inherit; }
 </style>
