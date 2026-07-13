@@ -29,11 +29,11 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain('placeLatestWorkflowEdit()');
   });
 
-  it('prevents dirty generated workflow state from being replaced by an older saved file', () => {
+  it('guards workflow replacement and routes tab close through the save confirmation command', () => {
     expect(projectPanelSource).toContain('workflow.active && workflow.dirty');
     expect(projectPanelSource).toContain('Save it before opening another saved workflow.');
     expect(projectPanelSource).toContain('workflow.savedPath === file.relativePath');
-    expect(documentTabsSource).toContain('if (workflow.dirty)');
-    expect(documentTabsSource).toContain('generated candidates and outputs are preserved');
+    expect(documentTabsSource).toContain('closeWorkflowCommand');
+    expect(documentTabsSource).not.toContain('if (workflow.dirty)');
   });
 });

@@ -3,7 +3,7 @@
   import { tooltip } from '../actions/tooltip';
   import { Dismiss } from '../icons';
   import { filesFromDataTransfer, hasFileDrag } from '../io';
-  import { openDocumentFiles, saveDocumentCommand } from '../state/commands';
+  import { closeWorkflowCommand, openDocumentFiles, saveDocumentCommand } from '../state/commands';
   import { editor, type DocumentSession } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
@@ -141,11 +141,7 @@
         use:tooltip={{ text: `Close ${workflow.name || 'workflow'}`, placement: 'bottom' }}
         onclick={(e) => {
           e.stopPropagation();
-          if (workflow.dirty) {
-            editor.flash('Save the workflow before closing it so generated candidates and outputs are preserved.');
-            return;
-          }
-          if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
+          void closeWorkflowCommand();
         }}
       >
         <Icon svg={Dismiss} size={13} />

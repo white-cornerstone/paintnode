@@ -52,6 +52,7 @@
   import { installKeyboard } from './lib/state/keyboard';
   import {
     autosaveOpenDocuments,
+    closeWorkflowCommand,
     exportPngCommand,
     exportPsdCommand,
     importImageCommand,
@@ -280,6 +281,10 @@
     return editor.documentFileName(session);
   }
 
+  function workflowNeedsSave(): boolean {
+    return workflow.active && (workflow.dirty || workflow.savedPath === null);
+  }
+
   function unsavedWorkItems(): UnsavedWorkItem[] {
     const items: UnsavedWorkItem[] = editor.documents
       .filter((session) => editor.hasUnsavedChanges(session))
@@ -288,7 +293,7 @@
         id: session.id,
         name: documentDisplayName(session),
       }));
-    if (workflow.active && workflow.dirty) {
+    if (workflowNeedsSave()) {
       items.push({ kind: 'workflow', name: workflow.name || 'Untitled Workflow' });
     }
     return items;
@@ -330,7 +335,7 @@
 
   async function closeActiveDocument(): Promise<void> {
     if (ui.activeSurface === 'workflow') {
-      if (!workflow.close()) editor.flash('Close workflow-linked editor tabs before closing the workflow.');
+      await closeWorkflowCommand();
       return;
     }
     const session = editor.activeDocument;
@@ -341,7 +346,7 @@
   async function saveWorkflowForClose(): Promise<boolean> {
     workflow.show();
     await saveWorkflowCommand();
-    return !workflow.dirty;
+    return !workflowNeedsSave();
   }
 
   async function confirmUnsavedWorkBeforeClose(items = unsavedWorkItems()): Promise<boolean> {
@@ -352,7 +357,7 @@
         const session = editor.documents.find((documentSession) => documentSession.id === item.id);
         if (!session || !editor.hasUnsavedChanges(session)) continue;
         editor.switchDocument(item.id);
-      } else if (!workflow.active || !workflow.dirty) {
+      } else if (!workflowNeedsSave()) {
         continue;
       } else {
         workflow.show();
