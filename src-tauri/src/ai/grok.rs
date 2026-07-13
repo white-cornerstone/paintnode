@@ -1133,6 +1133,12 @@ Action schema:
     )
 }
 
+fn grok_content_moderation_blocked(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("content moderation")
+        || error.contains("generated image rejected by content moderation")
+}
+
 /// Multi-asset workflow composition prompt. Equivalent wording to the
 /// Antigravity workflow prompt, adapted to positional attachments.
 fn grok_workflow_prompt(prompt: &str, attachments_note: &str) -> String {
@@ -1336,18 +1342,11 @@ fn grok_restore_image_details(
                 ),
                 image_model,
                 keep_debug_artifacts,
-            )
-            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-            fs::write(&result_path, &candidate).map_err(|e| {
-                ai_part_progress_message(
-                    &placement,
-                    part_index,
-                    &format!("Failed to write Grok detail restoration result: {e}"),
-                )
-            })?;
+            )?;
+            fs::write(&result_path, &candidate)
+                .map_err(|e| format!("Failed to write Grok detail restoration result: {e}"))?;
             let (candidate, _result_dimensions, _normalized) =
-                read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
-                    .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+                read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)?;
             let _ = fs::remove_file(&result_path);
             if upscale_layers {
                 validate_upscale_part_structure(&inputs.source_png, &candidate, label)?;
@@ -1356,7 +1355,7 @@ fn grok_restore_image_details(
         };
         let bytes = if use_grok_director {
             let mut director_image_paths = attachments.paths.clone();
-            run_candidate_director_loop(
+            let directed_result = run_candidate_director_loop(
                 &part_path,
                 DirectorLoopSpec {
                     provider_label: AiDirectorProvider::Grok.label(),
@@ -1416,8 +1415,25 @@ fn grok_restore_image_details(
                         file_name: candidate_file,
                     })
                 },
-            )
-            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?
+            );
+            match directed_result {
+                Ok(candidate) => candidate,
+                Err(error) if grok_content_moderation_blocked(&error) => {
+                    emit_codex_progress(
+                        app,
+                        run_id,
+                        ai_part_progress_message(
+                            &placement,
+                            part_index,
+                            "Grok declined this source crop after Director retries; keeping the deterministic upscaled pixels for this part and continuing",
+                        ),
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(ai_part_progress_message(&placement, part_index, &error));
+                }
+            }
         } else {
             let max_attempts = if upscale_layers {
                 AI_PROTECTED_DRIFT_MAX_ATTEMPTS
@@ -2855,6 +2871,16 @@ mod tests {
         assert!(prompt.contains("smallest faithful compliant rephrasing"));
         assert!(prompt.contains("generateCandidate"));
         assert!(prompt.contains("Do not invoke image-generation tools yourself"));
+    }
+
+    #[test]
+    fn moderation_classifier_recognizes_grok_image_rejection_without_part_prefixes() {
+        assert!(grok_content_moderation_blocked(
+            "Grok blocked this prompt during content moderation. Try a different prompt.\n\nGenerated image rejected by content moderation."
+        ));
+        assert!(!grok_content_moderation_blocked(
+            "Grok image request timed out while contacting xAI."
+        ));
     }
 
     #[test]
