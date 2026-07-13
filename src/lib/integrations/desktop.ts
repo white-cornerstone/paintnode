@@ -66,6 +66,15 @@ export async function setNativeMenuEnabledStates(enabled: Record<string, boolean
   }
 }
 
+export async function finishDesktopLaunch(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await invoke('finish_launch');
+  } catch (error) {
+    console.error('Failed to finish desktop launch', error);
+  }
+}
+
 export async function readAppMemoryInfo(): Promise<AppMemoryInfo | null> {
   if (!isDesktop()) return null;
   try {

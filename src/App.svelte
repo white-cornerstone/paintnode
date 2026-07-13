@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { Component } from 'svelte';
   import MenuBar from './lib/components/MenuBar.svelte';
   import Toolbar from './lib/components/Toolbar.svelte';
@@ -67,6 +67,7 @@
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { persistWorkflowAfterReturnForClose } from './lib/state/workflowReturnClose';
   import {
+    finishDesktopLaunch,
     isDesktop,
     providerQaMode,
     quitApplication,
@@ -800,6 +801,7 @@
     let disposed = false;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
+      void tick().then(finishDesktopLaunch);
       updateCheckTimer = window.setTimeout(
         () => void appUpdater.checkForUpdates({ background: true }),
         2500,
