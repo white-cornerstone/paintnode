@@ -2612,15 +2612,10 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
-                <span class="node-title-prefix">Asset -&nbsp;</span>
                 <WorkflowNodeTitle
                   name={node.name}
+                  typeLabel="Asset"
                   fallback="Untitled"
-                  onBegin={() => workflow.select({ kind: 'asset', id: node.id })}
-                  onCommit={(name) => {
-                    workflow.select({ kind: 'asset', id: node.id });
-                    workflow.setSelectedLabel(name);
-                  }}
                 />
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
               </span>
@@ -2748,16 +2743,8 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>
-                <WorkflowNodeTitle
-                  name={brief.name}
-                  onBegin={() => workflow.select({ kind: 'creator', id: brief.id })}
-                  onCommit={(name) => {
-                    workflow.select({ kind: 'creator', id: brief.id });
-                    workflow.setSelectedLabel(name);
-                  }}
-                />
+                <WorkflowNodeTitle name={brief.name} typeLabel={briefCreatorDefinition.label} />
               </span>
-              <small>{briefCreatorDefinition.label}</small>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
@@ -2804,15 +2791,7 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node }}>
-                <WorkflowNodeTitle
-                  name={node.name}
-                  onBegin={() => workflow.select({ kind: 'creator', id: node.id })}
-                  onCommit={(name) => {
-                    workflow.select({ kind: 'creator', id: node.id });
-                    workflow.setSelectedLabel(name);
-                  }}
-                />
-                <small>{definition.label}</small>
+                <WorkflowNodeTitle name={node.name} typeLabel={definition.label} />
               </span>
               <div class="node-tools">
                 <button
@@ -3205,8 +3184,9 @@
             }}
           >
             <div class="node-head">
-              <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>{node.name}</span>
-              <small>Unsupported</small>
+              <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>
+                <WorkflowNodeTitle name={node.name} typeLabel="Unsupported" />
+              </span>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
@@ -3252,12 +3232,8 @@
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>
               <WorkflowNodeTitle
                 name={workflow.compositionName || 'Composition'}
+                typeLabel="Composition"
                 fallback="Composition"
-                onBegin={() => workflow.select({ kind: 'composition' })}
-                onCommit={(name) => {
-                  workflow.select({ kind: 'composition' });
-                  workflow.setSelectedLabel(name);
-                }}
               />
             </span>
             <div class="node-tools">
@@ -3469,15 +3445,10 @@
             />
             <div class="node-head">
               <span class="node-drag-region" use:dragHandle={{ type: 'output', node: outputNode }}>
-                <span class="node-title-prefix">Output -&nbsp;</span>
                 <WorkflowNodeTitle
                   name={outputNode.name}
+                  typeLabel="Output"
                   fallback="Untitled"
-                  onBegin={() => workflow.select({ kind: 'output', id: outputNode.id })}
-                  onCommit={(name) => {
-                    workflow.select({ kind: 'output', id: outputNode.id });
-                    workflow.setSelectedLabel(name);
-                  }}
                 />
               </span>
               <div class="node-tools">
@@ -3758,10 +3729,7 @@
     flex: 1 1 auto;
     cursor: grab;
   }
-  .node-drag-region small,
-  .brief-node .node-head small,
-  .creator-node .node-head small,
-  .unsupported-node .node-head small {
+  .node-drag-region small {
     margin-left: 7px;
     color: var(--text-dim);
     font-size: 9px;
@@ -3770,9 +3738,6 @@
   }
   .node-drag-region small.required {
     color: #ffd38a;
-  }
-  .node-title-prefix {
-    flex: none;
   }
   .node-drag-region:active {
     cursor: grabbing;

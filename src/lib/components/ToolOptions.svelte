@@ -59,15 +59,6 @@
     { id: 'zoom', label: 'Zoom workflow canvas', icon: Search },
   ];
   const nodePalettes = ['#3a3c42', '#3e4f7a', '#3e6b57', '#74583c', '#70435f', '#5b4f7a'];
-  const selectedKindLabel = $derived(
-    workflow.selection?.kind === 'asset'
-      ? 'Asset'
-      : workflow.selection?.kind === 'composition'
-        ? 'Composition'
-        : workflow.selection?.kind === 'output'
-          ? 'Output'
-          : 'None',
-  );
   const selectedOutput = $derived(workflow.selectedOutputNode());
   const selectionModes: { id: SelectionMode; label: string; icon: string }[] = [
     { id: 'new', label: 'New', icon: MarqueeRect },
@@ -258,10 +249,6 @@
     </div>
 
     <span class="divider"></span>
-    <div class="opt">
-      Type
-      <span class="pill">{selectedKindLabel}</span>
-    </div>
     <label class="opt">
       Name
       <input
