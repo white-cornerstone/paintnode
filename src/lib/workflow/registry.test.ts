@@ -31,6 +31,21 @@ describe('creator node registry', () => {
     }
   });
 
+  it('gives newly created nodes enough initial height for their default controls', () => {
+    expect(Object.fromEntries(CREATOR_NODE_DEFINITIONS.map((definition) => [
+      definition.type,
+      definition.defaultSize.height,
+    ]))).toEqual({
+      input: 240,
+      brief: 220,
+      'art-direction': 408,
+      'extract-assets': 400,
+      transform: 480,
+      review: 536,
+      output: 280,
+    });
+  });
+
   it('rejects duplicate definitions instead of silently accepting Map last-write-wins behavior', () => {
     const input = creatorNodeDefinition('input');
     expect(() => createCreatorNodeRegistry([input, { ...input, label: 'Duplicate Input' }])).toThrow(

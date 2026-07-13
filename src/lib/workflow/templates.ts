@@ -1,5 +1,5 @@
 import { WorkflowGraphDomain } from './domain';
-import { createCreatorNode } from './registry';
+import { createCreatorNode, creatorNodeDefinition } from './registry';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2, type WorkflowNodeV2 } from './schema';
 
 export type WorkflowTemplateId = 'blank' | 'asset-composition' | 'campaign-composer';
@@ -175,10 +175,11 @@ function artDirectionNode(definition: WorkflowTemplateDefinition): WorkflowNodeV
 }
 
 function outputNode(output: WorkflowTemplateOutput, index: number, x = 925): WorkflowNodeV2 {
+  const outputDefinition = creatorNodeDefinition('output');
   return createCreatorNode('output', {
     id: `output-${output.id}`,
     title: output.name,
-    position: { x, y: 30 + index * 256 },
+    position: { x, y: 30 + index * (outputDefinition.defaultSize.height + 24) },
     replaceConfig: true,
     config: {
       templateRole: 'configured-output',
@@ -263,7 +264,11 @@ export function instantiateWorkflowTemplate(
     landscape: campaignGenerateTransform(
       'transform-generate-landscape', 'Generate Landscape',
       'Adapt the accepted campaign direction to the configured Landscape 16:9 output while preserving product and brand identity.',
-      { x: 1465, y: 562 }, 'campaign-generate-landscape',
+      {
+        x: 1465,
+        y: 306 + creatorNodeDefinition('transform').defaultSize.height + 24,
+      },
+      'campaign-generate-landscape',
     ),
   } : null;
   const outputs = definition.outputs.map((output, index) => outputNode(output, index, campaignNodes ? 1735 : 925));
