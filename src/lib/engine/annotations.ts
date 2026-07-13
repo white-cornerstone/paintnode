@@ -1,4 +1,5 @@
 import { uid } from './types';
+import { createCanvas, ctx2d } from './types';
 
 export type AnnotationKind = 'arrow' | 'note' | 'callout' | 'badge' | 'divider';
 
@@ -151,4 +152,113 @@ export function annotationInstructionNotes(items: AnnotationItem[], width: numbe
       const cy = Math.round(((item.y + item.height / 2) / Math.max(1, height)) * 100);
       return `Annotation ${index + 1} at ${cx}% x, ${cy}% y (${item.kind}): ${item.text.trim()}`;
     });
+}
+
+export function renderAnnotatedCanvas(source: HTMLCanvasElement, annotations: readonly AnnotationItem[]): HTMLCanvasElement {
+  const annotated = createCanvas(source.width, source.height);
+  const ctx = ctx2d(annotated);
+  ctx.drawImage(source, 0, 0);
+  for (const item of annotations) drawAnnotationToContext(ctx, item);
+  return annotated;
+}
+
+export function drawAnnotationToContext(ctx: CanvasRenderingContext2D, item: AnnotationItem): void {
+  ctx.save();
+  ctx.translate(item.x + item.width / 2, item.y + item.height / 2);
+  ctx.rotate(item.rotation);
+  ctx.scale(item.flipX ? -1 : 1, item.flipY ? -1 : 1);
+  ctx.strokeStyle = item.color;
+  ctx.fillStyle = item.color;
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const x0 = -item.width / 2;
+  const x1 = item.width / 2;
+  if (item.kind === 'arrow' || item.kind === 'divider') {
+    ctx.beginPath();
+    ctx.moveTo(x0, 0);
+    ctx.lineTo(x1, 0);
+    ctx.stroke();
+    if (item.kind === 'arrow') {
+      const size = 18;
+      ctx.beginPath();
+      ctx.moveTo(x1, 0);
+      ctx.lineTo(x1 - Math.cos(-Math.PI / 6) * size, -Math.sin(-Math.PI / 6) * size);
+      ctx.lineTo(x1 - Math.cos(Math.PI / 6) * size, -Math.sin(Math.PI / 6) * size);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
+  const w = Math.max(34, item.width);
+  const h = Math.max(26, item.height);
+  const x = -w / 2;
+  const y = -h / 2;
+  if (item.kind === 'badge') {
+    const radius = Math.min(Math.max(6, Math.min(16, h / 2)), w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#111111';
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(x + 14, 0, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = `700 ${Math.max(13, Math.min(22, h * 0.42))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(item.text, 8, 0, Math.max(10, w - 30));
+    ctx.restore();
+    return;
+  }
+  if (item.kind === 'note') {
+    ctx.fillStyle = '#fff5a8';
+    ctx.strokeStyle = '#111111';
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 5);
+    ctx.fill();
+    ctx.stroke();
+    const fold = Math.min(28, w * 0.28, h * 0.42);
+    ctx.fillStyle = '#eadc73';
+    ctx.beginPath();
+    ctx.moveTo(x + w - fold, y + h);
+    ctx.lineTo(x + w, y + h - fold);
+    ctx.lineTo(x + w, y + h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.94)';
+    ctx.strokeStyle = '#111111';
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, item.kind === 'callout' ? 14 : 7);
+    ctx.fill();
+    ctx.stroke();
+    if (item.kind === 'callout') {
+      ctx.beginPath();
+      ctx.moveTo(x + 18, y + h - 1);
+      ctx.lineTo(x + 35, y + h + 18);
+      ctx.lineTo(x + 45, y + h - 1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+  ctx.fillStyle = '#111111';
+  ctx.font = `${Math.max(13, Math.min(24, h * 0.38))}px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(item.text, x + 10, y + h / 2, Math.max(10, w - 20));
+  ctx.restore();
 }

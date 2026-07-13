@@ -206,6 +206,7 @@ fn validate_revision_context(context: &WorkflowDirectorRevisionContext) -> Resul
             "input" => &["assetId", "role", "required"][..],
             "brief" => &["objective", "guidance"][..],
             "art-direction" => &["prompt"][..],
+            "extract-assets" => &["prompt", "mode", "assetsPerSheet"][..],
             "transform" => &["capability", "instructions"][..],
             "review" => &["mode", "instructions"][..],
             "output" => &["finalWidth", "finalHeight"][..],
@@ -357,6 +358,7 @@ Return one strict GraphDraft v1 JSON object with exactly these top-level fields:
   - input: id,type,title,assetId(string or null),role,required(boolean)
   - brief: id,type,title,objective,guidance
   - art-direction: id,type,title,prompt
+  - extract-assets: id,type,title,prompt,mode(`quality` or `fast`),assetsPerSheet(1,2,4,or 8)
   - transform: id,type,title,capability,instructions
   - review: id,type,title,mode(`human` or `ai`),instructions
   - output: id,type,title,width,height

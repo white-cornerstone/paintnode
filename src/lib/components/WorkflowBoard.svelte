@@ -9,14 +9,19 @@
     antigravityConfigFromRunOptions,
     grokConfigFromRunOptions,
     cancelAiRun,
+    decoupleAntigravityImage,
+    decoupleCodexImage,
     isDesktop,
     providerQaMode,
+    readProjectAsset,
     readProjectFile,
     resolveProjectAssetMaterial,
     storeProjectAssetBytes,
     type ProjectAsset,
+    type ProjectFile,
   } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
+  import { openFiles } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
   import { Layer } from '../engine/Layer.svelte';
   import { modelToPlainText } from '../engine/text/model';
@@ -30,7 +35,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
-  import { imageProviderFromRunOptions } from '../ai/taskSupport';
+  import { directorModeFromRunOptions, directorProviderFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
   import { aiTasks } from '../state/aiTasks.svelte';
   import {
@@ -73,15 +78,24 @@
     type WorkflowReviewVerificationState,
     WorkflowReviewVerificationCoordinator,
   } from '../workflow';
+  import {
+    canvasPngBlob,
+    assetSheetGuidelineDataUrl,
+    composeAssetExtractionSources,
+    cropAssetIndexSheet,
+    decoupledLayerCanvas,
+    workflowAssetExtractionPrompt,
+    type AssetSheetCount,
+  } from '../workflow/assetExtraction';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
+  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
-  import { annotationFromDrag, type AnnotationItem } from '../engine/annotations';
+  import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
     createCodexWorkflowTransformExecutor,
@@ -122,8 +136,15 @@
   let busy = $state(false);
   let progress = $state('');
   let candidateResultMessages = $state<Record<string, string>>({});
+  let assetExtractionStates = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let error = $state('');
   const imageProvider = $derived(imageProviderFromRunOptions(runOptions));
+  const extractionProvider = $derived.by(() => {
+    const directorProvider = directorProviderFromRunOptions(runOptions);
+    return directorModeFromRunOptions(runOptions) === 'skip' || directorProvider === 'claude'
+      ? imageProviderFromRunOptions(runOptions)
+      : directorProvider;
+  });
   let qaMode = $state<'provider-free' | 'provider-e2e' | null>(null);
   let qaModeResolved = $state(!desktop);
   let qaScenario = $state<ProviderFreeQaScenario>('success');
@@ -202,7 +223,10 @@
   const OVERSCROLL_DAMPING = 0.14;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
+  const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
   const assetByPath = $derived(new Map(assets.map((asset) => [asset.relativePath, asset])));
+  const oraVariantCache = new Map<string, Promise<{ referenceDataUrl: string; annotationDataUrl: string | null; hasAnnotations: boolean }>>();
+  let lastOraPortSyncIdentity = '';
   const effectiveZoomMode = $derived(
     altDown
       ? workflow.zoomMode === 'in' ? 'out' : 'in'
@@ -438,6 +462,266 @@
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
+  }
+
+  function oraFor(node: WorkflowAssetNode): ProjectFile | null {
+    return node.oraRelativePath
+      ? oraDocuments.find((file) => file.relativePath === node.oraRelativePath) ?? null
+      : null;
+  }
+
+  async function oraVariants(file: ProjectFile): Promise<{ referenceDataUrl: string; annotationDataUrl: string | null; hasAnnotations: boolean }> {
+    const key = `${project.identity}:${file.relativePath}:${file.modifiedAt}`;
+    let cached = oraVariantCache.get(key);
+    if (!cached) {
+      cached = (async () => {
+        const bytes = await project.readFile(file);
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        const doc = await loadOra(buffer);
+        const reference = compositeToCanvas(doc);
+        const annotations = visibleAnnotations(doc.annotations);
+        return {
+          referenceDataUrl: reference.toDataURL('image/png'),
+          annotationDataUrl: doc.annotations.length > 0
+            ? renderAnnotatedCanvas(reference, annotations).toDataURL('image/png')
+            : null,
+          hasAnnotations: doc.annotations.length > 0,
+        };
+      })();
+      oraVariantCache.set(key, cached);
+    }
+    return cached;
+  }
+
+  async function assignWorkflowAsset(nodeId: string, value: string): Promise<void> {
+    if (value.startsWith('asset:')) {
+      workflow.assignAsset(nodeId, assets.find((item) => item.id === value.slice(6)) ?? null);
+      return;
+    }
+    if (value.startsWith('ora:')) {
+      const file = oraDocuments.find((item) => item.relativePath === value.slice(4));
+      if (!file) return;
+      try {
+        const variants = await oraVariants(file);
+        workflow.assignOraDocument(nodeId, file, variants.hasAnnotations);
+      } catch (e) {
+        editor.flash(`Could not inspect ${file.name}: ${(e as Error)?.message ?? String(e)}`);
+      }
+      return;
+    }
+    workflow.assignAsset(nodeId, null);
+  }
+
+  $effect(() => {
+    workflow.rev;
+    const identity = JSON.stringify({
+      project: project.identity,
+      files: oraDocuments.map((file) => [file.relativePath, file.modifiedAt]),
+      nodes: workflow.nodes.filter((node) => node.oraRelativePath).map((node) => [
+        node.id,
+        node.oraRelativePath,
+        workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation'),
+      ]),
+    });
+    if (identity === lastOraPortSyncIdentity) return;
+    lastOraPortSyncIdentity = identity;
+    const expectedProjectIdentity = project.identity;
+    void Promise.all(workflow.nodes.map(async (node) => {
+      if (!node.oraRelativePath) return;
+      const file = oraDocuments.find((item) => item.relativePath === node.oraRelativePath);
+      if (!file) return;
+      try {
+        const variants = await oraVariants(file);
+        if (project.identity !== expectedProjectIdentity) return;
+        const hasPort = workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation');
+        if (hasPort !== variants.hasAnnotations) workflow.assignOraDocument(node.id, file, variants.hasAnnotations);
+      } catch {
+        // Keep the last valid port contract while a document is temporarily unreadable.
+      }
+    }));
+  });
+
+  type ExtractedAssetLink = { id: string; name: string; relativePath: string };
+
+  function creatorConfigStrings(config: Record<string, unknown>, key: string): string[] {
+    const value = config[key];
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  }
+
+  function extractedAssetLinks(config: Record<string, unknown>): ExtractedAssetLink[] {
+    const value = config.resultAssets;
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
+      const record = item as Record<string, unknown>;
+      return typeof record.id === 'string' && typeof record.name === 'string' && typeof record.relativePath === 'string'
+        ? [{ id: record.id, name: record.name, relativePath: record.relativePath }]
+        : [];
+    });
+  }
+
+  function extractionQuickLinks(): Array<ExtractedAssetLink & { nodeName: string }> {
+    return workflow.creatorNodes.flatMap((node) => node.type === 'extract-assets'
+      ? extractedAssetLinks(node.config).map((asset) => ({ ...asset, nodeName: node.name }))
+      : []);
+  }
+
+  function toggleExtractionAsset(nodeId: string, key: 'sourceAssetIds' | 'supportAssetIds', assetId: string, checked: boolean): void {
+    const node = workflow.creatorNodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    const current = creatorConfigStrings(node.config, key);
+    const next = checked ? [...new Set([...current, assetId])] : current.filter((id) => id !== assetId);
+    workflow.configureCreatorNode(nodeId, { [key]: next });
+  }
+
+  function extractionConnectedCount(nodeId: string, portId: 'sources' | 'support'): number {
+    return workflow.incoming(nodeId).filter((connection) => connection.targetPortId === portId).length;
+  }
+
+  async function importExtractionImages(nodeId: string, key: 'sourceAssetIds' | 'supportAssetIds'): Promise<void> {
+    if (!project.path) return;
+    const files = await openFiles('image/png,image/jpeg,image/webp,image/gif', true);
+    if (files.length === 0) return;
+    const imported: string[] = [];
+    try {
+      for (const file of files) {
+        const bitmap = await createImageBitmap(file);
+        try {
+          const asset = await project.storeImportedFile(file, bitmap.width, bitmap.height);
+          if (asset) imported.push(asset.id);
+        } finally {
+          bitmap.close();
+        }
+      }
+      const node = workflow.creatorNodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      workflow.configureCreatorNode(nodeId, {
+        [key]: [...new Set([...creatorConfigStrings(node.config, key), ...imported])],
+      });
+      editor.flash(`Imported ${imported.length} extraction image${imported.length === 1 ? '' : 's'}`);
+    } catch (e) {
+      editor.flash(`Import failed: ${(e as Error)?.message ?? String(e)}`);
+    }
+  }
+
+  async function runAssetExtraction(nodeId: string): Promise<void> {
+    const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
+    if (!node) return;
+    const incoming = workflow.incoming(nodeId);
+    const sourceIds = [...new Set(creatorConfigStrings(node.config, 'sourceAssetIds'))];
+    const supportIds = [...new Set(creatorConfigStrings(node.config, 'supportAssetIds'))]
+      .filter((id) => !sourceIds.includes(id));
+    const sourceAssets = sourceIds.map((id) => assets.find((asset) => asset.id === id)).filter((asset): asset is ProjectAsset => !!asset);
+    const supportAssets = supportIds.map((id) => assets.find((asset) => asset.id === id)).filter((asset): asset is ProjectAsset => !!asset);
+    const mode = node.config.mode === 'fast' ? 'fast' : 'quality';
+    const assetsPerSheet = ([1, 2, 4, 8].includes(node.config.assetsPerSheet as number)
+      ? node.config.assetsPerSheet
+      : 4) as AssetSheetCount;
+    if (!desktop) {
+      assetExtractionStates[nodeId] = { running: false, message: '', error: 'Asset extraction is available only in the desktop app.' };
+      return;
+    }
+    if (!project.path) {
+      assetExtractionStates[nodeId] = { running: false, message: '', error: 'Open a project folder before extracting assets.' };
+      return;
+    }
+    const taskProjectPath = project.path;
+    const taskProjectIdentity = project.identity;
+    if (extractionProvider === 'grok') {
+      assetExtractionStates[nodeId] = { running: false, message: '', error: 'Grok asset extraction is not available yet. Choose Codex or Antigravity.' };
+      return;
+    }
+    assetExtractionStates[nodeId] = { running: true, message: 'Preparing source and support images…', error: '' };
+    try {
+      const combined = await Promise.all([
+        ...sourceAssets.map(async (asset) => ({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role: 'source' as const })),
+        ...supportAssets.map(async (asset) => ({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role: 'support' as const })),
+      ]);
+      for (const connection of incoming.filter((item) => item.targetPortId === 'sources' || item.targetPortId === 'support')) {
+        const inputNode = workflow.nodes.find((item) => item.id === connection.from);
+        if (!inputNode) continue;
+        const role = connection.targetPortId === 'support' ? 'support' as const : 'source' as const;
+        if (inputNode.oraRelativePath) {
+          const file = oraDocuments.find((item) => item.relativePath === inputNode.oraRelativePath);
+          if (!file) throw new Error(`The connected OpenRaster document "${inputNode.name}" is unavailable.`);
+          const variants = await oraVariants(file);
+          const annotated = connection.sourcePortId === 'annotation';
+          const dataUrl = annotated ? variants.annotationDataUrl : variants.referenceDataUrl;
+          if (!dataUrl) throw new Error(`The connected OpenRaster document "${file.name}" has no annotation overview.`);
+          combined.push({
+            name: annotated ? `${file.name} · annotations` : `${file.name} · reference`,
+            dataUrl,
+            role,
+          });
+          continue;
+        }
+        const asset = assetFor(inputNode);
+        if (!asset) continue;
+        combined.push({ name: asset.name, dataUrl: (await readProjectAsset(taskProjectPath, asset.id)).dataUrl, role });
+      }
+      if (!combined.some((item) => item.role === 'source')) {
+        throw new Error('Choose, import, or connect at least one source image.');
+      }
+      if (mode === 'fast') {
+        combined.push({
+          name: `INDEX SHEET GUIDELINE · ${assetsPerSheet} cells`,
+          dataUrl: assetSheetGuidelineDataUrl(assetsPerSheet),
+          role: 'support',
+        });
+      }
+      const inputPng = await composeAssetExtractionSources(combined);
+      const runId = createRunId();
+      const prompt = workflowAssetExtractionPrompt(creatorConfigString(node.config, 'prompt'), mode, assetsPerSheet);
+      assetExtractionStates[nodeId] = { running: true, message: mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…', error: '' };
+      const result = extractionProvider === 'antigravity'
+        ? await decoupleAntigravityImage(
+            antigravityConfigFromRunOptions(runOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
+            inputPng,
+            prompt,
+            false,
+          )
+        : await decoupleCodexImage(
+            codexConfigFromRunOptions(runOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
+            inputPng,
+            prompt,
+            false,
+          );
+      if (result.layers.length === 0) throw new Error('The image model did not return any extracted assets.');
+      assetExtractionStates[nodeId] = { running: true, message: 'Saving labelled assets to the project…', error: '' };
+      const prepared = mode === 'fast'
+        ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0]), assetsPerSheet).map((canvas, index) => ({
+            canvas,
+            name: `${node.name} ${String(index + 1).padStart(2, '0')}`,
+          }))
+        : await Promise.all(result.layers.map(async (layer, index) => ({
+            canvas: await decoupledLayerCanvas(layer),
+            name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
+          })));
+      if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
+        throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
+      }
+      const stored: ExtractedAssetLink[] = [];
+      for (const item of prepared) {
+        const asset = await project.storeGeneratedBlobAt(
+          taskProjectPath,
+          await canvasPngBlob(item.canvas),
+          `${item.name}.png`,
+          prompt,
+          item.canvas.width,
+          item.canvas.height,
+        );
+        if (asset) stored.push({ id: asset.id, name: asset.name, relativePath: asset.relativePath });
+      }
+      if (project.identity !== taskProjectIdentity) {
+        throw new Error('The active project changed while asset extraction was running. The saved assets were not linked to this workflow.');
+      }
+      workflow.configureCreatorNode(nodeId, { resultAssets: stored, notes: result.notes ?? '' });
+      assetExtractionStates[nodeId] = { running: false, message: `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`, error: '' };
+      editor.flash(`Extracted ${stored.length} assets`);
+    } catch (e) {
+      assetExtractionStates[nodeId] = { running: false, message: '', error: (e as Error)?.message ?? String(e) };
+      editor.flash('Asset extraction failed');
+    }
   }
 
   async function chooseProjectFolder(trigger: HTMLElement): Promise<void> {
@@ -2327,6 +2611,7 @@
 
         {#each workflow.nodes as node (node.id)}
           {@const asset = assetFor(node)}
+          {@const oraDocument = oraFor(node)}
           {@const ports = workflowNodePorts(node.id)}
           <article
             class="asset-node"
@@ -2386,23 +2671,40 @@
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="specialized-node-body asset-node-body">
               <div class="node-preview" style={`height:${Math.max(64, node.height - 150)}px`}>
-                {#if asset?.previewDataUrl}<img class="preview-image" src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
+                {#if (asset?.previewDataUrl ?? oraDocument?.previewDataUrl)}<img class="preview-image" src={asset?.previewDataUrl ?? oraDocument?.previewDataUrl ?? ''} alt="" />{:else}<Icon svg={Image} size={28} />{/if}
               </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
                 <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
                 <select
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
-                  value={asset?.id ?? ''}
-                  onchange={(event) => workflow.assignAsset(
-                    node.id,
-                    assets.find((item) => item.id === event.currentTarget.value) ?? null,
-                  )}
+                  value={asset ? `asset:${asset.id}` : oraDocument ? `ora:${oraDocument.relativePath}` : ''}
+                  onchange={(event) => void assignWorkflowAsset(node.id, event.currentTarget.value)}
                 >
                   <option value="">Choose from project…</option>
-                  {#each assets as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+                  {#if extractionQuickLinks().some((link) => assets.some((item) => item.id === link.id))}
+                    <optgroup label="Extract Assets results">
+                      {#each extractionQuickLinks().filter((link) => assets.some((item) => item.id === link.id)) as option (option.id)}
+                        <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
+                      {/each}
+                    </optgroup>
+                  {/if}
+                  <optgroup label="Project assets">
+                  {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
+                  </optgroup>
+                  {#if oraDocuments.length > 0}
+                    <optgroup label="OpenRaster documents">
+                      {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
+                    </optgroup>
+                  {/if}
                 </select>
-                <small aria-live="polite">{asset ? `Selected ${asset.name}` : 'No asset selected'}</small>
+                <small aria-live="polite">
+                  {asset
+                    ? `Selected ${asset.name}`
+                    : oraDocument
+                      ? `${oraDocument.name}${node.oraRelativePath && workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation') ? ' · annotation output available' : ''}`
+                      : 'No asset selected'}
+                </small>
               </label>
               <textarea
                 aria-label={`Role for ${node.name}`}
@@ -2461,6 +2763,10 @@
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
+          {@const extractionSources = creatorConfigStrings(node.config, 'sourceAssetIds')}
+          {@const extractionSupport = creatorConfigStrings(node.config, 'supportAssetIds')}
+          {@const extractionResults = extractedAssetLinks(node.config)}
+          {@const extractionState = assetExtractionStates[node.id]}
           <article
             class="creator-node"
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
@@ -2513,6 +2819,105 @@
                     oninput={(event) => workflow.configureCreatorNode(node.id, { prompt: event.currentTarget.value })}
                   ></textarea>
                 </label>
+              {:else if node.type === 'extract-assets'}
+                <div class="extract-asset-summary">
+                  <Icon svg={ImageMultiple} size={16} />
+                  <span>
+                    {extractionSources.length + extractionConnectedCount(node.id, 'sources')} source ·
+                    {extractionSupport.length + extractionConnectedCount(node.id, 'support')} support
+                  </span>
+                </div>
+                <div class="extract-asset-columns">
+                  <fieldset>
+                    <legend>Source images</legend>
+                    <div class="extract-asset-options">
+                      {#each assets as asset (asset.id)}
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={extractionSources.includes(asset.id)}
+                            onchange={(event) => toggleExtractionAsset(node.id, 'sourceAssetIds', asset.id, event.currentTarget.checked)}
+                          />
+                          <span>{asset.name}</span>
+                        </label>
+                      {:else}<small>Import source images to begin.</small>{/each}
+                    </div>
+                    <button type="button" disabled={!project.path} onclick={() => void importExtractionImages(node.id, 'sourceAssetIds')}>Import images…</button>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Annotated support</legend>
+                    <div class="extract-asset-options">
+                      {#each assets as asset (asset.id)}
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={extractionSupport.includes(asset.id)}
+                            onchange={(event) => toggleExtractionAsset(node.id, 'supportAssetIds', asset.id, event.currentTarget.checked)}
+                          />
+                          <span>{asset.name}</span>
+                        </label>
+                      {:else}<small>Optional reference images.</small>{/each}
+                    </div>
+                    <button type="button" disabled={!project.path} onclick={() => void importExtractionImages(node.id, 'supportAssetIds')}>Import support…</button>
+                  </fieldset>
+                </div>
+                <label class="creator-config-field">
+                  Extraction guidance
+                  <textarea
+                    aria-label={`${node.name} extraction guidance`}
+                    placeholder="What to extract, refine, or reconstruct…"
+                    value={creatorConfigString(node.config, 'prompt')}
+                    oninput={(event) => workflow.configureCreatorNode(node.id, { prompt: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+                <div class="extract-mode-row">
+                  <label>
+                    Mode
+                    <select
+                      aria-label={`${node.name} extraction mode`}
+                      value={node.config.mode === 'fast' ? 'fast' : 'quality'}
+                      onchange={(event) => workflow.configureCreatorNode(node.id, { mode: event.currentTarget.value })}
+                    >
+                      <option value="quality">Quality · one file per object</option>
+                      <option value="fast">Fast · crop an index sheet</option>
+                    </select>
+                  </label>
+                  {#if node.config.mode === 'fast'}
+                    <label>
+                      Assets per sheet
+                      <select
+                        aria-label={`${node.name} assets per index sheet`}
+                        value={String(node.config.assetsPerSheet ?? 4)}
+                        onchange={(event) => workflow.configureCreatorNode(node.id, { assetsPerSheet: Number(event.currentTarget.value) })}
+                      >
+                        <option value="1">1 per sheet</option>
+                        <option value="2">2 per sheet</option>
+                        <option value="4">4 per sheet</option>
+                        <option value="8">8 per sheet</option>
+                      </select>
+                    </label>
+                  {/if}
+                </div>
+                <button
+                  type="button"
+                  class="extract-run"
+                  disabled={!!extractionState?.running || (extractionSources.length === 0 && extractionConnectedCount(node.id, 'sources') === 0) || !project.path}
+                  onclick={() => void runAssetExtraction(node.id)}
+                >{extractionState?.running ? extractionState.message : 'Extract assets'}</button>
+                {#if extractionState?.error}<p class="extract-error" role="alert">{extractionState.error}</p>{/if}
+                {#if !extractionState?.running && extractionState?.message}<p class="extract-status" aria-live="polite">{extractionState.message}</p>{/if}
+                {#if extractionResults.length > 0}
+                  <div class="extract-results" aria-label="Extracted asset results">
+                    <strong>Results</strong>
+                    {#each extractionResults as result (result.id)}
+                      {@const resultAsset = assets.find((asset) => asset.id === result.id)}
+                      <span>
+                        {#if resultAsset?.previewDataUrl}<img src={resultAsset.previewDataUrl} alt="" />{/if}
+                        {result.name}
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
               {:else if node.type === 'transform'}
                 <label class="creator-config-field">
                   Capability
@@ -3630,6 +4035,110 @@
   .creator-config-field textarea {
     min-height: 54px;
     resize: none;
+  }
+  .extract-asset-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-bright);
+  }
+  .extract-asset-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .extract-asset-columns fieldset {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    margin: 0;
+    padding: 6px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .extract-asset-columns legend {
+    padding: 0 3px;
+    color: var(--text-bright);
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .extract-asset-options {
+    display: grid;
+    gap: 3px;
+    max-height: 72px;
+    overflow: auto;
+  }
+  .extract-asset-options label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .extract-asset-options label span {
+    overflow: hidden;
+    color: var(--text);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .extract-asset-columns button,
+  .extract-run {
+    min-width: 0;
+    padding: 4px 6px;
+    font-size: 9px;
+  }
+  .extract-mode-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .extract-mode-row label {
+    display: grid;
+    gap: 3px;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .extract-mode-row select {
+    width: 100%;
+    min-width: 0;
+    font-size: 9px;
+  }
+  .extract-error,
+  .extract-status {
+    padding: 5px;
+    border-radius: 4px;
+  }
+  .extract-error {
+    background: color-mix(in srgb, #e35b5b 12%, transparent);
+    color: #ffb7b7;
+  }
+  .extract-status {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--text);
+  }
+  .extract-results {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .extract-results strong {
+    grid-column: 1 / -1;
+    color: var(--text-bright);
+  }
+  .extract-results span {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .extract-results img {
+    width: 24px;
+    height: 24px;
+    flex: none;
+    border-radius: 3px;
+    object-fit: cover;
   }
   .asset-node textarea,
   .brief-node textarea {

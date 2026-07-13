@@ -99,6 +99,13 @@ export interface WorkflowDirectorArtDirectionDraft extends WorkflowDirectorNodeB
   prompt: string;
 }
 
+export interface WorkflowDirectorExtractAssetsDraft extends WorkflowDirectorNodeBase {
+  type: 'extract-assets';
+  prompt: string;
+  mode: 'quality' | 'fast';
+  assetsPerSheet: 1 | 2 | 4 | 8;
+}
+
 export interface WorkflowDirectorTransformDraft extends WorkflowDirectorNodeBase {
   type: 'transform';
   capability: string;
@@ -121,6 +128,7 @@ export type WorkflowDirectorNodeDraft =
   | WorkflowDirectorInputDraft
   | WorkflowDirectorBriefDraft
   | WorkflowDirectorArtDirectionDraft
+  | WorkflowDirectorExtractAssetsDraft
   | WorkflowDirectorTransformDraft
   | WorkflowDirectorReviewDraft
   | WorkflowDirectorOutputDraft;
@@ -191,6 +199,7 @@ const nodeSettings: Readonly<Record<CreatorNodeType, readonly string[]>> = {
   input: ['assetId', 'role', 'required'],
   brief: ['objective', 'guidance'],
   'art-direction': ['prompt'],
+  'extract-assets': ['prompt', 'mode', 'assetsPerSheet'],
   transform: ['capability', 'instructions'],
   review: ['mode', 'instructions'],
   output: ['width', 'height'],
@@ -442,6 +451,21 @@ function parseNode(
   if (creatorType === 'art-direction') {
     return { ...base, type: 'art-direction', prompt: stringValue(value, 'prompt', path, issues) };
   }
+  if (creatorType === 'extract-assets') {
+    const mode = value.mode;
+    if (mode !== 'quality' && mode !== 'fast') schemaIssue(issues, `${path}.mode`, 'mode must be "quality" or "fast".');
+    const assetsPerSheet = value.assetsPerSheet;
+    if (![1, 2, 4, 8].includes(assetsPerSheet as number)) {
+      schemaIssue(issues, `${path}.assetsPerSheet`, 'assetsPerSheet must be 1, 2, 4, or 8.');
+    }
+    return {
+      ...base,
+      type: 'extract-assets',
+      prompt: stringValue(value, 'prompt', path, issues),
+      mode: mode === 'fast' ? 'fast' : 'quality',
+      assetsPerSheet: ([1, 2, 4, 8].includes(assetsPerSheet as number) ? assetsPerSheet : 4) as 1 | 2 | 4 | 8,
+    };
+  }
   if (creatorType === 'transform') {
     return {
       ...base,
@@ -557,6 +581,18 @@ function nodeConfig(node: WorkflowDirectorNodeDraft): Record<string, unknown> {
       storyboardAnnotationsVisible: true,
     };
   }
+  if (node.type === 'extract-assets') {
+    return {
+      creatorRole: 'extract-assets',
+      prompt: node.prompt,
+      sourceAssetIds: [],
+      supportAssetIds: [],
+      mode: node.mode,
+      assetsPerSheet: node.assetsPerSheet,
+      resultAssets: [],
+      notes: '',
+    };
+  }
   if (node.type === 'transform') {
     return {
       creatorRole: 'transform',
@@ -591,6 +627,7 @@ function materializeDraft(
     input: 30,
     brief: 290,
     'art-direction': 575,
+    'extract-assets': 855,
     transform: 965,
     review: 1245,
     output: 1525,

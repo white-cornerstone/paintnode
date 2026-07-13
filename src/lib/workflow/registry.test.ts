@@ -10,7 +10,7 @@ import {
 } from './registry';
 import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2 } from './schema';
 
-const types: CreatorNodeType[] = ['input', 'brief', 'art-direction', 'transform', 'review', 'output'];
+const types: CreatorNodeType[] = ['input', 'brief', 'art-direction', 'extract-assets', 'transform', 'review', 'output'];
 
 describe('creator node registry', () => {
   it('defines each creator-facing node exactly once with valid metadata, geometry, ports, and defaults', () => {

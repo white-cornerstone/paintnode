@@ -20,7 +20,7 @@ import {
 import { WORKFLOW_TEMPLATES, instantiateWorkflowTemplate } from '../workflow/templates';
 import { workflowReadiness } from '../workflow/readiness';
 import { createCreatorNode, type CreatorNodeType } from '../workflow/registry';
-import type { ProjectAsset } from '../integrations/desktop';
+import type { ProjectAsset, ProjectFile } from '../integrations/desktop';
 import { bindWorkflowRoundTripAuthority, clearWorkflowRoundTripAuthority } from './workflowEditorSession';
 import { project } from './project.svelte';
 import {
@@ -1175,6 +1175,40 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.nodes).toEqual([]);
     expect(store.connections.every((connection) => connection.from !== assetId && connection.to !== assetId)).toBe(true);
     expect(store.rev).toBe(7);
+  });
+
+  it('adds and removes the annotation output for annotated OpenRaster asset nodes', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Annotated ORA');
+    store.addBlankAsset(20, 20, 220, 180);
+    const assetNodeId = store.nodes[0].id;
+    const oraFile: ProjectFile = {
+      kind: 'document',
+      name: 'Storyboard.ora',
+      relativePath: 'documents/Storyboard.ora',
+      createdAt: 1,
+      modifiedAt: 2,
+      size: 4096,
+      mime: 'image/openraster',
+      exists: true,
+    };
+
+    store.assignOraDocument(assetNodeId, oraFile, true);
+    expect(store.nodes[0]).toMatchObject({
+      assetId: null,
+      relativePath: 'documents/Storyboard.ora',
+      oraRelativePath: 'documents/Storyboard.ora',
+    });
+    expect(store.graphSnapshot().nodes.find((node) => node.id === assetNodeId)?.ports.outputs).toEqual([
+      { id: 'asset', label: 'Asset reference', dataType: 'asset-reference' },
+      { id: 'annotation', label: 'Annotation', dataType: 'asset-reference' },
+    ]);
+
+    store.assignAsset(assetNodeId, campaignProduct);
+    expect(store.nodes[0].oraRelativePath).toBeNull();
+    expect(store.graphSnapshot().nodes.find((node) => node.id === assetNodeId)?.ports.outputs).toEqual([
+      { id: 'asset', label: 'Asset reference', dataType: 'asset-reference' },
+    ]);
   });
 
   it('rolls back every compound store add when injected edge generation collides', () => {

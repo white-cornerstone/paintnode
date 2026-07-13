@@ -49,7 +49,7 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('workflowCandidateProgressLabel');
     expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
     expect(boardSource).toContain('candidate-result-summary');
-    expect(boardSource).toContain("onchange={(event) => workflow.assignAsset");
+    expect(boardSource).toContain("onchange={(event) => void assignWorkflowAsset");
     expect(boardSource).toContain('Selected ${asset.name}');
     expect(boardSource).toContain('review-candidate-preview');
     expect(boardSource).toContain("'Checking for reusable output…'");

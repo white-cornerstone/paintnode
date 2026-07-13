@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import { tooltip } from '../../actions/tooltip';
-  import { CheckmarkCircle, Dismiss, Document, Image, Open, PaintBrush, Sparkle } from '../../icons';
+  import { CheckmarkCircle, Dismiss, Document, Image, ImageMultiple, Open, PaintBrush, Sparkle } from '../../icons';
   import {
     filterCreatorNodeDefinitions,
     paletteIndexAfterKey,
@@ -33,6 +33,7 @@
 
   function iconFor(key: CreatorNodeIconKey): string {
     if (key === 'image') return Image;
+    if (key === 'image-multiple') return ImageMultiple;
     if (key === 'document') return Document;
     if (key === 'paint-brush') return PaintBrush;
     if (key === 'sparkle') return Sparkle;

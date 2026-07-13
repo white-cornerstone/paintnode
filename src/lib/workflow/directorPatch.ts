@@ -126,13 +126,14 @@ const supportedWorkflowGraphKeys = new Set([
 ]);
 
 const creatorTypes = new Set<CreatorNodeType>([
-  'input', 'brief', 'art-direction', 'transform', 'review', 'output',
+  'input', 'brief', 'art-direction', 'extract-assets', 'transform', 'review', 'output',
 ]);
 
 const configKeys: Readonly<Record<CreatorNodeType, ReadonlySet<string>>> = {
   input: new Set(['assetId', 'role', 'required']),
   brief: new Set(['objective', 'guidance']),
   'art-direction': new Set(['prompt']),
+  'extract-assets': new Set(['prompt', 'mode', 'assetsPerSheet']),
   transform: new Set(['capability', 'instructions']),
   review: new Set(['mode', 'instructions']),
   output: new Set(['finalWidth', 'finalHeight']),
@@ -391,8 +392,10 @@ function config(
         ? typeof setting === 'boolean'
         : key === 'finalWidth' || key === 'finalHeight'
           ? Number.isSafeInteger(setting) && (setting as number) >= 64 && (setting as number) <= 16_384
+          : key === 'assetsPerSheet'
+            ? [1, 2, 4, 8].includes(setting as number)
           : key === 'mode'
-            ? setting === 'human' || setting === 'ai'
+            ? setting === 'human' || setting === 'ai' || setting === 'quality' || setting === 'fast'
             : typeof setting === 'string'
               && setting.length <= 16_384
               && (key !== 'capability' || setting.trim().length > 0);

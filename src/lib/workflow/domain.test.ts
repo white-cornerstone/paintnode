@@ -275,6 +275,36 @@ describe('WorkflowGraphDomain', () => {
     expect(domain.revision).toBe(2);
   });
 
+  it('updates dynamic ports and prunes only edges attached to removed ports', () => {
+    const domain = new WorkflowGraphDomain(graph());
+
+    domain.updateNodePorts('source', {
+      inputs: domain.node('source')!.ports.inputs,
+      outputs: [
+        { id: 'output', label: 'Asset reference', dataType: 'prompt' },
+        { id: 'annotation', label: 'Annotation', dataType: 'prompt' },
+      ],
+    });
+    domain.addEdge({
+      id: 'edge-annotation-unrelated',
+      source: { nodeId: 'source', portId: 'annotation' },
+      target: { nodeId: 'unrelated', portId: 'alternate-input' },
+    });
+
+    domain.updateNodePorts('source', {
+      inputs: domain.node('source')!.ports.inputs,
+      outputs: [{ id: 'output', label: 'Asset reference', dataType: 'prompt' }],
+    });
+
+    expect(domain.graph.edges.map((edge) => edge.id)).toEqual([
+      'edge-source-middle',
+      'edge-middle-unrelated',
+    ]);
+    expect(domain.node('source')?.ports.outputs).toEqual([
+      { id: 'output', label: 'Asset reference', dataType: 'prompt' },
+    ]);
+  });
+
   it('provides read-only lookup and connection helpers for reactive adapters', () => {
     const domain = new WorkflowGraphDomain(graph());
 

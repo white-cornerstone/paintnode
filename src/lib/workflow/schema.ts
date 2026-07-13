@@ -12,6 +12,7 @@ export type WorkflowNodeType =
   | 'input'
   | 'brief'
   | 'art-direction'
+  | 'extract-assets'
   | 'transform'
   | 'review'
   | 'output'
@@ -282,6 +283,7 @@ const nodeTypes = new Set<WorkflowNodeType>([
   'input',
   'brief',
   'art-direction',
+  'extract-assets',
   'transform',
   'review',
   'output',

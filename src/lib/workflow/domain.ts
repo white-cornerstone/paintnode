@@ -748,6 +748,24 @@ export class WorkflowGraphDomain {
     this.replaceNode(nodeId, { ...node, config: normalizedConfig });
   }
 
+  updateNodePorts(nodeId: string, ports: WorkflowNodeV2['ports']): void {
+    const node = this.requireNode(nodeId);
+    const normalizedPorts = normalizeNegativeZero(ports);
+    const inputIds = new Set(normalizedPorts.inputs.map((port) => port.id));
+    const outputIds = new Set(normalizedPorts.outputs.map((port) => port.id));
+    const candidate: WorkflowGraphV2 = {
+      ...this.#graph,
+      nodes: this.#graph.nodes.map((item) => item.id === nodeId ? { ...node, ports: normalizedPorts } : item),
+      edges: this.#graph.edges.filter((edge) => (
+        edge.target.nodeId !== nodeId || inputIds.has(edge.target.portId)
+      ) && (
+        edge.source.nodeId !== nodeId || outputIds.has(edge.source.portId)
+      )),
+    };
+    if (valuesEqual(this.#graph, candidate)) return;
+    this.commit(candidate);
+  }
+
   updateNode(nodeId: string, update: WorkflowNodeUpdate): void {
     const node = this.requireNode(nodeId);
     if (update.config !== undefined) ensureJsonSafe(update.config, `nodes.${nodeId}.config`);

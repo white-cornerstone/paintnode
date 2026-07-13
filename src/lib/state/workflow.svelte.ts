@@ -1,4 +1,4 @@
-import type { ProjectAsset, WorkflowEditorReturnResult } from '../integrations/desktop';
+import type { ProjectAsset, ProjectFile, WorkflowEditorReturnResult } from '../integrations/desktop';
 import { project } from './project.svelte';
 import { ui } from './ui.svelte';
 import { coerceAnnotations, type AnnotationItem } from '../engine/annotations';
@@ -204,6 +204,7 @@ export interface WorkflowAssetNode {
   assetId: string | null;
   name: string;
   relativePath: string;
+  oraRelativePath: string | null;
   x: number;
   y: number;
   width: number;
@@ -231,7 +232,7 @@ export interface WorkflowBriefNode {
 
 export interface WorkflowCreatorNode {
   id: string;
-  type: 'art-direction' | 'transform' | 'review';
+  type: 'art-direction' | 'extract-assets' | 'transform' | 'review';
   name: string;
   x: number;
   y: number;
@@ -1193,11 +1194,41 @@ export class WorkflowStore {
     const node = this.requireGraphDomain().node(id);
     if (!node || node.type !== 'input') return;
     const domain = this.requireGraphDomain();
+    domain.updateNodePorts(id, {
+      inputs: node.ports.inputs,
+      outputs: node.ports.outputs.filter((port) => port.id !== 'annotation'),
+    });
     this.publishGraphMutation(domain, domain.configureNode(id, {
       ...node.config,
       assetId: asset?.id ?? null,
       relativePath: asset?.relativePath ?? null,
+      oraRelativePath: null,
+      hasAnnotations: false,
     }));
+  }
+
+  assignOraDocument(id: string, file: ProjectFile, hasAnnotations: boolean): void {
+    const node = this.requireGraphDomain().node(id);
+    if (!node || node.type !== 'input') return;
+    const domain = this.requireGraphDomain();
+    this.publishGraphMutation(domain, domain.configureNode(id, {
+      ...node.config,
+      assetId: null,
+      relativePath: file.relativePath,
+      oraRelativePath: file.relativePath,
+      hasAnnotations,
+    }));
+    const baseOutput = node.ports.outputs.find((port) => port.id === 'asset') ?? {
+      id: 'asset', label: 'Asset reference', dataType: 'asset-reference' as const,
+    };
+    domain.updateNodePorts(id, {
+      inputs: node.ports.inputs,
+      outputs: [
+        { ...baseOutput, label: 'Asset reference' },
+        ...(hasAnnotations ? [{ id: 'annotation', label: 'Annotation', dataType: 'asset-reference' as const }] : []),
+      ],
+    });
+    this.publishGraphMutation(domain, undefined);
   }
 
   configureCreatorNode(id: string, update: Record<string, unknown>): void {
@@ -2955,6 +2986,7 @@ export class WorkflowStore {
           assetId: typeof node.config.assetId === 'string' ? node.config.assetId : reference?.assetId ?? null,
           name: node.title,
           relativePath: typeof node.config.relativePath === 'string' ? node.config.relativePath : reference?.relativePath ?? '',
+          oraRelativePath: typeof node.config.oraRelativePath === 'string' ? node.config.oraRelativePath : null,
           x: roundLegacyGeometry ? roundWorkflowNumber(node.position.x) : node.position.x,
           y: roundLegacyGeometry ? roundWorkflowNumber(node.position.y) : node.position.y,
           width: node.size.width,
@@ -2986,6 +3018,7 @@ export class WorkflowStore {
     this.creatorNodes = domain.graph.nodes
       .filter((node): node is WorkflowNodeV2 & { type: WorkflowCreatorNode['type'] } => (
         node.type === 'transform'
+        || node.type === 'extract-assets'
         || node.type === 'review'
         || (node.type === 'art-direction' && node.id !== 'composition')
       ))
