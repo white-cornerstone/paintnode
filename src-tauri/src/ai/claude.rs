@@ -262,6 +262,50 @@ pub(crate) fn run_claude_workflow_revision_request(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn run_claude_workflow_review_request(
+    app: &AppHandle,
+    run_id: &str,
+    bin: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    job_path: &Path,
+    prompt_text: &str,
+    output_file: &str,
+) -> Result<AgentRunResult, String> {
+    ensure_provider_launch_allowed(Provider::Claude)?;
+    let options = claude_command_options(bin, model, effort);
+    let mut command = build_claude_agent_command_with_session(
+        &options,
+        job_path,
+        prompt_text,
+        &[],
+        None,
+        Some(output_file),
+        Some("workflow-review"),
+    );
+    let run = run_claude_with_progress(&mut command, app.clone(), run_id.to_string()).map_err(
+        |error| {
+            format!(
+                "Failed to run Claude at '{}': {error}",
+                claude_command_label(&options)
+            )
+        },
+    )?;
+    if run.output.status.success() {
+        Ok(run)
+    } else if let Some(message) = final_claude_agent_message(&run.output) {
+        Err(format!(
+            "Claude workflow candidate review failed.\n\n{message}"
+        ))
+    } else {
+        Err(claude_command_failure(
+            "Claude workflow candidate review",
+            &run.output,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_claude_workflow_extraction_request(
     app: &AppHandle,
     run_id: &str,
@@ -778,6 +822,32 @@ mod tests {
             .expect("schema");
         assert!(schema < delimiter);
         assert_eq!(args[schema + 1], "workflow-revision");
+        assert!(!args.iter().any(|arg| arg == "--image"));
+    }
+
+    #[test]
+    fn workflow_review_uses_dedicated_ranking_schema_before_prompt() {
+        let job = TempJobDir::new("paintnode-claude-workflow-review-test").expect("temp dir");
+        let command = build_claude_agent_command_with_session(
+            &claude_command_options(None, None, None),
+            job.path(),
+            "review candidates",
+            &[],
+            None,
+            Some("paintnode-workflow-review.json"),
+            Some("workflow-review"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let delimiter = args.iter().position(|arg| arg == "--").expect("delimiter");
+        let schema = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema");
+        assert!(schema < delimiter);
+        assert_eq!(args[schema + 1], "workflow-review");
         assert!(!args.iter().any(|arg| arg == "--image"));
     }
 

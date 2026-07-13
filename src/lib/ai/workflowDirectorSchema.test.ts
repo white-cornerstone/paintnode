@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   workflowDirectorExtractionSchema,
   workflowDirectorGraphDraftSchema,
+  workflowDirectorReviewSchema,
   workflowDirectorRevisionSchema,
 } from '../../../scripts/workflow-director-schema.mjs';
 import providerRuntimeWorkflow from '../../../.github/workflows/provider-runtimes.yml?raw';
@@ -16,10 +17,10 @@ describe('Workflow Director GraphDraft schema', () => {
     expect(workflowDirectorGraphDraftSchema.required).toEqual(['version', 'name', 'summary', 'nodes', 'edges']);
     expect(workflowDirectorGraphDraftSchema.properties.version.const).toBe(1);
     const nodeVariants = workflowDirectorGraphDraftSchema.properties.nodes.items.anyOf;
-    expect(nodeVariants).toHaveLength(6);
+    expect(nodeVariants).toHaveLength(7);
     expect(nodeVariants.every((variant: { additionalProperties: boolean }) => variant.additionalProperties === false)).toBe(true);
     expect(nodeVariants.map((variant: { properties: { type: { const: string } } }) => variant.properties.type.const)).toEqual([
-      'input', 'brief', 'art-direction', 'transform', 'review', 'output',
+      'input', 'brief', 'art-direction', 'extract-assets', 'transform', 'review', 'output',
     ]);
     const review = nodeVariants.find((variant: { properties: { type: { const: string } } }) => variant.properties.type.const === 'review') as
       | { properties: { mode: { enum: string[] } } }
@@ -56,6 +57,14 @@ describe('Workflow Director GraphDraft schema', () => {
     expect(variants.map((variant: { properties: { op: { const: string } } }) => variant.properties.op.const)).toEqual([
       'add-node', 'remove-node', 'configure-node', 'move-node', 'add-edge', 'remove-edge',
     ]);
+    const addNode = variants.find((variant: { properties: { op: { const: string } } }) => variant.properties.op.const === 'add-node') as
+      { properties: { node: { anyOf: Array<{ properties: { type: { const: string } } }> } } };
+    expect(addNode.properties.node.anyOf.map((node) => node.properties.type.const)).toContain('extract-assets');
+    const configureNode = variants.find((variant: { properties: { op: { const: string } } }) => variant.properties.op.const === 'configure-node') as
+      { properties: { changes: { anyOf: Array<{ properties: Record<string, unknown> }> } } };
+    expect(configureNode.properties.changes.anyOf.some((config) => (
+      'prompt' in config.properties && 'mode' in config.properties && 'assetsPerSheet' in config.properties
+    ))).toBe(true);
   });
 
   it('defines a strict structured-output schema for asset extraction plans', () => {
@@ -69,5 +78,15 @@ describe('Workflow Director GraphDraft schema', () => {
       'id', 'name', 'instruction',
     ]);
     expect(workflowDirectorExtractionSchema.properties.notes.maxLength).toBe(4000);
+  });
+
+  it('defines a strict structured-output schema for candidate reviews', () => {
+    expect(workflowDirectorReviewSchema.additionalProperties).toBe(false);
+    expect(workflowDirectorReviewSchema.required).toEqual(['rankings', 'recommendedCandidateId']);
+    expect(workflowDirectorReviewSchema.properties.rankings.minItems).toBe(1);
+    expect(workflowDirectorReviewSchema.properties.rankings.maxItems).toBe(64);
+    expect(workflowDirectorReviewSchema.properties.rankings.items.additionalProperties).toBe(false);
+    expect(workflowDirectorReviewSchema.properties.rankings.items.required).toEqual(['candidateId', 'reason']);
+    expect(workflowDirectorReviewSchema.properties.rankings.items.properties.reason.maxLength).toBe(1000);
   });
 });

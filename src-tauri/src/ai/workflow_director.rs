@@ -19,11 +19,11 @@ use tauri::AppHandle;
 use crate::ai::antigravity::run_antigravity_director_request;
 use crate::ai::claude::{
     run_claude_workflow_draft_request, run_claude_workflow_extraction_request,
-    run_claude_workflow_revision_request,
+    run_claude_workflow_review_request, run_claude_workflow_revision_request,
 };
 use crate::ai::codex::{
     run_codex_workflow_draft_request, run_codex_workflow_extraction_request,
-    run_codex_workflow_revision_request,
+    run_codex_workflow_review_request, run_codex_workflow_revision_request,
 };
 use crate::ai::grok::run_grok_director_request;
 use crate::ai::{
@@ -892,7 +892,7 @@ fn run_workflow_director_review(
     run_with_timeout(run_id, timeout, || {
         match provider.trim() {
             "codex" => {
-                run_codex_workflow_revision_request(
+                run_codex_workflow_review_request(
                     app,
                     run_id,
                     codex_bin,
@@ -905,7 +905,7 @@ fn run_workflow_director_review(
                 )?;
             }
             "claude" => {
-                run_claude_workflow_revision_request(
+                run_claude_workflow_review_request(
                     app,
                     run_id,
                     claude_bin,
