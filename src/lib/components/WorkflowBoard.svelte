@@ -10,9 +10,9 @@
     cancelAiRun,
     decoupleAntigravityImage,
     decoupleCodexImage,
+    extractGrokAsset,
     generateAntigravityRetouchImage,
     generateCodexRetouchImage,
-    generateGrokRetouchImage,
     isDesktop,
     providerQaMode,
     readProjectAsset,
@@ -21,6 +21,7 @@
     storeProjectAssetBytes,
     type ProjectAsset,
     type ProjectFile,
+    type WorkflowSourceImage,
   } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
@@ -85,11 +86,14 @@
   } from '../workflow';
   import {
     canvasPngBlob,
+    assetExtractionImageModelSources,
     assetSheetGuidelineDataUrl,
     composeAssetExtractionSources,
     cropAssetIndexSheet,
     decoupledLayerCanvas,
+    validateExtractedAssetCanvas,
     workflowAssetExtractionPrompt,
+    type AssetExtractionSource,
     type AssetSheetCount,
   } from '../workflow/assetExtraction';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
@@ -730,7 +734,7 @@
     };
     setExtractionProgress(initialProgress);
     try {
-      const combined: Array<{ name: string; dataUrl: string; role: 'source' | 'support' }> = [];
+      const combined: AssetExtractionSource[] = [];
       for (const connection of incoming.filter((item) => item.targetPortId === 'sources' || item.targetPortId === 'support')) {
         const inputNode = workflow.nodes.find((item) => item.id === connection.from);
         if (!inputNode) continue;
@@ -761,7 +765,18 @@
           name: `INDEX SHEET GUIDELINE · ${assetsPerSheet} cells`,
           dataUrl: assetSheetGuidelineDataUrl(assetsPerSheet),
           role: 'support',
+          synthetic: true,
         });
+      }
+      const grokExtractionSources: WorkflowSourceImage[] = extractionProvider === 'grok'
+        ? await Promise.all(assetExtractionImageModelSources(combined).map(async (item) => ({
+            name: item.name,
+            role: item.role === 'source' ? 'Extraction source' : 'Annotated support',
+            bytes: new Uint8Array(await (await fetch(item.dataUrl)).arrayBuffer()),
+          })))
+        : [];
+      if (grokExtractionSources.length > 3) {
+        throw new Error('Grok asset extraction supports up to 3 connected source or support images. Remove extra inputs or switch the image provider.');
       }
       const inputPng = await composeAssetExtractionSources(combined);
       const runId = createRunId();
@@ -812,17 +827,35 @@
           const itemRunId = `${runId}-${index + 1}`;
           activeExtractionRunId = itemRunId;
           try {
+            if (extractionProvider === 'grok') {
+              const result = await extractGrokAsset(
+                grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts),
+                itemPrompt,
+                item.name,
+                grokExtractionSources,
+              );
+              const layer = result.layers[0];
+              if (!layer) throw new Error('Grok did not return an extracted asset.');
+              const canvas = await decoupledLayerCanvas(layer);
+              validateExtractedAssetCanvas(canvas, item.name);
+              const asset = await project.storeGeneratedBlobAt(
+                taskProjectPath,
+                await canvasPngBlob(canvas),
+                `${item.name}.png`,
+                itemPrompt,
+                canvas.width,
+                canvas.height,
+              );
+              if (!asset) throw new Error('PaintNode could not save the extracted Grok asset.');
+              successes.push({ itemId: item.id, id: asset.id, name: item.name, relativePath: asset.relativePath });
+              continue;
+            }
             const generated = extractionProvider === 'antigravity'
               ? await generateAntigravityRetouchImage(
                   { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
                   inputPng, inputPng, maskPng, null, null, itemPrompt,
                 )
-              : extractionProvider === 'grok'
-                ? await generateGrokRetouchImage(
-                    { ...grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
-                    inputPng, inputPng, maskPng, null, null, itemPrompt,
-                  )
-                : await generateCodexRetouchImage(
+              : await generateCodexRetouchImage(
                     { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
                     inputPng, inputPng, maskPng, null, null, itemPrompt,
                   );

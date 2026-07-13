@@ -229,6 +229,7 @@ pub fn run() {
             ai::antigravity::decouple_antigravity_image,
             ai::antigravity::compose_antigravity_workflow,
             ai::grok::generate_grok_image,
+            ai::grok::extract_grok_asset,
             ai::grok::generate_grok_fill_image,
             ai::grok::generate_grok_retouch_image,
             ai::grok::upscale_grok_image,

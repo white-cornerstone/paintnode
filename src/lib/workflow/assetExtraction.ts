@@ -17,6 +17,7 @@ export interface AssetExtractionSource {
   name: string;
   dataUrl: string;
   role: 'source' | 'support';
+  synthetic?: boolean;
 }
 
 export interface AssetSheetCell {
@@ -84,6 +85,13 @@ export function workflowAssetExtractionPrompt(
   const cells = assetSheetCells(assetsPerSheet);
   const layout = `${Math.max(...cells.map((cell) => cell.column)) + 1} columns by ${Math.max(...cells.map((cell) => cell.row)) + 1} rows`;
   return `${guidance}\n\nFAST INDEX-SHEET MODE: return exactly one transparent PNG named asset-index-sheet.png. Follow the attached SUPPORT image named INDEX SHEET GUIDELINE for a uniform ${layout} grid. Arrange up to ${assetsPerSheet} distinct extracted objects, one centered object per cell, ordered left-to-right then top-to-bottom. The guideline numbers indicate crop order only; do not reproduce them. Do not add borders, captions, shadows, or a background. Do not return separate object files. Source images are labelled SOURCE; annotated references are labelled SUPPORT.`;
+}
+
+/** Planning composites may include synthetic layout aids; image models must not. */
+export function assetExtractionImageModelSources(
+  sources: readonly AssetExtractionSource[],
+): AssetExtractionSource[] {
+  return sources.filter((source) => !source.synthetic);
 }
 
 async function bitmapFromDataUrl(dataUrl: string): Promise<ImageBitmap> {
@@ -184,6 +192,52 @@ export async function decoupledLayerCanvas(layer: DecoupledLayerResult, toleranc
     ctx.putImageData(image, 0, 0);
   }
   return canvas;
+}
+
+export interface ExtractedAssetAlphaCoverage {
+  transparentFraction: number;
+  visibleFraction: number;
+}
+
+export function extractedAssetAlphaCoverage(rgba: ArrayLike<number>): ExtractedAssetAlphaCoverage {
+  if (rgba.length === 0 || rgba.length % 4 !== 0) {
+    throw new Error('Extracted asset pixels are invalid.');
+  }
+  const pixels = rgba.length / 4;
+  let transparent = 0;
+  let visible = 0;
+  for (let offset = 3; offset < rgba.length; offset += 4) {
+    const alpha = rgba[offset] ?? 0;
+    if (alpha < 16) transparent += 1;
+    if (alpha > 5) visible += 1;
+  }
+  return {
+    transparentFraction: transparent / pixels,
+    visibleFraction: visible / pixels,
+  };
+}
+
+export function assertExtractedAssetHasUsefulAlpha(
+  rgba: ArrayLike<number>,
+  assetName: string,
+): ExtractedAssetAlphaCoverage {
+  const coverage = extractedAssetAlphaCoverage(rgba);
+  if (coverage.transparentFraction < 0.01) {
+    throw new Error(`Asset "${assetName}" has no usable transparent background.`);
+  }
+  if (coverage.visibleFraction < 0.001) {
+    throw new Error(`Asset "${assetName}" became empty while preparing transparency.`);
+  }
+  return coverage;
+}
+
+export function validateExtractedAssetCanvas(canvas: HTMLCanvasElement, assetName: string): void {
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error(`Unable to validate extracted asset "${assetName}".`);
+  assertExtractedAssetHasUsefulAlpha(
+    context.getImageData(0, 0, canvas.width, canvas.height).data,
+    assetName,
+  );
 }
 
 export function cropAssetIndexSheet(sheet: HTMLCanvasElement, count: AssetSheetCount): HTMLCanvasElement[] {

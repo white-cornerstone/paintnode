@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { assetSheetCells, workflowAssetExtractionPrompt } from './assetExtraction';
+import {
+  assertExtractedAssetHasUsefulAlpha,
+  assetExtractionImageModelSources,
+  assetSheetCells,
+  extractedAssetAlphaCoverage,
+  workflowAssetExtractionPrompt,
+} from './assetExtraction';
 
 describe('workflow asset extraction', () => {
   it.each([
@@ -28,5 +34,42 @@ describe('workflow asset extraction', () => {
     expect(prompt).toContain('4 columns by 2 rows');
     expect(prompt).toContain('left-to-right then top-to-bottom');
     expect(prompt).toContain('Do not return separate object files');
+  });
+
+  it('keeps synthetic index guidelines out of image-model inputs', () => {
+    const sources = assetExtractionImageModelSources([
+      { name: 'Photo', dataUrl: 'data:image/png;base64,source', role: 'source' },
+      { name: 'Annotations', dataUrl: 'data:image/png;base64,support', role: 'support' },
+      { name: 'INDEX SHEET GUIDELINE', dataUrl: 'data:image/png;base64,grid', role: 'support', synthetic: true },
+    ]);
+    expect(sources.map((source) => source.name)).toEqual(['Photo', 'Annotations']);
+  });
+
+  it('rejects opaque and empty extraction results before saving them', () => {
+    const opaque = new Uint8ClampedArray([
+      20, 30, 40, 255,
+      50, 60, 70, 255,
+    ]);
+    expect(() => assertExtractedAssetHasUsefulAlpha(opaque, 'Bottle')).toThrow(/no usable transparent background/i);
+
+    const empty = new Uint8ClampedArray([
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+    ]);
+    expect(() => assertExtractedAssetHasUsefulAlpha(empty, 'Bottle')).toThrow(/became empty/i);
+  });
+
+  it('accepts a visible asset surrounded by transparency and reports coverage', () => {
+    const keyed = new Uint8ClampedArray([
+      0, 0, 0, 0,
+      120, 80, 40, 255,
+      120, 80, 40, 128,
+      0, 0, 0, 0,
+    ]);
+    expect(assertExtractedAssetHasUsefulAlpha(keyed, 'Bottle')).toEqual({
+      transparentFraction: 0.5,
+      visibleFraction: 0.5,
+    });
+    expect(extractedAssetAlphaCoverage(keyed).visibleFraction).toBe(0.5);
   });
 });

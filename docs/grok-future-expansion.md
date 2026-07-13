@@ -14,7 +14,7 @@ Director turns, and the xAI Images API for pixel generation and editing.
 | Generative fill and retouch | Implemented |
 | Upscale and detail restoration | Implemented |
 | Multi-asset workflow composition | Implemented, up to three sources |
-| Asset extraction / decouple | Not implemented |
+| Asset extraction / decouple | Implemented with an AI Director; up to three source/support images |
 | Video generation | Not implemented |
 
 The image-edit path uses `POST /v1/images/edits` with data-URI image inputs,
@@ -28,20 +28,24 @@ every CLI launch. On macOS, it pins the X.AI Corporation Team ID. Authentication
 reuses the local Grok sign-in; `grok models` is the no-generation refresh and
 capability probe when the stored token needs renewal.
 
-## Remaining image limitation: asset extraction
+## Asset extraction contract
 
-The image API returns images, not a structured multi-layer asset manifest.
-PaintNode's current extraction flow expects an agentic provider to produce and
-validate that manifest. Grok asset extraction should remain unavailable until
-one of these designs has a tested contract:
+Grok extraction requires an enabled AI Director. The Director inspects the
+source/support overview and returns a constrained asset inventory. PaintNode
+then sends each planned asset to the Grok image endpoint as its own bounded
+request, using only the real source and annotated support images. Synthetic
+index-sheet guidelines are planning aids and are never sent as image-model
+pixels.
 
-1. the Grok Director prepares the same constrained manifest used by existing
-   extraction flows; or
-2. PaintNode owns deterministic segmentation and uses Grok only for bounded
-   cleanup edits.
+The xAI Images API does not expose an alpha-output parameter and may return
+JPEG data. Each asset request therefore requires the exact PaintNode chroma
+matte (`#00ff00`). PaintNode removes the border-connected matte plus a narrow
+exact-key cleanup, converts the result to real PNG alpha, and rejects opaque
+or empty results before saving it. When provider job retention is enabled, the
+raw keyed result remains available for troubleshooting.
 
-Do not expose a partial extraction control that silently returns a flattened
-image.
+Direct Grok extraction with the Director disabled remains unavailable because
+the image endpoint cannot return a labelled multi-asset inventory by itself.
 
 ## Future capability: video generation
 

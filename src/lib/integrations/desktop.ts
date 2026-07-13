@@ -1005,6 +1005,36 @@ export async function generateGrokImage(
   });
 }
 
+/** Generate one Director-planned Grok asset on PaintNode's fixed chroma matte. */
+export async function extractGrokAsset(
+  config: GrokGeneratorConfig,
+  prompt: string,
+  assetName: string,
+  sources: WorkflowSourceImage[],
+): Promise<DecoupleImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok asset extraction is only available in the desktop app.');
+  }
+  if (sources.length === 0) {
+    throw new Error('Grok asset extraction needs at least one source image.');
+  }
+  if (sources.length > 3) {
+    throw new Error('Grok asset extraction supports up to 3 source or support images. Remove extra inputs or switch the image provider.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-extract-${Date.now()}`;
+  return invoke<DecoupleImageResult>('extract_grok_asset', {
+    ...grokInvokeConfig({ ...config, runId }),
+    prompt,
+    assetName,
+    sources: sources.map((source) => ({
+      name: source.name,
+      role: source.role?.trim() || 'Extraction source',
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
+  });
+}
+
 /** Mask-guided Grok generative fill through the xAI image-edit endpoint. */
 export async function generateGrokFillImage(
   config: GrokGeneratorConfig,
