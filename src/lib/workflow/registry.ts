@@ -86,7 +86,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'image',
     keywords: ['asset', 'image', 'mask', 'layered document', 'project', 'visual reference', 'source'],
     defaultTitle: 'Visual Input',
-    defaultSize: { width: 220, height: 180 },
+    defaultSize: { width: 220, height: 240 },
     defaultColor: '#3f4b5c',
     ports: {
       inputs: [],
@@ -103,7 +103,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'document',
     keywords: ['campaign', 'objective', 'direction', 'constraints', 'audience', 'prompt'],
     defaultTitle: 'Creative Brief',
-    defaultSize: { width: 245, height: 188 },
+    defaultSize: { width: 245, height: 220 },
     defaultColor: '#4a4059',
     ports: {
       inputs: [],
@@ -155,7 +155,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'image-multiple',
     keywords: ['extract', 'assets', 'objects', 'index sheet', 'grid', 'fast', 'support images', 'annotations'],
     defaultTitle: 'Extract Assets',
-    defaultSize: { width: 280, height: 330 },
+    defaultSize: { width: 280, height: 400 },
     defaultColor: '#3d4654',
     ports: {
       inputs: [
@@ -187,7 +187,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'sparkle',
     keywords: ['generate', 'edit', 'remove background', 'relight', 'upscale', 'action'],
     defaultTitle: 'Generate',
-    defaultSize: { width: 240, height: 190 },
+    defaultSize: { width: 240, height: 480 },
     defaultColor: '#39475a',
     ports: {
       inputs: [
@@ -216,7 +216,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'review',
     keywords: ['compare candidates', 'approve', 'promote', 'quality gate', 'decision'],
     defaultTitle: 'Review Candidates',
-    defaultSize: { width: 240, height: 190 },
+    defaultSize: { width: 240, height: 536 },
     defaultColor: '#4b4057',
     ports: {
       inputs: [{ id: 'candidates', label: 'Candidates', dataType: 'layout', required: true, multiple: true }],
@@ -237,7 +237,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'output',
     keywords: ['format', 'size', 'export', 'placement', 'delivery'],
     defaultTitle: 'Output',
-    defaultSize: { width: 220, height: 232 },
+    defaultSize: { width: 220, height: 280 },
     defaultColor: '#3a3c42',
     ports: {
       inputs: [{ id: 'source', label: 'Directed composition', dataType: 'layout', required: true }],

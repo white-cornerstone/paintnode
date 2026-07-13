@@ -2652,7 +2652,6 @@
               <div
                 class="node-preview"
                 class:can-paste={!asset && !oraDocument}
-                style={`height:${Math.max(64, node.height - 150)}px`}
                 role="button"
                 tabindex="0"
                 aria-haspopup="menu"
@@ -3467,7 +3466,7 @@
             </div>
             <WorkflowNodePreflight entry={preflightForNode(outputNode.id)} />
             <div class="specialized-node-body output-node-body">
-              <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
+              <div class="output-preview">
                 {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
               </div>
               <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
@@ -3902,6 +3901,28 @@
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
+  }
+  .asset-node-body,
+  .output-node-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .asset-node-body .node-preview,
+  .output-node-body .output-preview {
+    flex: 1 1 auto;
+  }
+  .asset-node-body .node-preview {
+    min-height: 64px;
+  }
+  .output-node-body .output-preview {
+    min-height: 76px;
+  }
+  .asset-node-body .slot-picker,
+  .asset-node-body textarea,
+  .output-node-body .output-props,
+  .output-node-body .output-actions,
+  .output-node-body .generate-block {
+    flex: none;
   }
   .creator-node-body > p {
     margin: 0;
