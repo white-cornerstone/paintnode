@@ -1536,6 +1536,36 @@ fn gradient_magnitude(luma: &[u8], width: usize, height: usize) -> Vec<u8> {
     out
 }
 
+/// Build a same-frame edge guide for image models that accept multiple edit
+/// inputs but do not expose a dedicated structural-control parameter. The
+/// guide is deterministic and contains no source color or generated pixels:
+/// bright lines on black mark boundaries already present in the source.
+pub(crate) fn upscale_structure_guide_png(
+    source_png: &[u8],
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    const EDGE_GAIN: u8 = 4;
+    let source = decode_png_rgba(source_png, label)?;
+    let (width, height) = source.dimensions();
+    let luma = image_luma(&source);
+    let gradient = gradient_magnitude(&luma, width as usize, height as usize);
+    let guide = image::RgbaImage::from_fn(width, height, |x, y| {
+        let x0 = x.saturating_sub(1);
+        let x1 = (x + 1).min(width.saturating_sub(1));
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(height.saturating_sub(1));
+        let mut edge = 0_u8;
+        for sy in y0..=y1 {
+            for sx in x0..=x1 {
+                edge = edge.max(gradient[sy as usize * width as usize + sx as usize]);
+            }
+        }
+        let value = edge.saturating_mul(EDGE_GAIN);
+        image::Rgba([value, value, value, 255])
+    });
+    encode_rgba_png(guide, label)
+}
+
 fn gradient_edge_threshold(gradient: &[u8]) -> u8 {
     let mut histogram = [0_u32; 256];
     for value in gradient {
@@ -1784,6 +1814,9 @@ pub(crate) fn validate_upscale_part_structure(
 ) -> Result<(), String> {
     const CHECK_SIDE: u32 = 32;
     const MAX_MEAN_CHANNEL_DELTA: f64 = 0.18;
+    const LOCAL_GRID_SIDE: usize = 8;
+    const LOCAL_CELL_SIDE: usize = CHECK_SIDE as usize / LOCAL_GRID_SIDE;
+    const MAX_LOCAL_MEAN_CHANNEL_DELTA: f64 = 0.18;
     let source = decode_png_rgba(source_png, label)?;
     let result = decode_png_rgba(result_png, label)?;
     if source.dimensions() != result.dimensions() {
@@ -1803,22 +1836,31 @@ pub(crate) fn validate_upscale_part_structure(
         CHECK_SIDE,
         image::imageops::FilterType::Triangle,
     );
-    let total_delta = source
-        .pixels()
-        .zip(result.pixels())
-        .map(|(a, b)| {
-            a.0[..3]
-                .iter()
-                .zip(&b.0[..3])
-                .map(|(x, y)| u64::from(x.abs_diff(*y)))
-                .sum::<u64>()
-        })
-        .sum::<u64>();
+    let mut total_delta = 0_u64;
+    let mut local_deltas = [0_u64; LOCAL_GRID_SIDE * LOCAL_GRID_SIDE];
+    for (index, (a, b)) in source.pixels().zip(result.pixels()).enumerate() {
+        let pixel_delta = a.0[..3]
+            .iter()
+            .zip(&b.0[..3])
+            .map(|(x, y)| u64::from(x.abs_diff(*y)))
+            .sum::<u64>();
+        total_delta += pixel_delta;
+        let x = index % CHECK_SIDE as usize;
+        let y = index / CHECK_SIDE as usize;
+        let cell_x = x / LOCAL_CELL_SIDE;
+        let cell_y = y / LOCAL_CELL_SIDE;
+        local_deltas[cell_y * LOCAL_GRID_SIDE + cell_x] += pixel_delta;
+    }
     let samples = u64::from(CHECK_SIDE) * u64::from(CHECK_SIDE) * 3;
     let mean_delta = total_delta as f64 / samples as f64 / 255.0;
-    if mean_delta > MAX_MEAN_CHANNEL_DELTA {
+    let local_samples = (LOCAL_CELL_SIDE * LOCAL_CELL_SIDE * 3) as f64;
+    let max_local_delta = local_deltas
+        .iter()
+        .map(|delta| *delta as f64 / local_samples / 255.0)
+        .fold(0.0_f64, f64::max);
+    if mean_delta > MAX_MEAN_CHANNEL_DELTA || max_local_delta > MAX_LOCAL_MEAN_CHANNEL_DELTA {
         return Err(format!(
-            "{label} changed the crop composition instead of restoring detail (structural delta {mean_delta:.3})."
+            "{label} changed the crop composition instead of restoring detail (structural delta {mean_delta:.3}, localized delta {max_local_delta:.3})."
         ));
     }
     Ok(())
@@ -4336,6 +4378,42 @@ mod tests {
         let error = validate_upscale_part_structure(&source, &unrelated, "AI upscale")
             .expect_err("unrelated composition must fail");
         assert!(error.contains("changed the crop composition"));
+    }
+
+    #[test]
+    fn upscale_structure_gate_rejects_local_recomposition_on_stable_background() {
+        let source = image::RgbaImage::from_pixel(64, 64, image::Rgba([20, 80, 180, 255]));
+        let mut recomposed = source.clone();
+        for y in 48..64 {
+            for x in 0..16 {
+                recomposed.put_pixel(x, y, image::Rgba([220, 30, 20, 255]));
+            }
+        }
+        let source = encode_test_image(source);
+        let recomposed = encode_test_image(recomposed);
+        let error = validate_upscale_part_structure(&source, &recomposed, "AI upscale")
+            .expect_err("localized recomposition must not hide in a stable crop");
+        assert!(error.contains("localized delta"));
+    }
+
+    #[test]
+    fn upscale_structure_guide_marks_source_boundaries_without_source_color() {
+        let source = image::RgbaImage::from_fn(32, 24, |x, _| {
+            if x < 16 {
+                image::Rgba([20, 80, 180, 255])
+            } else {
+                image::Rgba([230, 210, 30, 255])
+            }
+        });
+        let guide = upscale_structure_guide_png(&encode_test_image(source), "AI upscale")
+            .expect("structure guide");
+        let guide = decode_png_rgba(&guide, "structure guide").expect("decode guide");
+        assert_eq!(guide.dimensions(), (32, 24));
+        assert_eq!(guide.get_pixel(4, 12).0, [0, 0, 0, 255]);
+        let boundary = guide.get_pixel(15, 12).0;
+        assert_eq!(boundary[0], boundary[1]);
+        assert_eq!(boundary[1], boundary[2]);
+        assert!(boundary[0] > 100, "source boundary should be prominent");
     }
 
     #[test]

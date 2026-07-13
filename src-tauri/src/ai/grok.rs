@@ -48,8 +48,8 @@ use crate::ai::placement::{
     cover_crop_png_to_dimensions, fill_part_needs_overview, fill_placement_returns_layer_results,
     plan_ai_edit_placement, plan_ai_fill_placement, plan_ai_restore_placement,
     plan_ai_upscale_placement, prepare_ai_job_dir_for_placement, resize_png_to_dimensions,
-    reuse_part_result, validate_upscale_part_structure, AiEditComposer, AiEditProvider,
-    AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
+    reuse_part_result, upscale_structure_guide_png, validate_upscale_part_structure,
+    AiEditComposer, AiEditProvider, AiFillMethod, AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_provider_features, ai_retouch_asset_name, ai_run_cancelled, apply_ai_cli_environment,
@@ -1001,6 +1001,7 @@ impl GrokEditAttachments {
 }
 
 const GROK_OVERVIEW_ATTACHMENT_NOTE: &str = "a downscaled preview of the surrounding document content with the editable region outlined in red (`overview.png`). Use it only as non-editable composition and continuity guidance; never copy its pixels, its resolution, or the red outline into the output.";
+const GROK_UPSCALE_STRUCTURE_ATTACHMENT_NOTE: &str = "an automatically derived edge-only spatial registration guide (`structure-guide.png`). Bright lines trace boundaries already present in <IMAGE_0>; use them only to keep silhouettes, locations, scale, pose, depth, and overlaps fixed. Do not render the guide, line art, monochrome treatment, outlines, or any guide pixels in the output.";
 
 /// Generative fill prompt for one placement part. Equivalent wording to the
 /// Antigravity fill prompt, adapted to positional edit-endpoint attachments.
@@ -1109,6 +1110,14 @@ const GROK_IN_PLACE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejec
 - This is a strict in-place edit of <IMAGE_0>: apply the requested change only inside the white mask area of <IMAGE_1> and reproduce every pixel outside the mask exactly as it appears in <IMAGE_0>.
 - If the requested change cannot be honored inside the mask, make the closest faithful change possible rather than re-imagining the scene."#;
 
+/// Appended after an upscale candidate changes local low-frequency structure.
+/// The structure gate, rather than prompt compliance alone, decides whether
+/// the image is safe to import.
+const GROK_UPSCALE_STRUCTURE_RETRY_NOTE: &str = r#"IMPORTANT — previous candidate rejected:
+- The previous candidate moved or rescaled visible content instead of restoring the attached frame in place. PaintNode discarded it.
+- Use <IMAGE_0> as a locked spatial plate. Every subject and object silhouette, center, size, depth, pose, and overlap must remain at the same location and scale.
+- Add only fine surface detail that follows the existing pixels. When the source is ambiguous, preserve its soft structure instead of resolving it into a different face, body, object, or edge."#;
+
 /// Deterministic post-processing notes recorded in the part folder for
 /// debugging; the Grok image backend never sees this file.
 fn grok_retouch_contract_text(geometry_note: &str) -> String {
@@ -1211,7 +1220,16 @@ fn grok_restore_image_details(
             part_path.join("source.png"),
             "the image region to restore (`source.png`). It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.",
         );
-        if !upscale_layers {
+        if upscale_layers {
+            let structure_guide =
+                upscale_structure_guide_png(&inputs.source_png, "Grok upscale structure guide")?;
+            fs::write(part_path.join("structure-guide.png"), structure_guide)
+                .map_err(|e| format!("Failed to write {label} structure guide: {e}"))?;
+            attachments.push(
+                part_path.join("structure-guide.png"),
+                GROK_UPSCALE_STRUCTURE_ATTACHMENT_NOTE,
+            );
+        } else {
             attachments.push(
                 part_path.join("mask.png"),
                 "an editable-area mask over <IMAGE_0> (`mask.png`). White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades the result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged. The mask itself must never appear in the output.",
@@ -1233,8 +1251,7 @@ fn grok_restore_image_details(
         } else {
             ai_part_geometry_note(&placement, part_index)
         };
-        let prompt_text = grok_restore_prompt(&attachments.notes_block(), &geometry_note);
-        write_ai_job_prompt(&part_path, &prompt_text, label)?;
+        let base_prompt_text = grok_restore_prompt(&attachments.notes_block(), &geometry_note);
         emit_codex_part_progress(
             app,
             run_id,
@@ -1243,36 +1260,76 @@ fn grok_restore_image_details(
             ai_part_progress_message(&placement, part_index, "Restoring image detail with Grok"),
         );
         let result_path = part_path.join("result.png");
-        let bytes = run_grok_direct_edit(
-            app,
-            run_id,
-            grok_bin,
-            &part_path,
-            grok_edit_spec_for_working(
-                prompt_text.clone(),
-                attachments.paths,
-                &part.working,
-                image_resolution,
-            ),
-            image_model,
-            keep_debug_artifacts,
-        )
-        .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        fs::write(&result_path, &bytes).map_err(|e| {
-            ai_part_progress_message(
-                &placement,
-                part_index,
-                &format!("Failed to write Grok detail restoration result: {e}"),
+        let max_attempts = if upscale_layers {
+            AI_PROTECTED_DRIFT_MAX_ATTEMPTS
+        } else {
+            1
+        };
+        let mut bytes = Vec::new();
+        for attempt in 0..max_attempts {
+            let prompt_text = if attempt == 0 {
+                base_prompt_text.clone()
+            } else {
+                format!("{base_prompt_text}\n\n{GROK_UPSCALE_STRUCTURE_RETRY_NOTE}")
+            };
+            write_ai_job_prompt(&part_path, &prompt_text, label)?;
+            let candidate = run_grok_direct_edit(
+                app,
+                run_id,
+                grok_bin,
+                &part_path,
+                grok_edit_spec_for_working(
+                    prompt_text,
+                    attachments.paths.clone(),
+                    &part.working,
+                    image_resolution,
+                ),
+                image_model,
+                keep_debug_artifacts,
             )
-        })?;
-        let (bytes, _result_dimensions, _normalized) =
-            read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
-                .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
-        let _ = fs::remove_file(&result_path);
-        let unaligned_bytes = bytes.clone();
-        if upscale_layers {
-            validate_upscale_part_structure(&inputs.source_png, &bytes, label)?;
+            .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+            fs::write(&result_path, &candidate).map_err(|e| {
+                ai_part_progress_message(
+                    &placement,
+                    part_index,
+                    &format!("Failed to write Grok detail restoration result: {e}"),
+                )
+            })?;
+            let (candidate, _result_dimensions, _normalized) =
+                read_png_bytes_cropped_to_ai_working_canvas(&result_path, &part.working, label)
+                    .map_err(|e| ai_part_progress_message(&placement, part_index, &e))?;
+            let _ = fs::remove_file(&result_path);
+            if upscale_layers {
+                if let Err(error) =
+                    validate_upscale_part_structure(&inputs.source_png, &candidate, label)
+                {
+                    if attempt + 1 < max_attempts {
+                        emit_codex_progress(
+                            app,
+                            run_id,
+                            ai_part_progress_message(
+                                &placement,
+                                part_index,
+                                &format!(
+                                    "Rejected re-imagined upscale candidate: {error}; retrying with stricter preservation instructions"
+                                ),
+                            ),
+                        );
+                        continue;
+                    }
+                    return Err(ai_part_progress_message(
+                        &placement,
+                        part_index,
+                        &format!(
+                            "Grok repeatedly re-imagined the upscale crop instead of preserving its structure: {error}"
+                        ),
+                    ));
+                }
+            }
+            bytes = candidate;
+            break;
         }
+        let unaligned_bytes = bytes.clone();
         let (bytes, drift_correction) =
             correct_part_result_drift(&inputs.source_png, &bytes, label)?;
         if let Some(correction) = drift_correction {
@@ -2761,6 +2818,23 @@ mod tests {
         let text = serde_json::to_string(&body).unwrap();
         assert!(!text.contains("1024x1024"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upscale_structure_attachment_is_registration_only() {
+        let attachments = format!(
+            "- <IMAGE_0>: the source image.\n- <IMAGE_1>: {GROK_UPSCALE_STRUCTURE_ATTACHMENT_NOTE}"
+        );
+        let prompt = grok_restore_prompt(
+            &attachments,
+            "PaintNode upscale geometry:\n- Refine only the attached fixed crop.",
+        );
+        assert!(prompt.contains("edge-only spatial registration guide"));
+        assert!(
+            prompt.contains("keep silhouettes, locations, scale, pose, depth, and overlaps fixed")
+        );
+        assert!(prompt.contains("Do not render the guide"));
+        assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
     }
 
     #[test]

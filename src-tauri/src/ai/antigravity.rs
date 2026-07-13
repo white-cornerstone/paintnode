@@ -53,9 +53,9 @@ use crate::ai::placement::{
     fill_placement_returns_layer_results, normalize_storyboard_draft_png, plan_ai_edit_placement,
     plan_ai_fill_placement, plan_ai_restore_placement, plan_ai_upscale_placement,
     prepare_ai_job_dir_for_placement, resize_png_to_dimensions, reuse_part_result,
-    storyboard_draft_canvas_png, storyboard_draft_mask_png, validate_upscale_part_structure,
-    AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod, AiFillRedundancy,
-    AI_RESTORE_UPSCALE_THRESHOLD,
+    storyboard_draft_canvas_png, storyboard_draft_mask_png, upscale_structure_guide_png,
+    validate_upscale_part_structure, AiEditComposer, AiEditPlacement, AiEditProvider, AiFillMethod,
+    AiFillRedundancy, AI_RESTORE_UPSCALE_THRESHOLD,
 };
 use crate::ai::{
     ai_autonomy_level, ai_director_involvement, ai_director_mode, ai_director_provider,
@@ -2777,6 +2777,7 @@ fn antigravity_restore_prompt(
     director_involvement: AiDirectorInvolvement,
     geometry_note: &str,
     has_overview: bool,
+    has_structure_guide: bool,
 ) -> String {
     antigravity_restore_director_prompt(
         job_dir,
@@ -2786,9 +2787,11 @@ fn antigravity_restore_prompt(
         director_involvement,
         geometry_note,
         has_overview,
+        has_structure_guide,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn antigravity_restore_director_prompt(
     job_dir: &str,
     autonomy: AiAutonomyLevel,
@@ -2797,11 +2800,19 @@ fn antigravity_restore_director_prompt(
     director_involvement: AiDirectorInvolvement,
     geometry_note: &str,
     has_overview: bool,
+    has_structure_guide: bool,
 ) -> String {
     let autonomy_contract = image_agent_autonomy_contract(autonomy, "Antigravity");
     let director_contract =
         ai_director_restore_contract(director_provider, director_mode, director_involvement);
     let overview_note = antigravity_overview_note(job_dir, has_overview);
+    let structure_note = if has_structure_guide {
+        format!(
+            "\n- `{job_dir}/structure-guide.png`: an automatically derived edge-only spatial registration guide. Bright lines trace boundaries already present in `source.png`; use them only to keep silhouettes, locations, scale, pose, depth, and overlaps fixed. Do not render the guide, line art, monochrome treatment, outlines, or any guide pixels in the output."
+        )
+    } else {
+        String::new()
+    };
     let workspace_rule = if autonomy == AiAutonomyLevel::Unmanaged {
         "- Save the final image at the required path so PaintNode can import it.".into()
     } else {
@@ -2814,7 +2825,7 @@ This is a fixed-canvas image refinement task, not a new image generation task.
 
 Input files:
 - `{job_dir}/source.png`: the image region to restore. It was enlarged from a lower-resolution image, so it is soft and lacks fine detail.
-- `{job_dir}/mask.png`: editable-area mask. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.{overview_note}
+- `{job_dir}/mask.png`: editable-area mask. White pixels are editable. Gray pixels are a feathered hand-off band into already-restored content; PaintNode cross-fades your result there, so render that band seamlessly consistent with the neighboring restored pixels. Black or transparent pixels were already restored and must remain unchanged.{structure_note}{overview_note}
 
 {geometry_note}
 {director_contract}
@@ -2923,6 +2934,14 @@ fn antigravity_restore_image_details(
             .map_err(|e| format!("Failed to write {label} source image: {e}"))?;
         fs::write(part_path.join("mask.png"), &inputs.mask_png)
             .map_err(|e| format!("Failed to write {label} mask image: {e}"))?;
+        if upscale_layers {
+            let structure_guide = upscale_structure_guide_png(
+                &inputs.source_png,
+                "Antigravity upscale structure guide",
+            )?;
+            fs::write(part_path.join("structure-guide.png"), structure_guide)
+                .map_err(|e| format!("Failed to write {label} structure guide: {e}"))?;
+        }
         let has_overview = placement.is_split() && !upscale_layers;
         if has_overview {
             fs::write(
@@ -2944,6 +2963,7 @@ fn antigravity_restore_image_details(
             director_involvement,
             &geometry_note,
             has_overview,
+            upscale_layers,
         );
         write_ai_job_prompt(&part_path, &prompt_text, label)?;
         emit_codex_part_progress(
@@ -2959,6 +2979,9 @@ fn antigravity_restore_image_details(
         );
         let result_path = part_path.join("result.png");
         let mut image_paths = vec![part_path.join("source.png"), part_path.join("mask.png")];
+        if upscale_layers {
+            image_paths.push(part_path.join("structure-guide.png"));
+        }
         if has_overview {
             image_paths.push(part_path.join("overview.png"));
         }
@@ -5617,9 +5640,13 @@ mod tests {
             AiDirectorInvolvement::FullReview,
             "PaintNode image geometry:\n- The attached images are a crop of a larger PaintNode document; PaintNode will paste your result back into the correct document region automatically.",
             true,
+            true,
         );
         assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/source.png"));
         assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/overview.png"));
+        assert!(prompt.contains("paintnode/antigravity-runs/up-1/part-2/structure-guide.png"));
+        assert!(prompt.contains("edge-only spatial registration guide"));
+        assert!(prompt.contains("Do not render the guide"));
         assert!(prompt.contains("AI Director participation: Full review"));
         assert!(prompt.contains("Do not add, remove, move, restyle, or reinterpret any content"));
         assert!(prompt.contains("Preserve intentional medium character such as film grain"));
