@@ -121,6 +121,7 @@
   // Hide the custom titlebar while the OS window is in native fullscreen.
   let isFullscreen = $state(false);
   const hasDocument = $derived(ui.activeSurface === 'document' && !!editor.doc);
+  const hasWorkflowBoard = $derived(ui.activeSurface === 'workflow' && workflow.active && !workflow.storyboardEditing);
   const hasDrawingPanels = $derived(hasDocument || (ui.activeSurface === 'workflow' && workflow.storyboardEditing));
   let nativeMenuStateKey = '';
 
@@ -996,7 +997,7 @@
     <MenuBar />
   {/if}
   <div class="middle">
-    {#if !ui.workspaceFocusMode}
+    {#if !ui.workspaceFocusMode && !hasWorkflowBoard}
       <Toolbar />
     {/if}
     <div class="workspace">

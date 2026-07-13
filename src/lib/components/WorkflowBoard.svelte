@@ -41,6 +41,7 @@
   import { project } from '../state/project.svelte';
   import { settings } from '../state/settings.svelte';
   import { aiRunOptionsFromSettings } from '../state/settings';
+  import { panels } from '../state/panels.svelte';
   import { directorModeFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
   import { aiTasks } from '../state/aiTasks.svelte';
@@ -98,11 +99,11 @@
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { Add, ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize, Sparkle } from '../icons';
+  import { ArrowSync, Board, CheckmarkCircle, ChevronDoubleLeft, ChevronDoubleRight, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, Options, PaintBrush, SlideSize } from '../icons';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
+  import Panel from './Panel.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
-  import WorkflowNodePalette from './workflow/WorkflowNodePalette.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import WorkflowPropertiesPanel from './workflow/WorkflowPropertiesPanel.svelte';
   import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
@@ -199,8 +200,6 @@
   let sketching = false;
   let altDown = $state(false);
   let boardEl = $state<HTMLDivElement>();
-  let paletteButton = $state<HTMLButtonElement>();
-  let paletteOpen = $state(false);
   let directorOpen = $state(false);
   let revisionDirectorOpen = $state(false);
   let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
@@ -208,6 +207,8 @@
   let revisionDirectorTitle = $state('Revise current workflow');
   let boardWidth = $state(1);
   let boardHeight = $state(1);
+  let workflowPropertiesCollapsed = $state(false);
+  let workflowMapCollapsed = $state(false);
   let storyboardCanvas = $state<HTMLCanvasElement>();
   let storyboardViewport: Viewport | null = null;
 
@@ -396,11 +397,27 @@
       ].slice(-24);
       workflow.setStoryboardAnnotations(next);
     };
+    const handleWorkflowBoardAction = (event: Event) => {
+      const action = (event as CustomEvent<{ action?: string }>).detail?.action;
+      if (action === 'draft') directorOpen = true;
+      else if (action === 'revise') openRevisionDirector();
+    };
+    const handleWorkflowAddNode = (event: Event) => {
+      const type = (event as CustomEvent<{ type?: CreatorNodeType }>).detail?.type;
+      if (type) void addCreatorNodeFromPalette(type);
+    };
+    const handleWorkflowRefresh = () => void refreshWorkflowAssetsAndReview();
     window.addEventListener('paintnode:workflow-before-save', flushBeforeSave);
     window.addEventListener('paintnode:annotation-created', recordAnnotation);
+    window.addEventListener('paintnode:workflow-board-action', handleWorkflowBoardAction);
+    window.addEventListener('paintnode:workflow-add-node', handleWorkflowAddNode);
+    window.addEventListener('paintnode:workflow-refresh', handleWorkflowRefresh);
     return () => {
       window.removeEventListener('paintnode:workflow-before-save', flushBeforeSave);
       window.removeEventListener('paintnode:annotation-created', recordAnnotation);
+      window.removeEventListener('paintnode:workflow-board-action', handleWorkflowBoardAction);
+      window.removeEventListener('paintnode:workflow-add-node', handleWorkflowAddNode);
+      window.removeEventListener('paintnode:workflow-refresh', handleWorkflowRefresh);
     };
   });
 
@@ -1425,6 +1442,12 @@
     mapDragging = null;
   }
 
+  function showWorkflowPanel(panel: 'properties' | 'map'): void {
+    panels.setRightCollapsed(false);
+    if (panel === 'properties') workflowPropertiesCollapsed = false;
+    else workflowMapCollapsed = false;
+  }
+
   function workflowNodeRect(nodeId: WorkflowNodeId): { x: number; y: number; width: number; height: number } | null {
     if (nodeId === 'composition') {
       return { x: workflow.promptX, y: workflow.promptY, width: workflow.compositionWidth, height: workflow.compositionHeight };
@@ -1496,12 +1519,6 @@
     })[0];
   }
 
-  async function closeNodePalette(): Promise<void> {
-    paletteOpen = false;
-    await tick();
-    paletteButton?.focus();
-  }
-
   async function addCreatorNodeFromPalette(type: CreatorNodeType): Promise<void> {
     const definition = creatorNodeDefinition(type);
     const preferred = {
@@ -1517,7 +1534,6 @@
     };
     const position = findOpenCreatorNodePlacement(preferred, definition.defaultSize, workflowMapItems(), 20, visibleBounds);
     const nodeId = workflow.addCreatorNode(type, position);
-    paletteOpen = false;
     if (!creatorNodeFitsPlacementBounds(position, definition.defaultSize, visibleBounds)) {
       centerBoardAt(
         position.x + definition.defaultSize.width / 2,
@@ -2670,114 +2686,6 @@
 
 <section class="workflow-shell">
   <div class="workflow-main">
-    <aside class="asset-tray">
-      <div class="tray-head node-library">
-        <span>Nodes</span>
-        <div class="tray-head-actions">
-          {#if qaModeResolved && (qaMode === 'provider-free' || desktop)}
-            <button
-              type="button"
-              aria-label="Revise current workflow"
-              aria-haspopup="dialog"
-              use:tooltip={{
-                text: `Revise current workflow · ${qaMode === 'provider-free' ? 'QA Fake' : runOptions.directorProvider}`,
-                placement: 'right',
-              }}
-              onclick={openRevisionDirector}
-            >
-              <Icon svg={ArrowSync} size={14} />
-            </button>
-          {/if}
-          <button
-            type="button"
-            aria-label="Draft with AI Director"
-            aria-haspopup="dialog"
-            use:tooltip={{ text: 'Draft with AI Director', placement: 'right' }}
-            onclick={() => (directorOpen = true)}
-          >
-            <Icon svg={Sparkle} size={14} />
-          </button>
-          <button
-            bind:this={paletteButton}
-            type="button"
-            aria-label="Add workflow node"
-            aria-haspopup="dialog"
-            aria-expanded={paletteOpen}
-            use:tooltip={{ text: 'Add workflow node', placement: 'right' }}
-            onclick={() => (paletteOpen = !paletteOpen)}
-          >
-            <Icon svg={Add} size={14} />
-          </button>
-        </div>
-      </div>
-      {#if paletteOpen}
-        <WorkflowNodePalette
-          onAdd={(type) => void addCreatorNodeFromPalette(type)}
-          onClose={() => void closeNodePalette()}
-        />
-      {/if}
-      <div class="tray-head">
-        <span>Assets</span>
-        <button
-          aria-label="Refresh workflow assets and Review verification"
-          use:tooltip={{ text: 'Refresh workflow assets and Review verification', placement: 'right' }}
-          onclick={() => void refreshWorkflowAssetsAndReview()}
-        >
-          <Icon svg={ArrowSync} size={14} />
-        </button>
-      </div>
-      {#if !project.path}
-        <p class="empty">Open a project folder to use generated and imported assets.</p>
-      {:else}
-        <div class="asset-list">
-          {#each assets as asset (asset.id)}
-            <button class="asset-item" onclick={() => workflow.addAsset(asset)}>
-              {#if asset.previewDataUrl}<img src={asset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={20} />{/if}
-              <span>{asset.name}</span>
-              <Icon svg={Add} size={14} />
-            </button>
-          {/each}
-        </div>
-      {/if}
-
-      <div class="tray-head workflows">
-        <span>Map</span>
-      </div>
-      <div class="workflow-map">
-        <button
-          class="workflow-map-canvas"
-          class:dragging={mapDragging}
-          aria-label="Workflow map. Drag the viewport frame or click to center the workflow canvas."
-          onpointerdown={(event) => startMapDrag(event, workflowMapModel)}
-          onpointermove={(event) => moveMapDrag(event, workflowMapModel)}
-          onpointerup={stopMapDrag}
-          onpointercancel={stopMapDrag}
-        >
-          {#each graphConnections as connection (connection.id)}
-            <span class="map-link" style={mapLinkStyle(connection, workflowMapModel)}></span>
-          {/each}
-          {#each workflowMapModel.items as item (item.id)}
-            <span
-              class="map-node"
-              class:asset={item.kind === 'asset'}
-              class:brief={item.kind === 'brief'}
-              class:composition={item.kind === 'composition'}
-              class:creator={item.kind === 'creator'}
-              class:output={item.kind === 'output'}
-              class:unsupported={item.kind === 'unsupported'}
-              class:included={item.included}
-              style={mapRectStyle(item, workflowMapModel)}
-            ></span>
-          {/each}
-          <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
-        </button>
-        <div class="map-meta">
-          <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + (hasCompositionNode ? 1 : 0) + workflow.outputNodes.length} nodes</span>
-          <span>{Math.round(workflow.zoom * 100)}%</span>
-        </div>
-      </div>
-    </aside>
-
     <div
       class="board"
       class:adding={workflow.tool !== 'hand' && workflow.tool !== 'zoom'}
@@ -3791,7 +3699,73 @@
         {/each}
       </div>
     </div>
-    <WorkflowPropertiesPanel node={propertiesNode} onDirectorAction={openNodeDirectorAction} />
+    <aside class="workflow-panels" class:collapsed={panels.value.rightCollapsed} aria-label="Workflow panels">
+      {#if panels.value.rightCollapsed}
+        <div class="workflow-panel-rail">
+          <button
+            class="workflow-panel-toggle expand"
+            type="button"
+            aria-label="Expand workflow panels"
+            use:tooltip={{ text: 'Expand workflow panels', placement: 'left' }}
+            onclick={() => panels.setRightCollapsed(false)}
+          ><Icon svg={ChevronDoubleLeft} size={16} /></button>
+          <button type="button" class="workflow-rail-item" onclick={() => showWorkflowPanel('properties')}>
+            <Icon svg={Options} size={18} /><span>Properties</span>
+          </button>
+          <button type="button" class="workflow-rail-item" onclick={() => showWorkflowPanel('map')}>
+            <Icon svg={Board} size={18} /><span>Map</span>
+          </button>
+        </div>
+      {:else}
+        <div class="workflow-column-bar">
+          <button
+            class="workflow-panel-toggle"
+            type="button"
+            aria-label="Collapse workflow panels"
+            use:tooltip={{ text: 'Collapse workflow panels', placement: 'left' }}
+            onclick={() => panels.setRightCollapsed(true)}
+          ><Icon svg={ChevronDoubleRight} size={16} /></button>
+        </div>
+        <Panel title="Properties" grow bind:collapsed={workflowPropertiesCollapsed}>
+          <WorkflowPropertiesPanel embedded node={propertiesNode} onDirectorAction={openNodeDirectorAction} />
+        </Panel>
+        <Panel title="Map" bind:collapsed={workflowMapCollapsed}>
+          <div class="workflow-map">
+            <button
+              class="workflow-map-canvas"
+              class:dragging={mapDragging}
+              aria-label="Workflow map. Drag the viewport frame or click to center the workflow canvas."
+              onpointerdown={(event) => startMapDrag(event, workflowMapModel)}
+              onpointermove={(event) => moveMapDrag(event, workflowMapModel)}
+              onpointerup={stopMapDrag}
+              onpointercancel={stopMapDrag}
+            >
+              {#each graphConnections as connection (connection.id)}
+                <span class="map-link" style={mapLinkStyle(connection, workflowMapModel)}></span>
+              {/each}
+              {#each workflowMapModel.items as item (item.id)}
+                <span
+                  class="map-node"
+                  class:asset={item.kind === 'asset'}
+                  class:brief={item.kind === 'brief'}
+                  class:composition={item.kind === 'composition'}
+                  class:creator={item.kind === 'creator'}
+                  class:output={item.kind === 'output'}
+                  class:unsupported={item.kind === 'unsupported'}
+                  class:included={item.included}
+                  style={mapRectStyle(item, workflowMapModel)}
+                ></span>
+              {/each}
+              <span class="map-viewport" style={mapRectStyle(workflowMapModel.viewport, workflowMapModel)}></span>
+            </button>
+            <div class="map-meta">
+              <span>{workflow.nodes.length + workflow.briefNodes.length + workflow.creatorNodes.length + workflow.unsupportedNodes.length + (hasCompositionNode ? 1 : 0) + workflow.outputNodes.length} nodes</span>
+              <span>{Math.round(workflow.zoom * 100)}%</span>
+            </div>
+          </div>
+        </Panel>
+      {/if}
+    </aside>
   </div>
 </section>
 
@@ -3862,73 +3836,82 @@
     min-height: 0;
   }
   .composition-summary { margin: 8px; }
-  .asset-tray {
-    position: relative;
-    width: 248px;
+  .workflow-panels {
+    width: var(--rightpanel-w);
     flex: none;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-right: 1px solid var(--border);
+    overflow: hidden;
+    border-left: 1px solid var(--border);
     background: var(--bg-panel);
   }
-  .tray-head {
+  .workflow-panels.collapsed {
+    width: 132px;
+  }
+  .workflow-column-bar {
+    height: 26px;
+    flex: none;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    flex: none;
-    padding: 8px;
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
+    justify-content: flex-end;
+    padding: 0 6px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel-2);
+  }
+  .workflow-panel-toggle {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: var(--text-dim);
   }
-  .tray-head-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
+  .workflow-panel-toggle:hover {
+    color: var(--text-bright);
   }
-  .workflows {
-    border-top: 1px solid var(--border);
-  }
-  .node-library {
-    border-bottom: 1px solid var(--border);
-  }
-  .asset-list {
-    flex: 1 1 auto;
-    min-height: 0;
+  .workflow-panel-rail {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    overflow: auto;
-    padding: 0 8px 8px;
+    padding-top: 4px;
   }
-  .asset-item {
-    display: grid;
-    grid-template-columns: 34px minmax(0, 1fr) 16px;
+  .workflow-panel-rail .workflow-panel-toggle.expand {
+    align-self: flex-end;
+    margin: 0 5px 4px 0;
+  }
+  .workflow-rail-item {
+    display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 8px;
     width: 100%;
-    padding: 5px;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text);
     text-align: left;
   }
-  .asset-item img {
-    width: 34px;
-    height: 34px;
-    object-fit: cover;
-    background: var(--bg-input);
+  .workflow-rail-item:hover {
+    background: var(--bg-elevated);
   }
-  .asset-item span,
   .node-head span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .workflow-panels :global(.panel.grow) {
+    flex: 1;
+  }
+  .workflow-panels :global(.panel.grow .panel-body) {
+    overflow: hidden;
+  }
   .workflow-map {
     flex: none;
     display: grid;
     gap: 6px;
-    padding: 0 8px 10px;
+    padding: 8px 8px 10px;
   }
   .workflow-map-canvas {
     position: relative;
@@ -4011,17 +3994,12 @@
     color: var(--text-dim);
     font-size: 11px;
   }
-  .empty,
   .err,
   .progress {
     margin: 8px;
     color: var(--text-dim);
     font-size: 12px;
     line-height: 1.4;
-  }
-  .asset-tray > .empty {
-    flex: 1 1 auto;
-    min-height: 0;
   }
   .err {
     color: #ffb0b0;

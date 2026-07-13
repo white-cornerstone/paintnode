@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest';
 import dialogSource from '../components/WorkflowDirectorDialog.svelte?raw';
 import revisionDialogSource from '../components/WorkflowDirectorRevisionDialog.svelte?raw';
 import boardSource from '../components/WorkflowBoard.svelte?raw';
+import toolOptionsSource from '../components/ToolOptions.svelte?raw';
 import providerFreeRevisionSource from '../integrations/providerFreeWorkflowRevision.ts?raw';
 import revisionHistorySource from './directorRevisionHistory.svelte.ts?raw';
 
 describe('Workflow Director UI contract', () => {
   it('opens an explicit proposal dialog from the workflow board', () => {
     expect(boardSource).toContain('WorkflowDirectorDialog');
-    expect(boardSource).toContain('Draft with AI Director');
+    expect(boardSource).toContain("action === 'draft'");
+    expect(toolOptionsSource).toContain('Draft with AI Director');
   });
 
   it('shows proposal nodes, requirements, unsupported capabilities, validation issues, reject, and guarded accept', () => {
@@ -48,6 +50,7 @@ describe('Workflow Director UI contract', () => {
     expect(boardSource).toContain('WorkflowDirectorRevisionDialog');
     expect(boardSource).toContain('Revise current workflow');
     expect(boardSource).toContain("qaMode === 'provider-free'");
+    expect(toolOptionsSource).toContain('Revise current workflow');
     expect(revisionDialogSource).toContain('Revise current workflow');
     expect(revisionDialogSource).not.toContain('applyDirectorProposal');
     expect(revisionDialogSource).not.toContain('Accept and replace workflow');

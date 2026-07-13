@@ -15,7 +15,15 @@
   } from '../../workflow';
   import type { WorkflowNodeV2 } from '../../workflow/schema';
 
-  let { node, onDirectorAction }: { node: WorkflowNodeV2 | null; onDirectorAction?: (node: WorkflowNodeV2) => void } = $props();
+  let {
+    node,
+    onDirectorAction,
+    embedded = false,
+  }: {
+    node: WorkflowNodeV2 | null;
+    onDirectorAction?: (node: WorkflowNodeV2) => void;
+    embedded?: boolean;
+  } = $props();
 
   const directorProviders: Array<{ value: AiDirectorProvider; label: string }> = [
     { value: 'codex', label: 'Codex' },
@@ -107,7 +115,7 @@
   }
 </script>
 
-<aside class="workflow-properties" aria-label="Workflow properties">
+<aside class="workflow-properties" class:embedded aria-label="Workflow properties">
   <header>
     <strong>{node ? node.title : 'Workflow Properties'}</strong>
     <small>{node ? node.type.replaceAll('-', ' ') : 'Saved with this workflow'}</small>
@@ -278,6 +286,7 @@
 
 <style>
   .workflow-properties { width: 286px; min-width: 286px; overflow: auto; padding: 12px; border-left: 1px solid var(--border); background: #292b2f; color: var(--text); box-sizing: border-box; }
+  .workflow-properties.embedded { width: 100%; min-width: 0; flex: 1; border-left: 0; }
   header { display: grid; gap: 2px; margin-bottom: 14px; }
   header strong { color: var(--text-bright); font-size: 13px; }
   header small, .hint, .capability { color: var(--text-muted); font-size: 11px; }

@@ -16,9 +16,12 @@ describe('project restart recovery UX', () => {
     expect(projectPanelSource).toContain("event.code === 'KeyW' && workflowFiles.length");
   });
 
-  it('distinguishes layer placement from candidate inspection and requires an image document', () => {
+  it('routes project assets to the active surface and only requires a document for layer placement', () => {
     expect(projectPanelSource).toContain("'Place as layer'");
-    expect(projectPanelSource).toContain("disabled={actionLabel === 'Place' && !editor.doc}");
+    expect(projectPanelSource).toContain("'Add to workflow'");
+    expect(projectPanelSource).toContain('const canUsePlaceActions = $derived(!!editor.doc || workflowBoardActive)');
+    expect(projectPanelSource).toContain("disabled={actionLabel === 'Place' && !canUsePlaceActions}");
+    expect(projectPanelSource).toContain('workflow.addAsset(asset)');
   });
 
   it('offers a guarded keyboard path to place the latest saved workflow edit after restart', () => {
