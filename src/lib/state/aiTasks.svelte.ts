@@ -369,7 +369,7 @@ export class AiTaskStore {
 
   open(id: string): void {
     const task = this.find(id);
-    if (!task || task.kind === 'workflow') return;
+    if (!task) return;
     ui.openAiTask(task.kind, id);
   }
 

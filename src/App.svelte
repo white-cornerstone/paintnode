@@ -110,6 +110,7 @@
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadAiUpscaleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiUpscaleDialog.svelte');
   const loadAiAutoAdjustDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiAutoAdjustDialog.svelte');
+  const loadWorkflowTaskDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/WorkflowTaskDialog.svelte');
   const loadAiSetupWizard: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiSetupWizard.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
@@ -1200,6 +1201,8 @@
   {@render lazyAiDialog(loadAiUpscaleDialog)}
 {:else if ui.dialog === 'aiAutoAdjust'}
   {@render lazyAiDialog(loadAiAutoAdjustDialog)}
+{:else if ui.dialog === 'workflowTask'}
+  {@render lazyAiDialog(loadWorkflowTaskDialog)}
 {:else if ui.dialog === 'aiSetup'}
   {@render lazyDialog(loadAiSetupWizard)}
 {:else if ui.dialog === 'stockImages'}
