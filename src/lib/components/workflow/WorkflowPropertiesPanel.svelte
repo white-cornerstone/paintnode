@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiProvider } from '../../state/settings';
   import { workflow } from '../../state/workflow.svelte';
+  import { aiTasks } from '../../state/aiTasks.svelte';
   import {
     WORKFLOW_AI_CONFIG_VERSION,
     copyWorkflowAiDefaults,
@@ -46,6 +47,12 @@
   const briefManual = $derived(briefAssistMode === 'manual');
   const director = $derived(overrides?.director ?? workflow.aiDefaults.director);
   const image = $derived(overrides?.image ?? workflow.aiDefaults.image);
+  const nodeLocked = $derived.by(() => {
+    workflow.rev;
+    return node
+      ? aiTasks.runningForWorkflowNode(workflow.graphSnapshot().id, node.id).length > 0
+      : false;
+  });
 
   function updateDefaults(update: Partial<WorkflowAiDefaultsV1>): void {
     workflow.setAiDefaults({
@@ -131,7 +138,7 @@
   }
 </script>
 
-<aside class="workflow-properties" class:embedded aria-label="Workflow properties">
+<aside class="workflow-properties" class:embedded class:locked={nodeLocked} aria-label="Workflow properties" inert={nodeLocked}>
   <header>
     <strong>{node ? node.title : 'Workflow Properties'}</strong>
     <small>{node ? node.type.replaceAll('-', ' ') : 'Saved with this workflow'}</small>
@@ -309,6 +316,7 @@
 
 <style>
   .workflow-properties { width: 286px; min-width: 286px; overflow: auto; padding: 12px; border-left: 1px solid var(--border); background: #292b2f; color: var(--text); box-sizing: border-box; }
+  .workflow-properties.locked { opacity: .68; cursor: wait; }
   .workflow-properties.embedded { width: 100%; min-width: 0; flex: 1; border-left: 0; }
   header { display: grid; gap: 2px; margin-bottom: 14px; }
   header strong { color: var(--text-bright); font-size: 13px; }

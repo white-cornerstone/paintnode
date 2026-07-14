@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import boardSource from '../components/WorkflowBoard.svelte?raw';
 import projectPanelSource from '../components/ProjectPanel.svelte?raw';
+import directorSource from '../components/WorkflowDirectorDialog.svelte?raw';
+import revisionDirectorSource from '../components/WorkflowDirectorRevisionDialog.svelte?raw';
+import taskLockSource from '../components/workflow/WorkflowNodeTaskLock.svelte?raw';
+import toolOptionsSource from '../components/ToolOptions.svelte?raw';
+import propertiesSource from '../components/workflow/WorkflowPropertiesPanel.svelte?raw';
 
 describe('Workflow Board selective execution UX contract', () => {
   it('exposes preview-first actions and visible per-node preflight without bypassing the store', () => {
@@ -117,5 +122,25 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).not.toContain('aria-label="Refresh project"');
     expect(projectPanelSource).toContain('aria-label="Refresh project files and assets"');
     expect(projectPanelSource).toContain("window.dispatchEvent(new CustomEvent('paintnode:workflow-refresh'))");
+  });
+
+  it('registers every workflow AI entry point and locks its scoped nodes until terminal state', () => {
+    expect(boardSource).toContain('title: `Generate candidates: ${transformName}`');
+    expect(boardSource).toContain('title: `Retry ${retryLabel}: ${transformName}`');
+    expect(boardSource).toContain('detail: workflowTaskDetail');
+    expect(boardSource).toContain('workflowTaskUpstreamNodeIds');
+    expect(boardSource).toContain('aiTasks.runningForWorkflowNode');
+    expect(boardSource).toContain('inert={nodeTasks.length > 0}');
+    expect(boardSource).toContain('WorkflowNodeTaskLock');
+    expect(boardSource).toContain('connectionHasRunningTask');
+    expect(directorSource).toContain("title: 'AI Director: Draft workflow'");
+    expect(directorSource).toContain('aiTasks.create');
+    expect(revisionDirectorSource).toContain('AI Director: ${title}');
+    expect(revisionDirectorSource).toContain('taskNodeIds');
+    expect(taskLockSource).toContain('Node is read-only. Open task details.');
+    expect(taskLockSource).toContain('onOpen();');
+    expect(toolOptionsSource).toContain('selectedWorkflowNodeLocked');
+    expect(toolOptionsSource).toContain('AI task running · node read-only');
+    expect(propertiesSource).toContain('inert={nodeLocked}');
   });
 });

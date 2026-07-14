@@ -14,6 +14,7 @@ export * from './transformExecutor';
 export * from './transformContext';
 export * from './transformRole';
 export * from './reviewDecisionContracts';
+export * from './workflowTaskScope';
 export * from './runObserver';
 export * from './runControl';
 export * from './providerQaSelection';

@@ -24,11 +24,13 @@
     requester = createProviderFreeWorkflowRevisionRequester(),
     initialInstruction = 'Refine this workflow while preserving accepted candidates and run history.',
     title = 'Revise current workflow',
+    taskNodeIds = [],
   }: {
     onClose: () => void;
     requester?: WorkflowDirectorRevisionRequester;
     initialInstruction?: string;
     title?: string;
+    taskNodeIds?: readonly string[];
   } = $props();
 
   let instruction = $state(untrack(() => initialInstruction));
@@ -66,7 +68,7 @@
     controller?.abort();
     controller = null;
     requesting = false;
-    if (taskId) {
+    if (taskId && aiTasks.find(taskId)?.status === 'running') {
       aiTasks.setCancel(taskId, null);
       aiTasks.markCancelled(taskId, 'Director revision cancelled');
     }
@@ -88,13 +90,20 @@
     historyStatus = requester.providerFree
       ? 'Preparing a provider-free revision preview…'
       : 'Preparing a configured Director revision preview…';
+    const graph = workflow.graphSnapshot();
     const task = aiTasks.create({
       projectPath: project.path,
       kind: 'workflow',
       title: `AI Director: ${title}`,
       subtitle: requester.label,
-      progress: historyStatus,
-      detail: { kind: 'workflow', providerLabel: requester.label, outputName: title },
+      progress: 'Preparing and validating a workflow revision…',
+      detail: {
+        kind: 'workflow',
+        providerLabel: requester.label,
+        outputName: title,
+        workflowId: graph.id,
+        nodeIds: graph.nodes.filter((node) => taskNodeIds.includes(node.id)).map((node) => node.id),
+      },
     });
     activeTaskId = task.id;
     aiTasks.setCancel(task.id, async () => currentController.abort());
@@ -113,18 +122,17 @@
       if (result.result.proposal) aiTasks.complete(task.id, 'Director revision ready for review');
       else aiTasks.fail(task.id, 'The Director revision failed workflow validation.');
     } catch (caught) {
-      if (epoch !== requestEpoch) return;
-      if (caught instanceof WorkflowDirectorRevisionCancelledError) {
-        aiTasks.markCancelled(task.id, 'Director revision cancelled');
+      if (epoch !== requestEpoch || caught instanceof WorkflowDirectorRevisionCancelledError) {
+        if (aiTasks.find(task.id)?.status === 'running') aiTasks.markCancelled(task.id, 'Director revision cancelled');
         return;
       }
       error = caught instanceof Error ? caught.message : String(caught);
       historyStatus = 'Revision request failed; the workflow was not changed.';
-      aiTasks.fail(task.id, error);
+      if (aiTasks.find(task.id)?.status === 'running') aiTasks.fail(task.id, error);
     } finally {
+      aiTasks.setCancel(task.id, null);
+      if (activeTaskId === task.id) activeTaskId = null;
       if (epoch === requestEpoch) {
-        aiTasks.setCancel(task.id, null);
-        if (activeTaskId === task.id) activeTaskId = null;
         controller = null;
         requesting = false;
       }
