@@ -562,30 +562,103 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     async (completionOrder) => {
       const store = new WorkflowStore();
       store.newFromTemplate('campaign-composer', 'Unsaved Campaign');
-      const writes = [deferred<string | null>(), deferred<string | null>()];
-      vi.spyOn(project, 'saveDocument')
+      const writes = [
+        deferred<{ relativePath: string; name: string }>(),
+        deferred<{ relativePath: string; name: string }>(),
+      ];
+      vi.spyOn(project, 'pickDocumentSavePath')
+        .mockResolvedValueOnce('/virtual/project/documents/unsaved-campaign-first')
+        .mockResolvedValueOnce('/virtual/project/documents/unsaved-campaign-second');
+      vi.spyOn(project, 'saveDocumentAtPathAs')
         .mockReturnValueOnce(writes[0].promise)
         .mockReturnValueOnce(writes[1].promise);
 
       const olderSave = store.save();
       const newerSave = store.save();
       if (completionOrder === 'older-first') {
-        writes[0].resolve('workflows/unsaved-campaign-first.cxflow.json');
+        writes[0].resolve({
+          relativePath: 'documents/unsaved-campaign-first.cxflow.json',
+          name: 'unsaved-campaign-first.cxflow.json',
+        });
         await olderSave;
         expect(store.savedPath).toBeNull();
-        writes[1].resolve('workflows/unsaved-campaign-second.cxflow.json');
+        writes[1].resolve({
+          relativePath: 'documents/unsaved-campaign-second.cxflow.json',
+          name: 'unsaved-campaign-second.cxflow.json',
+        });
         await newerSave;
       } else {
-        writes[1].resolve('workflows/unsaved-campaign-second.cxflow.json');
+        writes[1].resolve({
+          relativePath: 'documents/unsaved-campaign-second.cxflow.json',
+          name: 'unsaved-campaign-second.cxflow.json',
+        });
         await newerSave;
-        writes[0].resolve('workflows/unsaved-campaign-first.cxflow.json');
+        writes[0].resolve({
+          relativePath: 'documents/unsaved-campaign-first.cxflow.json',
+          name: 'unsaved-campaign-first.cxflow.json',
+        });
         await olderSave;
       }
 
-      expect(store.savedPath).toBe('workflows/unsaved-campaign-second.cxflow.json');
+      expect(store.savedPath).toBe('documents/unsaved-campaign-second.cxflow.json');
       expect(store.dirty).toBe(false);
     },
   );
+
+  it('opens Save Workflow Board for a new workflow and uses the selected filename', async () => {
+    const store = new WorkflowStore();
+    store.newBoard();
+    const pickPath = vi.spyOn(project, 'pickDocumentSavePath')
+      .mockResolvedValue('/virtual/project/documents/Named Campaign.cxflow');
+    const saveAtPath = vi.spyOn(project, 'saveDocumentAtPathAs')
+      .mockResolvedValue({
+        relativePath: 'documents/Named Campaign.cxflow.json',
+        name: 'Named Campaign.cxflow.json',
+      });
+
+    await expect(store.save()).resolves.toBe('documents/Named Campaign.cxflow.json');
+
+    expect(pickPath).toHaveBeenCalledWith('Untitled Workflow.cxflow.json', 'Save Workflow Board');
+    expect(saveAtPath).toHaveBeenCalledWith(expect.objectContaining({
+      targetPath: '/virtual/project/documents/Named Campaign.cxflow',
+      name: 'Named Campaign.cxflow.json',
+    }));
+    expect(store.name).toBe('Named Campaign');
+    expect(store.savedPath).toBe('documents/Named Campaign.cxflow.json');
+    expect(store.dirty).toBe(false);
+  });
+
+  it('overwrites an opened workflow after load normalization without opening Save As', async () => {
+    const source = new WorkflowStore();
+    source.newFromTemplate('campaign-composer', 'Existing Campaign');
+    const graph = structuredClone(source.serialize());
+    const transform = graph.nodes.find((node) => node.type === 'transform')!;
+    transform.ports.inputs = transform.ports.inputs.filter((port) => port.id !== 'assets');
+
+    const store = new WorkflowStore();
+    store.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(graph)),
+      'documents/existing-campaign.cxflow.json',
+      'existing-campaign',
+    );
+    const pickPath = vi.spyOn(project, 'pickDocumentSavePath');
+    const saveToPath = vi.spyOn(project, 'saveDocumentToPath')
+      .mockResolvedValue('documents/existing-campaign.cxflow.json');
+
+    expect(store.requiresExplicitSave).toBe(true);
+    expect(store.savedPath).toBe('documents/existing-campaign.cxflow.json');
+
+    await expect(store.save()).resolves.toBe('documents/existing-campaign.cxflow.json');
+
+    expect(pickPath).not.toHaveBeenCalled();
+    expect(saveToPath).toHaveBeenCalledWith(
+      'documents/existing-campaign.cxflow.json',
+      expect.any(Uint8Array),
+    );
+    expect(store.requiresExplicitSave).toBe(false);
+    expect(store.savedPath).toBe('documents/existing-campaign.cxflow.json');
+    expect(store.dirty).toBe(false);
+  });
 
   it('ignores save completion after another workflow is opened in the same store', async () => {
     const store = storeWithAcceptedHistory();

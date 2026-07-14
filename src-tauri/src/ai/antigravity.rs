@@ -66,16 +66,16 @@ use crate::ai::{
     command_failure_with_required_output, configure_ai_process_group, emit_codex_part_progress,
     emit_codex_progress, emit_job_file_progress, emit_kept_job_dir, emit_provider_progress,
     image_agent_autonomy_contract, join_output_readers_bounded, now_id, output_tail,
-    project_or_temp_job_path, reference_prompt_note, remove_legacy_generative_fill_agent_inputs,
-    request_ai_director_input, required_png_output_is_ready, safe_job_child_path,
-    sanitize_provider_progress_line, should_keep_job_dir, spawn_output_reader,
-    synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
-    validate_reference_pngs, watched_job_files, write_ai_job_prompt, write_ai_job_settings,
-    write_reference_pngs, AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode,
-    AiDirectorProvider, AiModelCapability, AiProviderCapabilitiesResult, CodexDetectionResult,
-    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR,
-    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    parse_decouple_asset_manifest, project_or_temp_job_path, reference_prompt_note,
+    remove_legacy_generative_fill_agent_inputs, request_ai_director_input,
+    required_png_output_is_ready, safe_job_child_path, sanitize_provider_progress_line,
+    should_keep_job_dir, spawn_output_reader, synthesize_decouple_asset_manifest,
+    terminate_ai_process_tree, track_ai_process_tree, validate_reference_pngs, watched_job_files,
+    write_ai_job_prompt, write_ai_job_settings, write_reference_pngs, AgentRunResult,
+    AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiModelCapability,
+    AiProviderCapabilitiesResult, CodexDetectionResult, DecoupleImageResult, DecoupledLayerResult,
+    GeneratedImageLayerResult, GeneratedImageResult, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
+    ANTIGRAVITY_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{encode_rgba_png, is_png, png_data_url, png_dimensions_from_bytes};
 use crate::project::{
@@ -2413,7 +2413,8 @@ Required output:
 - Prefer real transparent pixels everywhere outside the objects, including soft alpha for hair, lace, rope, glass, shadows, antialiasing, and semi-transparent material.
 - If real alpha is not practical, create one same-size grayscale alpha mask and record it in `alphaMask`.
 - Only when neither real alpha nor an alpha mask is practical, use the perfectly flat PaintNode chroma-key matte {AI_CHROMA_KEY_HEX} and record `keyColor` as `{AI_CHROMA_KEY_HEX}`. Never render a checkerboard transparency preview.
-- Create `{job_dir}/manifest.json` with a top-level `layers` array containing exactly one entry for `asset-index-sheet.png`. The entry may also contain `alphaMask` or `keyColor` as described above.
+- Create `{job_dir}/manifest.json` with exactly one entry using this minimum schema: `{{"layers":[{{"name":"Asset index sheet","file":"asset-index-sheet.png"}}]}}`.
+- The `file` field is required and must be exactly `asset-index-sheet.png`. The entry may also contain `alphaMask` or `keyColor` as described above.
 - Use file names relative to `{job_dir}`, not absolute paths.
 - Work only inside `{job_dir}` and do not ask follow-up questions.
 
@@ -2437,6 +2438,7 @@ Required output:
 - If useful, create PNG alpha masks inside `{job_dir}`.
 - The manifest must be JSON with a top-level `layers` array.
 - Each layer must include `name` and `file`. Optional fields are `alphaMask`, `keyColor`, `x`, `y`, `opacity`, and `visible`.
+- Use this entry shape for every asset: `{{"name":"Reusable asset name","file":"asset-1.png"}}`. Never put the filename only in `name`; `file` is required.
 - Use file names relative to `{job_dir}`, such as `asset-1.png`, not absolute paths.
 - Do not ask follow-up questions.
 
@@ -4689,8 +4691,7 @@ pub(crate) async fn decouple_antigravity_image(
                 ));
             }
         };
-        let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
-            .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
+        let manifest = parse_decouple_asset_manifest(&manifest_text, &job_path)?;
         if manifest.layers.is_empty() {
             return Err("Asset manifest did not contain any assets.".into());
         }
@@ -5768,6 +5769,8 @@ mod tests {
         assert!(prompt.contains("exactly once"));
         assert!(prompt.contains("exactly one entry"));
         assert!(prompt.contains("asset-index-sheet.png"));
+        assert!(prompt.contains(r#""file":"asset-index-sheet.png""#));
+        assert!(prompt.contains("The `file` field is required"));
         assert!(prompt.contains("Never render a checkerboard"));
         assert!(prompt.contains("#00ff00"));
         assert!(prompt.contains("Semantically reconstruct"));

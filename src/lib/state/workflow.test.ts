@@ -700,7 +700,7 @@ describe('WorkflowStore graph adapter', () => {
     });
     expect(normalized.runRecords.some((record) => record.status === 'running')).toBe(false);
     expect(reopened.requiresExplicitSave).toBe(true);
-    expect(reopened.savedPath).toBeNull();
+    expect(reopened.savedPath).toBe('workflows/campaign.cxflow.json');
     expect(reopened.migrationSourcePath).toBe('workflows/campaign.cxflow.json');
     expect(reopened.dirty).toBe(true);
     expect(reopened.transformExecution(interrupted.nodeId)).toMatchObject({
@@ -1070,6 +1070,24 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.creatorNodes.find((node) => node.id === artId)?.config.prompt).toBe('Top-lit editorial layout');
     expect(store.creatorNodes.find((node) => node.id === transformId)?.config).toMatchObject({ capability: 'relight', instructions: 'Warm key light' });
     expect(store.creatorNodes.find((node) => node.id === reviewId)?.config).toMatchObject({ mode: 'human', instructions: 'Prefer legibility' });
+  });
+
+  it('preserves an intentionally empty role on an assigned input node', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Editable input role');
+    const inputId = store.addCreatorNode('input');
+
+    store.assignAsset(inputId, campaignProduct);
+    store.configureCreatorNode(inputId, { role: 'Connected visual input' });
+    store.configureCreatorNode(inputId, { role: '' });
+
+    expect(store.graphSnapshot().nodes.find((node) => node.id === inputId)?.config.role).toBe('');
+    expect(store.nodes.find((node) => node.id === inputId)?.note).toBe('');
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Editable input role');
+    expect(reopened.graphSnapshot().nodes.find((node) => node.id === inputId)?.config.role).toBe('');
+    expect(reopened.nodes.find((node) => node.id === inputId)?.note).toBe('');
   });
 
   it('connects the exact named typed ports requested by the board', () => {
@@ -1594,7 +1612,7 @@ describe('WorkflowStore graph adapter', () => {
     store.openFromBytes(originalBytes, `workflows/${fixture.name}.cxflow.json`, fixture.name);
 
     expect(store.requiresExplicitSave).toBe(true);
-    expect(store.savedPath).toBeNull();
+    expect(store.savedPath).toBe(`workflows/${fixture.name}.cxflow.json`);
     expect(store.migrationSourcePath).toContain('.cxflow.json');
     expect(store.serialize().version).toBe(WORKFLOW_GRAPH_VERSION);
     expect(JSON.parse(new TextDecoder().decode(originalBytes))).toEqual(fixture);
@@ -1712,6 +1730,24 @@ describe('WorkflowStore graph adapter', () => {
 
     store.setName('  Renamed.cxflow.json  ');
     expect(store.serialize().metadata.name).toBe('Renamed');
+  });
+
+  it('repairs a workflow extension leaked into metadata when it matches the opened filename', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
+    const graph = structuredClone(source.serialize());
+    graph.metadata.name = 'workflow-test-2.cxflow';
+
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(graph)),
+      'documents/workflow-test-2.cxflow.json',
+      'workflow-test-2',
+    );
+
+    expect(store.name).toBe('workflow-test-2');
+    expect(store.serialize().metadata.name).toBe('workflow-test-2');
+    expect(store.savedPath).toBe('documents/workflow-test-2.cxflow.json');
   });
 
   it('preserves fractional v2 pan for identity and saturated zoom no-ops', () => {

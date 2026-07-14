@@ -66,17 +66,16 @@ use crate::ai::{
     cleanup_project_job_enabled, clear_ai_run_cancelled, codex_agent_message_text, command_failure,
     configure_ai_process_group, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
     emit_kept_job_dir, join_output_readers_bounded, now_id, optional_project_dir, output_tail,
-    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
-    remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
-    safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
+    parse_decouple_asset_manifest, project_agent_run_dir, project_agent_run_dir_for_run,
+    reference_prompt_note, remove_legacy_generative_fill_agent_inputs, request_ai_director_input,
+    safe_job_child_path, safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
     AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
     AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
-    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, GROK_RUNS_DIR,
-    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    DecoupleImageResult, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
+    TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
+    CODEX_RUNS_DIR, GROK_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -5030,8 +5029,7 @@ pub(crate) async fn decouple_codex_image(
                 ));
             }
         };
-        let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
-            .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
+        let manifest = parse_decouple_asset_manifest(&manifest_text, &job_path)?;
         if manifest.layers.is_empty() {
             return Err("Asset manifest did not contain any assets.".into());
         }

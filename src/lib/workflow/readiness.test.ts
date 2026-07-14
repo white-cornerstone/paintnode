@@ -222,7 +222,7 @@ describe('workflow readiness', () => {
     });
   });
 
-  it('blocks missing, disconnected, and stale required asset bindings with a specific next action', () => {
+  it('blocks missing and stale connected required asset bindings with a specific next action', () => {
     const missing = workflowReadiness(instantiateWorkflowTemplate('campaign-composer'), readyOptions());
     expect(missing.items.find((item) => item.code === 'required-assets')).toMatchObject({
       status: 'blocked',
@@ -230,20 +230,32 @@ describe('workflow readiness', () => {
       action: 'Choose an asset for Product',
     });
 
-    const disconnectedGraph = bindProduct();
-    disconnectedGraph.edges = disconnectedGraph.edges.filter((edge) => edge.source.nodeId !== 'slot-product');
-    const disconnected = workflowReadiness(disconnectedGraph, readyOptions());
-    expect(disconnected.items.find((item) => item.code === 'required-assets')).toMatchObject({
-      status: 'blocked',
-      message: expect.stringMatching(/not connected/i),
-      action: 'Reconnect Product to Art Direction',
-    });
-
     const stale = workflowReadiness(bindProduct(), { ...readyOptions(), assets: [] });
     expect(stale.items.find((item) => item.code === 'required-assets')).toMatchObject({
       status: 'blocked',
       message: expect.stringMatching(/no longer available/i),
       action: 'Replace the asset in Product',
+    });
+  });
+
+  it('ignores populated Visual Input nodes that are not connected to the generation path', () => {
+    const graph = directWorkflow();
+    graph.nodes.push(createCreatorNode('input', {
+      id: 'planned-input',
+      title: 'Planned visual input',
+      config: {
+        assetId: 'planned-asset',
+        relativePath: 'assets/planned.png',
+        role: 'Reserved for a later Transform',
+      },
+    }));
+
+    const result = workflowReadiness(graph, { ...readyOptions(), targetNodeId: 'direct-output' });
+
+    expect(result.ready).toBe(true);
+    expect(result.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'complete',
+      message: '1 required visual input is ready.',
     });
   });
 

@@ -311,8 +311,21 @@ function id(prefix: string): string {
 }
 
 function cleanWorkflowName(name: string): string {
-  const trimmed = name.trim().replace(/\.cxflow\.json$/i, '');
+  const trimmed = name.trim().replace(/\.cxflow(?:\.json)?$/i, '');
   return trimmed || 'Untitled Workflow';
+}
+
+function workflowNameFromSavePath(path: string): string {
+  const fileName = path.split(/[\\/]/).pop() ?? path;
+  return cleanWorkflowName(fileName);
+}
+
+function loadedWorkflowName(metadataName: string, fallbackName: string): string {
+  if (!metadataName) return cleanWorkflowName(fallbackName);
+  const cleanedMetadataName = cleanWorkflowName(metadataName);
+  return cleanedMetadataName === cleanWorkflowName(fallbackName)
+    ? cleanedMetadataName
+    : metadataName;
 }
 
 function roundWorkflowNumber(value: number): number {
@@ -2717,9 +2730,9 @@ export class WorkflowStore {
     this.selection = result.graph.nodes.some((node) => node.id === 'composition') ? { kind: 'composition' } : null;
     this.storyboardEditing = false;
     this.storyboardTool = 'brush';
-    this.name = result.graph.metadata.name || cleanWorkflowName(fallbackName);
+    this.name = loadedWorkflowName(result.graph.metadata.name, fallbackName);
     this.aiDefaults = result.graph.metadata.ai ?? currentWorkflowAiDefaults();
-    this.savedPath = result.requiresExplicitSave ? null : savedPath;
+    this.savedPath = savedPath;
     this.migrationSourcePath = result.requiresExplicitSave ? savedPath : null;
     this.requiresExplicitSave = result.requiresExplicitSave;
     this.connectionError = null;
@@ -2737,12 +2750,28 @@ export class WorkflowStore {
 
   async save(): Promise<string | null> {
     if (!project.path) return null;
-    const name = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
     const savedPath = this.savedPath;
-    const submission = this.captureSaveSubmission(savedPath, savedPath === null);
-    const relativePath = savedPath
-      ? await project.saveDocumentToPath(savedPath, submission.bytes)
-      : await project.saveDocument(name, submission.bytes);
+    let submission: WorkflowSaveSubmission;
+    let relativePath: string | null;
+    if (savedPath) {
+      submission = this.captureSaveSubmission(savedPath, false);
+      relativePath = await project.saveDocumentToPath(savedPath, submission.bytes);
+    } else {
+      const defaultName = `${this.name || 'workflow'}.cxflow.json`;
+      const targetPath = await project.pickDocumentSavePath(defaultName, 'Save Workflow Board');
+      if (!targetPath) return null;
+      const previousName = this.name;
+      this.setName(workflowNameFromSavePath(targetPath));
+      const fileName = `${this.name || 'workflow'}.cxflow.json`;
+      submission = this.captureSaveSubmission(null, true);
+      const result = await project.saveDocumentAtPathAs({
+        targetPath,
+        name: fileName,
+        previousName,
+        bytes: submission.bytes,
+      });
+      relativePath = result.relativePath;
+    }
     this.reconcileSaveCompletion(submission, relativePath);
     return relativePath;
   }
