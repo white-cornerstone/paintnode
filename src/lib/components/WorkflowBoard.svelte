@@ -90,6 +90,9 @@
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
     workflowTransformContext,
+    workflowConceptReviewNode,
+    workflowConceptPreviewTarget,
+    workflowTransformRole,
     type WorkflowNodeV2,
   } from '../workflow';
   import {
@@ -170,6 +173,7 @@
   let qaScenario = $state<ProviderFreeQaScenario>('success');
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
+  let retryingCandidateId = $state<string | null>(null);
   let selectedReviewCandidates = $state<Record<string, string>>({});
   let aiReviewMessages = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let reviewVerificationState = $state<WorkflowReviewVerificationState>({
@@ -1162,8 +1166,9 @@
 
   function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
     const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: node.id });
-    if (path?.reviewNodeId) {
-      const resolution = workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity);
+    const directReviewNodeId = directReviewForOutput(node.id);
+    if (directReviewNodeId) {
+      const resolution = workflow.reviewResolution(directReviewNodeId, assets, true, project.identity);
       if (resolution.state !== 'ready') return null;
       return assets.find((asset) => (
         asset.id === resolution.output.assetId && asset.relativePath === resolution.output.relativePath
@@ -1178,6 +1183,13 @@
       }
     }
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
+  }
+
+  function directReviewForOutput(outputNodeId: string): string | null {
+    const graph = workflow.serialize();
+    const edge = graph.edges.find((candidate) => candidate.target.nodeId === outputNodeId
+      && candidate.target.portId === 'source');
+    return graph.nodes.find((node) => node.id === edge?.source.nodeId && node.type === 'review')?.id ?? null;
   }
 
   function creatorConfigString(config: Record<string, unknown>, key: string): string {
@@ -2374,7 +2386,7 @@
       return;
     }
     const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id });
-    const reviewedOutput = Boolean(path?.reviewNodeId);
+    const reviewedOutput = Boolean(directReviewForOutput(targetOutput.id));
     busy = true;
     progress = reviewedOutput
       ? 'Verifying promoted Review output…'
@@ -2459,6 +2471,28 @@
   function outputForTransform(nodeId: string): WorkflowOutputNode | null {
     const outputId = resolveWorkflowCampaignPath(workflow.serialize(), { transformNodeId: nodeId })?.outputNodeId ?? null;
     return outputId ? workflow.outputNode(outputId) ?? null : null;
+  }
+
+  async function focusTargetOutput(nodeId: string): Promise<void> {
+    const output = outputForTransform(nodeId);
+    if (!output) return;
+    workflow.select({ kind: 'output', id: output.id });
+    centerBoardAt(output.x + output.width / 2, output.y + output.height / 2);
+    await tick();
+    document.querySelector<HTMLElement>(`[data-workflow-node="${output.id}"]`)?.focus();
+  }
+
+  function setConceptPreviewAspect(nodeId: string, aspectRatio: string): void {
+    const dimensions = aspectRatio === '4:5'
+      ? { width: 1024, height: 1280 }
+      : aspectRatio === '16:9'
+        ? { width: 1792, height: 1024 }
+        : { width: 1024, height: 1024 };
+    workflow.configureCreatorNode(nodeId, {
+      conceptPreviewAspectRatio: aspectRatio,
+      conceptPreviewWidth: dimensions.width,
+      conceptPreviewHeight: dimensions.height,
+    });
   }
 
   function selectedReviewCandidate(nodeId: string) {
@@ -2556,10 +2590,26 @@
     }
   }
 
-  async function generateCandidateBranches(nodeId: string): Promise<void> {
-    const output = outputForTransform(nodeId);
-    if (!output) {
-      error = 'Connect this Transform to an Output before generating candidate branches.';
+  async function regenerateReviewCandidates(nodeId: string): Promise<void> {
+    const sourceNodeId = workflow.incoming(nodeId)
+      .find((connection) => connection.targetPortId === 'candidates')?.from ?? null;
+    const source = sourceNodeId
+      ? workflow.creatorNodes.find((candidate) => candidate.id === sourceNodeId && candidate.type === 'transform')
+      : null;
+    if (!source) {
+      error = 'Reconnect a Transform to this Review before regenerating candidates.';
+      return;
+    }
+    await generateCandidateBranches(source.id);
+  }
+
+  async function generateCandidateBranches(
+    nodeId: string,
+    existingTaskId: string | null = null,
+  ): Promise<void> {
+    const conceptReview = workflowConceptReviewNode(workflow.serialize(), nodeId);
+    if (!conceptReview) {
+      error = 'Connect this Concept Generator to a Review before generating candidate branches.';
       return;
     }
     if (!providerSelection.ready || !providerSelection.provider) {
@@ -2571,9 +2621,35 @@
     progress = `Generating ${candidateCount} independent candidates…`;
     const controller = new AbortController();
     activeCandidateController = controller;
-    const context = createWorkflowExecutionContext(createRunId());
+    const runId = createRunId();
+    const context = createWorkflowExecutionContext(runId, workflowCandidateProgressLabel);
+    const transformName = workflow.creatorNodes.find((node) => node.id === nodeId)?.name ?? 'Transform';
+    const task = existingTaskId
+      ? aiTasks.find(existingTaskId)
+      : aiTasks.create({
+          projectPath: context.runProjectPath,
+          kind: 'workflow',
+          title: `Generate candidates: ${transformName}`,
+          subtitle: context.runProvider,
+          progress,
+          runId,
+          detail: {
+            kind: 'workflow', providerLabel: context.runProvider,
+            outputName: `${candidateCount} concept candidates`,
+          },
+        });
+    if (!task) {
+      activeCandidateController = null;
+      busy = false;
+      progress = '';
+      return;
+    }
+    aiTasks.setRunId(task.id, runId);
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => controller.abort());
+    aiTasks.setRetry(task.id, () => generateCandidateBranches(nodeId, task.id));
     try {
-      const outcome = await workflow.runCandidateBranches(output.id, {
+      const outcome = await workflow.runCandidateBranches(nodeId, {
         ...context.options,
         signal: controller.signal,
       }, {
@@ -2584,28 +2660,93 @@
       if (!outcome.committed) {
         if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
         error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
-        candidateResultMessages[nodeId] = workflowCandidateBranchResultSummary(outcome.group);
+        const review = workflowConceptReviewNode(workflow.serialize(), nodeId);
+        const firstSuccessful = outcome.group.candidates.find((candidate) => candidate.status === 'succeeded');
+        if (review && firstSuccessful) {
+          selectedReviewCandidates[review.id] = firstSuccessful.candidateId;
+        }
+        const summary = workflowCandidateBranchResultSummary(outcome.group);
+        candidateResultMessages[nodeId] = summary;
+        const succeeded = outcome.group.candidates.filter((candidate) => candidate.status === 'succeeded').length;
+        const cancelled = outcome.group.candidates.filter((candidate) => candidate.status === 'cancelled').length;
+        if (succeeded > 0) aiTasks.complete(task.id, summary);
+        else if (cancelled === outcome.group.candidates.length) aiTasks.markCancelled(task.id, summary);
+        else aiTasks.fail(task.id, summary);
         editor.flash(outcome.commitMessage);
       }
     } catch (cause) {
       error = (cause as Error)?.message ?? String(cause);
+      if (controller.signal.aborted || (cause as { code?: unknown })?.code === 'CANCELLED') {
+        aiTasks.markCancelled(task.id, 'Candidate generation cancelled');
+      } else {
+        aiTasks.fail(task.id, error);
+      }
     } finally {
+      aiTasks.setCancel(task.id, null);
       if (activeCandidateController === controller) activeCandidateController = null;
+      if (activeWorkflowTaskId === task.id) activeWorkflowTaskId = null;
       busy = false;
       progress = '';
     }
   }
 
-  async function retryCandidate(candidateId: string): Promise<void> {
-    if (!providerSelection.ready || !providerSelection.provider) return;
+  async function retryCandidate(
+    candidateId: string,
+    existingTaskId: string | null = null,
+  ): Promise<void> {
+    const candidateGroup = workflow.candidateBranchGroups()
+      .find((group) => group.candidates.some((candidate) => candidate.candidateId === candidateId));
+    const candidateBeforeRetry = candidateGroup?.candidates.find((candidate) => candidate.candidateId === candidateId);
+    if (!candidateGroup || !candidateBeforeRetry) {
+      error = 'This candidate is no longer available to retry.';
+      if (existingTaskId) aiTasks.fail(existingTaskId, error);
+      editor.flash(error);
+      return;
+    }
+    if (!providerSelection.ready || !providerSelection.provider) {
+      error = providerSelection.label;
+      candidateResultMessages[candidateGroup.sourceNodeId] = error;
+      if (existingTaskId) aiTasks.fail(existingTaskId, error);
+      editor.flash(error);
+      return;
+    }
     busy = true;
+    retryingCandidateId = candidateId;
     error = '';
-    progress = 'Retrying one candidate while preserving its siblings…';
+    const retryLabel = `Candidate ${candidateBeforeRetry.ordinal}`;
+    progress = `Retrying ${retryLabel} while preserving its siblings…`;
+    candidateResultMessages[candidateGroup.sourceNodeId] = `${progress}`;
     const controller = new AbortController();
     activeCandidateController = controller;
-    const context = createWorkflowExecutionContext(createRunId());
+    const runId = createRunId();
+    const context = createWorkflowExecutionContext(runId, workflowCandidateProgressLabel);
+    const transformName = workflow.creatorNodes
+      .find((node) => node.id === candidateGroup.sourceNodeId)?.name ?? 'Transform';
+    const task = existingTaskId
+      ? aiTasks.find(existingTaskId)
+      : aiTasks.create({
+          projectPath: context.runProjectPath,
+          kind: 'workflow',
+          title: `Retry ${retryLabel}: ${transformName}`,
+          subtitle: context.runProvider,
+          progress,
+          runId,
+          detail: { kind: 'workflow', providerLabel: context.runProvider, outputName: retryLabel },
+        });
+    if (!task) {
+      activeCandidateController = null;
+      retryingCandidateId = null;
+      busy = false;
+      progress = '';
+      return;
+    }
+    aiTasks.setRunId(task.id, runId);
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => controller.abort());
+    aiTasks.setRetry(task.id, () => retryCandidate(candidateId, task.id));
     try {
       const outcome = await workflow.retryCandidateBranch(candidateId, {
         ...context.options,
@@ -2614,17 +2755,53 @@
       if (!outcome.committed) {
         if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
         error = outcome.commitMessage;
+        candidateResultMessages[candidateGroup.sourceNodeId] = outcome.commitMessage;
+        aiTasks.fail(task.id, outcome.commitMessage);
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
-        editor.flash(outcome.commitMessage);
+        const status = outcome.candidate.status === 'succeeded'
+          ? 'ready for Review'
+          : outcome.candidate.status === 'cancelled'
+            ? 'cancelled'
+            : 'failed again';
+        const message = `${retryLabel} attempt ${outcome.candidate.attemptCount} ${status}.`;
+        candidateResultMessages[candidateGroup.sourceNodeId] = message;
+        if (outcome.candidate.status === 'succeeded') {
+          const review = workflowConceptReviewNode(workflow.serialize(), candidateGroup.sourceNodeId);
+          if (review) selectedReviewCandidates[review.id] = outcome.candidate.candidateId;
+          aiTasks.complete(task.id, message);
+        } else if (outcome.candidate.status === 'cancelled') {
+          aiTasks.markCancelled(task.id, message);
+        } else {
+          aiTasks.fail(task.id, outcome.candidate.failure?.message ?? message);
+        }
+        editor.flash(message);
       }
     } catch (cause) {
       error = (cause as Error)?.message ?? String(cause);
+      candidateResultMessages[candidateGroup.sourceNodeId] = `${retryLabel} could not be retried: ${error}`;
+      if (controller.signal.aborted || (cause as { code?: unknown })?.code === 'CANCELLED') {
+        aiTasks.markCancelled(task.id, `${retryLabel} retry cancelled`);
+      } else {
+        aiTasks.fail(task.id, error);
+      }
+      editor.flash(`Candidate retry failed: ${error}`);
     } finally {
+      aiTasks.setCancel(task.id, null);
       if (activeCandidateController === controller) activeCandidateController = null;
+      if (activeWorkflowTaskId === task.id) activeWorkflowTaskId = null;
+      retryingCandidateId = null;
       busy = false;
       progress = '';
     }
+  }
+
+  function clearFailedCandidates(nodeId: string): void {
+    const cleared = workflow.clearFailedCandidateBranches(nodeId);
+    if (cleared === 0) return;
+    const message = `Cleared ${cleared} failed candidate${cleared === 1 ? '' : 's'} from this Transform.`;
+    candidateResultMessages[nodeId] = message;
+    editor.flash(message);
   }
 
   async function cancelGenerate(): Promise<void> {
@@ -3046,6 +3223,9 @@
                 {/if}
               {:else if node.type === 'transform'}
                 {@const contextSummary = transformContextSummary(node.id)}
+                {@const transformRole = workflowTransformRole(workflow.serialize(), node.id)}
+                {@const conceptPreview = workflowConceptPreviewTarget(workflow.serialize(), node.id)}
+                {@const targetOutput = outputForTransform(node.id)}
                 <label class="creator-config-field">
                   Capability
                   <select
@@ -3075,6 +3255,49 @@
                     <small><b>Direct references</b> {contextSummary.direct}</small>
                   </span>
                 </div>
+                {#if transformRole === 'concept-generator' && conceptPreview}
+                  <div class="transform-target-summary transform-preview-summary" aria-label={`${node.name} concept preview format`}>
+                    <Icon svg={Image} size={16} />
+                    <span>
+                      <b>Concept preview</b>
+                      {conceptPreview.width} × {conceptPreview.height}
+                      <small>Review-only canvas. Delivery Outputs are independent.</small>
+                    </span>
+                    <select
+                      aria-label={`${node.name} concept preview aspect ratio`}
+                      value={conceptPreview.aspectRatio}
+                      onchange={(event) => setConceptPreviewAspect(node.id, event.currentTarget.value)}
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="1:1">1:1</option>
+                      <option value="4:5">4:5</option>
+                      <option value="16:9">16:9</option>
+                      {#if conceptPreview.aspectRatio === 'custom'}<option value="custom">Custom</option>{/if}
+                    </select>
+                  </div>
+                {:else}
+                  <div
+                    class:missing={!targetOutput}
+                    class="transform-target-summary"
+                    aria-label={`${node.name} target output`}
+                  >
+                    <Icon svg={targetOutput ? Image : ErrorCircle} size={16} />
+                    <span>
+                      <b>Target output</b>
+                      {targetOutput
+                        ? `${outputTitle(targetOutput)} · ${targetOutput.finalWidth} × ${targetOutput.finalHeight}`
+                        : 'No single target Output'}
+                      <small>
+                        {targetOutput
+                          ? 'Dimensions are inherited from this Output.'
+                          : 'Connect one Output path. Use a separate Transform for each delivery format.'}
+                      </small>
+                    </span>
+                    {#if targetOutput}
+                      <button type="button" onclick={() => void focusTargetOutput(node.id)}>Show Output</button>
+                    {/if}
+                  </div>
+                {/if}
               {:else if node.type === 'review'}
                 <label class="creator-config-field">
                   Review mode
@@ -3099,6 +3322,12 @@
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
                 {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
                 {@const aiRecommendation = workflow.reviewRecommendation(node.id)}
+                {@const reviewSourceNodeId = workflow.incoming(node.id)
+                  .find((connection) => connection.targetPortId === 'candidates')?.from ?? null}
+                {@const upstreamCandidateCount = reviewSourceNodeId
+                  ? workflow.candidateBranchGroups(reviewSourceNodeId)
+                    .reduce((total, group) => total + group.candidates.length, 0)
+                  : 0}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
                   <p class="review-keyboard-hint">Keyboard: R focuses candidates; P promotes the selected eligible candidate. F7/F8 and Alt+R/Ctrl+Enter are also available.</p>
                   <button
@@ -3184,19 +3413,31 @@
                         Provenance: {reviewCandidate.providerId}{reviewCandidate.model ? ` / ${reviewCandidate.model}` : ''}
                         · {reviewCandidate.sourceAssetIds.length} sources · run {reviewCandidate.latestRunId}
                       </small>
-                      {#if reviewCandidate.failure}<p>{reviewCandidate.failure.message}</p>{/if}
-                      <button
-                        type="button"
-                        aria-keyshortcuts="P F8 Control+Enter"
-                        disabled={busy || reviewCandidate.state !== 'eligible'}
-                        onclick={() => void promoteReviewCandidate(node.id)}
-                      >Promote this candidate</button>
-                      {#if reviewCandidate.state !== 'eligible'}
-                        <small>Resolve this candidate’s {reviewCandidate.state} state before promotion.</small>
+                      {#if reviewCandidate.state === 'stale'}
+                        <button
+                          type="button"
+                          disabled={busy || !providerSelection.ready}
+                          onclick={() => void regenerateReviewCandidates(node.id)}
+                        >Regenerate current candidates</button>
+                        <small>This candidate no longer matches the current workflow or output settings. Generate a new set before promotion.</small>
+                      {:else}
+                        <button
+                          type="button"
+                          aria-keyshortcuts="P F8 Control+Enter"
+                          disabled={busy || reviewCandidate.state !== 'eligible'}
+                          onclick={() => void promoteReviewCandidate(node.id)}
+                        >Promote this candidate</button>
+                        {#if reviewCandidate.state !== 'eligible'}
+                          <small>Resolve this candidate’s {reviewCandidate.state} state before promotion.</small>
+                        {/if}
                       {/if}
                     </div>
                   {:else}
-                    <p class="draft-reason">Generate concept branches upstream to compare and promote them here.</p>
+                    <p class="draft-reason">
+                      {upstreamCandidateCount > 0
+                        ? 'No successful candidates are available for Review. Retry failed branches upstream.'
+                        : 'Generate concept branches upstream to compare and promote them here.'}
+                    </p>
                   {/if}
                 </section>
               {/if}
@@ -3224,7 +3465,10 @@
                     onclick={() => void openResultInEditor(acceptedEditorResult)}
                   >Open accepted result in Editor</button>
                 {/if}
-                {@const branchGroups = workflow.candidateBranchGroups(node.id)}
+                {@const branchGroups = workflow.visibleCandidateBranchGroups(node.id)}
+                {@const failedCandidateCount = branchGroups.reduce((total, group) => (
+                  total + group.candidates.filter((candidate) => candidate.status === 'failed').length
+                ), 0)}
                 {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
                   <p
                     class="selective-running-state"
@@ -3278,7 +3522,16 @@
                 <section class="candidate-branches" aria-label={`${node.name} concept branches`} aria-live="polite">
                   <div class="candidate-branch-head">
                     <strong>Concept branches</strong>
-                    <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
+                    <div class="candidate-branch-summary">
+                      <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
+                      {#if failedCandidateCount > 0}
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onclick={() => clearFailedCandidates(node.id)}
+                        >Clear failed</button>
+                      {/if}
+                    </div>
                   </div>
                   {#if candidateResultMessages[node.id]}
                     <p class="candidate-result-summary" aria-live="polite">{candidateResultMessages[node.id]}</p>
@@ -3302,7 +3555,7 @@
                     </label>
                     <button
                       type="button"
-                      disabled={busy || !providerSelection.ready || !outputForTransform(node.id)}
+                      disabled={busy || !providerSelection.ready || !workflowConceptReviewNode(workflow.serialize(), node.id)}
                       onclick={() => void generateCandidateBranches(node.id)}
                     >Generate branches</button>
                   </div>
@@ -3318,8 +3571,13 @@
                             </small>
                             {#if candidate.failure}<small>{candidate.failure.message}</small>{/if}
                             {#if candidate.status === 'failed' || candidate.status === 'cancelled'}
-                              <button type="button" disabled={busy} onclick={() => void retryCandidate(candidate.candidateId)}>
-                                Retry candidate
+                              <button
+                                type="button"
+                                disabled={busy}
+                                aria-busy={retryingCandidateId === candidate.candidateId}
+                                onclick={() => void retryCandidate(candidate.candidateId)}
+                              >
+                                {retryingCandidateId === candidate.candidateId ? 'Retrying…' : 'Retry candidate'}
                               </button>
                             {/if}
                           </li>
@@ -3614,7 +3872,7 @@
           {@const outputAsset = outputAssetFor(outputNode)}
           {@const ports = workflowNodePorts(outputNode.id)}
           {@const targetReadiness = outputReadiness(outputNode.id)}
-          {@const reviewedOutput = Boolean(resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: outputNode.id })?.reviewNodeId)}
+          {@const reviewedOutput = Boolean(directReviewForOutput(outputNode.id))}
           <article
             class="output-node"
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
@@ -4349,6 +4607,43 @@
     color: var(--text-dim);
     font-size: 9px;
   }
+  .transform-target-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--text-bright);
+    line-height: 1.35;
+  }
+  .transform-target-summary.missing {
+    border-color: color-mix(in srgb, var(--warning, #d6a84b) 38%, transparent);
+    background: color-mix(in srgb, var(--warning, #d6a84b) 8%, transparent);
+  }
+  .transform-target-summary > span,
+  .transform-target-summary small {
+    display: block;
+    min-width: 0;
+  }
+  .transform-target-summary small {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .transform-target-summary button {
+    min-width: 0;
+    padding: 3px 6px;
+    white-space: nowrap;
+    font-size: 9px;
+  }
+  .transform-preview-summary select {
+    min-width: 58px;
+    padding: 3px 4px;
+    font-size: 9px;
+  }
   .extract-run {
     min-width: 0;
     padding: 4px 6px;
@@ -4552,6 +4847,16 @@
     justify-content: space-between;
     color: var(--text-bright);
     font-size: 10px;
+  }
+  .candidate-branch-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .candidate-branch-summary button {
+    min-width: 0;
+    padding: 2px 5px;
+    font-size: 9px;
   }
   .candidate-branch-head span,
   .candidate-group small {

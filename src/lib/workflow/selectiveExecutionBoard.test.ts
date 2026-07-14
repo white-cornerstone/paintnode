@@ -38,14 +38,22 @@ describe('Workflow Board selective execution UX contract', () => {
   it('communicates provider-neutral candidate branch count, state, lineage, and retry', () => {
     expect(boardSource).toContain('Generate branches');
     expect(boardSource).toContain('workflow.runCandidateBranches');
+    expect(boardSource).toContain('Generate candidates: ${transformName}');
+    expect(boardSource).toContain('aiTasks.setRetry(task.id, () => generateCandidateBranches(nodeId, task.id))');
+    expect(boardSource).toContain('Retry ${retryLabel}: ${transformName}');
+    expect(boardSource).toContain('aiTasks.setRetry(task.id, () => retryCandidate(candidateId, task.id))');
+    expect(boardSource).toContain('createWorkflowExecutionContext(runId, workflowCandidateProgressLabel)');
     expect(boardSource).toContain("workflow.runReviewedOutput(targetOutput.id, context.options)");
     expect(boardSource).toContain("resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id })");
-    expect(boardSource).toContain("workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity)");
+    expect(boardSource).toContain('directReviewForOutput');
+    expect(boardSource).toContain('workflowConceptReviewNode');
     expect(boardSource).toContain("reviewedOutput ? 'Use promoted'");
     expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
     expect(boardSource).toContain('aiTasks.setRetry(task.id, () => generate(targetOutput, true, task.id))');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
-    expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
+    expect(boardSource).toContain('workflow.visibleCandidateBranchGroups(node.id)');
+    expect(boardSource).toContain('workflow.clearFailedCandidateBranches(nodeId)');
+    expect(boardSource).toContain('Clear failed');
     expect(boardSource).toContain('workflowCandidateProgressLabel');
     expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
     expect(boardSource).toContain('candidate-result-summary');
@@ -68,6 +76,13 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('role="tablist"');
     expect(boardSource).toContain("event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'");
     expect(boardSource).toContain('Promote this candidate');
+    expect(boardSource).toContain('Regenerate current candidates');
+    expect(boardSource).toContain('void regenerateReviewCandidates(node.id)');
+    expect(boardSource).toContain('selectedReviewCandidates[review.id] = firstSuccessful.candidateId');
+    expect(boardSource).toContain('<b>Target output</b>');
+    expect(boardSource).toContain('Dimensions are inherited from this Output.');
+    expect(boardSource).toContain('void focusTargetOutput(node.id)');
+    expect(boardSource).toContain('Use a separate Transform for each delivery format.');
     expect(boardSource).toContain('Keyboard: R focuses candidates; P promotes the selected eligible candidate.');
     expect(boardSource).toContain('aria-keyshortcuts="R F7 Alt+R"');
     expect(boardSource).toContain('Focus candidate review');

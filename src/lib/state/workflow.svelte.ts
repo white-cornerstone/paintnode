@@ -45,6 +45,7 @@ import {
   executeSelectiveWorkflowPlan,
   createWorkflowExecutionRestrictions,
   prepareCampaignGenerateTransform,
+  prepareConceptGenerateTransform,
   workflowSha256Bytes,
   workflowSha256Text,
   isFullWorkflowRunRecord,
@@ -105,6 +106,7 @@ function workflowEditorContextKey(graph: WorkflowGraphV2, nodeId: string): strin
   const runtimeConfigKeys = new Set([
     'resultAssetReferenceId', 'resultAssetId', 'resultRelativePath',
     'assetReferenceId', 'outputAssetId', 'outputRelativePath',
+    'dismissedCandidateIds',
   ]);
   const nodes = graph.nodes
     .filter((node) => relevantIds.has(node.id))
@@ -1183,11 +1185,21 @@ export class WorkflowStore {
     const node = this.requireGraphDomain().node(id);
     if (!node) return;
     const domain = this.requireGraphDomain();
+    const priorGraphRevision = this.graphRevision;
+    const reviewNodeId = resolveWorkflowCampaignPath(domain.graph, { outputNodeId: id })?.reviewNodeId ?? null;
+    const verification = reviewNodeId ? this.reviewVerifications[reviewNodeId] : undefined;
     this.publishGraphMutation(domain, domain.configureNode(id, {
       ...node.config,
       finalWidth: Math.max(64, roundWorkflowNumber(width)),
       finalHeight: Math.max(64, roundWorkflowNumber(height)),
     }), { label: 'Change output size', mergeKey: `output-size:${id}` });
+    if (reviewNodeId && verification?.graphRevision === priorGraphRevision
+      && this.graphRevision !== priorGraphRevision) {
+      this.reviewVerifications = {
+        ...this.reviewVerifications,
+        [reviewNodeId]: { ...verification, graphRevision: this.graphRevision },
+      };
+    }
   }
 
   panBy(dx: number, dy: number): void {
@@ -2019,6 +2031,48 @@ export class WorkflowStore {
     return sourceNodeId ? groups.filter((group) => group.sourceNodeId === sourceNodeId) : groups;
   }
 
+  dismissedCandidateIds(sourceNodeId: string): string[] {
+    const node = this.requireGraphDomain().node(sourceNodeId);
+    if (!node || node.type !== 'transform' || !Array.isArray(node.config.dismissedCandidateIds)) return [];
+    return node.config.dismissedCandidateIds.filter((candidateId): candidateId is string => (
+      typeof candidateId === 'string' && candidateId.length > 0
+    ));
+  }
+
+  visibleCandidateBranchGroups(sourceNodeId: string): WorkflowCandidateBranchGroup[] {
+    const dismissed = new Set(this.dismissedCandidateIds(sourceNodeId));
+    return this.candidateBranchGroups(sourceNodeId)
+      .map((group) => ({
+        ...group,
+        candidates: group.candidates.filter((candidate) => !dismissed.has(candidate.candidateId)),
+      }))
+      .filter((group) => group.candidates.length > 0);
+  }
+
+  clearFailedCandidateBranches(sourceNodeId: string): number {
+    const domain = this.requireGraphDomain();
+    const node = domain.node(sourceNodeId);
+    if (!node || node.type !== 'transform') return 0;
+    const dismissed = new Set(this.dismissedCandidateIds(sourceNodeId));
+    const failedCandidateIds = this.candidateBranchGroups(sourceNodeId)
+      .flatMap((group) => group.candidates)
+      .filter((candidate) => candidate.status === 'failed' && !dismissed.has(candidate.candidateId))
+      .map((candidate) => candidate.candidateId);
+    if (failedCandidateIds.length === 0) return 0;
+    failedCandidateIds.forEach((candidateId) => dismissed.add(candidateId));
+    const config = { ...node.config, dismissedCandidateIds: [...dismissed] };
+    const issues = validateCreatorNodeConfig(node.type, config);
+    if (issues.length > 0) {
+      throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
+    }
+    this.publishGraphMutation(
+      domain,
+      domain.configureNode(sourceNodeId, config),
+      { label: 'Clear failed candidates' },
+    );
+    return failedCandidateIds.length;
+  }
+
   reviewCandidates(
     reviewNodeId: string,
     availableAssets?: readonly WorkflowProjectAsset[],
@@ -2133,11 +2187,8 @@ export class WorkflowStore {
     const storeRevision = this.rev;
     const sessionIdentity = this.workflowSessionIdentity;
     const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
-    if (!topology.transformNodeId || !topology.outputNodeId) throw new Error('Review requires one unambiguous campaign path.');
-    const prepared = await prepareCampaignGenerateTransform(graph, topology.outputNodeId, {
-      ...options,
-      allowUnpromotedReview: true,
-    });
+    if (!topology.transformNodeId) throw new Error('Review requires one connected Concept Generator.');
+    const prepared = await prepareConceptGenerateTransform(graph, topology.transformNodeId, options);
     const verifiedOutputIds: string[] = [];
     for (const candidate of deriveWorkflowReviewCandidates(graph, reviewNodeId)) {
       if (!candidate.output) continue;
@@ -2239,14 +2290,11 @@ export class WorkflowStore {
     if (!candidate?.output || candidate.state !== 'eligible') {
       throw new Error('Only an available, current candidate can be promoted.');
     }
-    const path = resolveWorkflowCampaignPath(graph, { transformNodeId: candidate.sourceNodeId });
-    if (!path || path.reviewNodeId !== reviewNodeId) {
+    const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
+    if (topology.transformNodeId !== candidate.sourceNodeId) {
       throw new Error('The candidate is no longer connected to this Review.');
     }
-    const prepared = await prepareCampaignGenerateTransform(graph, path.outputNodeId, {
-      ...options,
-      allowUnpromotedReview: true,
-    });
+    const prepared = await prepareConceptGenerateTransform(graph, candidate.sourceNodeId, options);
     if (prepared.materialKey !== candidate.materialKey) {
       throw new Error('The candidate is stale because its upstream creative material changed. Generate current branches first.');
     }
@@ -2284,7 +2332,7 @@ export class WorkflowStore {
   }
 
   async runCandidateBranches(
-    outputNodeId: string,
+    transformNodeId: string,
     options: WorkflowStoreRunOptions,
     branch: WorkflowCandidateBranchExecutionOptions,
   ): Promise<WorkflowCandidateBranchStoreOutcome> {
@@ -2292,7 +2340,7 @@ export class WorkflowStore {
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
-    const outcome = await executeWorkflowCandidateBranches(this.serialize(), outputNodeId, options, branch);
+    const outcome = await executeWorkflowCandidateBranches(this.serialize(), transformNodeId, options, branch);
     const commitMessage = this.workflowSessionIdentity !== sessionIdentity
       ? 'The workflow session changed while candidate branches were running.'
       : this.graphRevision !== graphRevision || this.rev !== storeRevision
@@ -2329,7 +2377,12 @@ export class WorkflowStore {
     this.projectedGraphRevision = this.graphDomain.revision;
     this.syncReactiveGraph(this.graphDomain);
     this.bump();
-    return { ...outcome, committed: true, commitMessage: 'Candidate retry preserved.' };
+    const outcomeMessage = outcome.candidate.status === 'succeeded'
+      ? 'Candidate retry completed.'
+      : outcome.candidate.status === 'cancelled'
+        ? 'Candidate retry was cancelled.'
+        : 'Candidate retry completed with another failure.';
+    return { ...outcome, committed: true, commitMessage: outcomeMessage };
   }
 
   async runCampaignGenerate(

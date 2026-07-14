@@ -97,6 +97,7 @@ describe('creator node registry', () => {
     });
     expect(creatorNodeDefinition('transform').ports.inputs).toEqual([
       { id: 'source', label: 'Directed composition', dataType: 'layout' },
+      { id: 'decision', label: 'Promoted concept', dataType: 'review-decision' },
       { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
       { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
     ]);
@@ -112,6 +113,9 @@ describe('creator node registry', () => {
       { id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' },
     ]);
     expect(creatorNodeDefinition('review').executor.status).toBe('available');
+    expect(creatorNodeDefinition('review').ports.outputs).toEqual([
+      { id: 'selected', label: 'Promoted concept', dataType: 'review-decision' },
+    ]);
   });
 
   it('validates creator configuration without rejecting deliberately empty readiness fields', () => {

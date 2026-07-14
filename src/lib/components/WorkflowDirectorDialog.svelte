@@ -9,6 +9,8 @@
     createProviderFreeWorkflowDirector,
     type CancellableWorkflowDirector,
   } from '../integrations/workflowDirectorAdapters';
+  import { aiTasks } from '../state/aiTasks.svelte';
+  import { project } from '../state/project.svelte';
   import { cloneAiRunOptions, type AiDirectorProvider, type AiRunOptions } from '../state/settings';
   import { workflow } from '../state/workflow.svelte';
   import {
@@ -57,6 +59,7 @@
   let drafting = $state(false);
   let error = $state('');
   let activeDirector: CancellableWorkflowDirector | null = null;
+  let activeTaskId: string | null = null;
   let requestEpoch = 0;
 
   const selection = $derived(workflowDirectorProviderSelection(
@@ -152,15 +155,35 @@
     drafting = true;
     preview = null;
     error = '';
+    const task = aiTasks.create({
+      projectPath: project.path,
+      kind: 'workflow',
+      title: 'AI Director: Draft workflow',
+      subtitle: selection.label,
+      progress: 'Drafting a workflow proposal…',
+      detail: { kind: 'workflow', providerLabel: selection.label, outputName: 'Workflow proposal' },
+    });
+    activeTaskId = task.id;
+    aiTasks.setCancel(task.id, () => director.cancel());
     try {
       const result = await requestDirectorProposalPreview(director, context, workflow, {
         requestSource: directorRequestSource(),
       });
-      if (epoch === requestEpoch) preview = result;
+      if (epoch === requestEpoch) {
+        preview = result;
+        if (result.result.proposal) aiTasks.complete(task.id, 'Workflow proposal ready for review');
+        else aiTasks.fail(task.id, 'The Director response failed workflow validation.');
+      }
     } catch (caught) {
-      if (epoch === requestEpoch) error = caught instanceof Error ? caught.message : String(caught);
+      if (epoch === requestEpoch) {
+        error = caught instanceof Error ? caught.message : String(caught);
+        if (/cancelled|stopped/i.test(error)) aiTasks.markCancelled(task.id, 'Workflow drafting cancelled');
+        else aiTasks.fail(task.id, error);
+      }
     } finally {
       if (epoch === requestEpoch) {
+        aiTasks.setCancel(task.id, null);
+        if (activeTaskId === task.id) activeTaskId = null;
         activeDirector = null;
         drafting = false;
       }
@@ -187,14 +210,24 @@
   function closeDialog(): void {
     requestEpoch += 1;
     const director = activeDirector;
+    const taskId = activeTaskId;
     activeDirector = null;
+    activeTaskId = null;
     drafting = false;
     if (director) void director.cancel();
+    if (taskId) {
+      aiTasks.setCancel(taskId, null);
+      aiTasks.markCancelled(taskId, 'Workflow drafting cancelled');
+    }
     onClose();
   }
 
   onDestroy(() => {
     if (activeDirector) void activeDirector.cancel();
+    if (activeTaskId) {
+      aiTasks.setCancel(activeTaskId, null);
+      aiTasks.markCancelled(activeTaskId, 'Workflow drafting cancelled');
+    }
   });
 </script>
 

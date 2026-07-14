@@ -2719,6 +2719,8 @@ pub(crate) async fn compose_grok_workflow(
     keep_debug_artifacts: Option<bool>,
     image_model: Option<String>,
     image_resolution: Option<String>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<GeneratedImageResult, String> {
     if prompt.trim().is_empty() {
         return Err("Enter a composition prompt.".into());
@@ -2729,6 +2731,7 @@ pub(crate) async fn compose_grok_workflow(
     if sources.len() > GROK_MAX_EDIT_REFERENCE_IMAGES {
         return Err("Grok multi-asset compose supports up to 3 source images. Connect at most 3 assets, or switch the image generator to Codex or Antigravity.".into());
     }
+    let target_dimensions = validate_optional_target_dimensions(target_width, target_height)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<GeneratedImageResult, String> {
         let grok_bin = configured_or_default_grok_bin(bin)?;
@@ -2773,6 +2776,31 @@ pub(crate) async fn compose_grok_workflow(
         }
         let prompt_text = grok_workflow_prompt(prompt.trim(), &attachments.notes_block());
         write_ai_job_prompt(&job_path, &prompt_text, "Grok workflow composition")?;
+        let aspect_ratio = target_dimensions.and_then(grok_closest_aspect_label);
+        let resolution = grok_generation_resolution(
+            image_resolution.as_deref(),
+            aspect_ratio.as_deref(),
+            target_dimensions,
+        );
+        write_ai_job_settings(
+            &job_path,
+            json!({
+                "version": 1,
+                "workflow": "compose_workflow",
+                "runId": run_id,
+                "provider": "Grok",
+                "imageGenerator": {
+                    "provider": "Grok",
+                    "model": image_model,
+                    "aspectRatio": aspect_ratio,
+                    "resolution": resolution,
+                },
+                "targetDimensions": target_dimensions
+                    .map(|(width, height)| json!({ "width": width, "height": height })),
+                "keepJobDir": keep_job_dir,
+                "debugArtifacts": keep_debug_artifacts,
+            }),
+        )?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
 
         emit_codex_progress(
@@ -2781,7 +2809,7 @@ pub(crate) async fn compose_grok_workflow(
             "Generating workflow composition through the Grok image edit backend",
         );
         let result_path = job_path.join("result.png");
-        let bytes = run_grok_direct_edit(
+        let raw_bytes = run_grok_direct_edit(
             &app,
             &run_id,
             &grok_bin,
@@ -2789,13 +2817,17 @@ pub(crate) async fn compose_grok_workflow(
             GrokEditRequestSpec {
                 prompt: prompt_text.clone(),
                 image_paths: attachments.paths,
-                // Let the endpoint follow the first input image's ratio.
-                aspect_ratio: None,
-                resolution: explicit_grok_resolution(image_resolution.as_deref()),
+                aspect_ratio,
+                resolution: Some(resolution),
             },
             &image_model,
             keep_debug_artifacts,
         )?;
+        let bytes = if let Some(target) = target_dimensions {
+            cover_crop_png_to_dimensions(&raw_bytes, target, "Grok workflow result")?.0
+        } else {
+            raw_bytes
+        };
         fs::write(&result_path, &bytes)
             .map_err(|e| format!("Failed to write Grok workflow result: {e}"))?;
         let data_url = png_data_url(&bytes)?;
@@ -3613,6 +3645,10 @@ mod tests {
         assert_eq!(
             grok_closest_aspect_label((800, 1200)).as_deref(),
             Some("2:3")
+        );
+        assert_eq!(
+            grok_closest_aspect_label((1024, 1280)).as_deref(),
+            Some("3:4")
         );
         assert_eq!(
             grok_closest_aspect_label((2000, 900)).as_deref(),

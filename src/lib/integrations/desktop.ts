@@ -1134,6 +1134,7 @@ export async function composeGrokWorkflow(
   config: GrokGeneratorConfig,
   prompt: string,
   sources: WorkflowSourceImage[],
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Grok workflow compose is only available in the desktop app.');
@@ -1149,6 +1150,8 @@ export async function composeGrokWorkflow(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
     runId,
   });
 }

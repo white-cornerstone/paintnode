@@ -49,6 +49,7 @@ function campaignStore(): WorkflowStore {
   const store = new WorkflowStore({ idGenerator: ids() });
   store.newFromTemplate('campaign-composer');
   store.removeNode('review-campaign-direction');
+  store.removeNode('transform-format-square');
   store.removeNode('transform-generate-portrait');
   store.removeNode('transform-generate-landscape');
   store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');

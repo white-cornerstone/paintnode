@@ -376,7 +376,7 @@ describe('selective workflow planning', () => {
 
     expect(plan.requiredNodeIds).toEqual([
       'slot-product', 'slot-subject', 'slot-style', 'brief', 'composition', 'transform-generate-square',
-      'review-campaign-direction', 'output-square',
+      'review-campaign-direction', 'transform-format-square', 'output-square',
     ]);
     expect(plan.executionNodeIds).toEqual([]);
     expect(plan.preflight.map(({ nodeId, willExecute }) => [nodeId, willExecute])).toEqual([
@@ -387,6 +387,7 @@ describe('selective workflow planning', () => {
       ['composition', false],
       ['transform-generate-square', false],
       ['review-campaign-direction', false],
+      ['transform-format-square', false],
       ['output-square', false],
     ]);
     expect(calls).toEqual([]);

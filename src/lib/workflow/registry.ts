@@ -193,6 +193,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     ports: {
       inputs: [
         { id: 'source', label: 'Directed composition', dataType: 'layout' },
+        { id: 'decision', label: 'Promoted concept', dataType: 'review-decision' },
         { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
         { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
       ],
@@ -202,6 +203,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
       creatorRole: 'transform',
       capability: 'generate',
       instructions: '',
+      dismissedCandidateIds: [],
       advanced: { provider: null, model: null, options: {} },
     },
     executor: {
@@ -222,7 +224,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     defaultColor: '#4b4057',
     ports: {
       inputs: [{ id: 'candidates', label: 'Candidates', dataType: 'layout', required: true, multiple: true }],
-      outputs: [{ id: 'selected', label: 'Selected direction', dataType: 'layout' }],
+      outputs: [{ id: 'selected', label: 'Promoted concept', dataType: 'review-decision' }],
     },
     defaultConfig: { creatorRole: 'review', mode: 'human', instructions: '' },
     executor: {
@@ -311,6 +313,12 @@ export function validateCreatorNodeConfig(
     requireString('capability', false);
     if (typeof config.advanced !== 'object' || config.advanced === null || Array.isArray(config.advanced)) {
       issues.push({ path: 'config.advanced', message: 'advanced must be an object.' });
+    }
+    if (config.dismissedCandidateIds !== undefined && (
+      !Array.isArray(config.dismissedCandidateIds)
+      || config.dismissedCandidateIds.some((candidateId) => typeof candidateId !== 'string' || candidateId.length === 0)
+    )) {
+      issues.push({ path: 'config.dismissedCandidateIds', message: 'dismissedCandidateIds must be an array of non-empty strings.' });
     }
   } else if (type === 'review') {
     requireString('mode', false);

@@ -111,6 +111,7 @@ function persistedMaterialConfig(config: Record<string, unknown>): Record<string
   const runtimeKeys = new Set([
     'resultAssetReferenceId', 'resultAssetId', 'resultRelativePath',
     'assetReferenceId', 'outputAssetId', 'outputRelativePath',
+    'dismissedCandidateIds',
   ]);
   return Object.fromEntries(Object.entries(config).filter(([key]) => !runtimeKeys.has(key)));
 }

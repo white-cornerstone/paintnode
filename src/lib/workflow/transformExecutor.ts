@@ -33,6 +33,7 @@ import {
   type WorkflowRunProgressEvent,
 } from './runControl';
 import { workflowTransformContext, type WorkflowTransformVisualConnection } from './transformContext';
+import { workflowConceptPreviewTarget, workflowConceptReviewNode } from './transformRole';
 
 export interface WorkflowProjectAsset {
   id: string;
@@ -351,8 +352,74 @@ function requireTransformPath(graph: WorkflowGraphV2, outputNodeId: string): {
     artDirection: context.artDirection,
     brief: context.brief,
     visualConnections: context.visualInputs,
-    candidateReviewNodeId: path.reviewNodeId,
+    candidateReviewNodeId: workflowConceptReviewNode(graph, transform.id)?.id ?? null,
     sourceReviewNodeId: context.sourceReview?.id ?? null,
+  };
+}
+
+function withConceptPreviewOutput(
+  inputGraph: WorkflowGraphV2,
+  transformNodeId: string,
+): { graph: WorkflowGraphV2; outputNodeId: string } {
+  const target = workflowConceptPreviewTarget(inputGraph, transformNodeId);
+  if (!target) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_TRANSFORM_PATH',
+      'Concept branches require a Transform connected to Review.',
+      'Connect the Concept Generator to a Review node',
+    );
+  }
+  if (inputGraph.nodes.some((node) => node.id === target.nodeId)) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_TRANSFORM_PATH',
+      'The concept preview target conflicts with an existing workflow node.',
+      'Rename or reconnect the Concept Generator',
+    );
+  }
+  const transform = inputGraph.nodes.find((node) => node.id === transformNodeId)!;
+  const output: WorkflowNodeV2 = {
+    id: target.nodeId,
+    type: 'output',
+    title: target.title,
+    position: { x: transform.position.x + transform.size.width + 24, y: transform.position.y },
+    size: { width: 220, height: 280 },
+    color: '#3a3c42',
+    ports: {
+      inputs: [{ id: 'source', label: 'Concept preview', dataType: 'layout', required: true }],
+      outputs: [],
+    },
+    config: {
+      creatorRole: 'concept-preview-output',
+      displayName: target.title,
+      finalWidth: target.width,
+      finalHeight: target.height,
+      outputAssetId: null,
+      outputRelativePath: null,
+    },
+    runRecordIds: [],
+  };
+  const graph: WorkflowGraphV2 = {
+    ...inputGraph,
+    nodes: [...inputGraph.nodes, output],
+    edges: [...inputGraph.edges, {
+      id: `edge-${transformNodeId}-${target.nodeId}`,
+      source: { nodeId: transformNodeId, portId: 'result' },
+      target: { nodeId: target.nodeId, portId: 'source' },
+    }],
+  };
+  return { graph: new WorkflowGraphDomain(graph).graph, outputNodeId: target.nodeId };
+}
+
+function withoutConceptPreviewOutput(
+  graph: WorkflowGraphV2,
+  outputNodeId: string,
+): WorkflowGraphV2 {
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((node) => node.id !== outputNodeId),
+    edges: graph.edges.filter((edge) => (
+      edge.source.nodeId !== outputNodeId && edge.target.nodeId !== outputNodeId
+    )),
   };
 }
 
@@ -1145,4 +1212,44 @@ export async function executeCampaignGenerateTransform(
   const result = await campaignGenerateTransform(inputGraph, outputNodeId, options, false);
   if (!('graph' in result)) throw new Error('Campaign Generate execution returned a preflight outcome.');
   return result;
+}
+
+export async function prepareConceptGenerateTransform(
+  inputGraph: WorkflowGraphV2,
+  transformNodeId: string,
+  options: ExecuteCampaignGenerateOptions,
+): Promise<WorkflowPreparedCampaignGenerateTransform> {
+  const target = withConceptPreviewOutput(inputGraph, transformNodeId);
+  return prepareCampaignGenerateTransform(target.graph, target.outputNodeId, {
+    ...options,
+    allowUnpromotedReview: true,
+  });
+}
+
+export async function executeConceptGenerateTransform(
+  inputGraph: WorkflowGraphV2,
+  transformNodeId: string,
+  options: ExecuteCampaignGenerateOptions,
+): Promise<WorkflowTransformExecutionOutcome> {
+  const target = withConceptPreviewOutput(inputGraph, transformNodeId);
+  try {
+    const outcome = await executeCampaignGenerateTransform(target.graph, target.outputNodeId, {
+      ...options,
+      allowUnpromotedReview: true,
+    });
+    return {
+      ...outcome,
+      graph: withoutConceptPreviewOutput(outcome.graph, target.outputNodeId),
+    };
+  } catch (error) {
+    if (error instanceof WorkflowTransformExecutionError && error.failureGraph) {
+      throw new WorkflowTransformExecutionError(
+        error.code,
+        error.message,
+        error.nextAction,
+        withoutConceptPreviewOutput(error.failureGraph, target.outputNodeId),
+      );
+    }
+    throw error;
+  }
 }

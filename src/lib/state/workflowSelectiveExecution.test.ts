@@ -3,10 +3,12 @@ import type { ProjectAsset } from '../integrations/desktop';
 import { createProviderFreeQaWorkflowExecutor } from '../integrations/providerFreeQaWorkflowExecutor';
 import {
   createWorkflowBoardRunIdGenerator,
+  createWorkflowExecutionRestrictions,
   createCreatorNode,
   createWorkflowCompositionExecutor,
   isFullWorkflowRunRecord,
   resolveWorkflowBoardProjectAsset,
+  planSelectiveWorkflowExecution,
   workflowSha256Bytes,
   type WorkflowGraphV2,
   type WorkflowTransformArtifact,
@@ -545,6 +547,38 @@ describe('WorkflowStore selective execution integration', () => {
       outputAssetId: null, outputRelativePath: null,
     });
     expect(store.graphSnapshot()).toEqual(graphBeforeSecondOutput);
+  });
+
+  it('treats a verified promoted Review as a hard boundary when its upstream Transform is unavailable', async () => {
+    const { store, reviewId } = reviewedCampaignStore();
+    const run = harness();
+    await store.runCandidateBranches('output-square', run.options(), {
+      branchGroupId: 'promoted-boundary-group', count: 2, maxConcurrency: 1,
+    });
+    const [candidate] = store.reviewCandidates(reviewId);
+    await store.promoteCandidate(reviewId, candidate.candidateId, run.options());
+
+    const plan = planSelectiveWorkflowExecution(store.serialize(), {
+      mode: 'run-node',
+      nodeId: 'output-square',
+      materialKeys: {},
+      reviewMaterialKeys: { 'transform-generate-square': candidate.materialKey },
+      isReviewOutputAvailable: (output) => output.assetReferenceId === candidate.output?.assetReferenceId,
+      executionRestrictions: createWorkflowExecutionRestrictions([{
+        nodeId: 'transform-generate-square',
+        kind: 'unavailable',
+        reason: 'Upstream generation context is unavailable.',
+      }]),
+    });
+
+    expect(plan.executionNodeIds).toEqual([]);
+    expect(plan.preflight.find((entry) => entry.nodeId === reviewId)).toMatchObject({
+      state: 'cached', willExecute: false,
+    });
+    expect(plan.preflight.find((entry) => entry.nodeId === 'transform-generate-square')).toMatchObject({
+      state: 'planned', willExecute: false, reason: { code: 'PRUNED_BY_REUSABLE_RESULT' },
+    });
+    expect(plan.preflight.some((entry) => entry.state === 'blocked')).toBe(false);
   });
 
   it('blocks unpromoted or stale reviewed Output runs before provider execution', async () => {

@@ -27,7 +27,7 @@ describe('workflow templates', () => {
   it.each([
     ['blank', '8b988e92a66fe9ed'],
     ['asset-composition', 'bc19593fc82f18ea'],
-    ['campaign-composer', '2f9c70638ca7f005'],
+    ['campaign-composer', '2e823085b1620f69'],
   ] as const)('keeps the exact persisted v2 golden for %s', (id, expectedHash) => {
     const graph = instantiateWorkflowTemplate(id, { graphId: `golden-${id}`, name: `Golden ${id}` });
     expect(goldenHash(JSON.stringify(graph))).toBe(expectedHash);
@@ -47,7 +47,7 @@ describe('workflow templates', () => {
     expect(first.nodes.filter((node) => node.type === 'brief')).toHaveLength(id === 'blank' ? 0 : 1);
     expect(first.nodes.filter((node) => node.type === 'art-direction')).toHaveLength(id === 'blank' ? 0 : 1);
     expect(first.nodes.filter((node) => node.type === 'output')).toHaveLength(outputCount);
-    expect(first.nodes.filter((node) => node.type === 'transform')).toHaveLength(id === 'campaign-composer' ? 3 : 0);
+    expect(first.nodes.filter((node) => node.type === 'transform')).toHaveLength(id === 'campaign-composer' ? 4 : 0);
     expect(first.nodes.filter((node) => node.type === 'review')).toHaveLength(id === 'campaign-composer' ? 1 : 0);
 
     const serialized = serializeWorkflowGraphV2(first);
@@ -126,7 +126,7 @@ describe('workflow templates', () => {
           : graph.nodes.filter((node) => node.type === 'input').length
             + 1
             + definition.outputs.length
-            + (definition.id === 'campaign-composer' ? 4 : 0),
+            + (definition.id === 'campaign-composer' ? 5 : 0),
       );
       if (definition.id !== 'blank') {
         expect(domain.graph.nodes.find((node) => node.type === 'brief')?.ports.outputs).toEqual([
@@ -162,11 +162,15 @@ describe('workflow templates', () => {
       }),
       expect.objectContaining({
         source: { nodeId: 'review-campaign-direction', portId: 'selected' },
+        target: { nodeId: 'transform-format-square', portId: 'decision' },
+      }),
+      expect.objectContaining({
+        source: { nodeId: 'transform-format-square', portId: 'result' },
         target: { nodeId: 'output-square', portId: 'source' },
       }),
       expect.objectContaining({
         source: { nodeId: 'review-campaign-direction', portId: 'selected' },
-        target: { nodeId: 'transform-generate-portrait', portId: 'source' },
+        target: { nodeId: 'transform-generate-portrait', portId: 'decision' },
       }),
       expect.objectContaining({
         source: { nodeId: 'transform-generate-portrait', portId: 'result' },
@@ -174,7 +178,7 @@ describe('workflow templates', () => {
       }),
       expect.objectContaining({
         source: { nodeId: 'review-campaign-direction', portId: 'selected' },
-        target: { nodeId: 'transform-generate-landscape', portId: 'source' },
+        target: { nodeId: 'transform-generate-landscape', portId: 'decision' },
       }),
       expect.objectContaining({
         source: { nodeId: 'transform-generate-landscape', portId: 'result' },

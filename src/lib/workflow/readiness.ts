@@ -235,7 +235,8 @@ function reviewReadiness(
   const transform = graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform');
   const sourceReviewId = transform
     ? graph.edges.find((edge) => edge.target.nodeId === transform.id
-      && edge.target.portId === 'source' && edge.source.portId === 'selected')?.source.nodeId ?? null
+      && (edge.target.portId === 'decision' || edge.target.portId === 'source')
+      && edge.source.portId === 'selected')?.source.nodeId ?? null
     : null;
   const reviewNodeId = path?.reviewNodeId ?? sourceReviewId;
   if (!reviewNodeId || options.allowUnpromotedReview) return null;

@@ -57,11 +57,14 @@ export function workflowTransformContext(
     };
   }
 
-  const sourceEdge = graph.edges.find((edge) => (
+  const decisionEdge = graph.edges.find((edge) => (
+    edge.target.nodeId === transform.id && edge.target.portId === 'decision'
+  )) ?? null;
+  const sourceEdge = decisionEdge ?? graph.edges.find((edge) => (
     edge.target.nodeId === transform.id && edge.target.portId === 'source'
   )) ?? null;
   const directArtDirection = nodeForEdgeSource(graph, sourceEdge ?? undefined, 'art-direction');
-  const sourceReview = nodeForEdgeSource(graph, sourceEdge ?? undefined, 'review');
+  const sourceReview = nodeForEdgeSource(graph, decisionEdge ?? undefined, 'review');
   const conceptEdge = sourceReview
     ? graph.edges.find((edge) => edge.target.nodeId === sourceReview.id && edge.target.portId === 'candidates')
     : undefined;

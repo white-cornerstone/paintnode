@@ -31,7 +31,8 @@ function boundCampaign() {
     graphId: 'campaign-transform-test',
   }));
   graph.nodes = graph.nodes.filter((node) => ![
-    'review-campaign-direction', 'transform-generate-portrait', 'transform-generate-landscape',
+    'review-campaign-direction', 'transform-format-square',
+    'transform-generate-portrait', 'transform-generate-landscape',
   ].includes(node.id));
   graph.edges = graph.edges.filter((edge) => (
     graph.nodes.some((node) => node.id === edge.source.nodeId)

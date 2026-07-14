@@ -171,6 +171,7 @@ describe('desktop workflow composition adapters', () => {
         { name: 'Storyboard sketch - mandatory layout guide', bytes: new Uint8Array([2]) },
         { name: 'Product', role: 'Hero product', bytes: new Uint8Array([1]) },
       ],
+      expect.objectContaining({ width: 1024, height: 1024 }),
     );
     expect(executor.executor).toEqual({
       id: 'paintnode-grok-workflow', version: '1', requestSchemaVersion: '1',

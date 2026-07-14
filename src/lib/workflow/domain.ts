@@ -424,6 +424,7 @@ function validateConnectionInGraph(
   options: {
     excludedEdgeId?: string;
     allowDormantUnsupported?: boolean;
+    allowExistingTransformFanout?: boolean;
   } = {},
 ): WorkflowConnectionValidation {
   const sourceNode = graph.nodes.find((node) => node.id === endpoints.source.nodeId);
@@ -522,6 +523,15 @@ function validateConnectionInGraph(
       { sourceNodeId: sourceNode.id, targetNodeId: targetNode.id },
     );
   }
+  if (!options.allowExistingTransformFanout
+    && sourceNode.type === 'transform'
+    && existingEdges.some((edge) => endpointEquals(edge.source, endpoints.source))) {
+    return rejected(
+      'UNSUPPORTED_CONNECTION',
+      `A Transform result can follow only one downstream path. Add a separate Transform for each Output format.`,
+      { source: endpoints.source, sourceNodeId: sourceNode.id },
+    );
+  }
   return { ok: true };
 }
 
@@ -540,6 +550,7 @@ function assertConnections(graph: WorkflowGraphV2): void {
       validateConnectionInGraph(graph, edge, {
         excludedEdgeId: edge.id,
         allowDormantUnsupported: true,
+        allowExistingTransformFanout: true,
       }),
       { edgeId: edge.id, edgeIndex },
     );

@@ -14,7 +14,7 @@ import { parseWorkflowGraphV2, serializeWorkflowGraphV2, type WorkflowRunRecordV
 import { instantiateWorkflowTemplate } from './templates';
 import {
   createWorkflowCompositionExecutor,
-  executeCampaignGenerateTransform,
+  executeConceptGenerateTransform,
   WorkflowTransformExecutionError,
   type ExecuteCampaignGenerateOptions,
   type WorkflowProjectAsset,
@@ -158,7 +158,7 @@ describe('workflow candidate branches', () => {
 
   it('preserves accepted history while bounded concurrent siblings partially fail and reopen', async () => {
     const run = harness();
-    const seeded = await executeCampaignGenerateTransform(campaign(), 'output-square', {
+    const seeded = await executeConceptGenerateTransform(campaign(), 'transform-generate-square', {
       ...run.options(), allowUnpromotedReview: true,
     });
     const acceptedBefore = structuredClone(seeded.graph.runRecords);
@@ -278,7 +278,7 @@ describe('workflow candidate branches', () => {
     };
     let failedGraph;
     try {
-      await executeCampaignGenerateTransform(campaign(), 'output-square', options);
+      await executeConceptGenerateTransform(campaign(), 'transform-generate-square', options);
       throw new Error('Expected the first normal attempt to fail.');
     } catch (error) {
       expect(error).toBeInstanceOf(WorkflowTransformExecutionError);
@@ -288,7 +288,9 @@ describe('workflow candidate branches', () => {
       branchGroupId: 'interleaved-branch-group', count: 3, maxConcurrency: 2,
     });
 
-    const retried = await executeCampaignGenerateTransform(branched.graph, 'output-square', options);
+    const retried = await executeConceptGenerateTransform(
+      branched.graph, 'transform-generate-square', options,
+    );
     expect(retried.graph.runRecords.at(-1)).toMatchObject({
       id: 'normal-run-2',
       attempt: 5,

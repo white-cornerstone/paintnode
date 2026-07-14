@@ -368,7 +368,7 @@ export function createGrokWorkflowTransformExecutor(
     const effective = grokConfigForRequest({ ...config, runId }, request);
     return resultAsset(await executeObservedProvider(runId, context, async () => {
       if (request.transform.capability === 'generate') {
-        return composeGrokWorkflow(effective, request.prompt, providerSources(request));
+        return composeGrokWorkflow(effective, request.prompt, providerSources(request), request.output);
       }
       const frame = await editableWorkflowFrame(request);
       if (request.transform.capability === 'upscale') return upscaleGrokImage(effective, frame.bytes, frame.scalePercent);

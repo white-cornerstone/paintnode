@@ -1,5 +1,5 @@
 import { WorkflowGraphDomain } from './domain';
-import { resolveWorkflowCampaignPath } from './candidatePromotion';
+import { resolveWorkflowCampaignPath, resolveWorkflowReviewTopology } from './candidatePromotion';
 import { createWorkflowRunRecord, isFullWorkflowRunRecord, workflowSha256Text } from './provenance';
 import { safeWorkflowIdentifier } from './provenanceSafety';
 import type {
@@ -9,8 +9,8 @@ import type {
   WorkflowRunStatus,
 } from './schema';
 import {
-  executeCampaignGenerateTransform,
-  prepareCampaignGenerateTransform,
+  executeConceptGenerateTransform,
+  prepareConceptGenerateTransform,
   WorkflowTransformExecutionError,
   type ExecuteCampaignGenerateOptions,
   type WorkflowAssetMaterial,
@@ -19,6 +19,7 @@ import {
   type WorkflowStoryboardDescriptor,
   type WorkflowStoryboardRead,
 } from './transformExecutor';
+import { workflowTransformRole } from './transformRole';
 
 export const WORKFLOW_MIN_CANDIDATES = 2;
 export const WORKFLOW_MAX_CANDIDATES = 6;
@@ -167,10 +168,20 @@ export function deriveWorkflowCandidateBranchGroups(graph: WorkflowGraphV2): Wor
   });
 }
 
-function transformForOutput(graph: WorkflowGraphV2, outputNodeId: string): string {
-  const path = resolveWorkflowCampaignPath(graph, { outputNodeId });
-  if (!path) throw new Error('Candidate branches require one unambiguous Transform to Output path, with at most one Review hop.');
-  return path.transformNodeId;
+function conceptTransformForTarget(graph: WorkflowGraphV2, targetNodeId: string): string {
+  const node = graph.nodes.find((candidate) => candidate.id === targetNodeId);
+  if (node?.type === 'transform' && workflowTransformRole(graph, node.id) === 'concept-generator') return node.id;
+  if (node?.type === 'output') {
+    const path = resolveWorkflowCampaignPath(graph, { outputNodeId: node.id });
+    if (path?.reviewNodeId) {
+      const review = resolveWorkflowReviewTopology(graph, { reviewNodeId: path.reviewNodeId });
+      if (review.transformNodeId) return review.transformNodeId;
+    }
+    if (path?.transformNodeId && workflowTransformRole(graph, path.transformNodeId) === 'concept-generator') {
+      return path.transformNodeId;
+    }
+  }
+  throw new Error('Candidate branches require one Concept Generator connected to Review.');
 }
 
 function maximumNodeAttempt(graph: WorkflowGraphV2, nodeId: string): number {
@@ -356,7 +367,7 @@ function cancelledCandidateGraph(
 
 async function executeCandidate(
   base: WorkflowGraphV2,
-  outputNodeId: string,
+  transformNodeId: string,
   options: ExecuteCampaignGenerateOptions,
   lineage: WorkflowCandidateLineageV1,
   nodeAttempt: number,
@@ -365,7 +376,7 @@ async function executeCandidate(
 ): Promise<WorkflowGraphV2> {
   let progressOpen = true;
   try {
-    const outcome = await executeCampaignGenerateTransform(base, outputNodeId, {
+    const outcome = await executeConceptGenerateTransform(base, transformNodeId, {
       ...options,
       candidateLineage: lineage,
       runAttempt: nodeAttempt,
@@ -392,7 +403,7 @@ async function executeCandidate(
 
 export async function executeWorkflowCandidateBranches(
   inputGraph: WorkflowGraphV2,
-  outputNodeId: string,
+  transformNodeId: string,
   inputOptions: ExecuteCampaignGenerateOptions,
   branch: WorkflowCandidateBranchExecutionOptions,
 ): Promise<WorkflowCandidateBranchExecutionOutcome> {
@@ -402,12 +413,15 @@ export async function executeWorkflowCandidateBranches(
   if (candidateRecords(inputGraph).some((record) => record.candidate!.branchGroupId === groupId)) {
     throw new Error('Candidate branch group ID already exists in workflow history.');
   }
-  const sourceNodeId = transformForOutput(inputGraph, outputNodeId);
+  const sourceNodeId = safeWorkflowIdentifier(
+    conceptTransformForTarget(inputGraph, transformNodeId),
+    'Concept Generator node ID',
+  );
   const lineages = Array.from({ length: count }, (_, index) => (
     createWorkflowCandidateLineage(groupId, sourceNodeId, index + 1, count)
   ));
   const options = memoizedMaterialOptions(inputOptions);
-  const prepared = await prepareCampaignGenerateTransform(inputGraph, outputNodeId, {
+  const prepared = await prepareConceptGenerateTransform(inputGraph, sourceNodeId, {
     ...options,
     allowUnpromotedReview: true,
   });
@@ -435,7 +449,7 @@ export async function executeWorkflowCandidateBranches(
       try {
         terminalGraphs[index] = await executeCandidate(
           inputGraph,
-          outputNodeId,
+          sourceNodeId,
           { ...options, storeAsset: serializeStore, allowUnpromotedReview: true },
           lineages[index],
           firstNodeAttempt + index,
@@ -471,7 +485,7 @@ export async function retryWorkflowCandidateBranch(
     throw new Error('Only the latest failed or cancelled candidate attempt can be retried.');
   }
   const options = memoizedMaterialOptions(inputOptions);
-  const prepared = await prepareCampaignGenerateTransform(inputGraph, latest.target.nodeId, {
+  const prepared = await prepareConceptGenerateTransform(inputGraph, latest.nodeId, {
     ...options,
     allowUnpromotedReview: true,
   });
@@ -495,7 +509,7 @@ export async function retryWorkflowCandidateBranch(
       try {
         terminal = await executeCandidate(
           inputGraph,
-          latest.target.nodeId,
+          latest.nodeId,
           { ...options, allowUnpromotedReview: true },
           lineage,
           nodeAttempt,

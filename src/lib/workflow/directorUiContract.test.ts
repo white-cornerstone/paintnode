@@ -30,6 +30,15 @@ describe('Workflow Director UI contract', () => {
     expect(dialogSource).not.toMatch(/\b(discover\w*|authenticate\w*|login\w*|commandExists)\s*\(/i);
   });
 
+  it('records Director drafting and revision work in the Workflow Task panel', () => {
+    expect(dialogSource).toContain("title: 'AI Director: Draft workflow'");
+    expect(dialogSource).toContain('aiTasks.setCancel(task.id, () => director.cancel())');
+    expect(dialogSource).toContain("aiTasks.complete(task.id, 'Workflow proposal ready for review')");
+    expect(revisionDialogSource).toContain('title: `AI Director: ${title}`');
+    expect(revisionDialogSource).toContain('aiTasks.setCancel(task.id, async () => currentController.abort())');
+    expect(revisionDialogSource).toContain("aiTasks.complete(task.id, 'Director revision ready for review')");
+  });
+
   it('builds the strict context boundary from asset metadata and requested outputs', () => {
     expect(dialogSource).toContain('buildWorkflowDirectorContext');
     expect(dialogSource).toContain('directorAssetMetadata(asset)');

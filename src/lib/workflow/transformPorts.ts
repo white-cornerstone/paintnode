@@ -13,6 +13,12 @@ const VISUAL_REFERENCES_PORT: WorkflowNodePort = {
   multiple: true,
 };
 
+const PROMOTED_CONCEPT_PORT: WorkflowNodePort = {
+  id: 'decision',
+  label: 'Promoted concept',
+  dataType: 'review-decision',
+};
+
 const ADDITIONAL_GUIDANCE_PORT: WorkflowNodePort = {
   id: 'prompt',
   label: 'Additional guidance',
@@ -22,11 +28,13 @@ const ADDITIONAL_GUIDANCE_PORT: WorkflowNodePort = {
 function normalizeTransformInputs(node: WorkflowNodeV2): { node: WorkflowNodeV2; changed: boolean } {
   if (node.type !== 'transform') return { node, changed: false };
   const source = node.ports.inputs.find((port) => port.id === 'source');
+  const decision = node.ports.inputs.find((port) => port.id === 'decision');
   const assets = node.ports.inputs.find((port) => port.id === 'assets');
   const prompt = node.ports.inputs.find((port) => port.id === 'prompt');
-  const remaining = node.ports.inputs.filter((port) => !['source', 'assets', 'prompt'].includes(port.id));
+  const remaining = node.ports.inputs.filter((port) => !['source', 'decision', 'assets', 'prompt'].includes(port.id));
   const inputs: WorkflowNodePort[] = [
     { ...DIRECTED_COMPOSITION_PORT, ...(source ? { label: source.label } : {}) },
+    { ...PROMOTED_CONCEPT_PORT, ...(decision ? { label: decision.label } : {}) },
     { ...VISUAL_REFERENCES_PORT, ...(assets ? { label: assets.label } : {}) },
     { ...ADDITIONAL_GUIDANCE_PORT, ...(prompt ? { label: prompt.label } : {}) },
     ...remaining,

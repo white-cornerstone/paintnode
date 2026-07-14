@@ -11,6 +11,7 @@ import { executeWorkflowCandidateBranches } from './candidateBranches';
 import {
   createWorkflowCompositionExecutor,
   prepareCampaignGenerateTransform,
+  prepareConceptGenerateTransform,
   type ExecuteCampaignGenerateOptions,
 } from './transformExecutor';
 import { createWorkflowRevision, isFullWorkflowRunRecord, workflowSha256Bytes } from './provenance';
@@ -37,7 +38,7 @@ async function reviewGraph() {
     if (edge.target.nodeId === 'review-campaign-direction') edge.target.nodeId = 'review-concepts';
   }
   graph.edges.find((edge) => edge.target.nodeId === 'review-concepts')!.id = 'edge-transform-review';
-  graph.edges.find((edge) => edge.source.nodeId === 'review-concepts' && edge.target.nodeId === 'output-square')!.id = 'edge-review-output';
+  graph.edges.find((edge) => edge.source.nodeId === 'review-concepts' && edge.target.nodeId === 'transform-format-square')!.id = 'edge-review-square-adapter';
   let stored = 0;
   const executor = createWorkflowCompositionExecutor('fake', async () => ({
     kind: 'bytes', name: 'concept.png', bytes: new Uint8Array([...bytes, ++stored]),
@@ -128,7 +129,7 @@ describe('workflow candidate promotion', () => {
     expect(parsed.value?.reviewPromotions).toBeUndefined();
   });
 
-  it('lists eligible, stale, failed, and unavailable candidates with inspectable context', async () => {
+  it('sends only successful candidates to Review and preserves stale and unavailable states', async () => {
     const graph = await reviewGraph();
     const eligible = deriveWorkflowReviewCandidates(graph, 'review-concepts');
     expect(eligible.map((candidate) => candidate.state)).toEqual(['eligible', 'eligible']);
@@ -143,7 +144,12 @@ describe('workflow candidate promotion', () => {
     const failedGraph = structuredClone(graph);
     const failedRun = failedGraph.runRecords.find((record) => record.id === eligible[0].latestRunId)!;
     Object.assign(failedRun, { status: 'failed', outputs: [], failure: { code: 'FAILED', message: 'Safe failure' } });
-    expect(deriveWorkflowReviewCandidates(failedGraph, 'review-concepts')[0].state).toBe('failed');
+    expect(deriveWorkflowReviewCandidates(failedGraph, 'review-concepts').map((candidate) => candidate.ordinal))
+      .toEqual([2]);
+    const allFailedGraph = structuredClone(failedGraph);
+    const remainingRun = allFailedGraph.runRecords.find((record) => record.id === eligible[1].latestRunId)!;
+    Object.assign(remainingRun, { status: 'failed', outputs: [], failure: { code: 'FAILED', message: 'Safe failure' } });
+    expect(deriveWorkflowReviewCandidates(allFailedGraph, 'review-concepts')).toEqual([]);
     expect(eligible[0]).toMatchObject({
       brief: expect.any(String), artDirection: expect.any(String),
       providerId: 'fake', sourceNodeId: 'transform-generate-square',
@@ -186,7 +192,10 @@ describe('workflow candidate promotion', () => {
     expect(reopened.reviewPromotions).toEqual(promoted.reviewPromotions);
     expect(resolveWorkflowReviewTopology(reopened, {
       reviewNodeId: 'review-concepts', currentMaterialKeys: { 'transform-generate-square': 'changed' },
-    })).toMatchObject({ state: 'blocked', reason: { code: 'PROMOTION_STALE' } });
+    })).toMatchObject({
+      state: 'blocked',
+      reason: { code: 'PROMOTION_STALE', action: 'Regenerate candidates for the updated workflow' },
+    });
     expect(resolveWorkflowReviewTopology(reopened, {
       reviewNodeId: 'review-concepts', isOutputAvailable: () => false,
     })).toMatchObject({ state: 'blocked', reason: { code: 'PROMOTED_OUTPUT_UNAVAILABLE' } });
@@ -303,6 +312,7 @@ describe('workflow candidate promotion', () => {
       }),
       storeAsset: async () => { throw new Error('Preflight must not store output.'); },
     };
+    const square = await prepareCampaignGenerateTransform(edited, 'output-square', formatOptions);
     const portrait = await prepareCampaignGenerateTransform(edited, 'output-portrait', formatOptions);
     const landscape = await prepareCampaignGenerateTransform(edited, 'output-landscape', formatOptions);
     expect(portrait.request.sources[0]).toMatchObject({
@@ -316,6 +326,7 @@ describe('workflow candidate promotion', () => {
       mode: 'run-from-here', nodeId: 'review-concepts',
       materialKeys: {
         'transform-generate-square': promotion.materialKey,
+        'transform-format-square': square.materialKey,
         'transform-generate-portrait': portrait.materialKey,
         'transform-generate-landscape': landscape.materialKey,
       },
@@ -324,7 +335,7 @@ describe('workflow candidate promotion', () => {
       isRunRecordReusable: () => false,
     });
     expect(formatPlan.executionNodeIds).toEqual([
-      'transform-generate-portrait', 'transform-generate-landscape',
+      'transform-format-square', 'transform-generate-portrait', 'transform-generate-landscape',
     ]);
     expect(formatPlan.executionNodeIds).not.toContain('transform-generate-square');
 
@@ -338,6 +349,63 @@ describe('workflow candidate promotion', () => {
       candidateId: candidates[1].candidateId,
       promotionId: 'promotion-replacement',
     })?.editorRevision).toBeNull();
+  });
+
+  it('isolates the promoted concept from delivery sizes and scopes each adapter to its own Output', async () => {
+    const graph = await reviewGraph();
+    const candidate = deriveWorkflowReviewCandidates(graph, 'review-concepts')[0];
+    const promoted = promoteWorkflowCandidate(graph, {
+      reviewNodeId: 'review-concepts', candidateId: candidate.candidateId,
+      id: 'promotion-dimension-isolation', promotedAt: 1200,
+    });
+    const promotedOutput = candidate.output!;
+    const executor = createWorkflowCompositionExecutor('fake', async () => {
+      throw new Error('Preflight must not invoke the provider.');
+    }, { materialization: 'metadata-only' });
+    const options: ExecuteCampaignGenerateOptions = {
+      projectPath: '/virtual/project', provider: 'fake', executors: [executor],
+      assets: [product, {
+        id: promotedOutput.assetId,
+        name: 'Promoted concept.png',
+        relativePath: promotedOutput.relativePath,
+        width: 1024, height: 1024, mime: 'image/png',
+      }],
+      resolveAsset: async (asset) => ({
+        assetId: asset.id,
+        relativePath: asset.relativePath,
+        bytes: null,
+        contentHash: asset.id === promotedOutput.assetId
+          ? promotedOutput.contentHash
+          : workflowSha256Bytes(bytes),
+      }),
+      storeAsset: async () => { throw new Error('Preflight must not store output.'); },
+    };
+    const conceptBefore = await prepareConceptGenerateTransform(
+      promoted, 'transform-generate-square', options,
+    );
+    const squareBefore = await prepareCampaignGenerateTransform(promoted, 'output-square', options);
+    const portraitBefore = await prepareCampaignGenerateTransform(promoted, 'output-portrait', options);
+    const resized = structuredClone(promoted);
+    const squareOutput = resized.nodes.find((node) => node.id === 'output-square')!;
+    squareOutput.config = { ...squareOutput.config, finalWidth: 1000, finalHeight: 10 };
+
+    const conceptAfter = await prepareConceptGenerateTransform(
+      resized, 'transform-generate-square', options,
+    );
+    const squareAfter = await prepareCampaignGenerateTransform(resized, 'output-square', options);
+    const portraitAfter = await prepareCampaignGenerateTransform(resized, 'output-portrait', options);
+    const review = resolveWorkflowReviewTopology(resized, {
+      reviewNodeId: 'review-concepts',
+      currentMaterialKeys: { 'transform-generate-square': conceptAfter.materialKey },
+      isOutputAvailable: () => true,
+    });
+
+    expect(conceptAfter.materialKey).toBe(conceptBefore.materialKey);
+    expect(review.state).toBe('ready');
+    expect(squareAfter.materialKey).not.toBe(squareBefore.materialKey);
+    expect(portraitAfter.materialKey).toBe(portraitBefore.materialKey);
+    expect(squareAfter.request.output).toMatchObject({ width: 1000, height: 10 });
+    expect(portraitAfter.request.output).toMatchObject({ width: 1024, height: 1280 });
   });
 
   it('loads broken promotion references as recoverable state while rejecting a malformed append chain', async () => {

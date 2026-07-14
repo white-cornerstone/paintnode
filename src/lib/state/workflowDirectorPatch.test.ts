@@ -767,6 +767,13 @@ describe('WorkflowStore Director patch review lifecycle', () => {
   it('does not resurrect an older in-flight Generate after accept then undo restores revisions', async () => {
     const store = new WorkflowStore();
     store.newFromTemplate('campaign-composer');
+    store.removeNode('review-campaign-direction');
+    store.removeNode('transform-format-square');
+    store.removeNode('transform-generate-portrait');
+    store.removeNode('transform-generate-landscape');
+    store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');
+    store.connectPorts('composition', 'layout', 'output-portrait', 'source');
+    store.connectPorts('composition', 'layout', 'output-landscape', 'source');
     store.assignAsset('slot-product', productAsset);
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => { finish = resolve; });

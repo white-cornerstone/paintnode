@@ -9,6 +9,7 @@ import {
 } from './schema';
 import { withInputAssetScopePorts } from './inputAssetScope';
 import { withTransformVisualReferencePorts } from './transformPorts';
+import { withReviewDecisionContracts } from './reviewDecisionContracts';
 
 const LEGACY_GENERIC_ART_DIRECTION_SIZE = { width: 340, height: 408 } as const;
 const COMPACT_GENERIC_ART_DIRECTION_HEIGHT = 320;
@@ -87,7 +88,8 @@ function validateLoadedGraph(
     const layoutNormalization = normalizeLegacyCreatorLayout(runNormalizedGraph);
     const inputPortGraph = withInputAssetScopePorts(layoutNormalization.graph);
     const transformPortNormalization = withTransformVisualReferencePorts(inputPortGraph);
-    const normalizedGraph = transformPortNormalization.graph;
+    const reviewDecisionNormalization = withReviewDecisionContracts(transformPortNormalization.graph);
+    const normalizedGraph = reviewDecisionNormalization.graph;
     const domain = new WorkflowGraphDomain(normalizedGraph);
     return {
       ok: true,
@@ -96,7 +98,8 @@ function validateLoadedGraph(
       requiresExplicitSave: requiresExplicitSave
         || normalizedInterruptedRuns
         || layoutNormalization.normalized
-        || transformPortNormalization.normalized,
+        || transformPortNormalization.normalized
+        || reviewDecisionNormalization.normalized,
       normalizedInterruptedRuns,
       issues,
     };

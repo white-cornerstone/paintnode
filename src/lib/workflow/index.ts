@@ -12,6 +12,8 @@ export * from './registry';
 export * from './palette';
 export * from './transformExecutor';
 export * from './transformContext';
+export * from './transformRole';
+export * from './reviewDecisionContracts';
 export * from './runObserver';
 export * from './runControl';
 export * from './providerQaSelection';

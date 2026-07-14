@@ -5,6 +5,7 @@ import { readWorkflowGraph } from './load';
 import { migrateWorkflowFileV1 } from './migration';
 import { createCreatorNode } from './registry';
 import type { WorkflowGraphV2 } from './schema';
+import { instantiateWorkflowTemplate } from './templates';
 
 function invalidV2(
   mutate: (graph: WorkflowGraphV2) => void,
@@ -66,9 +67,56 @@ describe('workflow graph loading', () => {
     expect(result.requiresExplicitSave).toBe(true);
     expect(result.graph?.nodes.find((node) => node.id === transform.id)?.ports.inputs).toEqual([
       { id: 'source', label: 'Directed composition', dataType: 'layout' },
+      { id: 'decision', label: 'Promoted concept', dataType: 'review-decision' },
       { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
       { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
     ]);
+  });
+
+  it('migrates legacy Review delivery links into typed decisions and independent format adapters', () => {
+    const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
+    graph.nodes = graph.nodes.filter((node) => node.id !== 'transform-format-square');
+    const review = graph.nodes.find((node) => node.id === 'review-campaign-direction')!;
+    review.ports.outputs = review.ports.outputs.map((port) => port.id === 'selected'
+      ? { ...port, label: 'Selected direction', dataType: 'layout' }
+      : port);
+    for (const transform of graph.nodes.filter((node) => node.type === 'transform')) {
+      transform.ports.inputs = transform.ports.inputs.filter((port) => port.id !== 'decision');
+    }
+    graph.edges = graph.edges.filter((edge) => (
+      edge.source.nodeId !== 'transform-format-square'
+      && edge.target.nodeId !== 'transform-format-square'
+    ));
+    graph.edges.push({
+      id: 'legacy-review-square-output',
+      source: { nodeId: review.id, portId: 'selected' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    });
+    for (const edge of graph.edges.filter((edge) => edge.source.nodeId === review.id
+      && edge.target.nodeId.startsWith('transform-'))) {
+      edge.target.portId = 'source';
+    }
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(true);
+    const loaded = result.graph!;
+    const adapter = loaded.nodes.find((node) => node.type === 'transform'
+      && node.config.workflowRole === 'format-adapter'
+      && loaded.edges.some((edge) => edge.source.nodeId === node.id
+        && edge.target.nodeId === 'output-square'));
+    expect(adapter).toBeDefined();
+    expect(loaded.nodes.find((node) => node.id === 'transform-generate-square')?.config)
+      .toMatchObject({ workflowRole: 'concept-generator', conceptPreviewWidth: 1024, conceptPreviewHeight: 1024 });
+    expect(loaded.edges).toContainEqual(expect.objectContaining({
+      source: { nodeId: review.id, portId: 'selected' },
+      target: { nodeId: adapter!.id, portId: 'decision' },
+    }));
+    expect(loaded.edges.some((edge) => edge.source.nodeId === review.id
+      && edge.target.nodeId === 'output-square')).toBe(false);
+    expect(loaded.nodes.find((node) => node.id === review.id)?.ports.outputs)
+      .toContainEqual({ id: 'selected', label: 'Promoted concept', dataType: 'review-decision' });
   });
 
   it('compacts only untouched legacy generic Art Direction nodes', () => {
