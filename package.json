@@ -38,7 +38,7 @@
     "tauri:build:mac:signed": "bash scripts/build-macos-signed.sh"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "7.1.2",
+    "@sveltejs/vite-plugin-svelte": "7.2.0",
     "@tauri-apps/cli": "^2.11.4",
     "ajv": "^8.20.0",
     "svelte": "5.56.4",
