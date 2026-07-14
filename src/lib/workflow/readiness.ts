@@ -87,7 +87,24 @@ function assetReadiness(
   const slots = graph.nodes.filter((node) => node.type === 'input');
   const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
   const transformIds = new Set(graph.nodes.filter((node) => node.type === 'transform').map((node) => node.id));
+  const extractionIds = new Set(graph.nodes.filter((node) => node.type === 'extract-assets').map((node) => node.id));
+  const connectedToGenerationContext = (slotId: string): boolean => graph.edges.some((edge) => {
+    if (edge.source.nodeId !== slotId) return false;
+    if (context?.transform) {
+      return (edge.target.nodeId === context.transform.id && edge.target.portId === 'assets')
+        || (edge.target.nodeId === context.artDirection?.id && edge.target.portId === 'assets');
+    }
+    return (artDirectionIds.has(edge.target.nodeId) && edge.target.portId === 'assets')
+      || (transformIds.has(edge.target.nodeId) && edge.target.portId === 'assets');
+  });
   for (const slot of slots) {
+    const connected = connectedToGenerationContext(slot.id);
+    const extractionOnly = !connected && graph.edges.some((edge) => (
+      edge.source.nodeId === slot.id
+      && extractionIds.has(edge.target.nodeId)
+      && (edge.target.portId === 'sources' || edge.target.portId === 'support')
+    ));
+    if (extractionOnly) continue;
     const binding = assetBinding(graph, slot);
     const required = slot.config.required !== false;
     if (required && !binding) {
@@ -99,15 +116,6 @@ function assetReadiness(
       );
     }
     if (!binding) continue;
-    const connected = graph.edges.some((edge) => {
-      if (edge.source.nodeId !== slot.id) return false;
-      if (context?.transform) {
-        return (edge.target.nodeId === context.transform.id && edge.target.portId === 'assets')
-          || (edge.target.nodeId === context.artDirection?.id && edge.target.portId === 'assets');
-      }
-      return (artDirectionIds.has(edge.target.nodeId) && edge.target.portId === 'assets')
-        || (transformIds.has(edge.target.nodeId) && edge.target.portId === 'assets');
-    });
     if (!connected) {
       const targetName = context?.artDirection?.title ?? context?.transform?.title ?? 'Art Direction or Transform';
       return blocked(

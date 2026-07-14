@@ -246,6 +246,41 @@ describe('workflow readiness', () => {
     });
   });
 
+  it('does not require an extraction-only source image on the final generation path', () => {
+    const graph = bindProduct();
+    const extractionSource = createCreatorNode('input', {
+      id: 'extraction-source',
+      title: 'Original scene',
+      config: {
+        assetId: 'original-scene',
+        relativePath: 'assets/original-scene.png',
+        role: 'Extraction source',
+      },
+    });
+    const extraction = createCreatorNode('extract-assets', { id: 'extract-products' });
+    graph.nodes.push(extractionSource, extraction);
+    graph.edges.push({
+      id: 'scene-extraction',
+      source: { nodeId: extractionSource.id, portId: 'asset' },
+      target: { nodeId: extraction.id, portId: 'sources' },
+    });
+
+    const finalPath = workflowReadiness(graph, readyOptions());
+    expect(finalPath.ready).toBe(true);
+    expect(finalPath.items.find((item) => item.code === 'required-assets')).toMatchObject({ status: 'complete' });
+
+    graph.edges.push({
+      id: 'scene-art-direction',
+      source: { nodeId: extractionSource.id, portId: 'asset' },
+      target: { nodeId: 'composition', portId: 'assets' },
+    });
+    const reusedAsReference = workflowReadiness(graph, readyOptions());
+    expect(reusedAsReference.items.find((item) => item.code === 'required-assets')).toMatchObject({
+      status: 'blocked',
+      message: expect.stringMatching(/Original scene.*no longer available/i),
+    });
+  });
+
   it('blocks a stale assigned optional slot instead of silently ignoring it', () => {
     const graph = bindProduct();
     const style = graph.nodes.find((node) => node.id === 'slot-style')!;
