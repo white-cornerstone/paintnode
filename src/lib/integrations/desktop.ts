@@ -1475,6 +1475,17 @@ export async function saveProjectDocumentAs(args: {
   bytes: Uint8Array;
 }): Promise<SavedDocumentResult | null> {
   if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
+  const targetPath = await pickProjectDocumentSavePath(args);
+  if (!targetPath) return null;
+  return saveProjectDocumentAtPath({ ...args, targetPath });
+}
+
+export async function pickProjectDocumentSavePath(args: {
+  projectPath?: string | null;
+  name: string;
+  dialogTitle?: string | null;
+}): Promise<string | null> {
+  if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
   const defaultName = safeDocumentDialogName(args.name);
   const isWorkflow = defaultName.toLowerCase().endsWith('.cxflow.json');
   const isPsd = defaultName.toLowerCase().endsWith('.psd');
@@ -1497,10 +1508,20 @@ export async function saveProjectDocumentAs(args: {
       : [{ name: 'OpenRaster', extensions: ['ora'] }],
     canCreateDirectories: true,
   });
-  if (!targetPath) return null;
+  return targetPath;
+}
+
+export async function saveProjectDocumentAtPath(args: {
+  projectPath?: string | null;
+  targetPath: string;
+  name: string;
+  previousName?: string | null;
+  bytes: Uint8Array;
+}): Promise<SavedDocumentResult> {
+  if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
   return invoke<SavedDocumentResult>('project_save_document_as', {
     projectPath: args.projectPath?.trim() ? args.projectPath.trim() : null,
-    targetPath,
+    targetPath: args.targetPath,
     name: args.name,
     previousName: args.previousName?.trim() ? args.previousName.trim() : null,
     bytes: Array.from(args.bytes),

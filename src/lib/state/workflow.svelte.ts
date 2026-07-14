@@ -315,6 +315,11 @@ function cleanWorkflowName(name: string): string {
   return trimmed || 'Untitled Workflow';
 }
 
+function workflowNameFromSavePath(path: string): string {
+  const fileName = path.split(/[\\/]/).pop() ?? path;
+  return cleanWorkflowName(fileName.replace(/\.json$/i, ''));
+}
+
 function roundWorkflowNumber(value: number): number {
   const rounded = Math.round(value);
   return rounded === 0 ? 0 : rounded;
@@ -2737,12 +2742,32 @@ export class WorkflowStore {
 
   async save(): Promise<string | null> {
     if (!project.path) return null;
-    const name = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
     const savedPath = this.savedPath;
-    const submission = this.captureSaveSubmission(savedPath, savedPath === null);
-    const relativePath = savedPath
-      ? await project.saveDocumentToPath(savedPath, submission.bytes)
-      : await project.saveDocument(name, submission.bytes);
+    let submission: WorkflowSaveSubmission;
+    let relativePath: string | null;
+    if (savedPath) {
+      submission = this.captureSaveSubmission(savedPath, false);
+      relativePath = await project.saveDocumentToPath(savedPath, submission.bytes);
+    } else {
+      const defaultName = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
+      const targetPath = await project.pickDocumentSavePath(defaultName, 'Save Workflow Board');
+      if (!targetPath) return null;
+      const previousName = this.name;
+      const selectedName = workflowNameFromSavePath(targetPath);
+      const name = this.requiresExplicitSave && selectedName === `${previousName}-v2`
+        ? previousName
+        : selectedName;
+      this.setName(name);
+      const fileName = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
+      submission = this.captureSaveSubmission(null, true);
+      const result = await project.saveDocumentAtPathAs({
+        targetPath,
+        name: fileName,
+        previousName,
+        bytes: submission.bytes,
+      });
+      relativePath = result.relativePath;
+    }
     this.reconcileSaveCompletion(submission, relativePath);
     return relativePath;
   }

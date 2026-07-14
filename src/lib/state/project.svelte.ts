@@ -3,6 +3,7 @@ import {
   deleteProjectAsset,
   isDesktop,
   openProjectFolderAt,
+  pickProjectDocumentSavePath,
   pickProjectFolder,
   readProjectFile,
   readProjectAsset,
@@ -12,6 +13,7 @@ import {
   rollbackWorkflowEditorReturn,
   finalizeWorkflowEditorReturn,
   saveProjectDocumentAs,
+  saveProjectDocumentAtPath,
   storeProjectAssetBytes,
   storeProjectClipboardImage,
   writeProjectDocumentPath,
@@ -230,6 +232,28 @@ class ProjectStore {
       previousName,
       dialogTitle,
       bytes,
+    });
+    if (this.path && result) await this.refresh(this.path);
+    return result;
+  }
+
+  async pickDocumentSavePath(name: string, dialogTitle?: string | null): Promise<string | null> {
+    return pickProjectDocumentSavePath({
+      projectPath: this.path,
+      name,
+      dialogTitle,
+    });
+  }
+
+  async saveDocumentAtPathAs(args: {
+    targetPath: string;
+    name: string;
+    previousName?: string | null;
+    bytes: Uint8Array;
+  }) {
+    const result = await saveProjectDocumentAtPath({
+      projectPath: this.path,
+      ...args,
     });
     if (this.path && result) await this.refresh(this.path);
     return result;
