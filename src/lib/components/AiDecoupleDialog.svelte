@@ -49,7 +49,7 @@
 
   const desktop = isDesktop();
   const DEFAULT_PROMPT =
-    'Extract clean standalone storyboard assets for a later AI composition workflow. Regenerate hidden or occluded parts when useful, avoid duplicate props across assets, and prefer transparent PNGs or alpha masks over keyed backgrounds.';
+    'Semantically deconstruct the scene into useful constituent assets for later AI composition. Reconstruct each component as a fresh, clean, complete standalone reference using the source for identity and material evidence, not as pixels to cut out. Split useful composite parts, rebuild hidden geometry, avoid duplicate ownership, and remove the original environment.';
 
   let runOptions = $state(aiRunOptionsFromSettings(settings.value));
   let prompt = $state(DEFAULT_PROMPT);
@@ -247,7 +247,7 @@
           const layers: DecoupledLayerResult[] = [];
           for (const [index, item] of plan.items.entries()) {
             aiTasks.setProgress(task.id, `Extracting ${index + 1} of ${plan.items.length}: ${item.name}...`);
-            const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset and preserve its complete edges.`;
+            const itemPrompt = `Reconstruct a fresh, clean, complete standalone catalog-style asset of "${item.name}" using the source only as visual evidence. ${item.instruction} Do not crop, paste, clone, or preserve source-photo pixels, original occlusion boundaries, background patches, adjacent scenery, environmental reflections, color cast, or lighting spill. Rebuild hidden edges and sides while preserving the component's identity, design, materials, and characteristic details.`;
             const extracted = await extractGrokAsset(
               grokConfigFromRunOptions(
                 runOptions,

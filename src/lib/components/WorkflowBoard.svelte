@@ -11,8 +11,6 @@
     decoupleAntigravityImage,
     decoupleCodexImage,
     extractGrokAsset,
-    generateAntigravityRetouchImage,
-    generateCodexRetouchImage,
     isDesktop,
     providerQaMode,
     readProjectAsset,
@@ -87,12 +85,13 @@
   import {
     canvasPngBlob,
     assetExtractionImageModelSources,
-    assetSheetGuidelineDataUrl,
     composeAssetExtractionSources,
     cropAssetIndexSheet,
     decoupledLayerCanvas,
     validateExtractedAssetCanvas,
     workflowAssetExtractionPrompt,
+    workflowAssetExtractionExecution,
+    workflowPlannedAssetSheetPrompt,
     type AssetExtractionSource,
     type AssetSheetCount,
   } from '../workflow/assetExtraction';
@@ -663,22 +662,6 @@
     return workflow.incoming(nodeId).filter((connection) => connection.targetPortId === portId).length;
   }
 
-  async function extractionMaskPng(sourcePng: Uint8Array): Promise<Uint8Array> {
-    const bitmap = await bytesToBitmap(sourcePng);
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Could not prepare the extraction mask.');
-      context.fillStyle = '#fff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      return canvasToPngBytes(canvas);
-    } finally {
-      bitmap.close();
-    }
-  }
-
   async function runAssetExtraction(nodeId: string): Promise<void> {
     const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
     if (!node) return;
@@ -762,14 +745,6 @@
       if (!combined.some((item) => item.role === 'source')) {
         throw new Error('Connect at least one source image to the Source images input.');
       }
-      if (mode === 'fast') {
-        combined.push({
-          name: `INDEX SHEET GUIDELINE · ${assetsPerSheet} cells`,
-          dataUrl: assetSheetGuidelineDataUrl(assetsPerSheet),
-          role: 'support',
-          synthetic: true,
-        });
-      }
       const grokExtractionSources: WorkflowSourceImage[] = extractionProvider === 'grok'
         ? await Promise.all(assetExtractionImageModelSources(combined).map(async (item) => ({
             name: item.name,
@@ -777,102 +752,163 @@
             bytes: new Uint8Array(await (await fetch(item.dataUrl)).arrayBuffer()),
           })))
         : [];
-      if (grokExtractionSources.length > 3) {
+      if (mode !== 'fast' && grokExtractionSources.length > 3) {
         throw new Error('Grok asset extraction supports up to 3 connected source or support images. Remove extra inputs or switch the image provider.');
       }
-      const inputPng = await composeAssetExtractionSources(combined);
+      const planningInputPng = await composeAssetExtractionSources(combined);
+      const inputPng = mode === 'fast'
+        ? await composeAssetExtractionSources(combined, false)
+        : planningInputPng;
       const runId = createRunId();
       activeExtractionRunId = runId;
       const prompt = workflowAssetExtractionPrompt(creatorConfigString(node.config, 'prompt'), mode, assetsPerSheet);
+      const directorEnabled = directorModeFromRunOptions(extractionRunOptions) !== 'skip';
+      const execution = workflowAssetExtractionExecution(mode, directorEnabled);
       setExtractionProgress(mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…');
       let extractionNotes = '';
-      let prepared: Array<{ canvas: HTMLCanvasElement; name: string }>;
-      let plannedStored: ExtractedAssetLink[] | null = null;
+      let plan: Awaited<ReturnType<typeof planWorkflowAssetExtraction>> | null = null;
+      let prepared: Array<{ canvas: HTMLCanvasElement; name: string; prompt: string; itemId?: string }> = [];
+      const failures: Array<{ itemId: string; message: string }> = [];
       let extractionManifest: ReturnType<typeof createWorkflowAssetExtractionManifest> | null = null;
-      if (directorModeFromRunOptions(extractionRunOptions) === 'skip') {
-        const result = extractionProvider === 'antigravity'
-          ? await decoupleAntigravityImage(
-              antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
-              inputPng, prompt, false,
+      if (!directorEnabled) {
+        if (extractionProvider === 'grok' && execution !== 'single-index-sheet') {
+          throw new Error('Grok quality extraction requires an AI Director to name each asset. Enable an AI Director or use Fast index-sheet mode.');
+        }
+        const indexSheet = execution === 'single-index-sheet';
+        const result = extractionProvider === 'grok'
+          ? await extractGrokAsset(
+              grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+              prompt,
+              'asset-index-sheet',
+              [{ name: 'extraction-source-montage.png', role: 'Extraction sources', bytes: inputPng }],
+              indexSheet,
+              indexSheet ? assetsPerSheet : null,
             )
-          : await decoupleCodexImage(
-              codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
-              inputPng, prompt, false,
-            );
+          : extractionProvider === 'antigravity'
+            ? await decoupleAntigravityImage(
+                antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+                inputPng, prompt, false, indexSheet,
+              )
+            : await decoupleCodexImage(
+                codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+                inputPng, prompt, false, indexSheet,
+              );
         if (result.layers.length === 0) throw new Error('The image model did not return any extracted assets.');
         extractionNotes = result.notes ?? '';
         prepared = mode === 'fast'
-          ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0]), assetsPerSheet).map((canvas, index) => ({
-              canvas, name: `${node.name} ${String(index + 1).padStart(2, '0')}`,
+          ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0], 30, true), assetsPerSheet).map((canvas, index) => ({
+              canvas, name: `${node.name} ${String(index + 1).padStart(2, '0')}`, prompt,
             }))
           : await Promise.all(result.layers.map(async (layer, index) => ({
               canvas: await decoupledLayerCanvas(layer),
               name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
+              prompt,
             })));
       } else {
         setExtractionProgress('AI Director is planning the asset inventory…');
-        const plan = await planWorkflowAssetExtraction(extractionRunOptions, {
-          sourcePng: inputPng,
+        plan = await planWorkflowAssetExtraction(extractionRunOptions, {
+          sourcePng: planningInputPng,
           guidance: creatorConfigString(node.config, 'prompt'),
           mode,
           maximumAssets: mode === 'fast' ? assetsPerSheet : 16,
         }, { signal: extractionController.signal, runId: () => runId });
         extractionNotes = plan.notes;
-        const maskPng = await extractionMaskPng(inputPng);
-        const successes: Array<ExtractedAssetLink & { itemId: string }> = [];
-        const failures: Array<{ itemId: string; message: string }> = [];
-        for (const [index, item] of plan.items.entries()) {
-          if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
-          if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
-          setExtractionProgress(`Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`);
-          const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset, preserve its visual identity and complete edges, and make everything outside the asset transparent.`;
-          const itemRunId = `${runId}-${index + 1}`;
-          activeExtractionRunId = itemRunId;
-          try {
-            if (extractionProvider === 'grok') {
-              const result = await extractGrokAsset(
-                grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts),
-                itemPrompt,
-                item.name,
-                grokExtractionSources,
-              );
-              const layer = result.layers[0];
-              if (!layer) throw new Error('Grok did not return an extracted asset.');
-              const canvas = await decoupledLayerCanvas(layer);
-              validateExtractedAssetCanvas(canvas, item.name);
-              const asset = await project.storeGeneratedBlobAt(
-                taskProjectPath,
-                await canvasPngBlob(canvas),
-                `${item.name}.png`,
-                itemPrompt,
-                canvas.width,
-                canvas.height,
-              );
-              if (!asset) throw new Error('PaintNode could not save the extracted Grok asset.');
-              successes.push({ itemId: item.id, id: asset.id, name: item.name, relativePath: asset.relativePath });
-              continue;
-            }
-            const generated = extractionProvider === 'antigravity'
-              ? await generateAntigravityRetouchImage(
-                  { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
-                  inputPng, inputPng, maskPng, null, null, itemPrompt,
+        const generatePlannedCanvas = async (
+          operationPrompt: string,
+          assetName: string,
+          operationRunId: string,
+          indexSheet: boolean,
+        ): Promise<HTMLCanvasElement> => {
+          activeExtractionRunId = operationRunId;
+          const result = extractionProvider === 'grok'
+            ? await extractGrokAsset(
+                grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, operationRunId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+                operationPrompt,
+                assetName,
+                indexSheet
+                  ? [{ name: 'extraction-source-montage.png', role: 'Extraction sources', bytes: inputPng }]
+                  : grokExtractionSources,
+                indexSheet,
+                indexSheet ? assetsPerSheet : null,
+              )
+            : extractionProvider === 'antigravity'
+              ? await decoupleAntigravityImage(
+                  { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, operationRunId, indexSheet, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                  inputPng, operationPrompt, false, indexSheet,
                 )
-              : await generateCodexRetouchImage(
-                    { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
-                    inputPng, inputPng, maskPng, null, null, itemPrompt,
-                  );
-            if (!generated.asset) throw new Error('The image provider did not save the extracted asset.');
-            successes.push({ itemId: item.id, id: generated.asset.id, name: item.name, relativePath: generated.asset.relativePath });
-          } catch (cause) {
-            failures.push({ itemId: item.id, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+              : await decoupleCodexImage(
+                  { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, operationRunId, indexSheet, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                  inputPng, operationPrompt, false, indexSheet,
+                );
+          const layer = result.layers[0];
+          if (!layer) throw new Error('The image provider did not return the requested extracted asset.');
+          return decoupledLayerCanvas(layer, 30, indexSheet);
+        };
+
+        if (execution === 'single-index-sheet') {
+          const sheetPrompt = workflowPlannedAssetSheetPrompt(
+            creatorConfigString(node.config, 'prompt'), plan.items, assetsPerSheet,
+          );
+          setExtractionProgress(`Generating one index sheet for ${plan.items.length} planned assets…`);
+          const sheet = await generatePlannedCanvas(sheetPrompt, 'asset-index-sheet', `${runId}-sheet`, true);
+          const plannedItems = plan.items;
+          prepared = cropAssetIndexSheet(sheet, assetsPerSheet).slice(0, plannedItems.length).map((canvas, index) => {
+            const item = plannedItems[index];
+            if (!item) throw new Error('The AI Director asset inventory changed while preparing the index sheet.');
+            return { canvas, name: item.name, prompt: sheetPrompt, itemId: item.id };
+          });
+        } else {
+          for (const [index, item] of plan.items.entries()) {
+            if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
+            if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
+            setExtractionProgress(`Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`);
+            const itemPrompt = `This component was selected by PaintNode's AI Director. Reconstruct a fresh, clean, complete standalone catalog-style asset of "${item.name}" using the attached source only as visual evidence. ${item.instruction} Do not crop, paste, clone, or preserve source-photo pixels, original occlusion boundaries, background patches, adjacent scenery, reflections of the environment, or environmental lighting spill. Rebuild hidden edges and sides while preserving the component's identity, design, materials, and characteristic details. Make everything outside the reconstructed asset transparent.`;
+            try {
+              prepared.push({
+                canvas: await generatePlannedCanvas(itemPrompt, item.name, `${runId}-${index + 1}`, false),
+                name: item.name,
+                prompt: itemPrompt,
+                itemId: item.id,
+              });
+            } catch (cause) {
+              failures.push({ itemId: item.id, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+            }
           }
         }
-        if (successes.length === 0) throw new Error(`The image model could not extract any planned assets. ${failures.map((failure) => failure.message).join(' ')}`);
+      }
+      setExtractionProgress('Saving labelled assets to the project…');
+      if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
+        throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
+      }
+      const stored: ExtractedAssetLink[] = [];
+      const outputs: Array<{ itemId: string; name: string; assetId: string; relativePath: string }> = [];
+      for (const item of prepared) {
+        try {
+          validateExtractedAssetCanvas(item.canvas, item.name);
+          const asset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            await canvasPngBlob(item.canvas),
+            `${item.name}.png`,
+            item.prompt,
+            item.canvas.width,
+            item.canvas.height,
+          );
+          if (!asset) throw new Error('PaintNode could not save the prepared extracted asset.');
+          stored.push({ id: asset.id, name: item.name, relativePath: asset.relativePath });
+          if (item.itemId) outputs.push({ itemId: item.itemId, name: item.name, assetId: asset.id, relativePath: asset.relativePath });
+        } catch (cause) {
+          if (!item.itemId) throw cause;
+          failures.push({ itemId: item.itemId, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+        }
+      }
+      if (stored.length === 0) {
+        throw new Error(`The image model could not extract any valid assets. ${failures.map((failure) => failure.message).join(' ')}`.trim());
+      }
+      if (plan) {
         if (failures.length > 0) extractionNotes = [
           extractionNotes,
           `Partial result: ${failures.length} of ${plan.items.length} planned assets could not be produced.`,
         ].filter(Boolean).join('\n');
-        plannedStored = successes.map(({ id, name, relativePath }) => ({ id, name, relativePath }));
         const directorRole = workflowAiReviewProvider(extractionRunOptions);
         const imageModel = extractionProvider === 'antigravity'
           ? extractionRunOptions.antigravityImageModel
@@ -880,35 +916,13 @@
             ? extractionRunOptions.grokImageModel
             : null;
         extractionManifest = createWorkflowAssetExtractionManifest(plan, {
-          outputs: successes.map((success) => ({
-            itemId: success.itemId, name: success.name, assetId: success.id, relativePath: success.relativePath,
-          })),
+          outputs,
           failedItemIds: failures.map((failure) => failure.itemId),
           director: { provider: directorRole.id, model: directorRole.model },
           image: { provider: extractionProvider, model: imageModel },
           completedAt: Date.now(),
         });
-        prepared = [];
       }
-      setExtractionProgress('Saving labelled assets to the project…');
-      if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
-        throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
-      }
-      const stored: ExtractedAssetLink[] = plannedStored ?? [];
-      if (!plannedStored) {
-        for (const item of prepared) {
-          const asset = await project.storeGeneratedBlobAt(
-            taskProjectPath,
-            await canvasPngBlob(item.canvas),
-            `${item.name}.png`,
-            prompt,
-            item.canvas.width,
-            item.canvas.height,
-          );
-          if (asset) stored.push({ id: asset.id, name: asset.name, relativePath: asset.relativePath });
-        }
-      }
-      if (plannedStored) await project.refresh(taskProjectPath);
       if (project.identity !== taskProjectIdentity) {
         throw new Error('The active project changed while asset extraction was running. The saved assets were not linked to this workflow.');
       }
