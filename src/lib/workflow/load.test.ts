@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import blank from './fixtures/v1/blank.json';
+import assetsStoryboard from './fixtures/v1/assets-storyboard.json';
 import { readWorkflowGraph } from './load';
 import { migrateWorkflowFileV1 } from './migration';
 import type { WorkflowGraphV2 } from './schema';
@@ -25,13 +26,28 @@ describe('workflow graph loading', () => {
   });
 
   it('returns valid v2 data without marking it for migration save', () => {
-    const graph = migrateWorkflowFileV1(blank);
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
     const result = readWorkflowGraph(graph);
 
     expect(result.ok).toBe(true);
     expect(result.sourceVersion).toBe(2);
     expect(result.requiresExplicitSave).toBe(false);
     expect(result.graph).toEqual(graph);
+  });
+
+  it('makes the extraction scope probe available when loading older v2 input nodes', () => {
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
+    const input = graph.nodes.find((node) => node.type === 'input');
+    if (!input) throw new Error('Expected the fixture to contain an input node.');
+    input.ports.inputs = [];
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(false);
+    expect(result.graph?.nodes.find((node) => node.id === input.id)?.ports.inputs).toEqual([
+      { id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' },
+    ]);
   });
 
   it('returns recoverable path-specific issues for malformed or unsupported data', () => {

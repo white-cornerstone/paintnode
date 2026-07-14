@@ -25,3 +25,4 @@ export * from './editorRoundTrip';
 export * from './storyboardRead';
 export * from './aiRoles';
 export * from './reviewRecommendation';
+export * from './inputAssetScope';

@@ -1208,6 +1208,39 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.rev).toBe(7);
   });
 
+  it('keeps extraction-scoped Visual Input assignments inside the connected result list', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Scoped extraction');
+    const extractionId = store.addCreatorNode('extract-assets');
+    const inputId = store.addCreatorNode('input');
+    store.configureCreatorNode(extractionId, {
+      resultAssets: [{
+        id: campaignProduct.id,
+        name: campaignProduct.name,
+        relativePath: campaignProduct.relativePath,
+      }],
+    });
+    store.assignAsset(inputId, campaignProduct);
+
+    expect(store.connectPorts(extractionId, 'assets', inputId, 'scope')).toBe(true);
+    expect(store.nodes.find((node) => node.id === inputId)?.assetId).toBe(campaignProduct.id);
+
+    store.configureCreatorNode(extractionId, {
+      resultAssets: [{ id: 'replacement', name: 'Replacement.png', relativePath: 'assets/replacement.png' }],
+    });
+
+    expect(store.nodes.find((node) => node.id === inputId)).toMatchObject({
+      assetId: null,
+      relativePath: '',
+      oraRelativePath: null,
+    });
+    expect(store.graphSnapshot().nodes.find((node) => node.id === inputId)?.config).toMatchObject({
+      assetId: null,
+      relativePath: null,
+      oraRelativePath: null,
+    });
+  });
+
   it('adds and removes the annotation output for annotated OpenRaster asset nodes', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard('Annotated ORA');

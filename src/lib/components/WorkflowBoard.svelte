@@ -71,6 +71,9 @@
     workflowReadiness,
     workflowCandidateBranchResultSummary,
     workflowCandidateProgressLabel,
+    workflowExtractionQuickLinks,
+    workflowExtractedAssetLinks,
+    workflowInputAssetScope,
     resolveWorkflowCampaignPath,
     shouldRetryReviewVerificationAfterRefresh,
     type CreatorNodeType,
@@ -79,6 +82,8 @@
     type WorkflowSelectiveRunMode,
     type WorkflowStoryboardDescriptor,
     type WorkflowReviewVerificationState,
+    type WorkflowInputAssetScope,
+    type WorkflowExtractedAssetLink,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
     type WorkflowNodeV2,
@@ -678,24 +683,19 @@
     }));
   });
 
-  type ExtractedAssetLink = { id: string; name: string; relativePath: string };
-
-  function extractedAssetLinks(config: Record<string, unknown>): ExtractedAssetLink[] {
-    const value = config.resultAssets;
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
-      const record = item as Record<string, unknown>;
-      return typeof record.id === 'string' && typeof record.name === 'string' && typeof record.relativePath === 'string'
-        ? [{ id: record.id, name: record.name, relativePath: record.relativePath }]
-        : [];
-    });
+  function extractionQuickLinks() {
+    workflow.rev;
+    return workflowExtractionQuickLinks(workflow.graphSnapshot());
   }
 
-  function extractionQuickLinks(): Array<ExtractedAssetLink & { nodeName: string }> {
-    return workflow.creatorNodes.flatMap((node) => node.type === 'extract-assets'
-      ? extractedAssetLinks(node.config).map((asset) => ({ ...asset, nodeName: node.name }))
-      : []);
+  function extractionScopeFor(nodeId: string): WorkflowInputAssetScope | null {
+    workflow.rev;
+    return workflowInputAssetScope(workflow.graphSnapshot(), nodeId);
+  }
+
+  function availableExtractedAssetLinks<T extends { id: string }>(links: T[]): T[] {
+    const availableIds = new Set(assets.map((asset) => asset.id));
+    return links.filter((link) => availableIds.has(link.id));
   }
 
   function extractionConnectedCount(nodeId: string, portId: 'sources' | 'support'): number {
@@ -920,7 +920,7 @@
       if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
         throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
       }
-      const stored: ExtractedAssetLink[] = [];
+      const stored: WorkflowExtractedAssetLink[] = [];
       const outputs: Array<{ itemId: string; name: string; assetId: string; relativePath: string }> = [];
       for (const item of prepared) {
         try {
@@ -2620,6 +2620,8 @@
           {@const asset = assetFor(node)}
           {@const oraDocument = oraFor(node)}
           {@const ports = workflowNodePorts(node.id)}
+          {@const extractionScope = extractionScopeFor(node.id)}
+          {@const scopedExtractionLinks = extractionScope ? availableExtractedAssetLinks(extractionScope.assets) : []}
           <article
             class="asset-node"
             class:included={node.included}
@@ -2703,33 +2705,51 @@
                 {/if}
               </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
-                <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
+                <span>
+                  {node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}
+                  {extractionScope ? ` · ${extractionScope.nodeName}` : ''}
+                </span>
                 <select
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
                   value={asset ? `asset:${asset.id}` : oraDocument ? `ora:${oraDocument.relativePath}` : ''}
                   onchange={(event) => void assignWorkflowAsset(node.id, event.currentTarget.value)}
                 >
-                  <option value="">Choose from project…</option>
-                  {#if extractionQuickLinks().some((link) => assets.some((item) => item.id === link.id))}
-                    <optgroup label="Extract Assets results">
-                      {#each extractionQuickLinks().filter((link) => assets.some((item) => item.id === link.id)) as option (option.id)}
-                        <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
-                      {/each}
+                  <option value="">{extractionScope ? `Choose from ${extractionScope.nodeName}…` : 'Choose from project…'}</option>
+                  {#if extractionScope}
+                    {#if scopedExtractionLinks.length > 0}
+                      <optgroup label={`${extractionScope.nodeName} results`}>
+                        {#each scopedExtractionLinks as option (option.id)}
+                          <option value={`asset:${option.id}`}>{option.name}</option>
+                        {/each}
+                      </optgroup>
+                    {/if}
+                  {:else}
+                    {@const quickLinks = availableExtractedAssetLinks(extractionQuickLinks())}
+                    {#if quickLinks.length > 0}
+                      <optgroup label="Extract Assets results">
+                        {#each quickLinks as option (`${option.nodeId}:${option.id}`)}
+                          <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
+                        {/each}
+                      </optgroup>
+                    {/if}
+                    <optgroup label="Project assets">
+                    {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
                     </optgroup>
-                  {/if}
-                  <optgroup label="Project assets">
-                  {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
-                  </optgroup>
-                  {#if oraDocuments.length > 0}
-                    <optgroup label="OpenRaster documents">
-                      {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
-                    </optgroup>
+                    {#if oraDocuments.length > 0}
+                      <optgroup label="OpenRaster documents">
+                        {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
+                      </optgroup>
+                    {/if}
                   {/if}
                 </select>
                 <small aria-live="polite">
                   {asset
                     ? `Selected ${asset.name}`
+                    : extractionScope
+                      ? scopedExtractionLinks.length > 0
+                        ? `Scoped to ${extractionScope.nodeName}`
+                        : `No available results from ${extractionScope.nodeName}`
                     : oraDocument
                       ? `${oraDocument.name}${node.oraRelativePath && workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation') ? ' · annotation output available' : ''}`
                       : 'No asset selected'}
@@ -2807,7 +2827,7 @@
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
-          {@const extractionResults = extractedAssetLinks(node.config)}
+          {@const extractionResults = workflowExtractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
           {@const creatorGraphNode = workflow.graphSnapshot().nodes.find((item) => item.id === node.id)}
           <article

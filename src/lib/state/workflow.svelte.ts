@@ -82,6 +82,7 @@ import {
   type WorkflowAiReviewResult,
   type WorkflowReviewRecommendationResolution,
   type WorkflowRunProvider,
+  workflowExtractedAssetLinks,
 } from '../workflow';
 import {
   bindWorkflowRoundTripAuthority,
@@ -836,7 +837,10 @@ export class WorkflowStore {
       position: { x: 80 + (index % 3) * 230, y: 110 + Math.floor(index / 3) * 160 },
       size: { width: 205, height: 190 },
       color: '#3a3c42',
-      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      ports: {
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
       config: { legacyKind: 'asset', assetId: asset.id, relativePath: asset.relativePath, note: '' },
       runRecordIds: [],
     };
@@ -861,7 +865,10 @@ export class WorkflowStore {
       position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
       size: { width: Math.max(160, roundWorkflowNumber(width)), height: Math.max(130, roundWorkflowNumber(height)) },
       color: '#3a3c42',
-      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      ports: {
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
       config: { legacyKind: 'asset', assetId: null, relativePath: '', note: '' },
       runRecordIds: [],
     };
@@ -1134,10 +1141,12 @@ export class WorkflowStore {
       this.connectionError = validation.message;
       return false;
     }
-    this.publishGraphMutation(domain, domain.addEdge({
+    const edge = domain.addEdge({
       source: endpoints.source,
       target: endpoints.target,
-    }));
+    });
+    if (targetPortId === 'scope') this.reconcileScopedInputAsset(domain, from, to);
+    this.publishGraphMutation(domain, edge);
     this.connectionError = null;
     return true;
   }
@@ -1283,7 +1292,15 @@ export class WorkflowStore {
       throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
     }
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, config));
+    const configured = domain.configureNode(id, config);
+    if (node.type === 'extract-assets' && Object.prototype.hasOwnProperty.call(update, 'resultAssets')) {
+      for (const connection of domain.outgoing(id)) {
+        if (connection.source.portId === 'assets' && connection.target.portId === 'scope') {
+          this.reconcileScopedInputAsset(domain, id, connection.target.nodeId);
+        }
+      }
+    }
+    this.publishGraphMutation(domain, configured);
   }
 
   setNodeAiOverrides(id: string, value: WorkflowNodeAiOverridesV1 | null): void {
@@ -2447,6 +2464,32 @@ export class WorkflowStore {
     }));
   }
 
+  private reconcileScopedInputAsset(
+    domain: WorkflowGraphDomain,
+    extractionNodeId: string,
+    inputNodeId: string,
+  ): void {
+    const extraction = domain.node(extractionNodeId);
+    const input = domain.node(inputNodeId);
+    if (!extraction || extraction.type !== 'extract-assets' || !input || input.type !== 'input') return;
+    const selectedAssetId = typeof input.config.assetId === 'string' ? input.config.assetId : null;
+    const selectedOraPath = typeof input.config.oraRelativePath === 'string' ? input.config.oraRelativePath : null;
+    if (!selectedAssetId && !selectedOraPath) return;
+    const allowedIds = new Set(workflowExtractedAssetLinks(extraction.config).map((asset) => asset.id));
+    if (selectedAssetId && allowedIds.has(selectedAssetId) && !selectedOraPath) return;
+    domain.updateNodePorts(inputNodeId, {
+      inputs: input.ports.inputs,
+      outputs: input.ports.outputs.filter((port) => port.id !== 'annotation'),
+    });
+    domain.configureNode(inputNodeId, {
+      ...input.config,
+      assetId: null,
+      relativePath: null,
+      oraRelativePath: null,
+      hasAnnotations: false,
+    });
+  }
+
   private nextGraphId(kind: 'node' | 'edge'): string {
     return this.graphIdGenerator?.(kind) ?? id(kind === 'node' ? 'asset' : 'connection');
   }
@@ -2959,7 +3002,7 @@ export class WorkflowStore {
       size: { width: node.width, height: node.height },
       color: node.color,
       ports: {
-        inputs: [],
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
         outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
       },
       config: {
