@@ -73,6 +73,12 @@ const assetOutputPort: WorkflowNodePort = {
   dataType: 'asset-reference',
 };
 
+const assetScopeInputPort: WorkflowNodePort = {
+  id: 'scope',
+  label: 'Extracted asset scope',
+  dataType: 'asset-reference',
+};
+
 const artDirectionAssetPort: WorkflowNodePort = {
   id: 'assets',
   label: 'Assets',
@@ -132,7 +138,7 @@ function migrateInputNode(
       height: numberValue(source.height, 190),
     },
     color: stringValue(source.color, '#3a3c42'),
-    ports: { inputs: [], outputs: [{ ...assetOutputPort }] },
+    ports: { inputs: [{ ...assetScopeInputPort }], outputs: [{ ...assetOutputPort }] },
     config: {
       assetReferenceId: reference?.id ?? null,
       included: booleanValue(source.included, true),

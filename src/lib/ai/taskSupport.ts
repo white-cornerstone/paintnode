@@ -26,18 +26,6 @@ export function directorProviderLabel(provider: AiDirectorProvider): string {
   return providerLabel(provider);
 }
 
-/**
- * Guard for the remaining Grok gap: asset extraction needs an agentic
- * manifest-writing loop that the xAI image API does not provide (see
- * docs/grok-future-expansion.md). All other edit surfaces now dispatch to
- * the real Grok edit engine.
- */
-export function grokEditComingSoonError(feature: string): Error {
-  return new Error(
-    `Grok ${feature} is coming soon. Switch the image generator to Codex or Antigravity.`,
-  );
-}
-
 export function providerRunDir(provider: AiProvider): string {
   if (provider === 'antigravity') return 'antigravity-runs';
   if (provider === 'grok') return 'grok-runs';

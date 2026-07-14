@@ -376,7 +376,7 @@ describe('selective workflow planning', () => {
 
     expect(plan.requiredNodeIds).toEqual([
       'slot-product', 'slot-subject', 'slot-style', 'brief', 'composition', 'transform-generate-square',
-      'review-campaign-direction', 'output-square',
+      'review-campaign-direction', 'transform-format-square', 'output-square',
     ]);
     expect(plan.executionNodeIds).toEqual([]);
     expect(plan.preflight.map(({ nodeId, willExecute }) => [nodeId, willExecute])).toEqual([
@@ -387,6 +387,7 @@ describe('selective workflow planning', () => {
       ['composition', false],
       ['transform-generate-square', false],
       ['review-campaign-direction', false],
+      ['transform-format-square', false],
       ['output-square', false],
     ]);
     expect(calls).toEqual([]);
@@ -394,7 +395,7 @@ describe('selective workflow planning', () => {
 
   it('blocks a configured transform capability that the registry does not support', () => {
     const input = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
-    input.nodes.find((candidate) => candidate.id === 'transform-generate-square')!.config.capability = 'relight';
+    input.nodes.find((candidate) => candidate.id === 'transform-generate-square')!.config.capability = 'animate';
 
     expect(() => createWorkflowExecutionRestrictions([{
       nodeId: 'transform-generate-square',

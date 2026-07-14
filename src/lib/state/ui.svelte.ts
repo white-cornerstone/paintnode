@@ -18,12 +18,13 @@ export type DialogId =
   | 'aiRetouch'
   | 'aiUpscale'
   | 'aiDecouple'
+  | 'workflowTask'
   | 'aiSetup'
   | 'stockImages'
   | 'settings'
   | 'update';
 
-export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust';
+export type AiTaskDialogKind = 'generate' | 'retouch' | 'upscale' | 'decouple' | 'autoAdjust' | 'workflow';
 export type AiAutoAdjustKind = 'tone' | 'contrast' | 'color';
 export type ColorPickerTarget = 'foreground' | 'background';
 export type NewDialogTab = 'image' | 'workflow' | 'project';
@@ -115,7 +116,9 @@ class UiState {
   openAiTask(kind: AiTaskDialogKind, id: string): void {
     this.aiTaskDialog = { kind, id };
     this.dialog =
-      kind === 'generate'
+      kind === 'workflow'
+        ? 'workflowTask'
+        : kind === 'generate'
         ? 'aiGenerate'
         : kind === 'retouch'
           ? 'aiRetouch'

@@ -424,6 +424,7 @@ function validateConnectionInGraph(
   options: {
     excludedEdgeId?: string;
     allowDormantUnsupported?: boolean;
+    allowExistingTransformFanout?: boolean;
   } = {},
 ): WorkflowConnectionValidation {
   const sourceNode = graph.nodes.find((node) => node.id === endpoints.source.nodeId);
@@ -522,6 +523,15 @@ function validateConnectionInGraph(
       { sourceNodeId: sourceNode.id, targetNodeId: targetNode.id },
     );
   }
+  if (!options.allowExistingTransformFanout
+    && sourceNode.type === 'transform'
+    && existingEdges.some((edge) => endpointEquals(edge.source, endpoints.source))) {
+    return rejected(
+      'UNSUPPORTED_CONNECTION',
+      `A Transform result can follow only one downstream path. Add a separate Transform for each Output format.`,
+      { source: endpoints.source, sourceNodeId: sourceNode.id },
+    );
+  }
   return { ok: true };
 }
 
@@ -540,6 +550,7 @@ function assertConnections(graph: WorkflowGraphV2): void {
       validateConnectionInGraph(graph, edge, {
         excludedEdgeId: edge.id,
         allowDormantUnsupported: true,
+        allowExistingTransformFanout: true,
       }),
       { edgeId: edge.id, edgeIndex },
     );
@@ -560,33 +571,19 @@ function normalizeGraph(graph: WorkflowGraphV2): WorkflowGraphV2 {
   }
 
   const normalized = normalizeNegativeZero(parsed.value);
-  const normalizedInputRoles: WorkflowGraphV2 = {
-    ...normalized,
-    nodes: normalized.nodes.map((node) => {
-      if (node.type !== 'input' || typeof node.config.assetId !== 'string' || !node.config.assetId.trim()) return node;
-      const role = typeof node.config.role === 'string' && node.config.role.trim()
-        ? node.config.role
-        : typeof node.config.note === 'string' && node.config.note.trim()
-          ? node.config.note
-        : typeof node.config.slotId === 'string' && node.config.slotId.trim()
-          ? node.config.slotId
-          : 'Connected visual input';
-      return role === node.config.role ? node : { ...node, config: { ...node.config, role } };
-    }),
-  };
-  assertUniqueIds(normalizedInputRoles);
-  assertUniquePortIds(normalizedInputRoles);
+  assertUniqueIds(normalized);
+  assertUniquePortIds(normalized);
   // Parsing intentionally normalizes optional undefined fields. The parsed
   // graph must then round-trip through JSON without changing numeric identity
   // (including the otherwise lossy negative-zero case).
-  ensureJsonSafe(normalizedInputRoles, 'graph');
-  assertReferenceInvariants(normalizedInputRoles);
-  for (const node of normalizedInputRoles.nodes) {
+  ensureJsonSafe(normalized, 'graph');
+  assertReferenceInvariants(normalized);
+  for (const node of normalized.nodes) {
     assertFinitePoint(node.position, node.id);
     assertValidSize(node.size, node.id);
   }
-  assertConnections(normalizedInputRoles);
-  return deepFreeze(normalizedInputRoles);
+  assertConnections(normalized);
+  return deepFreeze(normalized);
 }
 
 function endpointEquals(left: WorkflowEdgeEndpoint, right: WorkflowEdgeEndpoint): boolean {

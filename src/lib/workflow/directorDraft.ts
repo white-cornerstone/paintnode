@@ -636,7 +636,10 @@ function materializeDraft(
     return createCreatorNode(node.type, {
       id: persistedNodeId(node.id),
       title: node.title,
-      position: { x: columns[node.type], y: 30 + index * 270 },
+      position: {
+        x: columns[node.type],
+        y: 30 + index * (creatorNodeDefinition(node.type).defaultSize.height + 24),
+      },
       replaceConfig: true,
       config: nodeConfig(node),
     });

@@ -7,6 +7,7 @@ import {
   antigravityConfigFromRunOptions,
   claudeConfigFromRunOptions,
   codexConfigFromRunOptions,
+  composeGrokWorkflow,
   grokConfigFromRunOptions,
   parseProjectAssetMaterialEnvelope,
   resolveProjectAssetMaterial,
@@ -100,6 +101,31 @@ describe('grokConfigFromRunOptions', () => {
     expect(config.directorInvolvement).toBe('fullReview');
     expect(config.directorModel).toBe('grok-4.5');
     expect(config.directorReasoningEffort).toBe('high');
+  });
+});
+
+describe('Grok workflow composition boundary', () => {
+  it('forwards the requested workflow canvas to the native composer', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    api.invoke.mockResolvedValueOnce({ dataUrl: 'data:image/png;base64,AA==', asset: null, assets: [] });
+    try {
+      await composeGrokWorkflow(
+        { imageModel: 'grok-imagine-image', projectPath: '/virtual/project', runId: 'candidate-1' },
+        'Compose the campaign image.',
+        [{ name: 'Product', role: 'Hero product', bytes: new Uint8Array([1, 2, 3]) }],
+        { width: 1024, height: 1280 },
+      );
+
+      expect(api.invoke).toHaveBeenCalledWith('compose_grok_workflow', expect.objectContaining({
+        prompt: 'Compose the campaign image.',
+        targetWidth: 1024,
+        targetHeight: 1280,
+        runId: 'candidate-1',
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+      api.invoke.mockReset();
+    }
   });
 });
 

@@ -49,6 +49,7 @@ function campaignStore(): WorkflowStore {
   const store = new WorkflowStore({ idGenerator: ids() });
   store.newFromTemplate('campaign-composer');
   store.removeNode('review-campaign-direction');
+  store.removeNode('transform-format-square');
   store.removeNode('transform-generate-portrait');
   store.removeNode('transform-generate-landscape');
   store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');
@@ -699,7 +700,7 @@ describe('WorkflowStore graph adapter', () => {
     });
     expect(normalized.runRecords.some((record) => record.status === 'running')).toBe(false);
     expect(reopened.requiresExplicitSave).toBe(true);
-    expect(reopened.savedPath).toBeNull();
+    expect(reopened.savedPath).toBe('workflows/campaign.cxflow.json');
     expect(reopened.migrationSourcePath).toBe('workflows/campaign.cxflow.json');
     expect(reopened.dirty).toBe(true);
     expect(reopened.transformExecution(interrupted.nodeId)).toMatchObject({
@@ -874,19 +875,56 @@ describe('WorkflowStore graph adapter', () => {
     expect(service).toHaveBeenCalledOnce();
   });
 
-  it('does not overwrite workflow edits made while a Transform is running', async () => {
+  it('applies a completed result without warning after node layout changes', async () => {
+    const store = campaignStore();
+    const deferred = deferredCampaignRun(store);
+    store.moveNode('brief', 333, 222);
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome).toMatchObject({ committed: true, commitMessage: 'Generated result applied.' });
+    expect(outcome.warning).toBeUndefined();
+    expect(store.briefNodes[0]).toMatchObject({ x: 333, y: 222 });
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('deferred-result');
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded' });
+
+    const reopened = new WorkflowStore();
+    reopened.openFromBytes(store.toBytes(), null, 'Reopened');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('applies a completed result without warning after an unrelated node changes', async () => {
+    const store = campaignStore();
+    const deferred = deferredCampaignRun(store);
+    store.setOutputFinalSize('output-portrait', 1080, 1440);
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome).toMatchObject({ committed: true, commitMessage: 'Generated result applied.' });
+    expect(outcome.warning).toBeUndefined();
+    expect(store.outputNode('output-portrait')).toMatchObject({ finalWidth: 1080, finalHeight: 1440 });
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('deferred-result');
+
+    const reopened = new WorkflowStore();
+    reopened.openFromBytes(store.toBytes(), null, 'Reopened');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('preserves workflow edits, applies the completed result, and warns when generation settings changed', async () => {
     const store = campaignStore();
     const deferred = deferredCampaignRun(store);
     store.setBriefObjective('brief', 'Edited while the provider was running.');
     deferred.finish();
     const outcome = await deferred.run;
 
-    expect(outcome.committed).toBe(false);
-    expect(outcome.commitMessage).toMatch(/workflow changed/i);
-    expect(outcome.commitMessage).toContain('generated/Square.png');
+    expect(outcome.committed).toBe(true);
+    expect(outcome.warning).toMatch(/settings changed/i);
+    expect(outcome.commitMessage).toBe(outcome.warning);
     expect(store.briefNodes[0].objective).toBe('Edited while the provider was running.');
-    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
-    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'failed' });
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('deferred-result');
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'stale', assetId: 'deferred-result', message: outcome.warning,
+    });
   });
 
   it.each(['new', 'open', 'close'] as const)('does not bind a late result after the workflow session is %s', async (action) => {
@@ -1032,6 +1070,24 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.creatorNodes.find((node) => node.id === artId)?.config.prompt).toBe('Top-lit editorial layout');
     expect(store.creatorNodes.find((node) => node.id === transformId)?.config).toMatchObject({ capability: 'relight', instructions: 'Warm key light' });
     expect(store.creatorNodes.find((node) => node.id === reviewId)?.config).toMatchObject({ mode: 'human', instructions: 'Prefer legibility' });
+  });
+
+  it('preserves an intentionally empty role on an assigned input node', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Editable input role');
+    const inputId = store.addCreatorNode('input');
+
+    store.assignAsset(inputId, campaignProduct);
+    store.configureCreatorNode(inputId, { role: 'Connected visual input' });
+    store.configureCreatorNode(inputId, { role: '' });
+
+    expect(store.graphSnapshot().nodes.find((node) => node.id === inputId)?.config.role).toBe('');
+    expect(store.nodes.find((node) => node.id === inputId)?.note).toBe('');
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Editable input role');
+    expect(reopened.graphSnapshot().nodes.find((node) => node.id === inputId)?.config.role).toBe('');
+    expect(reopened.nodes.find((node) => node.id === inputId)?.note).toBe('');
   });
 
   it('connects the exact named typed ports requested by the board', () => {
@@ -1206,6 +1262,161 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.nodes).toEqual([]);
     expect(store.connections.every((connection) => connection.from !== assetId && connection.to !== assetId)).toBe(true);
     expect(store.rev).toBe(7);
+  });
+
+  it('disconnects a selected set of node links as one graph mutation', () => {
+    const store = campaignStore();
+    const beforeRevision = store.rev;
+    const selectedIds = [
+      store.connections.find((connection) => connection.from === 'brief')!.id,
+      store.connections.find((connection) => connection.from === 'slot-product')!.id,
+    ];
+    const preservedId = store.connections.find((connection) => connection.to === 'output-square')!.id;
+
+    store.disconnectConnections([...selectedIds, selectedIds[0], 'missing-edge']);
+
+    expect(store.connections.map((connection) => connection.id)).not.toEqual(expect.arrayContaining(selectedIds));
+    expect(store.connections.map((connection) => connection.id)).toContain(preservedId);
+    expect(store.rev).toBe(beforeRevision + 1);
+  });
+
+  it('undoes and redoes a multi-link disconnect as one authoring transaction', () => {
+    const store = campaignStore();
+    const selected = store.connections
+      .filter((connection) => connection.to === 'composition')
+      .slice(0, 2);
+    const originalEdges = structuredClone(store.graphSnapshot().edges);
+
+    store.disconnectConnections(selected.map((connection) => connection.id));
+
+    expect(store.canUndoAuthoring).toBe(true);
+    expect(store.authoringUndoLabel).toBe('Disconnect links');
+    expect(store.connections.map((connection) => connection.id)).not.toEqual(
+      expect.arrayContaining(selected.map((connection) => connection.id)),
+    );
+
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.graphSnapshot().edges).toEqual(originalEdges);
+    expect(store.canRedoAuthoring).toBe(true);
+    expect(store.authoringRedoLabel).toBe('Disconnect links');
+
+    expect(store.redoAuthoring()).toBe(true);
+    expect(store.connections.map((connection) => connection.id)).not.toEqual(
+      expect.arrayContaining(selected.map((connection) => connection.id)),
+    );
+  });
+
+  it('reconciles dirty state when undo returns to the saved workflow bytes', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer');
+    const connectionId = store.connections[0].id;
+
+    store.disconnectConnection(connectionId);
+    expect(store.dirty).toBe(true);
+
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.dirty).toBe(false);
+
+    expect(store.redoAuthoring()).toBe(true);
+    expect(store.dirty).toBe(true);
+  });
+
+  it('coalesces a node drag and keeps viewport navigation outside authoring history', () => {
+    const store = campaignStore();
+    const node = store.graphSnapshot().nodes.find((candidate) => candidate.id === 'brief')!;
+    const originalPosition = { ...node.position };
+
+    store.beginAuthoringTransaction('Move node', 'move:brief');
+    store.moveNode('brief', 300, 240);
+    store.moveNode('brief', 330, 260);
+    store.endAuthoringTransaction();
+    store.panBy(40, -20);
+    store.setZoom(1.25);
+    const navigatedViewport = { panX: store.panX, panY: store.panY, zoom: store.zoom };
+
+    expect(store.authoringUndoLabel).toBe('Move node');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.graphSnapshot().nodes.find((candidate) => candidate.id === 'brief')?.position).toEqual(originalPosition);
+    expect({ panX: store.panX, panY: store.panY, zoom: store.zoom }).toEqual(navigatedViewport);
+    expect(store.authoringUndoLabel).not.toBe('Move node');
+  });
+
+  it('routes workflow metadata through authoring history', () => {
+    const store = campaignStore();
+    const originalName = store.name;
+
+    store.setName('Renamed campaign');
+
+    expect(store.authoringUndoLabel).toBe('Rename workflow');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.name).toBe(originalName);
+    expect(store.redoAuthoring()).toBe(true);
+    expect(store.name).toBe('Renamed campaign');
+  });
+
+  it('keeps workflow AI defaults stable across later graph edits and undoes them separately', () => {
+    const store = campaignStore();
+    const original = structuredClone(store.aiDefaults);
+    const next = {
+      ...original,
+      director: { ...original.director, model: 'workflow-history-test' },
+    };
+
+    store.setAiDefaults(next);
+    store.moveNode('brief', 410, 270);
+
+    expect(store.aiDefaults.director.model).toBe('workflow-history-test');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.aiDefaults.director.model).toBe('workflow-history-test');
+    expect(store.authoringUndoLabel).toBe('Change workflow AI defaults');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.aiDefaults).toEqual(original);
+  });
+
+  it('does not expose execution results or destructive run-history removal through authoring undo', () => {
+    const store = campaignStore();
+    store.disconnectConnection(store.connections[0].id);
+    expect(store.canUndoAuthoring).toBe(true);
+
+    store.setOutput(campaignProduct, 'output-square');
+    expect(store.canUndoAuthoring).toBe(false);
+
+    const withHistory = editorRoundTripStore();
+    withHistory.removeNode('transform-generate-square');
+    expect(withHistory.canUndoAuthoring).toBe(false);
+  });
+
+  it('keeps extraction-scoped Visual Input assignments inside the connected result list', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Scoped extraction');
+    const extractionId = store.addCreatorNode('extract-assets');
+    const inputId = store.addCreatorNode('input');
+    store.configureCreatorNode(extractionId, {
+      resultAssets: [{
+        id: campaignProduct.id,
+        name: campaignProduct.name,
+        relativePath: campaignProduct.relativePath,
+      }],
+    });
+    store.assignAsset(inputId, campaignProduct);
+
+    expect(store.connectPorts(extractionId, 'assets', inputId, 'scope')).toBe(true);
+    expect(store.nodes.find((node) => node.id === inputId)?.assetId).toBe(campaignProduct.id);
+
+    store.configureCreatorNode(extractionId, {
+      resultAssets: [{ id: 'replacement', name: 'Replacement.png', relativePath: 'assets/replacement.png' }],
+    });
+
+    expect(store.nodes.find((node) => node.id === inputId)).toMatchObject({
+      assetId: null,
+      relativePath: '',
+      oraRelativePath: null,
+    });
+    expect(store.graphSnapshot().nodes.find((node) => node.id === inputId)?.config).toMatchObject({
+      assetId: null,
+      relativePath: null,
+      oraRelativePath: null,
+    });
   });
 
   it('adds and removes the annotation output for annotated OpenRaster asset nodes', () => {
@@ -1401,7 +1612,7 @@ describe('WorkflowStore graph adapter', () => {
     store.openFromBytes(originalBytes, `workflows/${fixture.name}.cxflow.json`, fixture.name);
 
     expect(store.requiresExplicitSave).toBe(true);
-    expect(store.savedPath).toBeNull();
+    expect(store.savedPath).toBe(`workflows/${fixture.name}.cxflow.json`);
     expect(store.migrationSourcePath).toContain('.cxflow.json');
     expect(store.serialize().version).toBe(WORKFLOW_GRAPH_VERSION);
     expect(JSON.parse(new TextDecoder().decode(originalBytes))).toEqual(fixture);
@@ -1481,22 +1692,26 @@ describe('WorkflowStore graph adapter', () => {
     expect(after.assetReferences).toEqual(before.assetReferences);
   });
 
-  it('keeps presentation state outside graph revisions while persisting viewport dirty state', () => {
+  it('keeps viewport navigation outside workflow revisions and dirty state', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
     const store = new WorkflowStore({ idGenerator: ids() });
-    store.newBoard();
+    store.openFromBytes(source.toBytes(), 'workflows/existing.cxflow.json', 'Existing');
     const graphRevision = store.graphRevision;
+
+    expect(store.dirty).toBe(false);
     store.select({ kind: 'output', id: 'output' });
     store.setTool('zoom');
     expect(store.rev).toBe(0);
     expect(store.graphRevision).toBe(graphRevision);
-    store.zoomBy(1, 300, 200);
-    expect(store.rev).toBe(0);
 
+    store.zoomBy(1.25, 300, 200);
     store.panBy(20, 10);
-    store.setZoom(1.25);
-    expect(store.rev).toBe(2);
+
+    expect(store.rev).toBe(0);
     expect(store.graphRevision).toBe(graphRevision);
-    expect(store.serialize().viewport).toEqual({ panX: 20, panY: 10, zoom: 1.25 });
+    expect(store.dirty).toBe(false);
+    expect(store.serialize().viewport).toEqual({ panX: -55, panY: -40, zoom: 1.25 });
   });
 
   it('round-trips unusual valid v2 metadata names exactly until the user renames', () => {
@@ -1515,6 +1730,24 @@ describe('WorkflowStore graph adapter', () => {
 
     store.setName('  Renamed.cxflow.json  ');
     expect(store.serialize().metadata.name).toBe('Renamed');
+  });
+
+  it('repairs a workflow extension leaked into metadata when it matches the opened filename', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
+    const graph = structuredClone(source.serialize());
+    graph.metadata.name = 'workflow-test-2.cxflow';
+
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(graph)),
+      'documents/workflow-test-2.cxflow.json',
+      'workflow-test-2',
+    );
+
+    expect(store.name).toBe('workflow-test-2');
+    expect(store.serialize().metadata.name).toBe('workflow-test-2');
+    expect(store.savedPath).toBe('documents/workflow-test-2.cxflow.json');
   });
 
   it('preserves fractional v2 pan for identity and saturated zoom no-ops', () => {

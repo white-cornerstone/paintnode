@@ -66,6 +66,15 @@ export async function setNativeMenuEnabledStates(enabled: Record<string, boolean
   }
 }
 
+export async function finishDesktopLaunch(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await invoke('finish_launch');
+  } catch (error) {
+    console.error('Failed to finish desktop launch', error);
+  }
+}
+
 export async function readAppMemoryInfo(): Promise<AppMemoryInfo | null> {
   if (!isDesktop()) return null;
   try {
@@ -875,6 +884,7 @@ export async function decoupleCodexImage(
   sourcePng: Uint8Array,
   prompt: string,
   storeAssets = true,
+  indexSheet = false,
 ): Promise<DecoupleImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex image decoupling is only available in the desktop app.');
@@ -890,6 +900,7 @@ export async function decoupleCodexImage(
     sourcePng: Array.from(sourcePng),
     runId,
     storeAssets,
+    indexSheet,
   });
 }
 
@@ -996,6 +1007,40 @@ export async function generateGrokImage(
   });
 }
 
+/** Generate one Director-planned Grok asset or index sheet on PaintNode's fixed chroma matte. */
+export async function extractGrokAsset(
+  config: GrokGeneratorConfig,
+  prompt: string,
+  assetName: string,
+  sources: WorkflowSourceImage[],
+  indexSheet = false,
+  sheetCount: number | null = null,
+): Promise<DecoupleImageResult> {
+  if (!isDesktop()) {
+    throw new Error('Grok asset extraction is only available in the desktop app.');
+  }
+  if (sources.length === 0) {
+    throw new Error('Grok asset extraction needs at least one source image.');
+  }
+  if (sources.length > 3) {
+    throw new Error('Grok asset extraction supports up to 3 source or support images. Remove extra inputs or switch the image provider.');
+  }
+  const runId = config.runId?.trim() ? config.runId.trim() : `grok-extract-${Date.now()}`;
+  return invoke<DecoupleImageResult>('extract_grok_asset', {
+    ...grokInvokeConfig({ ...config, runId }),
+    prompt,
+    assetName,
+    sources: sources.map((source) => ({
+      name: source.name,
+      role: source.role?.trim() || 'Extraction source',
+      bytes: Array.from(source.bytes),
+    })),
+    runId,
+    indexSheet,
+    sheetCount,
+  });
+}
+
 /** Mask-guided Grok generative fill through the xAI image-edit endpoint. */
 export async function generateGrokFillImage(
   config: GrokGeneratorConfig,
@@ -1089,6 +1134,7 @@ export async function composeGrokWorkflow(
   config: GrokGeneratorConfig,
   prompt: string,
   sources: WorkflowSourceImage[],
+  targetDimensions?: TargetDimensions | null,
 ): Promise<GeneratedImageResult> {
   if (!isDesktop()) {
     throw new Error('Grok workflow compose is only available in the desktop app.');
@@ -1104,6 +1150,8 @@ export async function composeGrokWorkflow(
       name: source.name,
       bytes: Array.from(source.bytes),
     })),
+    targetWidth: targetDimensions?.width ?? null,
+    targetHeight: targetDimensions?.height ?? null,
     runId,
   });
 }
@@ -1196,6 +1244,7 @@ export async function decoupleAntigravityImage(
   sourcePng: Uint8Array,
   prompt: string,
   storeAssets = true,
+  indexSheet = false,
 ): Promise<DecoupleImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity image decoupling is only available in the desktop app.');
@@ -1207,6 +1256,7 @@ export async function decoupleAntigravityImage(
     sourcePng: Array.from(sourcePng),
     runId,
     storeAssets,
+    indexSheet,
   });
 }
 
@@ -1425,6 +1475,17 @@ export async function saveProjectDocumentAs(args: {
   bytes: Uint8Array;
 }): Promise<SavedDocumentResult | null> {
   if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
+  const targetPath = await pickProjectDocumentSavePath(args);
+  if (!targetPath) return null;
+  return saveProjectDocumentAtPath({ ...args, targetPath });
+}
+
+export async function pickProjectDocumentSavePath(args: {
+  projectPath?: string | null;
+  name: string;
+  dialogTitle?: string | null;
+}): Promise<string | null> {
+  if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
   const defaultName = safeDocumentDialogName(args.name);
   const isWorkflow = defaultName.toLowerCase().endsWith('.cxflow.json');
   const isPsd = defaultName.toLowerCase().endsWith('.psd');
@@ -1447,10 +1508,20 @@ export async function saveProjectDocumentAs(args: {
       : [{ name: 'OpenRaster', extensions: ['ora'] }],
     canCreateDirectories: true,
   });
-  if (!targetPath) return null;
+  return targetPath;
+}
+
+export async function saveProjectDocumentAtPath(args: {
+  projectPath?: string | null;
+  targetPath: string;
+  name: string;
+  previousName?: string | null;
+  bytes: Uint8Array;
+}): Promise<SavedDocumentResult> {
+  if (!isDesktop()) throw new Error('Native save is only available in the desktop app.');
   return invoke<SavedDocumentResult>('project_save_document_as', {
     projectPath: args.projectPath?.trim() ? args.projectPath.trim() : null,
-    targetPath,
+    targetPath: args.targetPath,
     name: args.name,
     previousName: args.previousName?.trim() ? args.previousName.trim() : null,
     bytes: Array.from(args.bytes),

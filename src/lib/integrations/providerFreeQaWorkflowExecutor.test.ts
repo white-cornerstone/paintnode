@@ -245,6 +245,31 @@ describe('provider-free QA workflow executor', () => {
     const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer', {
       graphId: 'provider-free-visible-qa',
     }));
+    graph.nodes = graph.nodes.filter((node) => ![
+      'review-campaign-direction', 'transform-format-square',
+      'transform-generate-portrait', 'transform-generate-landscape',
+    ].includes(node.id));
+    graph.edges = graph.edges.filter((edge) => (
+      graph.nodes.some((node) => node.id === edge.source.nodeId)
+      && graph.nodes.some((node) => node.id === edge.target.nodeId)
+    ));
+    graph.edges.push(
+      {
+        id: 'direct-square-output',
+        source: { nodeId: 'transform-generate-square', portId: 'result' },
+        target: { nodeId: 'output-square', portId: 'source' },
+      },
+      {
+        id: 'direct-portrait-output',
+        source: { nodeId: 'composition', portId: 'layout' },
+        target: { nodeId: 'output-portrait', portId: 'source' },
+      },
+      {
+        id: 'direct-landscape-output',
+        source: { nodeId: 'composition', portId: 'layout' },
+        target: { nodeId: 'output-landscape', portId: 'source' },
+      },
+    );
     const product = graph.nodes.find((node) => node.id === 'slot-product')!;
     product.config.assetId = 'product';
     product.config.relativePath = 'assets/Product.png';

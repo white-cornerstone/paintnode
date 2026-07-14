@@ -16,6 +16,13 @@ const product = {
 function campaignStore(): WorkflowStore {
   const store = new WorkflowStore();
   store.newFromTemplate('campaign-composer', 'Original campaign');
+  store.removeNode('review-campaign-direction');
+  store.removeNode('transform-format-square');
+  store.removeNode('transform-generate-portrait');
+  store.removeNode('transform-generate-landscape');
+  store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');
+  store.connectPorts('composition', 'layout', 'output-portrait', 'source');
+  store.connectPorts('composition', 'layout', 'output-landscape', 'source');
   store.assignAsset('slot-product', {
     ...product, kind: 'imported', createdAt: 1, exists: true,
   });

@@ -8,7 +8,7 @@ import type {
   WorkflowRunRecordV1,
 } from './schema';
 
-export type WorkflowReviewCandidateState = 'eligible' | 'stale' | 'failed' | 'unavailable';
+export type WorkflowReviewCandidateState = 'eligible' | 'stale' | 'unavailable';
 
 export interface WorkflowReviewCandidate {
   candidateId: string;
@@ -25,7 +25,6 @@ export interface WorkflowReviewCandidate {
   model: string | null;
   sourceAssetIds: string[];
   output: WorkflowRunOutput | null;
-  failure: { code: string; message: string } | null;
 }
 
 export interface WorkflowReviewResolutionOptions {
@@ -72,9 +71,10 @@ function reviewTopology(graph: WorkflowGraphV2, reviewNodeId: string) {
   ));
   const supportedFanout = outgoingEdges.every((edge) => (
     directOutputEdges.includes(edge)
-    || (edge.target.portId === 'source'
+    || ((edge.target.portId === 'decision' || edge.target.portId === 'source')
       && graph.nodes.some((node) => node.id === edge.target.nodeId && node.type === 'transform'))
   ));
+  const hasFormatFanout = outgoingEdges.some((edge) => !directOutputEdges.includes(edge));
   const outgoing = directOutputEdges.length === 1 ? directOutputEdges[0] : undefined;
   const output = outgoing?.target.portId === 'source'
     ? graph.nodes.find((node) => node.id === outgoing.target.nodeId && node.type === 'output')
@@ -83,7 +83,10 @@ function reviewTopology(graph: WorkflowGraphV2, reviewNodeId: string) {
     review,
     transform,
     output,
-    valid: Boolean(review && transform && output && incomingEdges.length === 1 && directOutputEdges.length === 1 && supportedFanout),
+    valid: Boolean(review && transform && incomingEdges.length === 1
+      && directOutputEdges.length <= 1
+      && !(directOutputEdges.length > 0 && hasFormatFanout)
+      && supportedFanout),
   };
 }
 
@@ -118,7 +121,9 @@ function candidateRunsForReview(graph: WorkflowGraphV2, reviewNodeId: string): W
       latest.set(record.candidate.candidateId, record);
     }
   }
-  return [...latest.values()].sort((left, right) => left.candidate!.ordinal - right.candidate!.ordinal);
+  return [...latest.values()]
+    .filter((record) => record.status === 'succeeded')
+    .sort((left, right) => left.candidate!.ordinal - right.candidate!.ordinal);
 }
 
 export function deriveWorkflowReviewCandidates(
@@ -129,13 +134,11 @@ export function deriveWorkflowReviewCandidates(
   return candidateRunsForReview(graph, reviewNodeId).map((record) => {
     const output = record.outputs[0] ?? null;
     const currentMaterial = options.currentMaterialKeys?.[record.nodeId];
-    const state: WorkflowReviewCandidateState = record.status !== 'succeeded'
-      ? 'failed'
-      : currentMaterial && currentMaterial !== record.materialKey
-        ? 'stale'
-        : !output || (options.isOutputAvailable && !options.isOutputAvailable(output))
-          ? 'unavailable'
-          : 'eligible';
+    const state: WorkflowReviewCandidateState = currentMaterial && currentMaterial !== record.materialKey
+      ? 'stale'
+      : !output || (options.isOutputAvailable && !options.isOutputAvailable(output))
+        ? 'unavailable'
+        : 'eligible';
     return Object.freeze({
       candidateId: record.candidate!.candidateId,
       branchGroupId: record.candidate!.branchGroupId,
@@ -151,7 +154,6 @@ export function deriveWorkflowReviewCandidates(
       model: record.provider.model,
       sourceAssetIds: Object.freeze(record.sourceAssets.map((asset) => asset.assetId)) as unknown as string[],
       output: output ? Object.freeze({ ...output }) : null,
-      failure: record.failure ? Object.freeze({ ...record.failure }) : null,
     });
   });
 }
@@ -215,10 +217,10 @@ export function resolveWorkflowReviewTopology(
     reason: { code, message, action },
   });
   if (!review) return blocked('REVIEW_NOT_FOUND', 'The Review node is unavailable.', 'Reconnect the Review node');
-  if (!valid || !transform || !outputNode) {
+  if (!valid || !transform) {
     return blocked(
       'REVIEW_TOPOLOGY_INVALID',
-      'Review must connect one concept Transform to one primary Output; supported format Transforms may fan out from the same decision.',
+      'Review must receive one concept Transform; its promoted decision may fan out to separate format Transforms.',
       'Reconnect the Review path',
     );
   }
@@ -234,7 +236,11 @@ export function resolveWorkflowReviewTopology(
   const currentMaterial = options.currentMaterialKeys?.[transform.id];
   if ((currentMaterial && currentMaterial !== promotion.materialKey)
     || createWorkflowReviewNodeRevision(graph, review.id) !== promotion.reviewNodeRevision) {
-    return blocked('PROMOTION_STALE', 'The promoted candidate predates changed upstream material.', 'Review and promote a current candidate');
+    return blocked(
+      'PROMOTION_STALE',
+      'The promoted candidate no longer matches the current concept inputs or preview settings.',
+      'Regenerate candidates for the updated workflow',
+    );
   }
   const output = run.outputs.find((item) => (
     item.assetReferenceId === promotion.assetReferenceId
@@ -253,7 +259,7 @@ export function resolveWorkflowReviewTopology(
   }
   return {
     state: 'ready', reviewNodeId: review.id, transformNodeId: transform.id,
-    outputNodeId: outputNode.id, promotion: structuredClone(promotion), output: structuredClone(output),
+    outputNodeId: outputNode?.id ?? null, promotion: structuredClone(promotion), output: structuredClone(output),
   };
 }
 
@@ -299,7 +305,17 @@ export function resolveWorkflowCampaignPath(
       const target = graph.nodes.find((node) => node.id === edge.target.nodeId);
       if (target?.type === 'output' && edge.target.portId === 'source') {
         if (!selector.outputNodeId || target.id === selector.outputNodeId) {
-          matches.push({ transformNodeId: transform.id, reviewNodeId: null, outputNodeId: target.id });
+          const reviewEdge = graph.edges.find((candidate) => (
+            candidate.target.nodeId === transform.id
+            && (candidate.target.portId === 'decision' || candidate.target.portId === 'source')
+            && candidate.source.portId === 'selected'
+            && graph.nodes.some((node) => node.id === candidate.source.nodeId && node.type === 'review')
+          ));
+          matches.push({
+            transformNodeId: transform.id,
+            reviewNodeId: reviewEdge?.source.nodeId ?? null,
+            outputNodeId: target.id,
+          });
         }
       }
       if (target?.type === 'review' && edge.target.portId === 'candidates') {
