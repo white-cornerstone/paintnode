@@ -12,13 +12,10 @@
   import {
     Add,
     ArrowSync,
-    Board,
     Dismiss,
     Hand,
-    ImageAdd,
     Info,
     MarqueeRect,
-    Open,
     Search,
     Sparkle,
     SquareMultiple,
@@ -53,9 +50,6 @@
   );
   const workflowTools: Array<{ id: WorkflowTool; label: string; icon: string }> = [
     { id: 'hand', label: 'Hand tool', icon: Hand },
-    { id: 'asset', label: 'Draw asset node', icon: ImageAdd },
-    { id: 'composition', label: 'Place composition node', icon: Board },
-    { id: 'output', label: 'Place output node', icon: Open },
     { id: 'zoom', label: 'Zoom workflow canvas', icon: Search },
   ];
   const nodePalettes = ['#3a3c42', '#3e4f7a', '#3e6b57', '#74583c', '#70435f', '#5b4f7a'];

@@ -291,7 +291,7 @@ export interface WorkflowOutputNode {
   outputRelativePath: string | null;
 }
 
-export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
+export type WorkflowTool = 'hand' | 'zoom';
 export type WorkflowSelection =
   | { kind: 'asset'; id: string }
   | { kind: 'creator'; id: string }
