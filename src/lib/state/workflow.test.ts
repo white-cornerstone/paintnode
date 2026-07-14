@@ -1208,6 +1208,22 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.rev).toBe(7);
   });
 
+  it('disconnects a selected set of node links as one graph mutation', () => {
+    const store = campaignStore();
+    const beforeRevision = store.rev;
+    const selectedIds = [
+      store.connections.find((connection) => connection.from === 'brief')!.id,
+      store.connections.find((connection) => connection.from === 'slot-product')!.id,
+    ];
+    const preservedId = store.connections.find((connection) => connection.to === 'output-square')!.id;
+
+    store.disconnectConnections([...selectedIds, selectedIds[0], 'missing-edge']);
+
+    expect(store.connections.map((connection) => connection.id)).not.toEqual(expect.arrayContaining(selectedIds));
+    expect(store.connections.map((connection) => connection.id)).toContain(preservedId);
+    expect(store.rev).toBe(beforeRevision + 1);
+  });
+
   it('keeps extraction-scoped Visual Input assignments inside the connected result list', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard('Scoped extraction');

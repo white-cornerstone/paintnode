@@ -1152,9 +1152,19 @@ export class WorkflowStore {
   }
 
   disconnectConnection(id: string): void {
-    if (!this.requireGraphDomain().edge(id)) return;
+    this.disconnectConnections([id]);
+  }
+
+  disconnectConnections(ids: readonly string[]): void {
+    const requestedIds = new Set(ids);
+    if (requestedIds.size === 0) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeEdge(id));
+    const existingIds = domain.graph.edges
+      .map((edge) => edge.id)
+      .filter((id) => requestedIds.has(id));
+    if (existingIds.length === 0) return;
+    for (const id of existingIds) domain.removeEdge(id);
+    this.publishGraphMutation(domain, undefined);
   }
 
   disconnectNodes(from: string, to: string): void {

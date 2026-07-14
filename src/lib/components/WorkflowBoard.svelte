@@ -74,6 +74,8 @@
     workflowExtractionQuickLinks,
     workflowExtractedAssetLinks,
     workflowInputAssetScope,
+    workflowDisconnectMode,
+    workflowNodeDisconnectLinks,
     resolveWorkflowCampaignPath,
     shouldRetryReviewVerificationAfterRefresh,
     type CreatorNodeType,
@@ -84,6 +86,7 @@
     type WorkflowReviewVerificationState,
     type WorkflowInputAssetScope,
     type WorkflowExtractedAssetLink,
+    type WorkflowDisconnectLink,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
     type WorkflowNodeV2,
@@ -104,13 +107,15 @@
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Open, PaintBrush, SlideSize } from '../icons';
+  import Modal from './Modal.svelte';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
   import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
+  import WorkflowNodeDisconnectButton from './workflow/WorkflowNodeDisconnectButton.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
@@ -227,6 +232,8 @@
   let handledPasteRequest = 0;
   let clipboardImporting = $state(false);
   let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
+  let disconnectDialog = $state<{ nodeId: string; nodeTitle: string; links: WorkflowDisconnectLink[] } | null>(null);
+  let disconnectSelections = $state<Record<string, boolean>>({});
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -239,6 +246,7 @@
       : workflow.zoomMode,
   );
   const graphConnections = $derived(workflow.connections);
+  const selectedDisconnectCount = $derived(Object.values(disconnectSelections).filter(Boolean).length);
   const hasCompositionNode = $derived.by(() => {
     workflow.rev;
     return workflow.graphSnapshot().nodes.some((node) => node.id === 'composition');
@@ -1478,6 +1486,40 @@
     event.stopPropagation();
   }
 
+  function nodeConnectionCount(nodeId: WorkflowNodeId): number {
+    return graphConnections.filter((connection) => connection.from === nodeId || connection.to === nodeId).length;
+  }
+
+  function requestNodeDisconnect(nodeId: WorkflowNodeId): void {
+    const graph = workflow.graphSnapshot();
+    const links = workflowNodeDisconnectLinks(graph, nodeId);
+    const mode = workflowDisconnectMode(links);
+    if (mode === 'none') return;
+    if (mode === 'immediate') {
+      workflow.disconnectConnection(links[0].id);
+      return;
+    }
+    disconnectSelections = Object.fromEntries(links.map((link) => [link.id, true]));
+    disconnectDialog = {
+      nodeId,
+      nodeTitle: graph.nodes.find((node) => node.id === nodeId)?.title || 'node',
+      links,
+    };
+  }
+
+  function closeDisconnectDialog(): void {
+    disconnectDialog = null;
+    disconnectSelections = {};
+  }
+
+  function confirmNodeDisconnect(): void {
+    if (!disconnectDialog) return;
+    workflow.disconnectConnections(disconnectDialog.links
+      .filter((link) => disconnectSelections[link.id])
+      .map((link) => link.id));
+    closeDisconnectDialog();
+  }
+
   function onBoardPointerDown(event: PointerEvent): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     if (event.button !== 0) return;
@@ -2654,19 +2696,11 @@
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
               </span>
               <div class="node-tools">
-                <button
-                  type="button"
-                  class:active={workflow.isConnected(node.id, 'composition')}
-                  aria-label={`${workflow.isConnected(node.id, 'composition') ? 'Disconnect' : 'Connect'} ${node.name} to composition`}
-                  use:tooltip={{ text: workflow.isConnected(node.id, 'composition') ? 'Connected to composition' : 'Connect to composition', placement: 'top' }}
-                  onpointerdown={(event) => event.stopPropagation()}
-                  onclick={(event) => {
-                    event.stopPropagation();
-                    workflow.setNodeIncluded(node.id, !workflow.isConnected(node.id, 'composition'));
-                  }}
-                >
-                  <Icon svg={Link} size={13} />
-                </button>
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${node.name}`}
@@ -2797,6 +2831,11 @@
                 <WorkflowNodeTitle name={brief.name} typeLabel={briefCreatorDefinition.label} />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(brief.id)}
+                  nodeName={brief.name}
+                  onDisconnect={() => requestNodeDisconnect(brief.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${brief.name}`}
@@ -2857,6 +2896,11 @@
                 <WorkflowNodeTitle name={node.name} typeLabel={definition.label} />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${node.name}`}
@@ -3250,6 +3294,13 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>
                 <WorkflowNodeTitle name={node.name} typeLabel="Unsupported" />
               </span>
+              <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
+              </div>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
@@ -3301,6 +3352,11 @@
             </span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
+              <WorkflowNodeDisconnectButton
+                count={nodeConnectionCount('composition')}
+                nodeName="Composition"
+                onDisconnect={() => requestNodeDisconnect('composition')}
+              />
               <button
                 type="button"
                 aria-label={`Remove ${workflow.compositionName || artDirectionCreatorDefinition.defaultTitle}`}
@@ -3528,6 +3584,11 @@
                 />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(outputNode.id)}
+                  nodeName={outputTitle(outputNode)}
+                  onDisconnect={() => requestNodeDisconnect(outputNode.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${outputTitle(outputNode)}`}
@@ -3588,6 +3649,58 @@
     </div>
   </div>
 </section>
+
+{#if disconnectDialog}
+  {@const inputLinks = disconnectDialog.links.filter((link) => link.direction === 'input')}
+  {@const outputLinks = disconnectDialog.links.filter((link) => link.direction === 'output')}
+  <Modal title="Disconnect links" onClose={closeDisconnectDialog} width={460}>
+    <div class="disconnect-dialog">
+      <p>
+        Choose which links to break for <strong>{disconnectDialog.nodeTitle}</strong>.
+        All links are selected by default.
+      </p>
+      {#if inputLinks.length > 0}
+        <fieldset>
+          <legend>Input links</legend>
+          {#each inputLinks as link (link.id)}
+            <label>
+              <input
+                type="checkbox"
+                checked={disconnectSelections[link.id]}
+                onchange={(event) => (disconnectSelections[link.id] = event.currentTarget.checked)}
+              />
+              <span><strong>{link.peerNodeTitle}</strong><small>{link.peerPortLabel} to {link.localPortLabel}</small></span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      {#if outputLinks.length > 0}
+        <fieldset>
+          <legend>Output links</legend>
+          {#each outputLinks as link (link.id)}
+            <label>
+              <input
+                type="checkbox"
+                checked={disconnectSelections[link.id]}
+                onchange={(event) => (disconnectSelections[link.id] = event.currentTarget.checked)}
+              />
+              <span><strong>{link.peerNodeTitle}</strong><small>{link.localPortLabel} to {link.peerPortLabel}</small></span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      <div class="disconnect-actions">
+        <button type="button" onclick={closeDisconnectDialog}>Cancel</button>
+        <button
+          type="button"
+          class="dlg-primary"
+          disabled={selectedDisconnectCount === 0}
+          onclick={confirmNodeDisconnect}
+        >Break {selectedDisconnectCount} {selectedDisconnectCount === 1 ? 'link' : 'links'}</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
 
 {#if directorOpen}
   <WorkflowDirectorDialog
@@ -3838,6 +3951,74 @@
     align-items: center;
     gap: 4px;
   }
+  .disconnect-dialog {
+    display: grid;
+    gap: 12px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .disconnect-dialog > p {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .disconnect-dialog > p strong {
+    color: var(--text-bright);
+  }
+  .disconnect-dialog fieldset {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    margin: 0;
+    padding: 8px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .disconnect-dialog legend {
+    padding: 0 4px;
+    color: var(--text-bright);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .disconnect-dialog label {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    padding: 6px;
+    border-radius: 3px;
+  }
+  .disconnect-dialog label:hover {
+    background: var(--bg-elevated);
+  }
+  .disconnect-dialog input {
+    margin: 2px 0 0;
+  }
+  .disconnect-dialog label span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .disconnect-dialog label strong {
+    overflow: hidden;
+    color: var(--text-bright);
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .disconnect-dialog label small {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .disconnect-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .disconnect-actions button {
+    min-width: 92px;
+  }
   .node-head button,
   .storyboard-head button {
     display: grid;
@@ -3846,7 +4027,6 @@
     height: 24px;
     padding: 0;
   }
-  .node-head button.active,
   .storyboard-head button.active {
     color: var(--accent);
   }
