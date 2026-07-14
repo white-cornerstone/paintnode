@@ -539,10 +539,12 @@
         void closeActiveDocument();
         break;
       case 'app:undo':
-        editor.undo();
+        if (ui.activeSurface === 'workflow' && workflow.active) workflow.undoAuthoring();
+        else editor.undo();
         break;
       case 'app:redo':
-        editor.redo();
+        if (ui.activeSurface === 'workflow' && workflow.active) workflow.redoAuthoring();
+        else editor.redo();
         break;
       case 'app:cut':
         editor.cut();

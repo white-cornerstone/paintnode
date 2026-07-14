@@ -29,6 +29,10 @@
   const activeId = () => editor.activeLayer?.id;
   const hasDocument = () => !!editor.doc;
   const hasOpenTarget = () => hasDocument() || (ui.activeSurface === 'workflow' && workflow.active);
+  const canUndo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.canUndoAuthoring : editor.canUndo;
+  const canRedo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.canRedoAuthoring : editor.canRedo;
+  const undo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.undoAuthoring() : editor.undo();
+  const redo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.redoAuthoring() : editor.redo();
   const activeLayer = () => editor.activeLayer;
   const hasActiveLayer = () => !!activeLayer();
   const hasEditableActiveLayer = () => {
@@ -92,8 +96,8 @@
     {
       label: 'Edit',
       items: [
-        { label: 'Undo', shortcut: '⌘Z', action: () => editor.undo(), disabled: () => !editor.canUndo },
-        { label: 'Redo', shortcut: '⇧⌘Z', action: () => editor.redo(), disabled: () => !editor.canRedo },
+        { label: 'Undo', shortcut: '⌘Z', action: undo, disabled: () => !canUndo() },
+        { label: 'Redo', shortcut: '⇧⌘Z', action: redo, disabled: () => !canRedo() },
         { sep: true },
         { label: 'Cut', shortcut: '⌘X', action: () => editor.cut(), disabled: () => !hasEditableActiveLayer() },
         { label: 'Copy', shortcut: '⌘C', action: () => editor.copy(), disabled: () => !hasActiveLayer() },

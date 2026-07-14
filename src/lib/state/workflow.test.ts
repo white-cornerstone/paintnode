@@ -1224,6 +1224,112 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.rev).toBe(beforeRevision + 1);
   });
 
+  it('undoes and redoes a multi-link disconnect as one authoring transaction', () => {
+    const store = campaignStore();
+    const selected = store.connections
+      .filter((connection) => connection.to === 'composition')
+      .slice(0, 2);
+    const originalEdges = structuredClone(store.graphSnapshot().edges);
+
+    store.disconnectConnections(selected.map((connection) => connection.id));
+
+    expect(store.canUndoAuthoring).toBe(true);
+    expect(store.authoringUndoLabel).toBe('Disconnect links');
+    expect(store.connections.map((connection) => connection.id)).not.toEqual(
+      expect.arrayContaining(selected.map((connection) => connection.id)),
+    );
+
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.graphSnapshot().edges).toEqual(originalEdges);
+    expect(store.canRedoAuthoring).toBe(true);
+    expect(store.authoringRedoLabel).toBe('Disconnect links');
+
+    expect(store.redoAuthoring()).toBe(true);
+    expect(store.connections.map((connection) => connection.id)).not.toEqual(
+      expect.arrayContaining(selected.map((connection) => connection.id)),
+    );
+  });
+
+  it('reconciles dirty state when undo returns to the saved workflow bytes', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newFromTemplate('campaign-composer');
+    const connectionId = store.connections[0].id;
+
+    store.disconnectConnection(connectionId);
+    expect(store.dirty).toBe(true);
+
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.dirty).toBe(false);
+
+    expect(store.redoAuthoring()).toBe(true);
+    expect(store.dirty).toBe(true);
+  });
+
+  it('coalesces a node drag and keeps viewport navigation outside authoring history', () => {
+    const store = campaignStore();
+    const node = store.graphSnapshot().nodes.find((candidate) => candidate.id === 'brief')!;
+    const originalPosition = { ...node.position };
+
+    store.beginAuthoringTransaction('Move node', 'move:brief');
+    store.moveNode('brief', 300, 240);
+    store.moveNode('brief', 330, 260);
+    store.endAuthoringTransaction();
+    store.panBy(40, -20);
+    store.setZoom(1.25);
+    const navigatedViewport = { panX: store.panX, panY: store.panY, zoom: store.zoom };
+
+    expect(store.authoringUndoLabel).toBe('Move node');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.graphSnapshot().nodes.find((candidate) => candidate.id === 'brief')?.position).toEqual(originalPosition);
+    expect({ panX: store.panX, panY: store.panY, zoom: store.zoom }).toEqual(navigatedViewport);
+    expect(store.authoringUndoLabel).not.toBe('Move node');
+  });
+
+  it('routes workflow metadata through authoring history', () => {
+    const store = campaignStore();
+    const originalName = store.name;
+
+    store.setName('Renamed campaign');
+
+    expect(store.authoringUndoLabel).toBe('Rename workflow');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.name).toBe(originalName);
+    expect(store.redoAuthoring()).toBe(true);
+    expect(store.name).toBe('Renamed campaign');
+  });
+
+  it('keeps workflow AI defaults stable across later graph edits and undoes them separately', () => {
+    const store = campaignStore();
+    const original = structuredClone(store.aiDefaults);
+    const next = {
+      ...original,
+      director: { ...original.director, model: 'workflow-history-test' },
+    };
+
+    store.setAiDefaults(next);
+    store.moveNode('brief', 410, 270);
+
+    expect(store.aiDefaults.director.model).toBe('workflow-history-test');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.aiDefaults.director.model).toBe('workflow-history-test');
+    expect(store.authoringUndoLabel).toBe('Change workflow AI defaults');
+    expect(store.undoAuthoring()).toBe(true);
+    expect(store.aiDefaults).toEqual(original);
+  });
+
+  it('does not expose execution results or destructive run-history removal through authoring undo', () => {
+    const store = campaignStore();
+    store.disconnectConnection(store.connections[0].id);
+    expect(store.canUndoAuthoring).toBe(true);
+
+    store.setOutput(campaignProduct, 'output-square');
+    expect(store.canUndoAuthoring).toBe(false);
+
+    const withHistory = editorRoundTripStore();
+    withHistory.removeNode('transform-generate-square');
+    expect(withHistory.canUndoAuthoring).toBe(false);
+  });
+
   it('keeps extraction-scoped Visual Input assignments inside the connected result list', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard('Scoped extraction');

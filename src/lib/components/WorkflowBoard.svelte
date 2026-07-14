@@ -234,6 +234,8 @@
   let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
   let disconnectDialog = $state<{ nodeId: string; nodeTitle: string; links: WorkflowDisconnectLink[] } | null>(null);
   let disconnectSelections = $state<Record<string, boolean>>({});
+  let disconnectUndoNotice = $state<{ count: number } | null>(null);
+  let disconnectUndoTimer = 0;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -350,6 +352,7 @@
 
   onDestroy(() => {
     boardDestroyed = true;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
     reviewVerificationCoordinator.reset();
     endStoryboardEditSession();
   });
@@ -1227,6 +1230,8 @@
       dx: boardPoint(event).x - x,
       dy: boardPoint(event).y - y,
     };
+    const historyNodeId = type === 'prompt' ? 'composition' : type === 'output' ? output?.id ?? 'output' : node?.id ?? type;
+    workflow.beginAuthoringTransaction('Move node', `move:${historyNodeId}`);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.stopPropagation();
   }
@@ -1272,6 +1277,7 @@
   }
 
   function stopDrag(): void {
+    if (dragging) workflow.endAuthoringTransaction();
     connecting = null;
     dragging = null;
     panning = null;
@@ -1497,6 +1503,7 @@
     if (mode === 'none') return;
     if (mode === 'immediate') {
       workflow.disconnectConnection(links[0].id);
+      showDisconnectUndo(1);
       return;
     }
     disconnectSelections = Object.fromEntries(links.map((link) => [link.id, true]));
@@ -1507,6 +1514,11 @@
     };
   }
 
+  function disconnectWorkflowConnection(connectionId: string): void {
+    workflow.disconnectConnection(connectionId);
+    showDisconnectUndo(1);
+  }
+
   function closeDisconnectDialog(): void {
     disconnectDialog = null;
     disconnectSelections = {};
@@ -1514,10 +1526,29 @@
 
   function confirmNodeDisconnect(): void {
     if (!disconnectDialog) return;
-    workflow.disconnectConnections(disconnectDialog.links
+    const selectedLinks = disconnectDialog.links
       .filter((link) => disconnectSelections[link.id])
-      .map((link) => link.id));
+      .map((link) => link.id);
+    workflow.disconnectConnections(selectedLinks);
     closeDisconnectDialog();
+    showDisconnectUndo(selectedLinks.length);
+  }
+
+  function showDisconnectUndo(count: number): void {
+    if (count <= 0) return;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
+    disconnectUndoNotice = { count };
+    disconnectUndoTimer = window.setTimeout(() => {
+      disconnectUndoNotice = null;
+      disconnectUndoTimer = 0;
+    }, 5_000);
+  }
+
+  function undoDisconnect(): void {
+    if (workflow.authoringUndoLabel === 'Disconnect links') workflow.undoAuthoring();
+    disconnectUndoNotice = null;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
+    disconnectUndoTimer = 0;
   }
 
   function onBoardPointerDown(event: PointerEvent): void {
@@ -2641,13 +2672,13 @@
                 tabindex="0"
                 aria-label="Disconnect workflow connection"
                 onpointerdown={(event) => {
-                  workflow.disconnectConnection(connection.id);
+                  disconnectWorkflowConnection(connection.id);
                   event.stopPropagation();
                 }}
                 onkeydown={(event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
-                  workflow.disconnectConnection(connection.id);
+                  disconnectWorkflowConnection(connection.id);
                 }}
               />
             {/if}
@@ -3650,6 +3681,17 @@
   </div>
 </section>
 
+{#if disconnectUndoNotice}
+  <div class="workflow-history-toast" role="region" aria-label="Workflow history" aria-live="polite">
+    <span>Disconnected {disconnectUndoNotice.count} {disconnectUndoNotice.count === 1 ? 'link' : 'links'}.</span>
+    <button
+      type="button"
+      disabled={!workflow.canUndoAuthoring || workflow.authoringUndoLabel !== 'Disconnect links'}
+      onclick={undoDisconnect}
+    >Undo</button>
+  </div>
+{/if}
+
 {#if disconnectDialog}
   {@const inputLinks = disconnectDialog.links.filter((link) => link.direction === 'input')}
   {@const outputLinks = disconnectDialog.links.filter((link) => link.direction === 'output')}
@@ -3756,6 +3798,28 @@
     min-height: 0;
     background: #242526;
     color: var(--text);
+  }
+  .workflow-history-toast {
+    position: fixed;
+    bottom: 36px;
+    left: 50%;
+    z-index: 1600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px 7px 11px;
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    background: var(--bg-elevated);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
+    color: var(--text-bright);
+    font-size: 12px;
+    transform: translateX(-50%);
+  }
+  .workflow-history-toast button {
+    padding: 3px 8px;
+    color: var(--accent);
+    font-weight: 600;
   }
   .node-head,
   .output-actions {

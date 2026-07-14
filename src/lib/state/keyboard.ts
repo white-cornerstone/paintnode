@@ -2,6 +2,7 @@ import { editor } from './editor.svelte';
 import { openCommand, saveActiveCopyCommand, saveActiveCommand } from './commands';
 import { isTypingTarget } from './editing';
 import { ui } from './ui.svelte';
+import { workflow } from './workflow.svelte';
 import { nextAiRetouchTool } from '../engine/aiRetouch';
 
 const TOOL_KEYS: Record<string, string> = {
@@ -65,12 +66,16 @@ export function installKeyboard(): () => void {
           return;
         case 'z':
           e.preventDefault();
-          if (e.shiftKey) editor.redo();
+          if (ui.activeSurface === 'workflow' && workflow.active) {
+            if (e.shiftKey) workflow.redoAuthoring();
+            else workflow.undoAuthoring();
+          } else if (e.shiftKey) editor.redo();
           else editor.undo();
           return;
         case 'y':
           e.preventDefault();
-          editor.redo();
+          if (ui.activeSurface === 'workflow' && workflow.active) workflow.redoAuthoring();
+          else editor.redo();
           return;
         case 'a':
           e.preventDefault();
