@@ -89,6 +89,7 @@
     type WorkflowDisconnectLink,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
+    workflowTransformContext,
     type WorkflowNodeV2,
   } from '../workflow';
   import {
@@ -1152,7 +1153,7 @@
         ? `Develop only Art Direction node "${node.id}". Improve its textual prompt using connected briefs and visual inputs. Do not generate a storyboard image and do not change any other node or connection.`
         : '';
     revisionDirectorTitle = node.type === 'brief'
-      ? 'Enhance Brief'
+      ? 'Enhance Brief with AI'
       : node.type === 'art-direction'
         ? 'Develop Art Direction'
         : 'Revise node';
@@ -1181,6 +1182,27 @@
 
   function creatorConfigString(config: Record<string, unknown>, key: string): string {
     return typeof config[key] === 'string' ? config[key] : '';
+  }
+
+  function transformContextSummary(nodeId: string): {
+    inherited: string;
+    direct: string;
+  } {
+    const context = workflowTransformContext(workflow.graphSnapshot(), nodeId);
+    const inheritedParts = [
+      context.inheritedVisuals.length > 0
+        ? `${context.inheritedVisuals.length} visual ${context.inheritedVisuals.length === 1 ? 'reference' : 'references'}`
+        : '',
+      context.brief ? 'Brief' : '',
+      context.artDirection ? 'Art Direction' : '',
+    ].filter(Boolean);
+    const directCount = context.visualInputs.filter((connection) => connection.origin === 'direct').length;
+    return {
+      inherited: inheritedParts.join(' · ') || 'none',
+      direct: directCount > 0
+        ? `${directCount} additional visual ${directCount === 1 ? 'reference' : 'references'}`
+        : 'none',
+    };
   }
 
   async function placeOutput(node: WorkflowOutputNode): Promise<void> {
@@ -3023,6 +3045,7 @@
                   </div>
                 {/if}
               {:else if node.type === 'transform'}
+                {@const contextSummary = transformContextSummary(node.id)}
                 <label class="creator-config-field">
                   Capability
                   <select
@@ -3038,13 +3061,20 @@
                   </select>
                 </label>
                 <label class="creator-config-field">
-                  Instructions
+                  Additional guidance (optional)
                   <textarea
                     aria-label={`${node.name} instructions`}
                     value={creatorConfigString(node.config, 'instructions')}
                     oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
                   ></textarea>
                 </label>
+                <div class="transform-context-summary" aria-label={`${node.name} connected context`}>
+                  <Icon svg={ImageMultiple} size={16} />
+                  <span>
+                    <b>Inherited context</b> {contextSummary.inherited}
+                    <small><b>Direct references</b> {contextSummary.direct}</small>
+                  </span>
+                </div>
               {:else if node.type === 'review'}
                 <label class="creator-config-field">
                   Review mode
@@ -4221,6 +4251,8 @@
   .creator-node-body {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: max-content;
+    align-content: start;
     flex: 1 1 auto;
     gap: 8px;
     min-height: 0;
@@ -4296,6 +4328,26 @@
     align-items: center;
     gap: 6px;
     color: var(--text-bright);
+  }
+  .transform-context-summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    color: var(--text-bright);
+    line-height: 1.35;
+  }
+  .transform-context-summary > span,
+  .transform-context-summary small {
+    display: block;
+    min-width: 0;
+  }
+  .transform-context-summary small {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 9px;
   }
   .extract-run {
     min-width: 0;

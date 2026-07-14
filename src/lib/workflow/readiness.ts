@@ -6,6 +6,7 @@ import {
 } from './candidatePromotion';
 import type { WorkflowGraphV2, WorkflowNodeV2 } from './schema';
 import { workflowNodeAiOverrides } from './aiRoles';
+import { workflowTransformContext, type WorkflowTransformContext } from './transformContext';
 
 export type WorkflowReadinessCode =
   | 'desktop'
@@ -78,9 +79,14 @@ function assetBinding(graph: WorkflowGraphV2, node: WorkflowNodeV2): { assetId: 
   return assetId || relativePath ? { assetId, relativePath } : null;
 }
 
-function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOptions): WorkflowReadinessItem {
+function assetReadiness(
+  graph: WorkflowGraphV2,
+  options: WorkflowReadinessOptions,
+  context: WorkflowTransformContext | null,
+): WorkflowReadinessItem {
   const slots = graph.nodes.filter((node) => node.type === 'input');
   const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
+  const transformIds = new Set(graph.nodes.filter((node) => node.type === 'transform').map((node) => node.id));
   for (const slot of slots) {
     const binding = assetBinding(graph, slot);
     const required = slot.config.required !== false;
@@ -93,15 +99,22 @@ function assetReadiness(graph: WorkflowGraphV2, options: WorkflowReadinessOption
       );
     }
     if (!binding) continue;
-    const connected = graph.edges.some((edge) => (
-      edge.source.nodeId === slot.id && artDirectionIds.has(edge.target.nodeId)
-    ));
+    const connected = graph.edges.some((edge) => {
+      if (edge.source.nodeId !== slot.id) return false;
+      if (context?.transform) {
+        return (edge.target.nodeId === context.transform.id && edge.target.portId === 'assets')
+          || (edge.target.nodeId === context.artDirection?.id && edge.target.portId === 'assets');
+      }
+      return (artDirectionIds.has(edge.target.nodeId) && edge.target.portId === 'assets')
+        || (transformIds.has(edge.target.nodeId) && edge.target.portId === 'assets');
+    });
     if (!connected) {
+      const targetName = context?.artDirection?.title ?? context?.transform?.title ?? 'Art Direction or Transform';
       return blocked(
         'required-assets',
         'Visual inputs',
-        `${slot.title} has an asset but is not connected to Art Direction.`,
-        `Reconnect ${slot.title} to Art Direction`,
+        `${slot.title} has an asset but is not connected to ${targetName}.`,
+        `Reconnect ${slot.title} to ${targetName}`,
       );
     }
     const available = options.assets.some((asset) => (
@@ -180,14 +193,16 @@ function transformReadiness(
         )
       : null;
   }
-  const artDirectionIds = new Set(graph.nodes.filter((node) => node.type === 'art-direction').map((node) => node.id));
-  const reviewIds = new Set(graph.nodes.filter((node) => node.type === 'review').map((node) => node.id));
-  const hasSource = graph.edges.some((edge) => (
-    edge.target.nodeId === transform.id
-    && edge.target.portId === 'source'
-    && ((edge.source.portId === 'layout' && artDirectionIds.has(edge.source.nodeId))
-      || (edge.source.portId === 'selected' && reviewIds.has(edge.source.nodeId)))
-  ));
+  const context = workflowTransformContext(graph, transform.id);
+  const hasSource = Boolean(
+    (context.artDirection
+      && context.sourceEdge?.source.nodeId === context.artDirection.id
+      && context.sourceEdge.source.portId === 'layout')
+    || (context.sourceReview
+      && context.sourceEdge?.source.nodeId === context.sourceReview.id
+      && context.sourceEdge.source.portId === 'selected')
+    || (!context.sourceEdge && context.directVisuals.length > 0),
+  );
   const hasResult = graph.edges.some((edge) => (
     edge.source.nodeId === transform.id && edge.source.portId === 'result'
   )) && Boolean(resolveWorkflowCampaignPath(graph, { outputNodeId: output.id, transformNodeId: transform.id }));
@@ -196,8 +211,8 @@ function transformReadiness(
     return blocked(
       'transform',
       'Image Transform',
-      `${transform.title} must connect Art Direction to ${output.title} with a supported image capability.`,
-      `Reconnect ${transform.title} to ${output.title}`,
+      `${transform.title} needs Directed composition or direct visual references, plus a connection to ${output.title}.`,
+      `Connect visual context to ${transform.title}, then reconnect ${output.title}`,
     );
   }
   return complete('transform', 'Image Transform', `${transform.title} is configured for ${output.title}.`);
@@ -261,13 +276,25 @@ function briefReadiness(
   graph: WorkflowGraphV2,
   brief: WorkflowNodeV2 | undefined,
   artDirection: WorkflowNodeV2 | undefined,
+  transform: WorkflowNodeV2 | null,
 ): WorkflowReadinessItem {
-  const objective = brief ? textConfig(brief, 'objective') : textConfig(artDirection, 'prompt');
+  if (!artDirection && transform) {
+    return complete('brief', 'Creative brief', 'No separate Brief is required; this Transform uses its local guidance.');
+  }
+  const requiredPromptPort = artDirection?.ports.inputs.find((port) => port.required && port.dataType === 'prompt');
+  if (artDirection && requiredPromptPort && !brief) {
+    return blocked(
+      'brief',
+      'Creative brief',
+      `${artDirection.title} requires a connected Brief.`,
+      `Connect a Brief to ${artDirection.title}`,
+    );
+  }
+  const objective = textConfig(brief, 'objective');
   if (!objective) {
     return blocked('brief', 'Creative brief', 'Describe the outcome this workflow should create.', 'Write the campaign brief');
   }
   if (brief && artDirection) {
-    const requiredPromptPort = artDirection.ports.inputs.find((port) => port.required && port.dataType === 'prompt');
     const connected = requiredPromptPort && graph.edges.some((edge) => (
       edge.source.nodeId === brief.id
       && edge.target.nodeId === artDirection.id
@@ -285,15 +312,44 @@ function briefReadiness(
   return complete('brief', 'Creative brief', 'The intended outcome is defined and connected.');
 }
 
+function artDirectionReadiness(
+  artDirection: WorkflowNodeV2 | undefined,
+  transform: WorkflowNodeV2 | null,
+): WorkflowReadinessItem {
+  if (artDirection) {
+    return textConfig(artDirection, 'prompt') || textConfig(artDirection, 'guidance')
+      ? complete('art-direction', 'Art direction', 'Visual guidance is defined.')
+      : blocked('art-direction', 'Art direction', 'Add composition, lighting, colour, or style guidance.', 'Add art-direction guidance');
+  }
+  if (!transform) {
+    return blocked('art-direction', 'Art direction', 'Add composition, lighting, colour, or style guidance.', 'Add art-direction guidance');
+  }
+  const capability = textConfig(transform, 'capability');
+  const instructions = textConfig(transform, 'instructions');
+  if (instructions || capability === 'remove-background' || capability === 'upscale') {
+    return complete('art-direction', 'Transform guidance', 'This Transform uses direct visual references and local guidance.');
+  }
+  return blocked(
+    'art-direction',
+    'Transform guidance',
+    `${transform.title} needs local instructions when no Art Direction is connected.`,
+    `Write instructions in ${transform.title}`,
+  );
+}
+
 export function workflowReadiness(
   inputGraph: WorkflowGraphV2,
   options: WorkflowReadinessOptions,
 ): WorkflowReadiness {
   const graph = new WorkflowGraphDomain(inputGraph).graph;
-  const brief = graph.nodes.find((node) => node.type === 'brief');
-  const artDirection = graph.nodes.find((node) => node.type === 'art-direction');
   const outputs = targetOutputs(graph, options.targetNodeId);
   const targetOutput = outputs[0];
+  const targetTransform = targetOutput ? transformForOutput(graph, targetOutput) : null;
+  const targetContext = targetTransform ? workflowTransformContext(graph, targetTransform.id) : null;
+  const brief = targetContext?.brief ?? graph.nodes.find((node) => node.type === 'brief');
+  const artDirection = targetContext?.artDirection ?? (targetTransform
+    ? undefined
+    : graph.nodes.find((node) => node.type === 'art-direction'));
   const transform = targetOutput
     ? transformReadiness(graph, targetOutput, Boolean(options.targetNodeId))
     : null;
@@ -306,11 +362,9 @@ export function workflowReadiness(
     options.projectPath
       ? complete('project-folder', 'Project folder', options.projectPath)
       : blocked('project-folder', 'Project folder', 'Generated assets and workflow files need a project folder.', 'Choose or create a project folder'),
-    assetReadiness(graph, options),
-    briefReadiness(graph, brief, artDirection),
-    textConfig(artDirection, 'prompt') || textConfig(artDirection, 'guidance')
-      ? complete('art-direction', 'Art direction', 'Visual guidance is defined.')
-      : blocked('art-direction', 'Art direction', 'Add composition, lighting, colour, or style guidance.', 'Add art-direction guidance'),
+    assetReadiness(graph, options, targetContext),
+    briefReadiness(graph, brief, artDirection, targetTransform),
+    artDirectionReadiness(artDirection, targetTransform),
     ...(transform ? [transform] : []),
     ...(provider ? [provider] : []),
     ...(review ? [review] : []),

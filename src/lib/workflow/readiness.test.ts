@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { workflowReadiness, type WorkflowReadinessOptions } from './readiness';
 import { instantiateWorkflowTemplate } from './templates';
 import { planWorkflowExecution } from './execution';
+import { createCreatorNode } from './registry';
+import { WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2 } from './schema';
 
 function readyOptions(): WorkflowReadinessOptions {
   return {
@@ -40,7 +42,49 @@ function bindProduct() {
   return graph;
 }
 
+function directWorkflow(instructions = 'Create a studio product photograph.'): WorkflowGraphV2 {
+  const input = createCreatorNode('input', {
+    id: 'direct-input',
+    title: 'Direct product',
+    config: { assetId: 'product-asset', relativePath: 'assets/product.png', role: 'Product reference' },
+  });
+  const transform = createCreatorNode('transform', {
+    id: 'direct-transform',
+    config: { capability: 'generate', instructions },
+  });
+  const output = createCreatorNode('output', { id: 'direct-output' });
+  return {
+    version: WORKFLOW_GRAPH_VERSION,
+    id: 'direct-workflow',
+    metadata: { name: 'Direct workflow', sourceVersion: null, migrations: [] },
+    viewport: { panX: 0, panY: 0, zoom: 1 },
+    nodes: [input, transform, output],
+    edges: [
+      { id: 'input-transform', source: { nodeId: input.id, portId: 'asset' }, target: { nodeId: transform.id, portId: 'assets' } },
+      { id: 'transform-output', source: { nodeId: transform.id, portId: 'result' }, target: { nodeId: output.id, portId: 'source' } },
+    ],
+    assetReferences: [],
+    runRecords: [],
+  };
+}
+
 describe('workflow readiness', () => {
+  it('accepts direct visual references and Transform guidance without Brief or Art Direction', () => {
+    const ready = workflowReadiness(directWorkflow(), { ...readyOptions(), targetNodeId: 'direct-output' });
+    expect(ready.ready).toBe(true);
+    expect(ready.items.find((item) => item.code === 'required-assets')).toMatchObject({ status: 'complete' });
+    expect(ready.items.find((item) => item.code === 'brief')).toMatchObject({ status: 'complete' });
+    expect(ready.items.find((item) => item.code === 'art-direction')).toMatchObject({
+      status: 'complete', label: 'Transform guidance',
+    });
+
+    const missingGuidance = workflowReadiness(directWorkflow(''), { ...readyOptions(), targetNodeId: 'direct-output' });
+    expect(missingGuidance.ready).toBe(false);
+    expect(missingGuidance.items.find((item) => item.code === 'art-direction')).toMatchObject({
+      status: 'blocked', action: 'Write instructions in Generate',
+    });
+  });
+
   it('reports every first-run requirement without performing any side effects', () => {
     const result = workflowReadiness(instantiateWorkflowTemplate('blank'), {
       desktop: false,

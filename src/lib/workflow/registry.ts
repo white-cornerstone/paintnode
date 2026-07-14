@@ -111,6 +111,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     },
     defaultConfig: {
       creatorRole: 'brief',
+      aiAssistMode: 'manual',
       objective: '',
       guidance: 'State the outcome, audience, and non-negotiable content for this workflow.',
     },
@@ -124,7 +125,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'paint-brush',
     keywords: ['campaign', 'direction', 'storyboard', 'layout', 'composition', 'annotations', 'style'],
     defaultTitle: 'Art Direction',
-    defaultSize: { width: 340, height: 408 },
+    defaultSize: { width: 340, height: 320 },
     defaultColor: '#3a3c42',
     ports: {
       inputs: [
@@ -191,7 +192,8 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     defaultColor: '#39475a',
     ports: {
       inputs: [
-        { id: 'source', label: 'Directed composition', dataType: 'layout', required: true },
+        { id: 'source', label: 'Directed composition', dataType: 'layout' },
+        { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
         { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
       ],
       outputs: [{ id: 'result', label: 'Transformed result', dataType: 'layout' }],

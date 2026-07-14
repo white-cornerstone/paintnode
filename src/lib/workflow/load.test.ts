@@ -3,6 +3,7 @@ import blank from './fixtures/v1/blank.json';
 import assetsStoryboard from './fixtures/v1/assets-storyboard.json';
 import { readWorkflowGraph } from './load';
 import { migrateWorkflowFileV1 } from './migration';
+import { createCreatorNode } from './registry';
 import type { WorkflowGraphV2 } from './schema';
 
 function invalidV2(
@@ -48,6 +49,51 @@ describe('workflow graph loading', () => {
     expect(result.graph?.nodes.find((node) => node.id === input.id)?.ports.inputs).toEqual([
       { id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' },
     ]);
+  });
+
+  it('adds direct visual references and makes Directed composition optional on older Transform nodes', () => {
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
+    const transform = createCreatorNode('transform', { id: 'legacy-transform' });
+    transform.ports.inputs = [
+      { id: 'source', label: 'Directed composition', dataType: 'layout', required: true },
+      { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
+    ];
+    graph.nodes.push(transform);
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(true);
+    expect(result.graph?.nodes.find((node) => node.id === transform.id)?.ports.inputs).toEqual([
+      { id: 'source', label: 'Directed composition', dataType: 'layout' },
+      { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
+      { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
+    ]);
+  });
+
+  it('compacts only untouched legacy generic Art Direction nodes', () => {
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
+    const compositionHeight = graph.nodes.find((node) => node.id === 'composition')?.size.height;
+    graph.nodes.push(
+      createCreatorNode('art-direction', {
+        id: 'legacy-generic-direction',
+        size: { width: 340, height: 408 },
+      }),
+      createCreatorNode('art-direction', {
+        id: 'custom-direction',
+        size: { width: 360, height: 408 },
+      }),
+    );
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(true);
+    expect(result.graph?.nodes.find((node) => node.id === 'legacy-generic-direction')?.size)
+      .toEqual({ width: 340, height: 320 });
+    expect(result.graph?.nodes.find((node) => node.id === 'custom-direction')?.size)
+      .toEqual({ width: 360, height: 408 });
+    expect(result.graph?.nodes.find((node) => node.id === 'composition')?.size.height).toBe(compositionHeight);
   });
 
   it('returns recoverable path-specific issues for malformed or unsupported data', () => {

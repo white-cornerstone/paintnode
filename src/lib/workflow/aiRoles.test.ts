@@ -6,6 +6,8 @@ import {
   resolveWorkflowNodeAiRunOptions,
   sanitizeWorkflowAiOptions,
   workflowAiDefaultsFromRunOptions,
+  workflowAiRoleSummary,
+  workflowBriefAiAssistMode,
   workflowNodeAiCapabilities,
   workflowNodeAiOverrides,
 } from './aiRoles';
@@ -89,12 +91,38 @@ describe('workflow AI roles', () => {
   });
 
   it('maps roles by node capability', () => {
-    expect(workflowNodeAiCapabilities('brief', {})).toEqual({ director: 'required', image: 'none' });
+    expect(workflowNodeAiCapabilities('brief', {})).toEqual({ director: 'optional', image: 'none' });
     expect(workflowNodeAiCapabilities('extract-assets', {})).toEqual({ director: 'optional', image: 'edit' });
     expect(workflowNodeAiCapabilities('transform', { capability: 'generate' })).toEqual({ director: 'optional', image: 'generate' });
     expect(workflowNodeAiCapabilities('transform', { capability: 'relight' })).toEqual({ director: 'optional', image: 'edit' });
     expect(workflowNodeAiCapabilities('review', { mode: 'human' })).toEqual({ director: 'none', image: 'none' });
     expect(workflowNodeAiCapabilities('review', { mode: 'ai' })).toEqual({ director: 'required', image: 'none' });
+  });
+
+  it('treats legacy and new Brief nodes as manual until AI assistance is explicitly selected', () => {
+    const defaults = workflowAiDefaultsFromRunOptions(defaultAiRunOptions());
+    const legacyBrief = node('brief', { objective: 'Keep these exact words.' });
+    const workflowDefaultBrief = node('brief', {
+      aiAssistMode: 'workflow-default',
+      objective: 'Use the workflow Director when requested.',
+    });
+    const configuredBrief = node('brief', {
+      aiAssistMode: 'configured',
+      objective: 'Use Claude when requested.',
+      ai: {
+        version: 1,
+        director: {
+          provider: 'claude', mode: 'auto', involvement: 'planOnly', model: null, options: {},
+        },
+      },
+    });
+
+    expect(workflowBriefAiAssistMode(legacyBrief)).toBe('manual');
+    expect(workflowAiRoleSummary(defaults, legacyBrief)).toBe('Manual · text used verbatim');
+    expect(workflowBriefAiAssistMode(workflowDefaultBrief)).toBe('workflow-default');
+    expect(workflowAiRoleSummary(defaults, workflowDefaultBrief)).toContain('↳');
+    expect(workflowBriefAiAssistMode(configuredBrief)).toBe('configured');
+    expect(workflowAiRoleSummary(defaults, configuredBrief)).toContain('claude');
   });
 
   it('rejects malformed persisted workflow defaults', () => {
