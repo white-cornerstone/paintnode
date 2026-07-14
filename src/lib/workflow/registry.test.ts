@@ -102,6 +102,9 @@ describe('creator node registry', () => {
     });
     expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('sourceAssetIds');
     expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('supportAssetIds');
+    expect(creatorNodeDefinition('input').ports.inputs).toEqual([
+      { id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' },
+    ]);
     expect(creatorNodeDefinition('review').executor.status).toBe('available');
   });
 

@@ -71,6 +71,11 @@
     workflowReadiness,
     workflowCandidateBranchResultSummary,
     workflowCandidateProgressLabel,
+    workflowExtractionQuickLinks,
+    workflowExtractedAssetLinks,
+    workflowInputAssetScope,
+    workflowDisconnectMode,
+    workflowNodeDisconnectLinks,
     resolveWorkflowCampaignPath,
     shouldRetryReviewVerificationAfterRefresh,
     type CreatorNodeType,
@@ -79,6 +84,9 @@
     type WorkflowSelectiveRunMode,
     type WorkflowStoryboardDescriptor,
     type WorkflowReviewVerificationState,
+    type WorkflowInputAssetScope,
+    type WorkflowExtractedAssetLink,
+    type WorkflowDisconnectLink,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
     type WorkflowNodeV2,
@@ -99,13 +107,15 @@
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Open, PaintBrush, SlideSize } from '../icons';
+  import Modal from './Modal.svelte';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
   import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
+  import WorkflowNodeDisconnectButton from './workflow/WorkflowNodeDisconnectButton.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
@@ -222,6 +232,10 @@
   let handledPasteRequest = 0;
   let clipboardImporting = $state(false);
   let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
+  let disconnectDialog = $state<{ nodeId: string; nodeTitle: string; links: WorkflowDisconnectLink[] } | null>(null);
+  let disconnectSelections = $state<Record<string, boolean>>({});
+  let disconnectUndoNotice = $state<{ count: number } | null>(null);
+  let disconnectUndoTimer = 0;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -234,6 +248,7 @@
       : workflow.zoomMode,
   );
   const graphConnections = $derived(workflow.connections);
+  const selectedDisconnectCount = $derived(Object.values(disconnectSelections).filter(Boolean).length);
   const hasCompositionNode = $derived.by(() => {
     workflow.rev;
     return workflow.graphSnapshot().nodes.some((node) => node.id === 'composition');
@@ -337,6 +352,7 @@
 
   onDestroy(() => {
     boardDestroyed = true;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
     reviewVerificationCoordinator.reset();
     endStoryboardEditSession();
   });
@@ -678,24 +694,19 @@
     }));
   });
 
-  type ExtractedAssetLink = { id: string; name: string; relativePath: string };
-
-  function extractedAssetLinks(config: Record<string, unknown>): ExtractedAssetLink[] {
-    const value = config.resultAssets;
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
-      const record = item as Record<string, unknown>;
-      return typeof record.id === 'string' && typeof record.name === 'string' && typeof record.relativePath === 'string'
-        ? [{ id: record.id, name: record.name, relativePath: record.relativePath }]
-        : [];
-    });
+  function extractionQuickLinks() {
+    workflow.rev;
+    return workflowExtractionQuickLinks(workflow.graphSnapshot());
   }
 
-  function extractionQuickLinks(): Array<ExtractedAssetLink & { nodeName: string }> {
-    return workflow.creatorNodes.flatMap((node) => node.type === 'extract-assets'
-      ? extractedAssetLinks(node.config).map((asset) => ({ ...asset, nodeName: node.name }))
-      : []);
+  function extractionScopeFor(nodeId: string): WorkflowInputAssetScope | null {
+    workflow.rev;
+    return workflowInputAssetScope(workflow.graphSnapshot(), nodeId);
+  }
+
+  function availableExtractedAssetLinks<T extends { id: string }>(links: T[]): T[] {
+    const availableIds = new Set(assets.map((asset) => asset.id));
+    return links.filter((link) => availableIds.has(link.id));
   }
 
   function extractionConnectedCount(nodeId: string, portId: 'sources' | 'support'): number {
@@ -920,7 +931,7 @@
       if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
         throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
       }
-      const stored: ExtractedAssetLink[] = [];
+      const stored: WorkflowExtractedAssetLink[] = [];
       const outputs: Array<{ itemId: string; name: string; assetId: string; relativePath: string }> = [];
       for (const item of prepared) {
         try {
@@ -1219,6 +1230,8 @@
       dx: boardPoint(event).x - x,
       dy: boardPoint(event).y - y,
     };
+    const historyNodeId = type === 'prompt' ? 'composition' : type === 'output' ? output?.id ?? 'output' : node?.id ?? type;
+    workflow.beginAuthoringTransaction('Move node', `move:${historyNodeId}`);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.stopPropagation();
   }
@@ -1264,6 +1277,7 @@
   }
 
   function stopDrag(): void {
+    if (dragging) workflow.endAuthoringTransaction();
     connecting = null;
     dragging = null;
     panning = null;
@@ -1476,6 +1490,65 @@
     workflow.connectPorts(connecting.from.nodeId, connecting.from.portId, nodeId, portId);
     connecting = null;
     event.stopPropagation();
+  }
+
+  function nodeConnectionCount(nodeId: WorkflowNodeId): number {
+    return graphConnections.filter((connection) => connection.from === nodeId || connection.to === nodeId).length;
+  }
+
+  function requestNodeDisconnect(nodeId: WorkflowNodeId): void {
+    const graph = workflow.graphSnapshot();
+    const links = workflowNodeDisconnectLinks(graph, nodeId);
+    const mode = workflowDisconnectMode(links);
+    if (mode === 'none') return;
+    if (mode === 'immediate') {
+      workflow.disconnectConnection(links[0].id);
+      showDisconnectUndo(1);
+      return;
+    }
+    disconnectSelections = Object.fromEntries(links.map((link) => [link.id, true]));
+    disconnectDialog = {
+      nodeId,
+      nodeTitle: graph.nodes.find((node) => node.id === nodeId)?.title || 'node',
+      links,
+    };
+  }
+
+  function disconnectWorkflowConnection(connectionId: string): void {
+    workflow.disconnectConnection(connectionId);
+    showDisconnectUndo(1);
+  }
+
+  function closeDisconnectDialog(): void {
+    disconnectDialog = null;
+    disconnectSelections = {};
+  }
+
+  function confirmNodeDisconnect(): void {
+    if (!disconnectDialog) return;
+    const selectedLinks = disconnectDialog.links
+      .filter((link) => disconnectSelections[link.id])
+      .map((link) => link.id);
+    workflow.disconnectConnections(selectedLinks);
+    closeDisconnectDialog();
+    showDisconnectUndo(selectedLinks.length);
+  }
+
+  function showDisconnectUndo(count: number): void {
+    if (count <= 0) return;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
+    disconnectUndoNotice = { count };
+    disconnectUndoTimer = window.setTimeout(() => {
+      disconnectUndoNotice = null;
+      disconnectUndoTimer = 0;
+    }, 5_000);
+  }
+
+  function undoDisconnect(): void {
+    if (workflow.authoringUndoLabel === 'Disconnect links') workflow.undoAuthoring();
+    disconnectUndoNotice = null;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
+    disconnectUndoTimer = 0;
   }
 
   function onBoardPointerDown(event: PointerEvent): void {
@@ -2599,13 +2672,13 @@
                 tabindex="0"
                 aria-label="Disconnect workflow connection"
                 onpointerdown={(event) => {
-                  workflow.disconnectConnection(connection.id);
+                  disconnectWorkflowConnection(connection.id);
                   event.stopPropagation();
                 }}
                 onkeydown={(event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
-                  workflow.disconnectConnection(connection.id);
+                  disconnectWorkflowConnection(connection.id);
                 }}
               />
             {/if}
@@ -2620,6 +2693,8 @@
           {@const asset = assetFor(node)}
           {@const oraDocument = oraFor(node)}
           {@const ports = workflowNodePorts(node.id)}
+          {@const extractionScope = extractionScopeFor(node.id)}
+          {@const scopedExtractionLinks = extractionScope ? availableExtractedAssetLinks(extractionScope.assets) : []}
           <article
             class="asset-node"
             class:included={node.included}
@@ -2652,19 +2727,11 @@
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
               </span>
               <div class="node-tools">
-                <button
-                  type="button"
-                  class:active={workflow.isConnected(node.id, 'composition')}
-                  aria-label={`${workflow.isConnected(node.id, 'composition') ? 'Disconnect' : 'Connect'} ${node.name} to composition`}
-                  use:tooltip={{ text: workflow.isConnected(node.id, 'composition') ? 'Connected to composition' : 'Connect to composition', placement: 'top' }}
-                  onpointerdown={(event) => event.stopPropagation()}
-                  onclick={(event) => {
-                    event.stopPropagation();
-                    workflow.setNodeIncluded(node.id, !workflow.isConnected(node.id, 'composition'));
-                  }}
-                >
-                  <Icon svg={Link} size={13} />
-                </button>
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${node.name}`}
@@ -2703,33 +2770,51 @@
                 {/if}
               </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
-                <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
+                <span>
+                  {node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}
+                  {extractionScope ? ` · ${extractionScope.nodeName}` : ''}
+                </span>
                 <select
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
                   value={asset ? `asset:${asset.id}` : oraDocument ? `ora:${oraDocument.relativePath}` : ''}
                   onchange={(event) => void assignWorkflowAsset(node.id, event.currentTarget.value)}
                 >
-                  <option value="">Choose from project…</option>
-                  {#if extractionQuickLinks().some((link) => assets.some((item) => item.id === link.id))}
-                    <optgroup label="Extract Assets results">
-                      {#each extractionQuickLinks().filter((link) => assets.some((item) => item.id === link.id)) as option (option.id)}
-                        <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
-                      {/each}
+                  <option value="">{extractionScope ? `Choose from ${extractionScope.nodeName}…` : 'Choose from project…'}</option>
+                  {#if extractionScope}
+                    {#if scopedExtractionLinks.length > 0}
+                      <optgroup label={`${extractionScope.nodeName} results`}>
+                        {#each scopedExtractionLinks as option (option.id)}
+                          <option value={`asset:${option.id}`}>{option.name}</option>
+                        {/each}
+                      </optgroup>
+                    {/if}
+                  {:else}
+                    {@const quickLinks = availableExtractedAssetLinks(extractionQuickLinks())}
+                    {#if quickLinks.length > 0}
+                      <optgroup label="Extract Assets results">
+                        {#each quickLinks as option (`${option.nodeId}:${option.id}`)}
+                          <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
+                        {/each}
+                      </optgroup>
+                    {/if}
+                    <optgroup label="Project assets">
+                    {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
                     </optgroup>
-                  {/if}
-                  <optgroup label="Project assets">
-                  {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
-                  </optgroup>
-                  {#if oraDocuments.length > 0}
-                    <optgroup label="OpenRaster documents">
-                      {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
-                    </optgroup>
+                    {#if oraDocuments.length > 0}
+                      <optgroup label="OpenRaster documents">
+                        {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
+                      </optgroup>
+                    {/if}
                   {/if}
                 </select>
                 <small aria-live="polite">
                   {asset
                     ? `Selected ${asset.name}`
+                    : extractionScope
+                      ? scopedExtractionLinks.length > 0
+                        ? `Scoped to ${extractionScope.nodeName}`
+                        : `No available results from ${extractionScope.nodeName}`
                     : oraDocument
                       ? `${oraDocument.name}${node.oraRelativePath && workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation') ? ' · annotation output available' : ''}`
                       : 'No asset selected'}
@@ -2777,6 +2862,11 @@
                 <WorkflowNodeTitle name={brief.name} typeLabel={briefCreatorDefinition.label} />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(brief.id)}
+                  nodeName={brief.name}
+                  onDisconnect={() => requestNodeDisconnect(brief.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${brief.name}`}
@@ -2807,7 +2897,7 @@
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
-          {@const extractionResults = extractedAssetLinks(node.config)}
+          {@const extractionResults = workflowExtractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
           {@const creatorGraphNode = workflow.graphSnapshot().nodes.find((item) => item.id === node.id)}
           <article
@@ -2837,6 +2927,11 @@
                 <WorkflowNodeTitle name={node.name} typeLabel={definition.label} />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${node.name}`}
@@ -3230,6 +3325,13 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>
                 <WorkflowNodeTitle name={node.name} typeLabel="Unsupported" />
               </span>
+              <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
+              </div>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
@@ -3281,6 +3383,11 @@
             </span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
+              <WorkflowNodeDisconnectButton
+                count={nodeConnectionCount('composition')}
+                nodeName="Composition"
+                onDisconnect={() => requestNodeDisconnect('composition')}
+              />
               <button
                 type="button"
                 aria-label={`Remove ${workflow.compositionName || artDirectionCreatorDefinition.defaultTitle}`}
@@ -3508,6 +3615,11 @@
                 />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(outputNode.id)}
+                  nodeName={outputTitle(outputNode)}
+                  onDisconnect={() => requestNodeDisconnect(outputNode.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${outputTitle(outputNode)}`}
@@ -3569,6 +3681,69 @@
   </div>
 </section>
 
+{#if disconnectUndoNotice}
+  <div class="workflow-history-toast" role="region" aria-label="Workflow history" aria-live="polite">
+    <span>Disconnected {disconnectUndoNotice.count} {disconnectUndoNotice.count === 1 ? 'link' : 'links'}.</span>
+    <button
+      type="button"
+      disabled={!workflow.canUndoAuthoring || workflow.authoringUndoLabel !== 'Disconnect links'}
+      onclick={undoDisconnect}
+    >Undo</button>
+  </div>
+{/if}
+
+{#if disconnectDialog}
+  {@const inputLinks = disconnectDialog.links.filter((link) => link.direction === 'input')}
+  {@const outputLinks = disconnectDialog.links.filter((link) => link.direction === 'output')}
+  <Modal title="Disconnect links" onClose={closeDisconnectDialog} width={460}>
+    <div class="disconnect-dialog">
+      <p>
+        Choose which links to break for <strong>{disconnectDialog.nodeTitle}</strong>.
+        All links are selected by default.
+      </p>
+      {#if inputLinks.length > 0}
+        <fieldset>
+          <legend>Input links</legend>
+          {#each inputLinks as link (link.id)}
+            <label>
+              <input
+                type="checkbox"
+                checked={disconnectSelections[link.id]}
+                onchange={(event) => (disconnectSelections[link.id] = event.currentTarget.checked)}
+              />
+              <span><strong>{link.peerNodeTitle}</strong><small>{link.peerPortLabel} to {link.localPortLabel}</small></span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      {#if outputLinks.length > 0}
+        <fieldset>
+          <legend>Output links</legend>
+          {#each outputLinks as link (link.id)}
+            <label>
+              <input
+                type="checkbox"
+                checked={disconnectSelections[link.id]}
+                onchange={(event) => (disconnectSelections[link.id] = event.currentTarget.checked)}
+              />
+              <span><strong>{link.peerNodeTitle}</strong><small>{link.localPortLabel} to {link.peerPortLabel}</small></span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      <div class="disconnect-actions">
+        <button type="button" onclick={closeDisconnectDialog}>Cancel</button>
+        <button
+          type="button"
+          class="dlg-primary"
+          disabled={selectedDisconnectCount === 0}
+          onclick={confirmNodeDisconnect}
+        >Break {selectedDisconnectCount} {selectedDisconnectCount === 1 ? 'link' : 'links'}</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
 {#if directorOpen}
   <WorkflowDirectorDialog
     {assets}
@@ -3623,6 +3798,28 @@
     min-height: 0;
     background: #242526;
     color: var(--text);
+  }
+  .workflow-history-toast {
+    position: fixed;
+    bottom: 36px;
+    left: 50%;
+    z-index: 1600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px 7px 11px;
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    background: var(--bg-elevated);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
+    color: var(--text-bright);
+    font-size: 12px;
+    transform: translateX(-50%);
+  }
+  .workflow-history-toast button {
+    padding: 3px 8px;
+    color: var(--accent);
+    font-weight: 600;
   }
   .node-head,
   .output-actions {
@@ -3818,6 +4015,74 @@
     align-items: center;
     gap: 4px;
   }
+  .disconnect-dialog {
+    display: grid;
+    gap: 12px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .disconnect-dialog > p {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .disconnect-dialog > p strong {
+    color: var(--text-bright);
+  }
+  .disconnect-dialog fieldset {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    margin: 0;
+    padding: 8px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .disconnect-dialog legend {
+    padding: 0 4px;
+    color: var(--text-bright);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .disconnect-dialog label {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    padding: 6px;
+    border-radius: 3px;
+  }
+  .disconnect-dialog label:hover {
+    background: var(--bg-elevated);
+  }
+  .disconnect-dialog input {
+    margin: 2px 0 0;
+  }
+  .disconnect-dialog label span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .disconnect-dialog label strong {
+    overflow: hidden;
+    color: var(--text-bright);
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .disconnect-dialog label small {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .disconnect-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .disconnect-actions button {
+    min-width: 92px;
+  }
   .node-head button,
   .storyboard-head button {
     display: grid;
@@ -3826,7 +4091,6 @@
     height: 24px;
     padding: 0;
   }
-  .node-head button.active,
   .storyboard-head button.active {
     color: var(--accent);
   }

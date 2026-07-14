@@ -89,7 +89,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     defaultSize: { width: 220, height: 240 },
     defaultColor: '#3f4b5c',
     ports: {
-      inputs: [],
+      inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
       outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
     },
     defaultConfig: { creatorRole: 'input', assetId: null, relativePath: null, role: '' },

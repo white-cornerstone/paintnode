@@ -7,6 +7,7 @@ import {
   type WorkflowGraphV2,
   type WorkflowValidationIssue,
 } from './schema';
+import { withInputAssetScopePorts } from './inputAssetScope';
 
 export interface WorkflowReadResult {
   ok: boolean;
@@ -57,8 +58,9 @@ function validateLoadedGraph(
   issues: WorkflowValidationIssue[] = [],
 ): WorkflowReadResult {
   try {
-    const normalizedGraph = normalizeInterruptedWorkflowRuns(graph);
-    const normalizedInterruptedRuns = normalizedGraph !== graph;
+    const runNormalizedGraph = normalizeInterruptedWorkflowRuns(graph);
+    const normalizedInterruptedRuns = runNormalizedGraph !== graph;
+    const normalizedGraph = withInputAssetScopePorts(runNormalizedGraph);
     const domain = new WorkflowGraphDomain(normalizedGraph);
     return {
       ok: true,

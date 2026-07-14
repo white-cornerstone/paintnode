@@ -82,6 +82,7 @@ import {
   type WorkflowAiReviewResult,
   type WorkflowReviewRecommendationResolution,
   type WorkflowRunProvider,
+  workflowExtractedAssetLinks,
 } from '../workflow';
 import {
   bindWorkflowRoundTripAuthority,
@@ -365,6 +366,34 @@ interface WorkflowDirectorPatchTransaction {
   sessionIdentity: number;
 }
 
+interface WorkflowAuthoringSnapshot {
+  graph: WorkflowGraphV2;
+  graphRevision: number;
+  name: string;
+  aiDefaults: WorkflowAiDefaultsV1;
+}
+
+interface WorkflowAuthoringTransaction {
+  label: string;
+  before: WorkflowAuthoringSnapshot;
+  after: WorkflowAuthoringSnapshot;
+  sessionIdentity: number;
+  mergeKey: string | null;
+  updatedAt: number;
+}
+
+interface WorkflowAuthoringHistoryOptions {
+  label: string;
+  mergeKey?: string;
+}
+
+interface ActiveWorkflowAuthoringTransaction {
+  label: string;
+  before: WorkflowAuthoringSnapshot;
+  mergeKey: string | null;
+  changed: boolean;
+}
+
 interface WorkflowSaveSubmission {
   bytes: Uint8Array;
   serializedBytes: string;
@@ -465,6 +494,10 @@ export class WorkflowStore {
   private pendingDirectorPatchReview: WorkflowDirectorPatchReview | null = null;
   private directorPatchUndoStack: WorkflowDirectorPatchTransaction[] = [];
   private directorPatchRedoStack: WorkflowDirectorPatchTransaction[] = [];
+  private authoringUndoStack: WorkflowAuthoringTransaction[] = [];
+  private authoringRedoStack: WorkflowAuthoringTransaction[] = [];
+  private activeAuthoringTransaction: ActiveWorkflowAuthoringTransaction | null = null;
+  private projectedGraphSnapshot: WorkflowGraphV2 | null = null;
   private savedWorkflowBytes = $state<string | null>(null);
   private savePathIntentSequence = 0;
   private activeSavePathIntentIdentity = 0;
@@ -509,6 +542,32 @@ export class WorkflowStore {
     return transaction !== undefined
       && transaction.sessionIdentity === this.workflowSessionIdentity
       && this.matchesDirectorPatchSnapshot(transaction.before);
+  }
+
+  get canUndoAuthoring(): boolean {
+    this.rev;
+    const transaction = this.authoringUndoStack.at(-1);
+    return transaction !== undefined
+      && transaction.sessionIdentity === this.workflowSessionIdentity
+      && this.matchesAuthoringSnapshot(transaction.after);
+  }
+
+  get canRedoAuthoring(): boolean {
+    this.rev;
+    const transaction = this.authoringRedoStack.at(-1);
+    return transaction !== undefined
+      && transaction.sessionIdentity === this.workflowSessionIdentity
+      && this.matchesAuthoringSnapshot(transaction.before);
+  }
+
+  get authoringUndoLabel(): string {
+    this.rev;
+    return this.canUndoAuthoring ? this.authoringUndoStack.at(-1)?.label ?? '' : '';
+  }
+
+  get authoringRedoLabel(): string {
+    this.rev;
+    return this.canRedoAuthoring ? this.authoringRedoStack.at(-1)?.label ?? '' : '';
   }
 
   captureDirectorSession(): WorkflowDirectorSessionToken {
@@ -592,6 +651,7 @@ export class WorkflowStore {
       throw error;
     }
     this.pendingDirectorPatchReview = null;
+    this.clearAuthoringHistory();
     this.directorPatchUndoStack.push({
       before,
       after,
@@ -631,6 +691,58 @@ export class WorkflowStore {
     this.workflowMutationIdentity += 1;
     this.pendingDirectorPatchReview = null;
     this.directorPatchUndoStack.push(transaction);
+    return true;
+  }
+
+  beginAuthoringTransaction(label: string, mergeKey?: string): void {
+    if (this.activeAuthoringTransaction) this.endAuthoringTransaction();
+    this.activeAuthoringTransaction = {
+      label,
+      before: this.captureAuthoringSnapshot(),
+      mergeKey: mergeKey ?? null,
+      changed: false,
+    };
+  }
+
+  endAuthoringTransaction(): void {
+    const active = this.activeAuthoringTransaction;
+    this.activeAuthoringTransaction = null;
+    if (!active?.changed) return;
+    this.recordAuthoringTransaction(
+      active.label,
+      active.before,
+      this.captureAuthoringSnapshot(),
+      active.mergeKey,
+    );
+  }
+
+  undoAuthoring(): boolean {
+    this.endAuthoringTransaction();
+    const transaction = this.authoringUndoStack.at(-1);
+    if (!transaction) return false;
+    if (transaction.sessionIdentity !== this.workflowSessionIdentity
+      || !this.matchesAuthoringSnapshot(transaction.after)) {
+      this.clearAuthoringHistory();
+      return false;
+    }
+    this.authoringUndoStack.pop();
+    this.publishAuthoringSnapshot(transaction.before);
+    this.authoringRedoStack.push(transaction);
+    return true;
+  }
+
+  redoAuthoring(): boolean {
+    this.endAuthoringTransaction();
+    const transaction = this.authoringRedoStack.at(-1);
+    if (!transaction) return false;
+    if (transaction.sessionIdentity !== this.workflowSessionIdentity
+      || !this.matchesAuthoringSnapshot(transaction.before)) {
+      this.clearAuthoringHistory();
+      return false;
+    }
+    this.authoringRedoStack.pop();
+    this.publishAuthoringSnapshot(transaction.after);
+    this.authoringUndoStack.push(transaction);
     return true;
   }
 
@@ -769,6 +881,7 @@ export class WorkflowStore {
     this.zoom = nextDomain.graph.viewport.zoom;
     this.graphDomain = nextDomain;
     this.projectedGraphRevision = nextDomain.revision;
+    this.aiDefaults = nextDomain.graph.metadata.ai ?? currentWorkflowAiDefaults();
     this.syncReactiveGraph(nextDomain);
     this.rev = 1;
     this.savedRev = 0;
@@ -790,16 +903,22 @@ export class WorkflowStore {
   }
 
   setName(name: string): void {
-    this.name = cleanWorkflowName(name);
-    this.bump();
+    const next = cleanWorkflowName(name);
+    if (next === this.name) return;
+    const before = this.captureAuthoringSnapshot();
+    this.name = next;
+    this.bump(true);
+    this.recordAuthoringTransaction('Rename workflow', before, this.captureAuthoringSnapshot(), 'workflow:name');
   }
 
   setAiDefaults(value: WorkflowAiDefaultsV1): void {
     const current = JSON.stringify(this.aiDefaults);
     const next = copyWorkflowAiDefaults(value);
     if (current === JSON.stringify(next)) return;
+    const before = this.captureAuthoringSnapshot();
     this.aiDefaults = next;
-    this.bump();
+    this.bump(true);
+    this.recordAuthoringTransaction('Change workflow AI defaults', before, this.captureAuthoringSnapshot(), 'workflow:ai-defaults');
   }
 
   setTool(tool: WorkflowTool): void {
@@ -836,7 +955,10 @@ export class WorkflowStore {
       position: { x: 80 + (index % 3) * 230, y: 110 + Math.floor(index / 3) * 160 },
       size: { width: 205, height: 190 },
       color: '#3a3c42',
-      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      ports: {
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
       config: { legacyKind: 'asset', assetId: asset.id, relativePath: asset.relativePath, note: '' },
       runRecordIds: [],
     };
@@ -847,7 +969,7 @@ export class WorkflowStore {
           other: { nodeId: 'composition', portId: 'assets' },
         }).node
       : domain.addNode(draft);
-    this.publishGraphMutation(domain, added);
+    this.publishGraphMutation(domain, added, { label: 'Add node' });
     this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
@@ -861,7 +983,10 @@ export class WorkflowStore {
       position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
       size: { width: Math.max(160, roundWorkflowNumber(width)), height: Math.max(130, roundWorkflowNumber(height)) },
       color: '#3a3c42',
-      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      ports: {
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
       config: { legacyKind: 'asset', assetId: null, relativePath: '', note: '' },
       runRecordIds: [],
     };
@@ -872,7 +997,7 @@ export class WorkflowStore {
           other: { nodeId: 'composition', portId: 'assets' },
         }).node
       : domain.addNode(draft);
-    this.publishGraphMutation(domain, added);
+    this.publishGraphMutation(domain, added, { label: 'Add node' });
     this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
@@ -890,7 +1015,7 @@ export class WorkflowStore {
         : undefined,
       config,
     });
-    this.publishGraphMutation(domain, domain.addNode(node));
+    this.publishGraphMutation(domain, domain.addNode(node), { label: 'Add node' });
     this.selection = type === 'input'
       ? { kind: 'asset', id: node.id }
       : type === 'output'
@@ -903,7 +1028,7 @@ export class WorkflowStore {
   removeNode(id: string): void {
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeNode(id));
+    this.publishGraphMutation(domain, domain.removeNode(id), { label: 'Remove node' });
     if ((this.selection?.kind === 'asset' || this.selection?.kind === 'creator' || this.selection?.kind === 'unsupported' || this.selection?.kind === 'output')
       && this.selection.id === id) this.selection = null;
     if (this.selection?.kind === 'composition' && id === 'composition') this.selection = null;
@@ -912,7 +1037,11 @@ export class WorkflowStore {
   moveNode(id: string, x: number, y: number): void {
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.moveNode(id, { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }));
+    this.publishGraphMutation(
+      domain,
+      domain.moveNode(id, { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }),
+      { label: 'Move node', mergeKey: `move:${id}` },
+    );
   }
 
   resizeNode(id: string, width: number, height: number): void {
@@ -921,12 +1050,16 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.resizeNode(id, {
       width: Math.max(160, roundWorkflowNumber(width)),
       height: Math.max(130, roundWorkflowNumber(height)),
-    }));
+    }), { label: 'Resize node', mergeKey: `resize:${id}` });
   }
 
   movePrompt(x: number, y: number): void {
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.moveNode('composition', { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }));
+    this.publishGraphMutation(
+      domain,
+      domain.moveNode('composition', { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }),
+      { label: 'Move node', mergeKey: 'move:composition' },
+    );
   }
 
   resizePrompt(width: number, height: number): void {
@@ -934,7 +1067,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.resizeNode('composition', {
       width: Math.max(260, roundWorkflowNumber(width)),
       height: Math.max(260, roundWorkflowNumber(height)),
-    }));
+    }), { label: 'Resize node', mergeKey: 'resize:composition' });
   }
 
   moveOutput(x: number, y: number): void {
@@ -973,7 +1106,7 @@ export class WorkflowStore {
       direction: 'incoming',
       nodePortId: 'source',
       other: { nodeId: 'composition', portId: 'layout' },
-    }));
+    }), { label: 'Add output node' });
     const node = this.outputNode(added.node.id)!;
     this.selection = { kind: 'output', id: added.node.id };
     this.tool = 'hand';
@@ -984,7 +1117,7 @@ export class WorkflowStore {
     if (this.outputNodes.length <= 1) return;
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeNode(id));
+    this.publishGraphMutation(domain, domain.removeNode(id), { label: 'Remove node' });
     if (this.selection?.kind === 'output' && this.selection.id === id) this.selection = { kind: 'output', id: this.outputNodes[0].id };
   }
 
@@ -1011,7 +1144,7 @@ export class WorkflowStore {
           legacyY: position.y,
         } }
         : {}),
-    }));
+    }), { label: 'Move node', mergeKey: `move:${id}` });
   }
 
   resizeOutputNode(id: string, width: number, height: number): void {
@@ -1031,7 +1164,7 @@ export class WorkflowStore {
           legacyHeight: size.height,
         } }
         : {}),
-    }));
+    }), { label: 'Resize node', mergeKey: `resize:${id}` });
   }
 
   setOutputFinalSize(id: string, width: number, height: number): void {
@@ -1042,7 +1175,7 @@ export class WorkflowStore {
       ...node.config,
       finalWidth: Math.max(64, roundWorkflowNumber(width)),
       finalHeight: Math.max(64, roundWorkflowNumber(height)),
-    }));
+    }), { label: 'Change output size', mergeKey: `output-size:${id}` });
   }
 
   panBy(dx: number, dy: number): void {
@@ -1051,14 +1184,14 @@ export class WorkflowStore {
     if (panX === this.panX && panY === this.panY) return;
     this.panX = panX;
     this.panY = panY;
-    this.bump();
+    this.bump(true);
   }
 
   setZoom(nextZoom: number): void {
     const zoom = Math.min(4, Math.max(0.2, Number(nextZoom.toFixed(3))));
     if (zoom === this.zoom) return;
     this.zoom = zoom;
-    this.bump();
+    this.bump(true);
   }
 
   zoomAt(viewX: number, viewY: number, direction: WorkflowZoomMode): void {
@@ -1073,7 +1206,7 @@ export class WorkflowStore {
     this.zoom = zoom;
     this.panX = panX;
     this.panY = panY;
-    this.bump();
+    this.bump(true);
   }
 
   zoomBy(factor: number, viewX: number, viewY: number): void {
@@ -1088,13 +1221,13 @@ export class WorkflowStore {
     this.zoom = zoom;
     this.panX = panX;
     this.panY = panY;
-    this.bump();
+    this.bump(true);
   }
 
   resetZoom(): void {
     if (this.zoom === 1) return;
     this.zoom = 1;
-    this.bump();
+    this.bump(true);
   }
 
   setNodeIncluded(id: string, included: boolean): void {
@@ -1134,25 +1267,37 @@ export class WorkflowStore {
       this.connectionError = validation.message;
       return false;
     }
-    this.publishGraphMutation(domain, domain.addEdge({
+    const edge = domain.addEdge({
       source: endpoints.source,
       target: endpoints.target,
-    }));
+    });
+    if (targetPortId === 'scope') this.reconcileScopedInputAsset(domain, from, to);
+    this.publishGraphMutation(domain, edge, { label: 'Connect nodes' });
     this.connectionError = null;
     return true;
   }
 
   disconnectConnection(id: string): void {
-    if (!this.requireGraphDomain().edge(id)) return;
+    this.disconnectConnections([id]);
+  }
+
+  disconnectConnections(ids: readonly string[]): void {
+    const requestedIds = new Set(ids);
+    if (requestedIds.size === 0) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeEdge(id));
+    const existingIds = domain.graph.edges
+      .map((edge) => edge.id)
+      .filter((id) => requestedIds.has(id));
+    if (existingIds.length === 0) return;
+    for (const id of existingIds) domain.removeEdge(id);
+    this.publishGraphMutation(domain, undefined, { label: 'Disconnect links' });
   }
 
   disconnectNodes(from: string, to: string): void {
     const domain = this.requireGraphDomain();
     const edge = domain.outgoing(from).find((item) => item.target.nodeId === to);
     if (!edge) return;
-    this.publishGraphMutation(domain, domain.removeEdge(edge.id));
+    this.publishGraphMutation(domain, domain.removeEdge(edge.id), { label: 'Disconnect links' });
   }
 
   isConnected(from: string, to: string): boolean {
@@ -1230,7 +1375,11 @@ export class WorkflowStore {
     const node = this.requireGraphDomain().node(id);
     if (!node) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, note }));
+    this.publishGraphMutation(
+      domain,
+      domain.configureNode(id, { ...node.config, note }),
+      { label: 'Edit node note', mergeKey: `node-note:${id}` },
+    );
   }
 
   assignAsset(id: string, asset: ProjectAsset | null): void {
@@ -1247,7 +1396,7 @@ export class WorkflowStore {
       relativePath: asset?.relativePath ?? null,
       oraRelativePath: null,
       hasAnnotations: false,
-    }));
+    }), { label: 'Assign input asset' });
   }
 
   assignOraDocument(id: string, file: ProjectFile, hasAnnotations: boolean): void {
@@ -1260,7 +1409,7 @@ export class WorkflowStore {
       relativePath: file.relativePath,
       oraRelativePath: file.relativePath,
       hasAnnotations,
-    }));
+    }), { label: 'Assign input document', mergeKey: `assign-ora:${id}` });
     const baseOutput = node.ports.outputs.find((port) => port.id === 'asset') ?? {
       id: 'asset', label: 'Asset reference', dataType: 'asset-reference' as const,
     };
@@ -1271,7 +1420,7 @@ export class WorkflowStore {
         ...(hasAnnotations ? [{ id: 'annotation', label: 'Annotation', dataType: 'asset-reference' as const }] : []),
       ],
     });
-    this.publishGraphMutation(domain, undefined);
+    this.publishGraphMutation(domain, undefined, { label: 'Assign input document', mergeKey: `assign-ora:${id}` });
   }
 
   configureCreatorNode(id: string, update: Record<string, unknown>): void {
@@ -1283,7 +1432,24 @@ export class WorkflowStore {
       throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
     }
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, config));
+    const configured = domain.configureNode(id, config);
+    if (node.type === 'extract-assets' && Object.prototype.hasOwnProperty.call(update, 'resultAssets')) {
+      for (const connection of domain.outgoing(id)) {
+        if (connection.source.portId === 'assets' && connection.target.portId === 'scope') {
+          this.reconcileScopedInputAsset(domain, id, connection.target.nodeId);
+        }
+      }
+    }
+    const recordsExecutionResult = Object.prototype.hasOwnProperty.call(update, 'resultAssets')
+      || Object.prototype.hasOwnProperty.call(update, 'extractionManifest');
+    this.publishGraphMutation(
+      domain,
+      configured,
+      recordsExecutionResult ? undefined : {
+        label: 'Configure node',
+        mergeKey: `configure:${id}:${Object.keys(update).sort().join(',')}`,
+      },
+    );
   }
 
   setNodeAiOverrides(id: string, value: WorkflowNodeAiOverridesV1 | null): void {
@@ -1301,14 +1467,18 @@ export class WorkflowStore {
       throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
     }
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, config));
+    this.publishGraphMutation(domain, domain.configureNode(id, config), { label: 'Change node AI options', mergeKey: `node-ai:${id}` });
   }
 
   setBriefObjective(id: string, objective: string): void {
     const node = this.requireGraphDomain().node(id);
     if (!node || node.type !== 'brief') return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, objective }));
+    this.publishGraphMutation(
+      domain,
+      domain.configureNode(id, { ...node.config, objective }),
+      { label: 'Edit creative brief', mergeKey: `brief:${id}` },
+    );
   }
 
   selectedLabel(): string {
@@ -1365,7 +1535,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.updateNode(nodeId, {
       title: displayName || fallback,
       config: { ...node.config, displayName },
-    }));
+    }), { label: 'Rename node', mergeKey: `node-label:${nodeId}` });
   }
 
   setSelectedColor(color: string): void {
@@ -1388,7 +1558,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.updateNode(nodeId, {
       color,
       ...(nodeId === 'output' ? { config: { ...node.config, legacyColor: color } } : {}),
-    }));
+    }), { label: 'Change node color', mergeKey: `node-color:${nodeId}` });
   }
 
   setOutput(asset: ProjectAsset | null, outputId = this.selectedOutputNode()?.id ?? 'output'): void {
@@ -2429,8 +2599,7 @@ export class WorkflowStore {
 
   async saveAs(name: string): Promise<string | null> {
     if (!project.path) return null;
-    this.name = cleanWorkflowName(name);
-    this.bump();
+    this.setName(name);
     const submission = this.captureSaveSubmission(null, true);
     const relativePath = await project.saveDocument(`${this.name}.cxflow.json`, submission.bytes);
     this.reconcileSaveCompletion(submission, relativePath);
@@ -2444,7 +2613,36 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.configureNode('composition', {
       ...composition.config,
       ...update,
-    }));
+    }), {
+      label: 'Edit composition',
+      mergeKey: `composition:${Object.keys(update).sort().join(',')}`,
+    });
+  }
+
+  private reconcileScopedInputAsset(
+    domain: WorkflowGraphDomain,
+    extractionNodeId: string,
+    inputNodeId: string,
+  ): void {
+    const extraction = domain.node(extractionNodeId);
+    const input = domain.node(inputNodeId);
+    if (!extraction || extraction.type !== 'extract-assets' || !input || input.type !== 'input') return;
+    const selectedAssetId = typeof input.config.assetId === 'string' ? input.config.assetId : null;
+    const selectedOraPath = typeof input.config.oraRelativePath === 'string' ? input.config.oraRelativePath : null;
+    if (!selectedAssetId && !selectedOraPath) return;
+    const allowedIds = new Set(workflowExtractedAssetLinks(extraction.config).map((asset) => asset.id));
+    if (selectedAssetId && allowedIds.has(selectedAssetId) && !selectedOraPath) return;
+    domain.updateNodePorts(inputNodeId, {
+      inputs: input.ports.inputs,
+      outputs: input.ports.outputs.filter((port) => port.id !== 'annotation'),
+    });
+    domain.configureNode(inputNodeId, {
+      ...input.config,
+      assetId: null,
+      relativePath: null,
+      oraRelativePath: null,
+      hasAnnotations: false,
+    });
   }
 
   private nextGraphId(kind: 'node' | 'edge'): string {
@@ -2481,6 +2679,7 @@ export class WorkflowStore {
       idGenerator: this.graphIdGenerator,
     });
     this.projectedGraphRevision = this.graphDomain.revision;
+    this.projectedGraphSnapshot = this.graphDomain.graph;
   }
 
   private async buildSelectivePreflight(
@@ -2812,6 +3011,7 @@ export class WorkflowStore {
     this.activeTransformRuns.clear();
     this.pendingDirectorPatchReview = null;
     this.clearDirectorPatchHistory();
+    this.clearAuthoringHistory();
     this.transformStartQueues.clear();
     this.latestTransformRunSequences.clear();
     this.progressRouter.clear();
@@ -2834,11 +3034,29 @@ export class WorkflowStore {
     return this.graphDomain!;
   }
 
-  private publishGraphMutation<T>(domain: WorkflowGraphDomain, result: T): T {
+  private publishGraphMutation<T>(
+    domain: WorkflowGraphDomain,
+    result: T,
+    history?: WorkflowAuthoringHistoryOptions,
+  ): T {
     if (domain.revision !== this.projectedGraphRevision) {
+      const before = history ? this.captureAuthoringSnapshot() : null;
       this.syncReactiveGraph(domain);
-      this.bump();
       this.projectedGraphRevision = domain.revision;
+      this.bump(history !== undefined);
+      if (history && before) {
+        if (this.activeAuthoringTransaction) {
+          this.activeAuthoringTransaction.changed = true;
+          this.authoringRedoStack = [];
+        } else {
+          this.recordAuthoringTransaction(
+            history.label,
+            before,
+            this.captureAuthoringSnapshot(),
+            history.mergeKey ?? null,
+          );
+        }
+      }
     }
     return result;
   }
@@ -2866,6 +3084,7 @@ export class WorkflowStore {
     this.panX = domain.graph.viewport.panX;
     this.panY = domain.graph.viewport.panY;
     this.zoom = domain.graph.viewport.zoom;
+    this.aiDefaults = domain.graph.metadata.ai ?? this.aiDefaults;
     this.syncReactiveGraph(domain);
     this.graphDomain = domain;
     this.projectedGraphRevision = domain.revision;
@@ -2925,6 +3144,99 @@ export class WorkflowStore {
     this.directorPatchRedoStack = [];
   }
 
+  private captureAuthoringSnapshot(
+    graph = this.projectedGraphSnapshot ?? this.requireGraphDomain().graph,
+    graphRevision = this.projectedGraphRevision,
+  ): WorkflowAuthoringSnapshot {
+    return {
+      graph,
+      graphRevision,
+      name: this.name,
+      aiDefaults: copyWorkflowAiDefaults(this.aiDefaults),
+    };
+  }
+
+  private authoringSnapshotContent(snapshot: WorkflowAuthoringSnapshot): string {
+    return JSON.stringify({
+      graph: workflowGraphBytes(snapshot.graph),
+      name: snapshot.name,
+      aiDefaults: snapshot.aiDefaults,
+    });
+  }
+
+  private matchesAuthoringSnapshot(snapshot: WorkflowAuthoringSnapshot): boolean {
+    return this.graphRevision === snapshot.graphRevision
+      && this.authoringSnapshotContent(this.captureAuthoringSnapshot()) === this.authoringSnapshotContent(snapshot);
+  }
+
+  private recordAuthoringTransaction(
+    label: string,
+    before: WorkflowAuthoringSnapshot,
+    after: WorkflowAuthoringSnapshot,
+    mergeKey: string | null = null,
+  ): void {
+    if (this.authoringSnapshotContent(before) === this.authoringSnapshotContent(after)) return;
+    if (immutableWorkflowHistoryBytes(before.graph) !== immutableWorkflowHistoryBytes(after.graph)) {
+      this.clearAuthoringHistory();
+      return;
+    }
+    const updatedAt = Date.now();
+    const previous = this.authoringUndoStack.at(-1);
+    if (mergeKey
+      && previous?.mergeKey === mergeKey
+      && previous.sessionIdentity === this.workflowSessionIdentity
+      && updatedAt - previous.updatedAt <= 1_000
+      && this.authoringSnapshotContent(previous.after) === this.authoringSnapshotContent(before)) {
+      previous.after = after;
+      previous.updatedAt = updatedAt;
+    } else {
+      this.authoringUndoStack.push({
+        label,
+        before,
+        after,
+        sessionIdentity: this.workflowSessionIdentity,
+        mergeKey,
+        updatedAt,
+      });
+      if (this.authoringUndoStack.length > 60) this.authoringUndoStack.shift();
+    }
+    this.authoringRedoStack = [];
+  }
+
+  private publishAuthoringSnapshot(snapshot: WorkflowAuthoringSnapshot): void {
+    const domain = new WorkflowGraphDomain(snapshot.graph, {
+      idGenerator: this.graphIdGenerator,
+      initialRevision: snapshot.graphRevision,
+    });
+    this.graphDomain = domain;
+    this.projectedGraphRevision = domain.revision;
+    this.syncReactiveGraph(domain);
+    this.name = snapshot.name;
+    this.aiDefaults = copyWorkflowAiDefaults(snapshot.aiDefaults);
+    this.pendingDirectorPatchReview = null;
+    this.reviewVerifications = {};
+    this.reconcileSelectionAfterAuthoringRestore();
+    this.bump(true);
+  }
+
+  private reconcileSelectionAfterAuthoringRestore(): void {
+    const selection = this.selection;
+    if (!selection) return;
+    if (selection.kind === 'composition') {
+      if (!this.requireGraphDomain().node('composition')) this.selection = null;
+      return;
+    }
+    if (!this.requireGraphDomain().node(selection.id)) {
+      this.selection = this.requireGraphDomain().node('composition') ? { kind: 'composition' } : null;
+    }
+  }
+
+  private clearAuthoringHistory(): void {
+    this.authoringUndoStack = [];
+    this.authoringRedoStack = [];
+    this.activeAuthoringTransaction = null;
+  }
+
   private domainGraphFromReactiveState(): WorkflowGraphV2 {
     const composition: WorkflowNodeV2 = {
       id: 'composition',
@@ -2959,7 +3271,7 @@ export class WorkflowStore {
       size: { width: node.width, height: node.height },
       color: node.color,
       ports: {
-        inputs: [],
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
         outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
       },
       config: {
@@ -3019,7 +3331,6 @@ export class WorkflowStore {
   }
 
   private syncReactiveGraph(domain: WorkflowGraphDomain, roundLegacyGeometry = false): void {
-    this.aiDefaults = domain.graph.metadata.ai ?? this.aiDefaults;
     const composition = domain.node('composition');
     if (composition) {
       const storyboard = recordValue(composition.config.storyboard);
@@ -3189,10 +3500,12 @@ export class WorkflowStore {
       : firstOutput.y;
     this.outputAssetId = firstOutput.outputAssetId;
     this.outputRelativePath = firstOutput.outputRelativePath;
+    this.projectedGraphSnapshot = domain.graph;
   }
 
-  private bump(): void {
+  private bump(preserveAuthoringHistory = false): void {
     this.clearDirectorPatchHistory();
+    if (!preserveAuthoringHistory) this.clearAuthoringHistory();
     this.workflowMutationIdentity += 1;
     this.rev++;
   }
