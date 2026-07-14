@@ -27,6 +27,7 @@
   import { modelToPlainText } from '../engine/text/model';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
+  import { canConsumeWheel, wheelDeltaPixels } from '../engine/wheelScrollChain';
   import { wheelZoomFactor } from '../engine/zoomGesture';
   import { clampWorkflowPan as clampWorkflowPanGeometry } from '../workflow/viewportGeometry';
   import { compositeToCanvas } from '../engine/compositor';
@@ -178,7 +179,6 @@
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
-  let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
   let boardEl = $state<HTMLDivElement>();
@@ -222,8 +222,6 @@
   let handledPasteRequest = 0;
   let clipboardImporting = $state(false);
   let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
-
-  const ASSET_NODE_W = 205;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -480,6 +478,10 @@
     const observer = new ResizeObserver(scheduleResize);
     observer.observe(board);
     const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey && scrollNodeUnderPointer(event, board)) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       if (event.ctrlKey || event.metaKey) {
         const rect = board.getBoundingClientRect();
@@ -496,6 +498,44 @@
       board.removeEventListener('wheel', onWheel);
     };
   });
+
+  function scrollNodeUnderPointer(event: WheelEvent, board: HTMLElement): boolean {
+    if (!(event.target instanceof Element)) return false;
+    const node = event.target.closest<HTMLElement>('article[data-workflow-node]');
+    if (!node || !board.contains(node)) return false;
+    const body = node.querySelector<HTMLElement>(
+      ':scope > .creator-node-body, :scope > .specialized-node-body, :scope > .prompt-node-body',
+    );
+    if (!body) return false;
+
+    const candidates: HTMLElement[] = [];
+    let current: Element | null = event.target;
+    while (current && current !== node) {
+      if (current instanceof HTMLElement && body.contains(current) && isUserScrollable(current)) {
+        candidates.push(current);
+      }
+      current = current.parentElement;
+    }
+    if (!candidates.includes(body)) candidates.push(body);
+
+    for (const candidate of candidates) {
+      const deltaX = wheelDeltaPixels(event.deltaX, event.deltaMode, candidate.clientWidth);
+      const deltaY = wheelDeltaPixels(event.deltaY, event.deltaMode, candidate.clientHeight);
+      if (!canConsumeWheel(candidate, deltaX, deltaY)) continue;
+      candidate.scrollLeft += deltaX;
+      candidate.scrollTop += deltaY;
+      return true;
+    }
+    return false;
+  }
+
+  function isUserScrollable(element: HTMLElement): boolean {
+    const style = getComputedStyle(element);
+    return style.overflowX === 'auto'
+      || style.overflowX === 'scroll'
+      || style.overflowY === 'auto'
+      || style.overflowY === 'scroll';
+  }
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
@@ -1211,15 +1251,6 @@
       panning = { x: event.clientX, y: event.clientY };
       return;
     }
-    if (drawing) {
-      const point = boardPoint(event);
-      drawing = {
-        ...drawing,
-        width: point.x - drawing.x,
-        height: point.y - drawing.y,
-      };
-      return;
-    }
     if (dragging) {
       const point = boardPoint(event);
       const x = point.x - dragging.dx;
@@ -1233,9 +1264,6 @@
   }
 
   function stopDrag(): void {
-    if (drawing) {
-      commitDrawing();
-    }
     connecting = null;
     dragging = null;
     panning = null;
@@ -1450,22 +1478,6 @@
     event.stopPropagation();
   }
 
-  function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } {
-    const x = rect.width < 0 ? rect.x + rect.width : rect.x;
-    const y = rect.height < 0 ? rect.y + rect.height : rect.y;
-    return {
-      x,
-      y,
-      width: Math.abs(rect.width),
-      height: Math.abs(rect.height),
-    };
-  }
-
   function onBoardPointerDown(event: PointerEvent): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     if (event.button !== 0) return;
@@ -1483,29 +1495,7 @@
     if (workflow.tool === 'hand') {
       panning = { x: event.clientX, y: event.clientY };
       event.currentTarget.setPointerCapture(event.pointerId);
-      return;
     }
-    const point = boardPoint(event);
-    drawing = { type: workflow.tool, x: point.x, y: point.y, width: 0, height: 0 };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function commitDrawing(): void {
-    if (!drawing) return;
-    const rect = normalizeRect(drawing);
-    const width = rect.width < 12 ? (drawing.type === 'composition' ? workflow.compositionWidth : drawing.type === 'output' ? workflow.outputWidth : ASSET_NODE_W) : rect.width;
-    const height = rect.height < 12 ? (drawing.type === 'composition' ? workflow.compositionHeight : drawing.type === 'output' ? workflow.outputHeight : 190) : rect.height;
-    if (drawing.type === 'asset') workflow.addBlankAsset(rect.x, rect.y, width, height);
-    else if (drawing.type === 'composition') {
-      workflow.movePrompt(rect.x, rect.y);
-      workflow.resizePrompt(width, height);
-      workflow.select({ kind: 'composition' });
-      workflow.setTool('hand');
-    } else {
-      const node = workflow.addOutputNode(rect.x, rect.y, width, height);
-      workflow.select({ kind: 'output', id: node.id });
-    }
-    drawing = null;
   }
 
   function compositionTitle(): string {
@@ -2579,7 +2569,6 @@
   <div class="workflow-main">
     <div
       class="board"
-      class:adding={workflow.tool !== 'hand' && workflow.tool !== 'zoom'}
       class:panning={workflow.tool === 'hand'}
       class:zooming={workflow.tool === 'zoom'}
       class:zoom-in={workflow.tool === 'zoom' && effectiveZoomMode === 'in'}
@@ -2626,14 +2615,6 @@
             {#if path}<path class="pending" d={path} />{/if}
           {/if}
         </svg>
-
-        {#if drawing}
-          {@const rect = normalizeRect(drawing)}
-          <div
-            class="draw-preview"
-            style={`transform:translate(${rect.x}px, ${rect.y}px); width:${Math.max(12, rect.width)}px; height:${Math.max(12, rect.height)}px`}
-          ></div>
-        {/if}
 
         {#each workflow.nodes as node (node.id)}
           {@const asset = assetFor(node)}
@@ -3690,9 +3671,6 @@
   .board.panning:active {
     cursor: grabbing;
   }
-  .board.adding {
-    cursor: copy;
-  }
   .board.zooming.zoom-in {
     cursor: zoom-in;
   }
@@ -3992,14 +3970,12 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
-    overscroll-behavior: contain;
   }
   .prompt-node-body {
     flex: 1 1 auto;
     min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
-    overscroll-behavior: contain;
   }
   .asset-node-body,
   .output-node-body {
@@ -4587,11 +4563,5 @@
     min-width: 0;
     padding: 3px 5px;
     font-size: 11px;
-  }
-  .draw-preview {
-    position: absolute;
-    border: 1px dashed var(--accent);
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    pointer-events: none;
   }
 </style>
