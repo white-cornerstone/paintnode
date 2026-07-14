@@ -52,4 +52,30 @@ describe('workflow task details', () => {
       ui.close();
     }
   });
+
+  it('exposes only active tasks scoped to the requested workflow node', () => {
+    const store = new AiTaskStore();
+    const task = store.create({
+      kind: 'workflow',
+      title: 'Generate concept branches',
+      subtitle: 'codex',
+      progress: 'Generating candidates…',
+      detail: {
+        kind: 'workflow',
+        providerLabel: 'codex',
+        outputName: 'Candidates',
+        workflowId: 'workflow-1',
+        nodeIds: ['transform-1', 'output-1'],
+      },
+    });
+
+    expect(store.runningForWorkflowNode('workflow-1', 'transform-1')).toEqual([task]);
+    expect(store.runningForWorkflow('workflow-1')).toEqual([task]);
+    expect(store.runningForWorkflowNode('workflow-1', 'other')).toEqual([]);
+    expect(store.runningForWorkflowNode('workflow-2', 'transform-1')).toEqual([]);
+
+    store.complete(task.id);
+    expect(store.runningForWorkflow('workflow-1')).toEqual([]);
+    expect(store.runningForWorkflowNode('workflow-1', 'transform-1')).toEqual([]);
+  });
 });

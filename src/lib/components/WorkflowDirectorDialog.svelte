@@ -11,6 +11,8 @@
   } from '../integrations/workflowDirectorAdapters';
   import { cloneAiRunOptions, type AiDirectorProvider, type AiRunOptions } from '../state/settings';
   import { workflow } from '../state/workflow.svelte';
+  import { project } from '../state/project.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import {
     acceptDirectorProposalPreview,
     buildWorkflowDirectorContext,
@@ -57,6 +59,7 @@
   let drafting = $state(false);
   let error = $state('');
   let activeDirector: CancellableWorkflowDirector | null = null;
+  let activeTaskId: string | null = null;
   let requestEpoch = 0;
 
   const selection = $derived(workflowDirectorProviderSelection(
@@ -152,14 +155,48 @@
     drafting = true;
     preview = null;
     error = '';
+    const graph = workflow.graphSnapshot();
+    const task = aiTasks.create({
+      projectPath: project.path,
+      kind: 'workflow',
+      title: 'AI Director: Draft workflow',
+      subtitle: selection.label,
+      progress: 'Drafting and validating a workflow proposal…',
+      detail: {
+        kind: 'workflow',
+        providerLabel: selection.label,
+        outputName: 'Workflow proposal',
+        workflowId: graph.id,
+        nodeIds: graph.nodes.map((node) => node.id),
+      },
+    });
+    activeTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => {
+      await director.cancel();
+      if (aiTasks.find(task.id)?.status === 'running') {
+        aiTasks.markCancelled(task.id, 'Workflow drafting cancelled');
+      }
+    });
     try {
       const result = await requestDirectorProposalPreview(director, context, workflow, {
         requestSource: directorRequestSource(),
       });
-      if (epoch === requestEpoch) preview = result;
+      if (epoch === requestEpoch && aiTasks.find(task.id)?.status === 'running') {
+        preview = result;
+        aiTasks.complete(task.id, 'Workflow proposal ready for review');
+      }
     } catch (caught) {
-      if (epoch === requestEpoch) error = caught instanceof Error ? caught.message : String(caught);
+      if (epoch === requestEpoch) {
+        if (aiTasks.find(task.id)?.status === 'running') {
+          error = caught instanceof Error ? caught.message : String(caught);
+          aiTasks.fail(task.id, error);
+        }
+      } else if (aiTasks.find(task.id)?.status === 'running') {
+        aiTasks.markCancelled(task.id, 'Workflow drafting cancelled');
+      }
     } finally {
+      aiTasks.setCancel(task.id, null);
+      if (activeTaskId === task.id) activeTaskId = null;
       if (epoch === requestEpoch) {
         activeDirector = null;
         drafting = false;
@@ -190,11 +227,18 @@
     activeDirector = null;
     drafting = false;
     if (director) void director.cancel();
+    if (activeTaskId && aiTasks.find(activeTaskId)?.status === 'running') {
+      aiTasks.markCancelled(activeTaskId, 'Workflow drafting cancelled');
+      activeTaskId = null;
+    }
     onClose();
   }
 
   onDestroy(() => {
     if (activeDirector) void activeDirector.cancel();
+    if (activeTaskId && aiTasks.find(activeTaskId)?.status === 'running') {
+      aiTasks.markCancelled(activeTaskId, 'Workflow drafting cancelled');
+    }
   });
 </script>
 

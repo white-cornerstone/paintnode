@@ -54,6 +54,12 @@
           <dt>Output</dt>
           <dd>{detail.outputName}</dd>
         </div>
+        {#if detail.nodeIds?.length}
+          <div>
+            <dt>Locked nodes</dt>
+            <dd>{detail.nodeIds.length}</dd>
+          </div>
+        {/if}
         <div>
           <dt>Started</dt>
           <dd>{formatTime(task.startedAt)}</dd>

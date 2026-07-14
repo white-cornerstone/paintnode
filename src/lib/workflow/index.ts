@@ -12,6 +12,7 @@ export * from './registry';
 export * from './palette';
 export * from './transformExecutor';
 export * from './transformContext';
+export * from './workflowTaskScope';
 export * from './runObserver';
 export * from './runControl';
 export * from './providerQaSelection';
