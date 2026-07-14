@@ -205,7 +205,10 @@ export function registryExecutionDisposition(node: Readonly<WorkflowNodeV2>): Wo
     };
   }
   const configuredCapability = node.config.capability;
-  if (typeof configuredCapability !== 'string' || configuredCapability !== executor.capability) {
+  const supportedCapabilities = node.type === 'transform'
+    ? ['generate', 'edit', 'remove-background', 'relight', 'upscale']
+    : [executor.capability];
+  if (typeof configuredCapability !== 'string' || !supportedCapabilities.includes(configuredCapability)) {
     return {
       kind: 'unavailable',
       reason: 'The configured Transform capability is not available for execution.',
@@ -494,7 +497,7 @@ export function planSelectiveWorkflowExecution(
   while (changed) {
     changed = false;
     for (const node of graph.nodes) {
-      if (!required.has(node.id) || blocked.has(node.id)) continue;
+      if (!required.has(node.id) || blocked.has(node.id) || promotedReviewResults.has(node.id)) continue;
       const blockedUpstream = incomingNodeIds(edges, node.id).find((nodeId) => blocked.has(nodeId));
       if (!blockedUpstream) continue;
       blocked.set(node.id, {
@@ -553,6 +556,16 @@ export function planSelectiveWorkflowExecution(
     incomingNodeIds(edges, nodeId).forEach(visitNeeded);
   };
   affectedNodeIds.forEach(visitNeeded);
+  const prunedByPromotedReview = new Set<string>();
+  for (const reviewNodeId of promotedReviewResults.keys()) {
+    const pending = incomingNodeIds(edges, reviewNodeId);
+    while (pending.length > 0) {
+      const upstreamId = pending.shift()!;
+      if (prunedByPromotedReview.has(upstreamId)) continue;
+      prunedByPromotedReview.add(upstreamId);
+      pending.push(...incomingNodeIds(edges, upstreamId));
+    }
+  }
 
   const cachedResults: WorkflowCachedResult[] = graph.nodes
     .filter((node) => needed.has(node.id) && (cachedRuns.has(node.id) || promotedReviewResults.has(node.id)))
@@ -579,6 +592,17 @@ export function planSelectiveWorkflowExecution(
   const preflight: WorkflowNodePreflight[] = graph.nodes
     .filter((node) => required.has(node.id))
     .map((node) => {
+      if (!needed.has(node.id) && blocked.has(node.id) && prunedByPromotedReview.has(node.id)) {
+        return {
+          nodeId: node.id,
+          state: 'planned' as const,
+          willExecute: false,
+          reason: {
+            code: 'PRUNED_BY_REUSABLE_RESULT' as const,
+            message: `Node "${node.title}" is behind a verified reusable result and is not scheduled.`,
+          },
+        };
+      }
       const block = blocked.get(node.id);
       if (block) return { nodeId: node.id, state: 'blocked' as const, willExecute: false, reason: block };
       if (dispositions.get(node.id)?.kind === 'not-required') {

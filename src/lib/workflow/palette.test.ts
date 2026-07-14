@@ -83,7 +83,13 @@ describe('creator node palette model', () => {
           y: position.y + definition.defaultSize.height / 2 - viewport.height / 2,
         };
       }
-      expect(creatorNodeFitsPlacementBounds(position, definition.defaultSize, viewport)).toBe(true);
+      if (definition.defaultSize.width + viewport.padding * 2 <= viewport.width
+        && definition.defaultSize.height + viewport.padding * 2 <= viewport.height) {
+        expect(creatorNodeFitsPlacementBounds(position, definition.defaultSize, viewport)).toBe(true);
+      } else {
+        expect(position.x + definition.defaultSize.width / 2).toBe(viewport.x + viewport.width / 2);
+        expect(position.y + definition.defaultSize.height / 2).toBe(viewport.y + viewport.height / 2);
+      }
     }
 
     expect(new Set(added.map(({ x, y }) => `${x}:${y}`))).toHaveLength(6);

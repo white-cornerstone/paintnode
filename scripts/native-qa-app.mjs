@@ -106,6 +106,7 @@ const windowConfig = {
   minHeight: 560,
   resizable: true,
   fullscreen: false,
+  visible: false,
   devtools: false,
   titleBarStyle: 'Overlay',
   hiddenTitle: true,

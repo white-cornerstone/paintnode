@@ -86,10 +86,10 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'image',
     keywords: ['asset', 'image', 'mask', 'layered document', 'project', 'visual reference', 'source'],
     defaultTitle: 'Visual Input',
-    defaultSize: { width: 220, height: 180 },
+    defaultSize: { width: 220, height: 240 },
     defaultColor: '#3f4b5c',
     ports: {
-      inputs: [],
+      inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
       outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
     },
     defaultConfig: { creatorRole: 'input', assetId: null, relativePath: null, role: '' },
@@ -103,7 +103,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'document',
     keywords: ['campaign', 'objective', 'direction', 'constraints', 'audience', 'prompt'],
     defaultTitle: 'Creative Brief',
-    defaultSize: { width: 245, height: 188 },
+    defaultSize: { width: 245, height: 220 },
     defaultColor: '#4a4059',
     ports: {
       inputs: [],
@@ -111,6 +111,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     },
     defaultConfig: {
       creatorRole: 'brief',
+      aiAssistMode: 'manual',
       objective: '',
       guidance: 'State the outcome, audience, and non-negotiable content for this workflow.',
     },
@@ -124,7 +125,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'paint-brush',
     keywords: ['campaign', 'direction', 'storyboard', 'layout', 'composition', 'annotations', 'style'],
     defaultTitle: 'Art Direction',
-    defaultSize: { width: 340, height: 408 },
+    defaultSize: { width: 340, height: 320 },
     defaultColor: '#3a3c42',
     ports: {
       inputs: [
@@ -155,7 +156,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'image-multiple',
     keywords: ['extract', 'assets', 'objects', 'index sheet', 'grid', 'fast', 'support images', 'annotations'],
     defaultTitle: 'Extract Assets',
-    defaultSize: { width: 280, height: 330 },
+    defaultSize: { width: 280, height: 400 },
     defaultColor: '#3d4654',
     ports: {
       inputs: [
@@ -187,11 +188,13 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'sparkle',
     keywords: ['generate', 'edit', 'remove background', 'relight', 'upscale', 'action'],
     defaultTitle: 'Generate',
-    defaultSize: { width: 240, height: 190 },
+    defaultSize: { width: 240, height: 480 },
     defaultColor: '#39475a',
     ports: {
       inputs: [
-        { id: 'source', label: 'Directed composition', dataType: 'layout', required: true },
+        { id: 'source', label: 'Directed composition', dataType: 'layout' },
+        { id: 'decision', label: 'Promoted concept', dataType: 'review-decision' },
+        { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
         { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
       ],
       outputs: [{ id: 'result', label: 'Transformed result', dataType: 'layout' }],
@@ -200,6 +203,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
       creatorRole: 'transform',
       capability: 'generate',
       instructions: '',
+      dismissedCandidateIds: [],
       advanced: { provider: null, model: null, options: {} },
     },
     executor: {
@@ -216,11 +220,11 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'review',
     keywords: ['compare candidates', 'approve', 'promote', 'quality gate', 'decision'],
     defaultTitle: 'Review Candidates',
-    defaultSize: { width: 240, height: 190 },
+    defaultSize: { width: 240, height: 536 },
     defaultColor: '#4b4057',
     ports: {
       inputs: [{ id: 'candidates', label: 'Candidates', dataType: 'layout', required: true, multiple: true }],
-      outputs: [{ id: 'selected', label: 'Selected direction', dataType: 'layout' }],
+      outputs: [{ id: 'selected', label: 'Promoted concept', dataType: 'review-decision' }],
     },
     defaultConfig: { creatorRole: 'review', mode: 'human', instructions: '' },
     executor: {
@@ -237,7 +241,7 @@ export const CREATOR_NODE_DEFINITIONS: readonly CreatorNodeDefinition[] = deepFr
     iconKey: 'output',
     keywords: ['format', 'size', 'export', 'placement', 'delivery'],
     defaultTitle: 'Output',
-    defaultSize: { width: 220, height: 232 },
+    defaultSize: { width: 220, height: 280 },
     defaultColor: '#3a3c42',
     ports: {
       inputs: [{ id: 'source', label: 'Directed composition', dataType: 'layout', required: true }],
@@ -309,6 +313,12 @@ export function validateCreatorNodeConfig(
     requireString('capability', false);
     if (typeof config.advanced !== 'object' || config.advanced === null || Array.isArray(config.advanced)) {
       issues.push({ path: 'config.advanced', message: 'advanced must be an object.' });
+    }
+    if (config.dismissedCandidateIds !== undefined && (
+      !Array.isArray(config.dismissedCandidateIds)
+      || config.dismissedCandidateIds.some((candidateId) => typeof candidateId !== 'string' || candidateId.length === 0)
+    )) {
+      issues.push({ path: 'config.dismissedCandidateIds', message: 'dismissedCandidateIds must be an array of non-empty strings.' });
     }
   } else if (type === 'review') {
     requireString('mode', false);

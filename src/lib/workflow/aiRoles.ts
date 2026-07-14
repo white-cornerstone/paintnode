@@ -44,6 +44,8 @@ export interface WorkflowNodeAiCapabilities {
   image: 'none' | 'generate' | 'edit';
 }
 
+export type WorkflowBriefAiAssistMode = 'manual' | 'workflow-default' | 'configured';
+
 const DIRECTOR_PROVIDERS = new Set<AiDirectorProvider>(['codex', 'antigravity', 'claude', 'grok']);
 const IMAGE_PROVIDERS = new Set<AiProvider>(['codex', 'antigravity', 'grok']);
 const DIRECTOR_MODES = new Set<AiDirectorMode>(['auto', 'skip', 'force']);
@@ -212,7 +214,8 @@ export function copyWorkflowNodeAiOverrides(value: unknown): WorkflowNodeAiOverr
 }
 
 export function workflowNodeAiCapabilities(type: WorkflowNodeType, config: Record<string, unknown>): WorkflowNodeAiCapabilities {
-  if (type === 'brief' || type === 'art-direction') return { director: 'required', image: 'none' };
+  if (type === 'brief') return { director: 'optional', image: 'none' };
+  if (type === 'art-direction') return { director: 'required', image: 'none' };
   if (type === 'extract-assets') return { director: 'optional', image: 'edit' };
   if (type === 'transform') {
     const capability = typeof config.capability === 'string' ? config.capability : 'generate';
@@ -236,6 +239,16 @@ export function workflowNodeAiOverrides(node: Pick<WorkflowNodeV2, 'type' | 'con
       options: sanitizeWorkflowAiOptions(advanced.options),
     },
   };
+}
+
+export function workflowBriefAiAssistMode(
+  node: Pick<WorkflowNodeV2, 'type' | 'config'>,
+): WorkflowBriefAiAssistMode | null {
+  if (node.type !== 'brief') return null;
+  const configured = node.config.aiAssistMode;
+  if (configured === 'manual' || configured === 'workflow-default') return configured;
+  if (configured === 'configured' && workflowNodeAiOverrides(node)?.director) return configured;
+  return workflowNodeAiOverrides(node)?.director ? 'configured' : 'manual';
 }
 
 const RUN_OPTION_KEYS: Record<string, keyof AiRunOptions> = {
@@ -298,6 +311,7 @@ export function workflowAiRoleSummary(
 ): string | null {
   const capabilities = workflowNodeAiCapabilities(node.type, node.config);
   if (capabilities.director === 'none' && capabilities.image === 'none') return null;
+  if (workflowBriefAiAssistMode(node) === 'manual') return 'Manual · text used verbatim';
   const overrides = workflowNodeAiOverrides(node);
   const selectedDirector = overrides?.director ?? defaults.director;
   const director = capabilities.director === 'required' && selectedDirector.mode === 'skip'

@@ -66,17 +66,16 @@ use crate::ai::{
     cleanup_project_job_enabled, clear_ai_run_cancelled, codex_agent_message_text, command_failure,
     configure_ai_process_group, copy_png_candidate, emit_codex_part_progress, emit_codex_progress,
     emit_kept_job_dir, join_output_readers_bounded, now_id, optional_project_dir, output_tail,
-    project_agent_run_dir, project_agent_run_dir_for_run, reference_prompt_note,
-    remove_legacy_generative_fill_agent_inputs, request_ai_director_input, safe_job_child_path,
-    safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
+    parse_decouple_asset_manifest, project_agent_run_dir, project_agent_run_dir_for_run,
+    reference_prompt_note, remove_legacy_generative_fill_agent_inputs, request_ai_director_input,
+    safe_job_child_path, safe_png_source_file_name, should_keep_job_dir, spawn_output_reader,
     synthesize_decouple_asset_manifest, terminate_ai_process_tree, track_ai_process_tree,
     unique_child_path, validate_reference_pngs, write_ai_job_prompt, write_reference_pngs,
     AgentRunResult, AiAutonomyLevel, AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider,
     AiModelCapability, AiProviderCapabilitiesResult, AiReasoningCapability, CodexDetectionResult,
-    DecoupleImageResult, DecoupleManifest, DecoupledLayerResult, GeneratedImageLayerResult,
-    GeneratedImageResult, TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE,
-    ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR, CODEX_RUNS_DIR, GROK_RUNS_DIR,
-    OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
+    DecoupleImageResult, DecoupledLayerResult, GeneratedImageLayerResult, GeneratedImageResult,
+    TempJobDir, WorkflowSourceImage, AI_RUN_STOPPED_MESSAGE, ANTIGRAVITY_RUNS_DIR, CLAUDE_RUNS_DIR,
+    CODEX_RUNS_DIR, GROK_RUNS_DIR, OUTPUT_READER_JOIN_TIMEOUT, POLL_INTERVAL,
 };
 use crate::png::{
     file_has_png_signature, is_png, png_data_url, png_dimensions, png_dimensions_from_bytes,
@@ -1494,6 +1493,7 @@ fn decouple_codex_prompt(user_prompt: &str) -> String {
         AiDirectorProvider::Codex,
         AiDirectorMode::Auto,
         AiDirectorInvolvement::FullReview,
+        false,
     )
 }
 
@@ -1502,6 +1502,7 @@ fn decouple_codex_director_prompt(
     director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
+    index_sheet: bool,
 ) -> String {
     let director_contract = ai_director_workflow_contract(
         director_provider,
@@ -1511,6 +1512,37 @@ fn decouple_codex_director_prompt(
     );
     let director_review_criteria =
         director_review_criteria_section("decouple", director_mode, director_involvement);
+    if index_sheet {
+        return format!(
+            r##"Use the attached `source.png` to create exactly one PaintNode asset index sheet.
+
+User guidance and optional AI Director inventory:
+{user_prompt}
+
+{director_contract}
+
+Delivery contract:
+- When the user guidance contains an AI Director inventory, treat it as final and do not re-plan it. Otherwise identify the requested objects before the single image-generation call. Never split the sheet into separate image jobs.
+- Use Codex image generation / the `$imagegen` image skill exactly once to create one `asset-index-sheet.png` containing every requested object in the specified grid and order.
+- The index sheet is the only image deliverable. Do not generate one file per object, alternate candidates, or multiple variations.
+- Semantically reconstruct every inventory component as a fresh, clean, complete, catalog-style standalone asset. This is not segmentation, background removal, or cutting visible pixels from the source.
+- Use the source only as evidence for identity, design, proportions, materials, labels, style, and characteristic detail. Do not crop, paste, clone, trace, or preserve source-photo pixels, background patches, original occlusion silhouettes, adjacent objects, environmental reflections, color cast, or lighting spill.
+- Rebuild hidden edges, sides, and canonical component geometry. Keep every complete asset centered and scaled inside its assigned equal-size cell; never span cells, change the requested grid, or add rows or columns.
+- Do not add cell borders, numbers, captions, shadows, scenery, or UI chrome.
+- Prefer real transparent pixels everywhere outside the objects, including soft alpha for hair, lace, rope, glass, shadows, antialiasing, and semi-transparent material.
+- If real transparent output is not practical, create one same-size grayscale alpha mask and record it in `alphaMask`; white means opaque, black means transparent, and gray means partially transparent.
+- Only when neither real alpha nor an alpha mask is practical, use the perfectly flat PaintNode chroma-key matte {chroma_key} and record `keyColor` as `{chroma_key}`. Never render a checkerboard transparency preview.
+- After the generated image is available, copy or save it into the current working directory as `asset-index-sheet.png`.
+- Create `manifest.json` with exactly one entry for the sheet, using this schema:
+  {{"assets":[{{"name":"Asset index sheet","file":"asset-index-sheet.png","alphaMask":null,"keyColor":null,"x":0,"y":0,"opacity":1,"visible":true}}],"notes":""}}
+- Do not ask follow-up questions and do not edit files outside the current working directory.
+
+Final response:
+- One short sentence confirming that the single asset index sheet and manifest were created.
+- Do not embed base64 in the final response."##,
+            chroma_key = AI_CHROMA_KEY_HEX,
+        );
+    }
     format!(
         r##"Use the attached `source.png` to create a PaintNode recomposition asset pack.
 
@@ -1521,8 +1553,10 @@ User guidance:
 {director_review_criteria}
 
 Goal:
-- Extract or regenerate useful standalone visual assets from the source image for later AI compositing workflows and storyboard planning.
+- Semantically deconstruct the source and reconstruct useful standalone visual assets for later AI compositing workflows and storyboard planning.
 - Think of the result as reusable visual references/ingredients for a node workflow, not as layers that must stack back together to recreate the source photo.
+- Generate fresh, clean, complete representations using the source as evidence; do not crop, paste, clone, trace, or preserve source-photo pixels, background patches, original occlusion silhouettes, adjacent scenery, environmental reflections, color cast, or lighting spill.
+- Split independently reusable constituent components, including strongly supported ingredients or parts of composite subjects, and rebuild hidden edges, sides, and canonical geometry.
 - Prefer assets such as people/characters, held objects, vehicles, product/prop objects, architectural landmarks, environment plates, plants, and useful shadows/reflections when helpful.
 - Preserve the subject identity, pose, style, lighting direction, and broad perspective, but prioritize clean reusable assets over exact original occlusion geometry.
 
@@ -1596,6 +1630,7 @@ fn build_decouple_codex_command(
         AiDirectorProvider::Codex,
         AiDirectorMode::Auto,
         AiDirectorInvolvement::FullReview,
+        false,
         json_progress,
     )
 }
@@ -1611,6 +1646,7 @@ fn build_decouple_codex_director_command(
     director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
+    index_sheet: bool,
     _json_progress: bool,
 ) -> Command {
     let prompt_text = decouple_codex_director_prompt(
@@ -1618,6 +1654,7 @@ fn build_decouple_codex_director_command(
         director_provider,
         director_mode,
         director_involvement,
+        index_sheet,
     );
     let image_paths = vec![job_path.join("source.png")];
     build_codex_sdk_command(codex_bin, job_path, &prompt_text, &image_paths, options)
@@ -4820,6 +4857,7 @@ pub(crate) async fn decouple_codex_image(
     source_png: Vec<u8>,
     run_id: String,
     store_assets: Option<bool>,
+    index_sheet: Option<bool>,
     keep_job_dir: Option<bool>,
     keep_debug_artifacts: Option<bool>,
     model: Option<String>,
@@ -4850,6 +4888,7 @@ pub(crate) async fn decouple_codex_image(
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
+        let index_sheet = index_sheet.unwrap_or(false);
         let run_id = if run_id.trim().is_empty() {
             format!("decouple-{}", now_id())
         } else {
@@ -4889,6 +4928,7 @@ pub(crate) async fn decouple_codex_image(
                 director_provider,
                 director_mode,
                 director_involvement,
+                index_sheet,
             ),
             "Codex asset extraction",
         )?;
@@ -4901,6 +4941,7 @@ pub(crate) async fn decouple_codex_image(
             director_provider,
             director_mode,
             director_involvement,
+            index_sheet,
             true,
         );
         let mut run =
@@ -4926,6 +4967,7 @@ pub(crate) async fn decouple_codex_image(
                 director_provider,
                 director_mode,
                 director_involvement,
+                index_sheet,
                 false,
             );
             run = run_codex_with_progress(&mut fallback, &codex_bin, app.clone(), run_id.clone())
@@ -4987,8 +5029,7 @@ pub(crate) async fn decouple_codex_image(
                 ));
             }
         };
-        let manifest: DecoupleManifest = serde_json::from_str(&manifest_text)
-            .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
+        let manifest = parse_decouple_asset_manifest(&manifest_text, &job_path)?;
         if manifest.layers.is_empty() {
             return Err("Asset manifest did not contain any assets.".into());
         }
@@ -5788,6 +5829,36 @@ mod tests {
         assert!(prompt.contains("\"alphaMask\": null"));
         assert!(prompt.contains("last fallback"));
         assert!(prompt.contains("PaintNode accepts only `#00ff00`"));
+    }
+
+    #[test]
+    fn decouple_index_sheet_prompt_requires_one_image_and_real_transparency() {
+        let prompt = decouple_codex_director_prompt(
+            "Create Bottle then Glass in a 2-cell sheet.",
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Skip,
+            AiDirectorInvolvement::PlanOnly,
+            true,
+        );
+        assert!(prompt.contains("AI Director inventory"));
+        assert!(prompt.contains("exactly once"));
+        assert!(prompt.contains("exactly one entry for the sheet"));
+        assert!(prompt.contains("asset-index-sheet.png"));
+        assert!(prompt.contains("Never render a checkerboard"));
+        assert!(prompt.contains("#00ff00"));
+        assert!(prompt.contains("Semantically reconstruct"));
+        assert!(prompt.contains("Do not crop, paste, clone, trace"));
+        assert!(!prompt.contains("For each major editable object"));
+
+        let maximum_operation_prompt = "x".repeat(3_200);
+        let bounded = decouple_codex_director_prompt(
+            &maximum_operation_prompt,
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Skip,
+            AiDirectorInvolvement::PlanOnly,
+            true,
+        );
+        assert!(bounded.chars().count() <= 8_000);
     }
 
     #[test]

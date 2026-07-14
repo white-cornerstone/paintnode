@@ -69,6 +69,23 @@ fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+#[cfg(desktop)]
+fn create_launch_screen(app: &tauri::App) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
+        .title("PaintNode")
+        .inner_size(1100.0, 680.0)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .closable(false)
+        .decorations(false)
+        .shadow(true)
+        .skip_taskbar(true)
+        .center()
+        .build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -148,6 +165,10 @@ pub fn run() {
                 }
                 (None, None) => {}
             }
+            #[cfg(desktop)]
+            if deferred_main.is_none() {
+                create_launch_screen(app)?;
+            }
             managed_runtime::initialize(app.handle()).map_err(std::io::Error::other)?;
             #[cfg(desktop)]
             app.handle()
@@ -175,6 +196,7 @@ pub fn run() {
             app::clipboard_write_text,
             app::app_memory_info,
             app::set_app_menu_enabled,
+            app::finish_launch,
             ai::cancel_ai_run,
             ai::submit_ai_director_input,
             ai::workflow_director::draft_workflow_with_director,
@@ -207,6 +229,7 @@ pub fn run() {
             ai::antigravity::decouple_antigravity_image,
             ai::antigravity::compose_antigravity_workflow,
             ai::grok::generate_grok_image,
+            ai::grok::extract_grok_asset,
             ai::grok::generate_grok_fill_image,
             ai::grok::generate_grok_retouch_image,
             ai::grok::upscale_grok_image,
@@ -286,7 +309,7 @@ pub fn run() {
             }
 
             #[cfg(target_os = "macos")]
-            if matches!(event, RunEvent::Ready) {
+            if matches!(event, RunEvent::Ready) && app.get_webview_window("splash").is_none() {
                 focus_main_window(app);
             }
 

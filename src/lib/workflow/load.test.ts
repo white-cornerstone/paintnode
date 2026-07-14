@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import blank from './fixtures/v1/blank.json';
+import assetsStoryboard from './fixtures/v1/assets-storyboard.json';
 import { readWorkflowGraph } from './load';
 import { migrateWorkflowFileV1 } from './migration';
+import { createCreatorNode } from './registry';
 import type { WorkflowGraphV2 } from './schema';
+import { instantiateWorkflowTemplate } from './templates';
 
 function invalidV2(
   mutate: (graph: WorkflowGraphV2) => void,
@@ -25,13 +28,120 @@ describe('workflow graph loading', () => {
   });
 
   it('returns valid v2 data without marking it for migration save', () => {
-    const graph = migrateWorkflowFileV1(blank);
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
     const result = readWorkflowGraph(graph);
 
     expect(result.ok).toBe(true);
     expect(result.sourceVersion).toBe(2);
     expect(result.requiresExplicitSave).toBe(false);
     expect(result.graph).toEqual(graph);
+  });
+
+  it('makes the extraction scope probe available when loading older v2 input nodes', () => {
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
+    const input = graph.nodes.find((node) => node.type === 'input');
+    if (!input) throw new Error('Expected the fixture to contain an input node.');
+    input.ports.inputs = [];
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(false);
+    expect(result.graph?.nodes.find((node) => node.id === input.id)?.ports.inputs).toEqual([
+      { id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' },
+    ]);
+  });
+
+  it('adds direct visual references and makes Directed composition optional on older Transform nodes', () => {
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
+    const transform = createCreatorNode('transform', { id: 'legacy-transform' });
+    transform.ports.inputs = [
+      { id: 'source', label: 'Directed composition', dataType: 'layout', required: true },
+      { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
+    ];
+    graph.nodes.push(transform);
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(true);
+    expect(result.graph?.nodes.find((node) => node.id === transform.id)?.ports.inputs).toEqual([
+      { id: 'source', label: 'Directed composition', dataType: 'layout' },
+      { id: 'decision', label: 'Promoted concept', dataType: 'review-decision' },
+      { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
+      { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
+    ]);
+  });
+
+  it('migrates legacy Review delivery links into typed decisions and independent format adapters', () => {
+    const graph = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
+    graph.nodes = graph.nodes.filter((node) => node.id !== 'transform-format-square');
+    const review = graph.nodes.find((node) => node.id === 'review-campaign-direction')!;
+    review.ports.outputs = review.ports.outputs.map((port) => port.id === 'selected'
+      ? { ...port, label: 'Selected direction', dataType: 'layout' }
+      : port);
+    for (const transform of graph.nodes.filter((node) => node.type === 'transform')) {
+      transform.ports.inputs = transform.ports.inputs.filter((port) => port.id !== 'decision');
+    }
+    graph.edges = graph.edges.filter((edge) => (
+      edge.source.nodeId !== 'transform-format-square'
+      && edge.target.nodeId !== 'transform-format-square'
+    ));
+    graph.edges.push({
+      id: 'legacy-review-square-output',
+      source: { nodeId: review.id, portId: 'selected' },
+      target: { nodeId: 'output-square', portId: 'source' },
+    });
+    for (const edge of graph.edges.filter((edge) => edge.source.nodeId === review.id
+      && edge.target.nodeId.startsWith('transform-'))) {
+      edge.target.portId = 'source';
+    }
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(true);
+    const loaded = result.graph!;
+    const adapter = loaded.nodes.find((node) => node.type === 'transform'
+      && node.config.workflowRole === 'format-adapter'
+      && loaded.edges.some((edge) => edge.source.nodeId === node.id
+        && edge.target.nodeId === 'output-square'));
+    expect(adapter).toBeDefined();
+    expect(loaded.nodes.find((node) => node.id === 'transform-generate-square')?.config)
+      .toMatchObject({ workflowRole: 'concept-generator', conceptPreviewWidth: 1024, conceptPreviewHeight: 1024 });
+    expect(loaded.edges).toContainEqual(expect.objectContaining({
+      source: { nodeId: review.id, portId: 'selected' },
+      target: { nodeId: adapter!.id, portId: 'decision' },
+    }));
+    expect(loaded.edges.some((edge) => edge.source.nodeId === review.id
+      && edge.target.nodeId === 'output-square')).toBe(false);
+    expect(loaded.nodes.find((node) => node.id === review.id)?.ports.outputs)
+      .toContainEqual({ id: 'selected', label: 'Promoted concept', dataType: 'review-decision' });
+  });
+
+  it('compacts only untouched legacy generic Art Direction nodes', () => {
+    const graph = migrateWorkflowFileV1(assetsStoryboard);
+    const compositionHeight = graph.nodes.find((node) => node.id === 'composition')?.size.height;
+    graph.nodes.push(
+      createCreatorNode('art-direction', {
+        id: 'legacy-generic-direction',
+        size: { width: 340, height: 408 },
+      }),
+      createCreatorNode('art-direction', {
+        id: 'custom-direction',
+        size: { width: 360, height: 408 },
+      }),
+    );
+
+    const result = readWorkflowGraph(graph);
+
+    expect(result.ok).toBe(true);
+    expect(result.requiresExplicitSave).toBe(true);
+    expect(result.graph?.nodes.find((node) => node.id === 'legacy-generic-direction')?.size)
+      .toEqual({ width: 340, height: 320 });
+    expect(result.graph?.nodes.find((node) => node.id === 'custom-direction')?.size)
+      .toEqual({ width: 360, height: 408 });
+    expect(result.graph?.nodes.find((node) => node.id === 'composition')?.size.height).toBe(compositionHeight);
   });
 
   it('returns recoverable path-specific issues for malformed or unsupported data', () => {

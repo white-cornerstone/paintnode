@@ -1480,7 +1480,8 @@
         <p class="section-note">
           Grok generates and edits images through the xAI Images API using the local <code>grok</code> sign-in.
           Generation, generative fill, retouch, auto-adjust, upscale, and multi-asset compose (up to 3 sources) are
-          supported; asset extraction is coming soon. 'Auto' resolution picks the 1k or 2k tier from the target size.
+          supported. Asset extraction uses an enabled AI Director and supports up to 3 source/support images.
+          'Auto' resolution picks the 1k or 2k tier from the target size.
         </p>
 
       {:else if selectedSection === 'ai-profiles'}

@@ -31,6 +31,21 @@ describe('creator node registry', () => {
     }
   });
 
+  it('gives newly created nodes enough initial height for their default controls', () => {
+    expect(Object.fromEntries(CREATOR_NODE_DEFINITIONS.map((definition) => [
+      definition.type,
+      definition.defaultSize.height,
+    ]))).toEqual({
+      input: 240,
+      brief: 220,
+      'art-direction': 320,
+      'extract-assets': 400,
+      transform: 480,
+      review: 536,
+      output: 280,
+    });
+  });
+
   it('rejects duplicate definitions instead of silently accepting Map last-write-wins behavior', () => {
     const input = creatorNodeDefinition('input');
     expect(() => createCreatorNodeRegistry([input, { ...input, label: 'Duplicate Input' }])).toThrow(
@@ -80,6 +95,13 @@ describe('creator node registry', () => {
       capability: 'generate',
       advanced: { provider: null, model: null },
     });
+    expect(creatorNodeDefinition('transform').ports.inputs).toEqual([
+      { id: 'source', label: 'Directed composition', dataType: 'layout' },
+      { id: 'decision', label: 'Promoted concept', dataType: 'review-decision' },
+      { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
+      { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
+    ]);
+    expect(creatorNodeDefinition('brief').defaultConfig).toMatchObject({ aiAssistMode: 'manual' });
     expect(creatorNodeDefinition('transform').executor).toMatchObject({
       status: 'available',
       capability: 'generate',
@@ -87,7 +109,13 @@ describe('creator node registry', () => {
     });
     expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('sourceAssetIds');
     expect(creatorNodeDefinition('extract-assets').defaultConfig).not.toHaveProperty('supportAssetIds');
+    expect(creatorNodeDefinition('input').ports.inputs).toEqual([
+      { id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' },
+    ]);
     expect(creatorNodeDefinition('review').executor.status).toBe('available');
+    expect(creatorNodeDefinition('review').ports.outputs).toEqual([
+      { id: 'selected', label: 'Promoted concept', dataType: 'review-decision' },
+    ]);
   });
 
   it('validates creator configuration without rejecting deliberately empty readiness fields', () => {

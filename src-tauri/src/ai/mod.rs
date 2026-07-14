@@ -875,6 +875,7 @@ pub(crate) struct DecoupleManifest {
 #[serde(rename_all = "camelCase")]
 struct DecoupleManifestLayer {
     name: String,
+    #[serde(default)]
     file: String,
     alpha_mask: Option<String>,
     key_color: Option<String>,
@@ -882,6 +883,43 @@ struct DecoupleManifestLayer {
     y: Option<i32>,
     opacity: Option<f32>,
     visible: Option<bool>,
+}
+
+pub(crate) fn parse_decouple_asset_manifest(
+    manifest_text: &str,
+    job_path: &Path,
+) -> Result<DecoupleManifest, String> {
+    let mut manifest: DecoupleManifest = serde_json::from_str(manifest_text)
+        .map_err(|e| format!("Asset manifest is invalid JSON: {e}"))?;
+
+    for layer in &mut manifest.layers {
+        if !layer.file.trim().is_empty() {
+            continue;
+        }
+
+        // Antigravity has been observed putting the output filename in `name`
+        // even when asked for a single manifest entry. Recover only when that
+        // value is a safe, existing PNG in this job, so an arbitrary malformed
+        // manifest still fails instead of importing an unintended file.
+        let candidate = layer.name.trim();
+        let inferred_file = candidate
+            .to_ascii_lowercase()
+            .ends_with(".png")
+            .then(|| safe_job_child_path(job_path, candidate).ok())
+            .flatten()
+            .filter(|path| path.is_file())
+            .map(|_| candidate.to_string());
+
+        let Some(inferred_file) = inferred_file else {
+            return Err(format!(
+                "Asset manifest layer '{}' is missing required field `file`.",
+                layer.name.trim()
+            ));
+        };
+        layer.file = inferred_file;
+    }
+
+    Ok(manifest)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2710,6 +2748,41 @@ mod tests {
 
         assert_eq!(manifest.layers.len(), 1);
         assert_eq!(manifest.layers[0].name, "Girl");
+    }
+
+    #[test]
+    fn decouple_manifest_recovers_antigravity_filename_stored_as_name() {
+        let job = TempJobDir::new("paintnode-decouple-name-file-test").expect("temp dir");
+        let png = crate::test_util::test_rgba_png(1, 1, &[[20, 40, 80, 255]]);
+        fs::write(job.path().join("asset-index-sheet.png"), png).expect("write output png");
+
+        let manifest = parse_decouple_asset_manifest(
+            r##"{
+              "layers": [
+                {
+                  "name": "asset-index-sheet.png",
+                  "keyColor": "#00ff00"
+                }
+              ]
+            }"##,
+            job.path(),
+        )
+        .expect("observed Antigravity manifest shape should recover");
+
+        assert_eq!(manifest.layers[0].file, "asset-index-sheet.png");
+        assert_eq!(manifest.layers[0].key_color.as_deref(), Some("#00ff00"));
+    }
+
+    #[test]
+    fn decouple_manifest_does_not_infer_a_missing_or_unsafe_file() {
+        let job = TempJobDir::new("paintnode-decouple-missing-file-test").expect("temp dir");
+
+        for name in ["Reusable asset", "../outside.png", "missing.png"] {
+            let manifest_text = serde_json::json!({ "layers": [{ "name": name }] }).to_string();
+            let error = parse_decouple_asset_manifest(&manifest_text, job.path())
+                .expect_err("missing file field should remain invalid");
+            assert!(error.contains("missing required field `file`"));
+        }
     }
 
     #[test]
