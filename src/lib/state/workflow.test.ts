@@ -1072,6 +1072,24 @@ describe('WorkflowStore graph adapter', () => {
     expect(store.creatorNodes.find((node) => node.id === reviewId)?.config).toMatchObject({ mode: 'human', instructions: 'Prefer legibility' });
   });
 
+  it('preserves an intentionally empty role on an assigned input node', () => {
+    const store = new WorkflowStore({ idGenerator: ids() });
+    store.newBoard('Editable input role');
+    const inputId = store.addCreatorNode('input');
+
+    store.assignAsset(inputId, campaignProduct);
+    store.configureCreatorNode(inputId, { role: 'Connected visual input' });
+    store.configureCreatorNode(inputId, { role: '' });
+
+    expect(store.graphSnapshot().nodes.find((node) => node.id === inputId)?.config.role).toBe('');
+    expect(store.nodes.find((node) => node.id === inputId)?.note).toBe('');
+
+    const reopened = new WorkflowStore({ idGenerator: ids() });
+    reopened.openFromBytes(store.toBytes(), null, 'Editable input role');
+    expect(reopened.graphSnapshot().nodes.find((node) => node.id === inputId)?.config.role).toBe('');
+    expect(reopened.nodes.find((node) => node.id === inputId)?.note).toBe('');
+  });
+
   it('connects the exact named typed ports requested by the board', () => {
     const store = new WorkflowStore({ idGenerator: ids() });
     store.newBoard('Exact ports');

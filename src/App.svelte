@@ -445,13 +445,14 @@
       'app:export-png': hasDoc,
       'app:export-psd': hasDoc,
       'app:close-document': hasDoc,
-      // Keep native Edit shortcuts enabled so focused text controls in dialogs
-      // can receive Cmd+Z/X/C/V even when no document/layer action is available.
+      // Keep native Edit shortcuts enabled so focused text controls can receive
+      // Cmd+Z/X/C/V/A even when no document/layer action is available.
       'app:undo': true,
       'app:redo': true,
       'app:cut': true,
       'app:copy': true,
       'app:paste': true,
+      'app:select-all': true,
       'app:fill-foreground': hasEditableLayer,
       'app:fill-background': hasEditableLayer,
       'app:clear': hasEditableLayer,
@@ -485,7 +486,6 @@
       'app:rasterize-type': canRasterizeType,
       'app:merge-down': canMergeDown,
       'app:flatten': canFlatten,
-      'app:select-all': hasDoc,
       'app:deselect': hasDoc && hasSelection,
       'app:inverse-selection': hasDoc && hasSelection,
       'app:gaussian-blur': hasEditableLayer,
