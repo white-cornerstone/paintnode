@@ -7,6 +7,7 @@ import {
   createCreatorNode,
   createWorkflowCompositionExecutor,
   isFullWorkflowRunRecord,
+  prepareCampaignGenerateTransform,
   resolveWorkflowBoardProjectAsset,
   planSelectiveWorkflowExecution,
   workflowSha256Bytes,
@@ -39,6 +40,7 @@ function campaignStore(assignProduct = true): WorkflowStore {
   const store = new WorkflowStore();
   store.newFromTemplate('campaign-composer', 'Selective campaign');
   store.removeNode('review-campaign-direction');
+  store.removeNode('transform-format-square');
   store.removeNode('transform-generate-portrait');
   store.removeNode('transform-generate-landscape');
   store.connectPorts('transform-generate-square', 'result', 'output-square', 'source');
@@ -49,12 +51,12 @@ function campaignStore(assignProduct = true): WorkflowStore {
 }
 
 function reviewedCampaignStore(): { store: WorkflowStore; reviewId: string } {
-  const store = campaignStore();
-  const reviewId = store.addCreatorNode('review');
-  store.disconnectNodes('transform-generate-square', 'output-square');
-  expect(store.connectPorts('transform-generate-square', 'result', reviewId, 'candidates')).toBe(true);
-  expect(store.connectPorts(reviewId, 'selected', 'output-square', 'source')).toBe(true);
-  return { store, reviewId };
+  const store = new WorkflowStore();
+  store.newFromTemplate('campaign-composer', 'Reviewed selective campaign');
+  store.removeNode('transform-generate-portrait');
+  store.removeNode('transform-generate-landscape');
+  store.assignAsset('slot-product', productAsset);
+  return { store, reviewId: 'review-campaign-direction' };
 }
 
 function twoGenerateStore(): WorkflowStore {
@@ -510,7 +512,7 @@ describe('WorkflowStore selective execution integration', () => {
     expect(store.transformExecution('transform-generate-square').state).toBe('succeeded');
   });
 
-  it('consumes the exact promoted Review result without invoking the provider or mutating Output binding', async () => {
+  it('adapts the exact promoted Review result and binds each generated Output', async () => {
     const { store, reviewId } = reviewedCampaignStore();
     const run = harness();
     await store.runCandidateBranches('output-square', run.options(), {
@@ -522,31 +524,30 @@ describe('WorkflowStore selective execution integration', () => {
 
     const firstPreflight = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
     expect(firstPreflight.stateByNodeId[reviewId]).toMatchObject({ state: 'cached', willExecute: false });
-    expect(firstPreflight.plan.executionNodeIds).toEqual([]);
+    expect(firstPreflight.plan.executionNodeIds).toEqual(['transform-format-square']);
     expect(firstPreflight.plan.cachedResults).toContainEqual(expect.objectContaining({
       nodeId: reviewId, outputIds: [first.output!.assetReferenceId],
     }));
-    const graphBeforeFirstOutput = structuredClone(store.graphSnapshot());
-    const firstOutcome = await store.runReviewedOutput('output-square', run.options());
-    expect(firstOutcome.executedNodeIds).toEqual([]);
+    const firstOutcome = await store.runSelectiveExecution(firstPreflight, run.options(), { maxConcurrency: 1 });
+    expect(firstOutcome.executedNodeIds).toEqual(['transform-format-square']);
     expect(firstOutcome.cachedNodeIds).toContain(reviewId);
     expect(firstOutcome.results[reviewId]?.outputIds).toEqual([first.output!.assetReferenceId]);
-    expect(run.providerCalls()).toBe(callsAfterBranches);
+    expect(run.providerCalls()).toBe(callsAfterBranches + 1);
     expect(store.outputNode('output-square')).toMatchObject({
-      outputAssetId: null, outputRelativePath: null,
+      outputAssetId: run.generatedAssets.at(-1)!.id,
+      outputRelativePath: run.generatedAssets.at(-1)!.relativePath,
     });
-    expect(store.graphSnapshot()).toEqual(graphBeforeFirstOutput);
 
     await store.promoteCandidate(reviewId, second.candidateId, run.options());
-    const graphBeforeSecondOutput = structuredClone(store.graphSnapshot());
-    const secondOutcome = await store.runReviewedOutput('output-square', run.options());
-    expect(secondOutcome.executedNodeIds).toEqual([]);
+    const secondPreflight = await store.preflightSelectiveExecution('run-node', 'output-square', run.options());
+    const secondOutcome = await store.runSelectiveExecution(secondPreflight, run.options(), { maxConcurrency: 1 });
+    expect(secondOutcome.executedNodeIds).toEqual(['transform-format-square']);
     expect(secondOutcome.results[reviewId]?.outputIds).toEqual([second.output!.assetReferenceId]);
-    expect(run.providerCalls()).toBe(callsAfterBranches);
+    expect(run.providerCalls()).toBe(callsAfterBranches + 2);
     expect(store.outputNode('output-square')).toMatchObject({
-      outputAssetId: null, outputRelativePath: null,
+      outputAssetId: run.generatedAssets.at(-1)!.id,
+      outputRelativePath: run.generatedAssets.at(-1)!.relativePath,
     });
-    expect(store.graphSnapshot()).toEqual(graphBeforeSecondOutput);
   });
 
   it('treats a verified promoted Review as a hard boundary when its upstream Transform is unavailable', async () => {
@@ -557,11 +558,12 @@ describe('WorkflowStore selective execution integration', () => {
     });
     const [candidate] = store.reviewCandidates(reviewId);
     await store.promoteCandidate(reviewId, candidate.candidateId, run.options());
+    const format = await prepareCampaignGenerateTransform(store.serialize(), 'output-square', run.options());
 
     const plan = planSelectiveWorkflowExecution(store.serialize(), {
       mode: 'run-node',
       nodeId: 'output-square',
-      materialKeys: {},
+      materialKeys: { 'transform-format-square': format.materialKey },
       reviewMaterialKeys: { 'transform-generate-square': candidate.materialKey },
       isReviewOutputAvailable: (output) => output.assetReferenceId === candidate.output?.assetReferenceId,
       executionRestrictions: createWorkflowExecutionRestrictions([{
@@ -571,7 +573,7 @@ describe('WorkflowStore selective execution integration', () => {
       }]),
     });
 
-    expect(plan.executionNodeIds).toEqual([]);
+    expect(plan.executionNodeIds).toEqual(['transform-format-square']);
     expect(plan.preflight.find((entry) => entry.nodeId === reviewId)).toMatchObject({
       state: 'cached', willExecute: false,
     });

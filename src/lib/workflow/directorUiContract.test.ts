@@ -32,7 +32,9 @@ describe('Workflow Director UI contract', () => {
 
   it('records Director drafting and revision work in the Workflow Task panel', () => {
     expect(dialogSource).toContain("title: 'AI Director: Draft workflow'");
-    expect(dialogSource).toContain('aiTasks.setCancel(task.id, () => director.cancel())');
+    expect(dialogSource).toContain('aiTasks.setCancel(task.id, async () => {');
+    expect(dialogSource).toContain('await director.cancel();');
+    expect(dialogSource).toContain("aiTasks.markCancelled(task.id, 'Workflow drafting cancelled')");
     expect(dialogSource).toContain("aiTasks.complete(task.id, 'Workflow proposal ready for review')");
     expect(revisionDialogSource).toContain('title: `AI Director: ${title}`');
     expect(revisionDialogSource).toContain('aiTasks.setCancel(task.id, async () => currentController.abort())');

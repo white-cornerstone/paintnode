@@ -27,7 +27,7 @@ describe('workflow templates', () => {
   it.each([
     ['blank', '8b988e92a66fe9ed'],
     ['asset-composition', 'bc19593fc82f18ea'],
-    ['campaign-composer', '2e823085b1620f69'],
+    ['campaign-composer', '4ff2a1ef8bb981cd'],
   ] as const)('keeps the exact persisted v2 golden for %s', (id, expectedHash) => {
     const graph = instantiateWorkflowTemplate(id, { graphId: `golden-${id}`, name: `Golden ${id}` });
     expect(goldenHash(JSON.stringify(graph))).toBe(expectedHash);
