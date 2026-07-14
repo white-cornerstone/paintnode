@@ -36,9 +36,6 @@
     ArrowTrending,
     Hand,
     Search,
-    ImageAdd,
-    Board,
-    Open,
     Sparkle,
     Patch,
     ImageEdit,
@@ -167,9 +164,6 @@
   const enabled = $derived(hasDocument || hasWorkflow);
   const workflowSlots: WorkflowSlot[] = [
     { id: 'hand', label: 'Hand', icon: Hand, tooltip: 'Hand tool' },
-    { id: 'asset', label: 'Asset node', icon: ImageAdd, tooltip: 'Draw asset node' },
-    { id: 'composition', label: 'Composition node', icon: Board, tooltip: 'Place composition node' },
-    { id: 'output', label: 'Output node', icon: Open, tooltip: 'Place output node' },
     { id: 'zoom', label: 'Zoom', icon: Search, tooltip: 'Zoom workflow canvas' },
   ];
 

@@ -1,10 +1,12 @@
 <script lang="ts">
   import type { AiDirectorInvolvement, AiDirectorMode, AiDirectorProvider, AiProvider } from '../../state/settings';
   import { workflow } from '../../state/workflow.svelte';
+  import { aiTasks } from '../../state/aiTasks.svelte';
   import {
     WORKFLOW_AI_CONFIG_VERSION,
     copyWorkflowAiDefaults,
     copyWorkflowNodeAiOverrides,
+    workflowBriefAiAssistMode,
     workflowNodeAiCapabilities,
     workflowNodeAiOverrides,
     type WorkflowAiDefaultsV1,
@@ -41,8 +43,16 @@
     ? workflowNodeAiCapabilities(node.type, node.config)
     : { director: 'optional' as const, image: 'generate' as const });
   const overrides = $derived(node ? workflowNodeAiOverrides(node) : null);
+  const briefAssistMode = $derived(node ? workflowBriefAiAssistMode(node) : null);
+  const briefManual = $derived(briefAssistMode === 'manual');
   const director = $derived(overrides?.director ?? workflow.aiDefaults.director);
   const image = $derived(overrides?.image ?? workflow.aiDefaults.image);
+  const nodeLocked = $derived.by(() => {
+    workflow.rev;
+    return node
+      ? aiTasks.runningForWorkflowNode(workflow.graphSnapshot().id, node.id).length > 0
+      : false;
+  });
 
   function updateDefaults(update: Partial<WorkflowAiDefaultsV1>): void {
     workflow.setAiDefaults({
@@ -75,7 +85,10 @@
 
   function updateDirector(update: Partial<WorkflowAiDirectorSelection>): void {
     if (!node) updateDefaults({ director: { ...workflow.aiDefaults.director, ...update } });
-    else setNodeDirector({ ...director, ...update });
+    else {
+      setNodeDirector({ ...director, ...update });
+      if (node.type === 'brief') workflow.configureCreatorNode(node.id, { aiAssistMode: 'configured' });
+    }
   }
 
   function updateImage(update: Partial<WorkflowAiImageSelection>): void {
@@ -92,13 +105,18 @@
   }
 
   function inheritDirector(checked: boolean): void {
-    if (checked) setNodeDirector(undefined);
-    else setNodeDirector({
-      ...copyWorkflowAiDefaults(workflow.aiDefaults).director,
-      mode: capabilities.director === 'required' && workflow.aiDefaults.director.mode === 'skip'
-        ? 'auto'
-        : workflow.aiDefaults.director.mode,
-    });
+    if (checked) {
+      setNodeDirector(undefined);
+      if (node?.type === 'brief') workflow.configureCreatorNode(node.id, { aiAssistMode: 'workflow-default' });
+    } else {
+      setNodeDirector({
+        ...copyWorkflowAiDefaults(workflow.aiDefaults).director,
+        mode: capabilities.director === 'required' && workflow.aiDefaults.director.mode === 'skip'
+          ? 'auto'
+          : workflow.aiDefaults.director.mode,
+      });
+      if (node?.type === 'brief') workflow.configureCreatorNode(node.id, { aiAssistMode: 'configured' });
+    }
   }
 
   function inheritImage(checked: boolean): void {
@@ -107,6 +125,11 @@
   }
 
   function setDirectorSource(value: string): void {
+    if (node?.type === 'brief' && value === 'manual') {
+      setNodeDirector(undefined);
+      workflow.configureCreatorNode(node.id, { aiAssistMode: 'manual' });
+      return;
+    }
     inheritDirector(value === 'inherit');
   }
 
@@ -115,7 +138,7 @@
   }
 </script>
 
-<aside class="workflow-properties" class:embedded aria-label="Workflow properties">
+<aside class="workflow-properties" class:embedded class:locked={nodeLocked} aria-label="Workflow properties" inert={nodeLocked}>
   <header>
     <strong>{node ? node.title : 'Workflow Properties'}</strong>
     <small>{node ? node.type.replaceAll('-', ' ') : 'Saved with this workflow'}</small>
@@ -137,7 +160,7 @@
   {#if capabilities.director !== 'none'}
     <section>
       <div class="section-title">
-        <strong>AI Director</strong>
+        <strong>{node?.type === 'brief' ? 'AI assistance' : 'AI Director'}</strong>
       </div>
       {#if node}
         <label class="field role-source">
@@ -145,17 +168,22 @@
           <select
             id={`workflow-role-source-${node.id}-director`}
             aria-label={`${node.title} AI Director configuration`}
-            value={overrides?.director ? 'override' : 'inherit'}
+            value={node.type === 'brief' ? briefAssistMode : overrides?.director ? 'override' : 'inherit'}
             onchange={(event) => setDirectorSource(event.currentTarget.value)}
           >
+            {#if node.type === 'brief'}<option value="manual">Manual · use text verbatim</option>{/if}
             <option value="inherit">Inherit workflow default</option>
-            <option value="override">Override for this node</option>
+            <option value={node.type === 'brief' ? 'configured' : 'override'}>Override for this node</option>
           </select>
         </label>
-        {#if !overrides?.director}
+        {#if briefManual}
+          <p class="role-hint">No AI request is made. The Brief text is passed downstream exactly as written.</p>
+        {:else if !overrides?.director}
           <p class="role-hint">Using the saved workflow Director. Choose an override to edit this node independently.</p>
         {/if}
       {/if}
+      {#if !briefManual}
+      {#if node?.type !== 'brief'}
       <label class="field">
         <span>Mode</span>
         <select
@@ -169,6 +197,7 @@
           {#if capabilities.director !== 'required'}<option value="skip">Direct image / off</option>{/if}
         </select>
       </label>
+      {/if}
       <label class="field">
         <span>Provider</span>
         <select
@@ -180,7 +209,7 @@
           {#each directorProviders as provider}<option value={provider.value}>{provider.label}</option>{/each}
         </select>
       </label>
-      <label class="field">
+      {#if node?.type !== 'brief'}<label class="field">
         <span>Involvement</span>
         <select
           aria-label={node ? `${node.title} AI Director involvement` : 'Workflow AI Director involvement'}
@@ -192,7 +221,7 @@
           <option value="ensureCompletion">Ensure completion</option>
           <option value="fullReview">Full review</option>
         </select>
-      </label>
+      </label>{/if}
       <label class="field">
         <span>Model</span>
         <input
@@ -209,6 +238,7 @@
         <label class="field"><span>Effort</span><select value={String(director.options.claudeEffort ?? 'auto')} disabled={!!node && !overrides?.director} onchange={(event) => updateDirectorOption('claudeEffort', event.currentTarget.value)}><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Maximum</option></select></label>
       {:else if director.provider === 'grok'}
         <label class="field"><span>Reasoning effort</span><select value={String(director.options.grokReasoningEffort ?? 'auto')} disabled={!!node && !overrides?.director} onchange={(event) => updateDirectorOption('grokReasoningEffort', event.currentTarget.value)}><option value="auto">Automatic</option><option value="low">Low</option><option value="high">High</option></select></label>
+      {/if}
       {/if}
     </section>
   {/if}
@@ -279,13 +309,14 @@
 
   {#if node && (node.type === 'brief' || node.type === 'art-direction' || (node.type === 'review' && node.config.mode === 'ai'))}
     <button class="ai-action" type="button" onclick={() => onDirectorAction?.(node)}>
-      {node.type === 'brief' ? 'Enhance Brief…' : node.type === 'art-direction' ? 'Develop Art Direction…' : 'Review Candidates…'}
+      {node.type === 'brief' ? 'Enhance with AI…' : node.type === 'art-direction' ? 'Develop Art Direction…' : 'Review Candidates…'}
     </button>
   {/if}
 </aside>
 
 <style>
   .workflow-properties { width: 286px; min-width: 286px; overflow: auto; padding: 12px; border-left: 1px solid var(--border); background: #292b2f; color: var(--text); box-sizing: border-box; }
+  .workflow-properties.locked { opacity: .68; cursor: wait; }
   .workflow-properties.embedded { width: 100%; min-width: 0; flex: 1; border-left: 0; }
   header { display: grid; gap: 2px; margin-bottom: 14px; }
   header strong { color: var(--text-bright); font-size: 13px; }

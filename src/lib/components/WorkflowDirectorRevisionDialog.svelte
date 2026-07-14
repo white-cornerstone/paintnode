@@ -4,6 +4,8 @@
   import Icon from './Icon.svelte';
   import { ArrowSync, CheckmarkCircle, ErrorCircle } from '../icons';
   import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
+  import { aiTasks } from '../state/aiTasks.svelte';
+  import { project } from '../state/project.svelte';
   import { workflow } from '../state/workflow.svelte';
   import { createWorkflowDirectorRevisionHistoryState } from '../workflow/directorRevisionHistory.svelte';
   import {
@@ -22,11 +24,13 @@
     requester = createProviderFreeWorkflowRevisionRequester(),
     initialInstruction = 'Refine this workflow while preserving accepted candidates and run history.',
     title = 'Revise current workflow',
+    taskNodeIds = [],
   }: {
     onClose: () => void;
     requester?: WorkflowDirectorRevisionRequester;
     initialInstruction?: string;
     title?: string;
+    taskNodeIds?: readonly string[];
   } = $props();
 
   let instruction = $state(untrack(() => initialInstruction));
@@ -35,6 +39,7 @@
   let error = $state('');
   let historyStatus = $state('No revision has been accepted in this review session.');
   let controller: AbortController | null = null;
+  let activeTaskId: string | null = null;
   let requestEpoch = 0;
 
   const view = $derived(preview ? createWorkflowDirectorRevisionViewModel(preview.result) : null);
@@ -58,9 +63,15 @@
 
   function cancelRequest(status = 'Revision request cancelled; the workflow was not changed.'): void {
     requestEpoch += 1;
+    const taskId = activeTaskId;
+    activeTaskId = null;
     controller?.abort();
     controller = null;
     requesting = false;
+    if (taskId && aiTasks.find(taskId)?.status === 'running') {
+      aiTasks.setCancel(taskId, null);
+      aiTasks.markCancelled(taskId, 'Director revision cancelled');
+    }
     if (status) historyStatus = status;
   }
 
@@ -79,6 +90,23 @@
     historyStatus = requester.providerFree
       ? 'Preparing a provider-free revision preview…'
       : 'Preparing a configured Director revision preview…';
+    const graph = workflow.graphSnapshot();
+    const task = aiTasks.create({
+      projectPath: project.path,
+      kind: 'workflow',
+      title: `AI Director: ${title}`,
+      subtitle: requester.label,
+      progress: 'Preparing and validating a workflow revision…',
+      detail: {
+        kind: 'workflow',
+        providerLabel: requester.label,
+        outputName: title,
+        workflowId: graph.id,
+        nodeIds: graph.nodes.filter((node) => taskNodeIds.includes(node.id)).map((node) => node.id),
+      },
+    });
+    activeTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => currentController.abort());
     try {
       const result = await requestWorkflowDirectorRevisionPreview(
         requester,
@@ -91,11 +119,19 @@
       historyStatus = result.result.proposal
         ? 'Revision preview ready. Review every change before accepting.'
         : 'Revision response failed validation; the workflow was not changed.';
+      if (result.result.proposal) aiTasks.complete(task.id, 'Director revision ready for review');
+      else aiTasks.fail(task.id, 'The Director revision failed workflow validation.');
     } catch (caught) {
-      if (epoch !== requestEpoch || caught instanceof WorkflowDirectorRevisionCancelledError) return;
+      if (epoch !== requestEpoch || caught instanceof WorkflowDirectorRevisionCancelledError) {
+        if (aiTasks.find(task.id)?.status === 'running') aiTasks.markCancelled(task.id, 'Director revision cancelled');
+        return;
+      }
       error = caught instanceof Error ? caught.message : String(caught);
       historyStatus = 'Revision request failed; the workflow was not changed.';
+      if (aiTasks.find(task.id)?.status === 'running') aiTasks.fail(task.id, error);
     } finally {
+      aiTasks.setCancel(task.id, null);
+      if (activeTaskId === task.id) activeTaskId = null;
       if (epoch === requestEpoch) {
         controller = null;
         requesting = false;
@@ -143,7 +179,7 @@
   }
 
   onDestroy(() => {
-    controller?.abort();
+    cancelRequest('');
     if (preview) rejectWorkflowDirectorRevisionPreview(preview, workflow);
   });
 </script>

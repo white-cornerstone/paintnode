@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PaintNode</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #09070d;
+        color: #f7f6f9;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #09070d;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      .splash {
+        display: grid;
+        grid-template-columns: 360px minmax(0, 1fr);
+        width: 100%;
+        height: 100%;
+        border: 1px solid #292331;
+        background: #09070d;
+      }
+
+      .identity {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        padding: 64px 48px 42px;
+        background: #09070d;
+        box-shadow: 18px 0 48px rgba(4, 2, 8, 0.46);
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        color: #9afa2f;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 48px;
+        font-weight: 760;
+        line-height: 0.94;
+        letter-spacing: 0;
+      }
+
+      .tagline {
+        max-width: 230px;
+        margin: 24px 0 0;
+        color: #b8b3bf;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .launch-meta {
+        margin-top: auto;
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 24px;
+        color: #e1dde6;
+        font-size: 12px;
+        line-height: 1;
+      }
+
+      .pulse {
+        position: relative;
+        width: 8px;
+        height: 8px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #8ef11f;
+        box-shadow: 0 0 14px rgba(142, 241, 31, 0.72);
+        animation: breathe 1.4s ease-in-out infinite;
+      }
+
+      .progress {
+        width: 100%;
+        height: 2px;
+        margin-bottom: 28px;
+        overflow: hidden;
+        background: #25202b;
+      }
+
+      .progress::after {
+        display: block;
+        width: 38%;
+        height: 100%;
+        content: "";
+        background: #8ef11f;
+        box-shadow: 0 0 10px rgba(142, 241, 31, 0.5);
+        animation: progress 1.55s ease-in-out infinite;
+      }
+
+      .legal {
+        margin: 0;
+        color: #716b79;
+        font-size: 10px;
+        line-height: 1.45;
+      }
+
+      .artwork {
+        position: relative;
+        min-width: 0;
+        overflow: hidden;
+        background: #10091a;
+      }
+
+      .artwork::after {
+        position: absolute;
+        inset: 0;
+        content: "";
+        box-shadow: inset 28px 0 52px rgba(5, 2, 9, 0.42);
+        pointer-events: none;
+      }
+
+      .artwork img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: 50% 50%;
+      }
+
+      @keyframes breathe {
+        0%,
+        100% {
+          opacity: 0.48;
+          transform: scale(0.78);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      @keyframes progress {
+        0% {
+          transform: translateX(-105%);
+        }
+        52% {
+          transform: translateX(84%);
+        }
+        100% {
+          transform: translateX(266%);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .pulse,
+        .progress::after {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="splash">
+      <section class="identity" aria-label="PaintNode launch information">
+        <p class="eyebrow">AI companion canvas</p>
+        <h1>PaintNode</h1>
+        <p class="tagline">Create, retouch, and compose in a real layered image workspace.</p>
+
+        <div class="launch-meta">
+          <p class="status" role="status" aria-live="polite">
+            <span class="pulse" aria-hidden="true"></span>
+            Opening workspace…
+          </p>
+          <div class="progress" aria-hidden="true"></div>
+          <p class="legal">© 2026 White Cornerstone Pty Ltd.<br />GPL-3.0-or-later.</p>
+        </div>
+      </section>
+
+      <figure class="artwork" aria-label="PaintNode buddy surrounded by layers, masks, and creative tools">
+        <img src="assets/launch-artwork.jpg" alt="" />
+      </figure>
+    </main>
+  </body>
+</html>

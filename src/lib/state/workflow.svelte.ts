@@ -33,7 +33,7 @@ import {
   type WorkflowDirectorPatchProposalResult,
   assertFreshWorkflowDirectorProposal,
   WorkflowTransformExecutionError,
-  createWorkflowRevision,
+  createWorkflowGenerationRevision,
   deriveWorkflowNodeRunState,
   resolveWorkflowCancellation,
   WorkflowRunProgressRouter,
@@ -45,6 +45,7 @@ import {
   executeSelectiveWorkflowPlan,
   createWorkflowExecutionRestrictions,
   prepareCampaignGenerateTransform,
+  prepareConceptGenerateTransform,
   workflowSha256Bytes,
   workflowSha256Text,
   isFullWorkflowRunRecord,
@@ -82,6 +83,7 @@ import {
   type WorkflowAiReviewResult,
   type WorkflowReviewRecommendationResolution,
   type WorkflowRunProvider,
+  workflowExtractedAssetLinks,
 } from '../workflow';
 import {
   bindWorkflowRoundTripAuthority,
@@ -104,6 +106,7 @@ function workflowEditorContextKey(graph: WorkflowGraphV2, nodeId: string): strin
   const runtimeConfigKeys = new Set([
     'resultAssetReferenceId', 'resultAssetId', 'resultRelativePath',
     'assetReferenceId', 'outputAssetId', 'outputRelativePath',
+    'dismissedCandidateIds',
   ]);
   const nodes = graph.nodes
     .filter((node) => relevantIds.has(node.id))
@@ -118,7 +121,7 @@ function workflowEditorContextKey(graph: WorkflowGraphV2, nodeId: string): strin
     .filter((edge) => relevantIds.has(edge.source.nodeId) && relevantIds.has(edge.target.nodeId))
     .map((edge) => ({ source: edge.source, target: edge.target }))
     .toSorted((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-  return workflowSha256Text(JSON.stringify({ nodeId, nodes, edges }));
+  return workflowSha256Text(JSON.stringify({ nodeId, ai: graph.metadata.ai ?? null, nodes, edges }));
 }
 
 export interface WorkflowTransformExecutionState {
@@ -130,6 +133,7 @@ export interface WorkflowTransformExecutionState {
 export interface WorkflowTransformStoreOutcome extends WorkflowTransformExecutionOutcome {
   committed: boolean;
   commitMessage: string;
+  warning?: string;
 }
 
 export interface WorkflowCandidateBranchStoreOutcome extends WorkflowCandidateBranchExecutionOutcome {
@@ -291,7 +295,7 @@ export interface WorkflowOutputNode {
   outputRelativePath: string | null;
 }
 
-export type WorkflowTool = 'hand' | 'zoom' | 'asset' | 'composition' | 'output';
+export type WorkflowTool = 'hand' | 'zoom';
 export type WorkflowSelection =
   | { kind: 'asset'; id: string }
   | { kind: 'creator'; id: string }
@@ -307,8 +311,21 @@ function id(prefix: string): string {
 }
 
 function cleanWorkflowName(name: string): string {
-  const trimmed = name.trim().replace(/\.cxflow\.json$/i, '');
+  const trimmed = name.trim().replace(/\.cxflow(?:\.json)?$/i, '');
   return trimmed || 'Untitled Workflow';
+}
+
+function workflowNameFromSavePath(path: string): string {
+  const fileName = path.split(/[\\/]/).pop() ?? path;
+  return cleanWorkflowName(fileName);
+}
+
+function loadedWorkflowName(metadataName: string, fallbackName: string): string {
+  if (!metadataName) return cleanWorkflowName(fallbackName);
+  const cleanedMetadataName = cleanWorkflowName(metadataName);
+  return cleanedMetadataName === cleanWorkflowName(fallbackName)
+    ? cleanedMetadataName
+    : metadataName;
 }
 
 function roundWorkflowNumber(value: number): number {
@@ -365,9 +382,37 @@ interface WorkflowDirectorPatchTransaction {
   sessionIdentity: number;
 }
 
+interface WorkflowAuthoringSnapshot {
+  graph: WorkflowGraphV2;
+  graphRevision: number;
+  name: string;
+  aiDefaults: WorkflowAiDefaultsV1;
+}
+
+interface WorkflowAuthoringTransaction {
+  label: string;
+  before: WorkflowAuthoringSnapshot;
+  after: WorkflowAuthoringSnapshot;
+  sessionIdentity: number;
+  mergeKey: string | null;
+  updatedAt: number;
+}
+
+interface WorkflowAuthoringHistoryOptions {
+  label: string;
+  mergeKey?: string;
+}
+
+interface ActiveWorkflowAuthoringTransaction {
+  label: string;
+  before: WorkflowAuthoringSnapshot;
+  mergeKey: string | null;
+  changed: boolean;
+}
+
 interface WorkflowSaveSubmission {
   bytes: Uint8Array;
-  serializedBytes: string;
+  contentBytes: string;
   storeRevision: number;
   sessionIdentity: number;
   projectIdentity: string;
@@ -376,6 +421,18 @@ interface WorkflowSaveSubmission {
 
 function workflowGraphBytes(graph: WorkflowGraphV2): string {
   return new WorkflowGraphDomain(graph).serialize();
+}
+
+/**
+ * Viewport navigation is presentation state, not authored workflow content.
+ * Keep it in the file so a workflow can reopen at the last explicitly saved
+ * view, but exclude it from dirty-state reconciliation.
+ */
+function workflowContentBytes(graph: WorkflowGraphV2): string {
+  return workflowGraphBytes({
+    ...graph,
+    viewport: { panX: 0, panY: 0, zoom: 1 },
+  });
 }
 
 function immutableWorkflowHistoryBytes(graph: WorkflowGraphV2): string {
@@ -465,7 +522,11 @@ export class WorkflowStore {
   private pendingDirectorPatchReview: WorkflowDirectorPatchReview | null = null;
   private directorPatchUndoStack: WorkflowDirectorPatchTransaction[] = [];
   private directorPatchRedoStack: WorkflowDirectorPatchTransaction[] = [];
-  private savedWorkflowBytes = $state<string | null>(null);
+  private authoringUndoStack: WorkflowAuthoringTransaction[] = [];
+  private authoringRedoStack: WorkflowAuthoringTransaction[] = [];
+  private activeAuthoringTransaction: ActiveWorkflowAuthoringTransaction | null = null;
+  private projectedGraphSnapshot: WorkflowGraphV2 | null = null;
+  private savedWorkflowContentBytes = $state<string | null>(null);
   private savePathIntentSequence = 0;
   private activeSavePathIntentIdentity = 0;
   private activeSavePathIntentTarget: string | null = null;
@@ -484,9 +545,9 @@ export class WorkflowStore {
 
   get dirty(): boolean {
     this.rev;
-    return this.savedWorkflowBytes === null
+    return this.savedWorkflowContentBytes === null
       ? this.rev !== this.savedRev
-      : workflowGraphBytes(this.serialize()) !== this.savedWorkflowBytes;
+      : workflowContentBytes(this.serialize()) !== this.savedWorkflowContentBytes;
   }
 
   get graphRevision(): number {
@@ -509,6 +570,32 @@ export class WorkflowStore {
     return transaction !== undefined
       && transaction.sessionIdentity === this.workflowSessionIdentity
       && this.matchesDirectorPatchSnapshot(transaction.before);
+  }
+
+  get canUndoAuthoring(): boolean {
+    this.rev;
+    const transaction = this.authoringUndoStack.at(-1);
+    return transaction !== undefined
+      && transaction.sessionIdentity === this.workflowSessionIdentity
+      && this.matchesAuthoringSnapshot(transaction.after);
+  }
+
+  get canRedoAuthoring(): boolean {
+    this.rev;
+    const transaction = this.authoringRedoStack.at(-1);
+    return transaction !== undefined
+      && transaction.sessionIdentity === this.workflowSessionIdentity
+      && this.matchesAuthoringSnapshot(transaction.before);
+  }
+
+  get authoringUndoLabel(): string {
+    this.rev;
+    return this.canUndoAuthoring ? this.authoringUndoStack.at(-1)?.label ?? '' : '';
+  }
+
+  get authoringRedoLabel(): string {
+    this.rev;
+    return this.canRedoAuthoring ? this.authoringRedoStack.at(-1)?.label ?? '' : '';
   }
 
   captureDirectorSession(): WorkflowDirectorSessionToken {
@@ -592,6 +679,7 @@ export class WorkflowStore {
       throw error;
     }
     this.pendingDirectorPatchReview = null;
+    this.clearAuthoringHistory();
     this.directorPatchUndoStack.push({
       before,
       after,
@@ -631,6 +719,58 @@ export class WorkflowStore {
     this.workflowMutationIdentity += 1;
     this.pendingDirectorPatchReview = null;
     this.directorPatchUndoStack.push(transaction);
+    return true;
+  }
+
+  beginAuthoringTransaction(label: string, mergeKey?: string): void {
+    if (this.activeAuthoringTransaction) this.endAuthoringTransaction();
+    this.activeAuthoringTransaction = {
+      label,
+      before: this.captureAuthoringSnapshot(),
+      mergeKey: mergeKey ?? null,
+      changed: false,
+    };
+  }
+
+  endAuthoringTransaction(): void {
+    const active = this.activeAuthoringTransaction;
+    this.activeAuthoringTransaction = null;
+    if (!active?.changed) return;
+    this.recordAuthoringTransaction(
+      active.label,
+      active.before,
+      this.captureAuthoringSnapshot(),
+      active.mergeKey,
+    );
+  }
+
+  undoAuthoring(): boolean {
+    this.endAuthoringTransaction();
+    const transaction = this.authoringUndoStack.at(-1);
+    if (!transaction) return false;
+    if (transaction.sessionIdentity !== this.workflowSessionIdentity
+      || !this.matchesAuthoringSnapshot(transaction.after)) {
+      this.clearAuthoringHistory();
+      return false;
+    }
+    this.authoringUndoStack.pop();
+    this.publishAuthoringSnapshot(transaction.before);
+    this.authoringRedoStack.push(transaction);
+    return true;
+  }
+
+  redoAuthoring(): boolean {
+    this.endAuthoringTransaction();
+    const transaction = this.authoringRedoStack.at(-1);
+    if (!transaction) return false;
+    if (transaction.sessionIdentity !== this.workflowSessionIdentity
+      || !this.matchesAuthoringSnapshot(transaction.before)) {
+      this.clearAuthoringHistory();
+      return false;
+    }
+    this.authoringRedoStack.pop();
+    this.publishAuthoringSnapshot(transaction.after);
+    this.authoringUndoStack.push(transaction);
     return true;
   }
 
@@ -769,6 +909,7 @@ export class WorkflowStore {
     this.zoom = nextDomain.graph.viewport.zoom;
     this.graphDomain = nextDomain;
     this.projectedGraphRevision = nextDomain.revision;
+    this.aiDefaults = nextDomain.graph.metadata.ai ?? currentWorkflowAiDefaults();
     this.syncReactiveGraph(nextDomain);
     this.rev = 1;
     this.savedRev = 0;
@@ -790,16 +931,22 @@ export class WorkflowStore {
   }
 
   setName(name: string): void {
-    this.name = cleanWorkflowName(name);
-    this.bump();
+    const next = cleanWorkflowName(name);
+    if (next === this.name) return;
+    const before = this.captureAuthoringSnapshot();
+    this.name = next;
+    this.bump(true);
+    this.recordAuthoringTransaction('Rename workflow', before, this.captureAuthoringSnapshot(), 'workflow:name');
   }
 
   setAiDefaults(value: WorkflowAiDefaultsV1): void {
     const current = JSON.stringify(this.aiDefaults);
     const next = copyWorkflowAiDefaults(value);
     if (current === JSON.stringify(next)) return;
+    const before = this.captureAuthoringSnapshot();
     this.aiDefaults = next;
-    this.bump();
+    this.bump(true);
+    this.recordAuthoringTransaction('Change workflow AI defaults', before, this.captureAuthoringSnapshot(), 'workflow:ai-defaults');
   }
 
   setTool(tool: WorkflowTool): void {
@@ -836,7 +983,10 @@ export class WorkflowStore {
       position: { x: 80 + (index % 3) * 230, y: 110 + Math.floor(index / 3) * 160 },
       size: { width: 205, height: 190 },
       color: '#3a3c42',
-      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      ports: {
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
       config: { legacyKind: 'asset', assetId: asset.id, relativePath: asset.relativePath, note: '' },
       runRecordIds: [],
     };
@@ -847,7 +997,7 @@ export class WorkflowStore {
           other: { nodeId: 'composition', portId: 'assets' },
         }).node
       : domain.addNode(draft);
-    this.publishGraphMutation(domain, added);
+    this.publishGraphMutation(domain, added, { label: 'Add node' });
     this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
@@ -861,7 +1011,10 @@ export class WorkflowStore {
       position: { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) },
       size: { width: Math.max(160, roundWorkflowNumber(width)), height: Math.max(130, roundWorkflowNumber(height)) },
       color: '#3a3c42',
-      ports: { inputs: [], outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }] },
+      ports: {
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
+        outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
+      },
       config: { legacyKind: 'asset', assetId: null, relativePath: '', note: '' },
       runRecordIds: [],
     };
@@ -872,7 +1025,7 @@ export class WorkflowStore {
           other: { nodeId: 'composition', portId: 'assets' },
         }).node
       : domain.addNode(draft);
-    this.publishGraphMutation(domain, added);
+    this.publishGraphMutation(domain, added, { label: 'Add node' });
     this.selection = { kind: 'asset', id: added.id };
     this.tool = 'hand';
   }
@@ -890,7 +1043,7 @@ export class WorkflowStore {
         : undefined,
       config,
     });
-    this.publishGraphMutation(domain, domain.addNode(node));
+    this.publishGraphMutation(domain, domain.addNode(node), { label: 'Add node' });
     this.selection = type === 'input'
       ? { kind: 'asset', id: node.id }
       : type === 'output'
@@ -903,15 +1056,20 @@ export class WorkflowStore {
   removeNode(id: string): void {
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeNode(id));
+    this.publishGraphMutation(domain, domain.removeNode(id), { label: 'Remove node' });
     if ((this.selection?.kind === 'asset' || this.selection?.kind === 'creator' || this.selection?.kind === 'unsupported' || this.selection?.kind === 'output')
       && this.selection.id === id) this.selection = null;
+    if (this.selection?.kind === 'composition' && id === 'composition') this.selection = null;
   }
 
   moveNode(id: string, x: number, y: number): void {
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.moveNode(id, { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }));
+    this.publishGraphMutation(
+      domain,
+      domain.moveNode(id, { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }),
+      { label: 'Move node', mergeKey: `move:${id}` },
+    );
   }
 
   resizeNode(id: string, width: number, height: number): void {
@@ -920,12 +1078,16 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.resizeNode(id, {
       width: Math.max(160, roundWorkflowNumber(width)),
       height: Math.max(130, roundWorkflowNumber(height)),
-    }));
+    }), { label: 'Resize node', mergeKey: `resize:${id}` });
   }
 
   movePrompt(x: number, y: number): void {
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.moveNode('composition', { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }));
+    this.publishGraphMutation(
+      domain,
+      domain.moveNode('composition', { x: roundWorkflowNumber(x), y: roundWorkflowNumber(y) }),
+      { label: 'Move node', mergeKey: 'move:composition' },
+    );
   }
 
   resizePrompt(width: number, height: number): void {
@@ -933,7 +1095,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.resizeNode('composition', {
       width: Math.max(260, roundWorkflowNumber(width)),
       height: Math.max(260, roundWorkflowNumber(height)),
-    }));
+    }), { label: 'Resize node', mergeKey: 'resize:composition' });
   }
 
   moveOutput(x: number, y: number): void {
@@ -972,7 +1134,7 @@ export class WorkflowStore {
       direction: 'incoming',
       nodePortId: 'source',
       other: { nodeId: 'composition', portId: 'layout' },
-    }));
+    }), { label: 'Add output node' });
     const node = this.outputNode(added.node.id)!;
     this.selection = { kind: 'output', id: added.node.id };
     this.tool = 'hand';
@@ -983,7 +1145,7 @@ export class WorkflowStore {
     if (this.outputNodes.length <= 1) return;
     if (!this.requireGraphDomain().node(id)) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeNode(id));
+    this.publishGraphMutation(domain, domain.removeNode(id), { label: 'Remove node' });
     if (this.selection?.kind === 'output' && this.selection.id === id) this.selection = { kind: 'output', id: this.outputNodes[0].id };
   }
 
@@ -1010,7 +1172,7 @@ export class WorkflowStore {
           legacyY: position.y,
         } }
         : {}),
-    }));
+    }), { label: 'Move node', mergeKey: `move:${id}` });
   }
 
   resizeOutputNode(id: string, width: number, height: number): void {
@@ -1030,18 +1192,28 @@ export class WorkflowStore {
           legacyHeight: size.height,
         } }
         : {}),
-    }));
+    }), { label: 'Resize node', mergeKey: `resize:${id}` });
   }
 
   setOutputFinalSize(id: string, width: number, height: number): void {
     const node = this.requireGraphDomain().node(id);
     if (!node) return;
     const domain = this.requireGraphDomain();
+    const priorGraphRevision = this.graphRevision;
+    const reviewNodeId = resolveWorkflowCampaignPath(domain.graph, { outputNodeId: id })?.reviewNodeId ?? null;
+    const verification = reviewNodeId ? this.reviewVerifications[reviewNodeId] : undefined;
     this.publishGraphMutation(domain, domain.configureNode(id, {
       ...node.config,
       finalWidth: Math.max(64, roundWorkflowNumber(width)),
       finalHeight: Math.max(64, roundWorkflowNumber(height)),
-    }));
+    }), { label: 'Change output size', mergeKey: `output-size:${id}` });
+    if (reviewNodeId && verification?.graphRevision === priorGraphRevision
+      && this.graphRevision !== priorGraphRevision) {
+      this.reviewVerifications = {
+        ...this.reviewVerifications,
+        [reviewNodeId]: { ...verification, graphRevision: this.graphRevision },
+      };
+    }
   }
 
   panBy(dx: number, dy: number): void {
@@ -1050,14 +1222,12 @@ export class WorkflowStore {
     if (panX === this.panX && panY === this.panY) return;
     this.panX = panX;
     this.panY = panY;
-    this.bump();
   }
 
   setZoom(nextZoom: number): void {
     const zoom = Math.min(4, Math.max(0.2, Number(nextZoom.toFixed(3))));
     if (zoom === this.zoom) return;
     this.zoom = zoom;
-    this.bump();
   }
 
   zoomAt(viewX: number, viewY: number, direction: WorkflowZoomMode): void {
@@ -1072,7 +1242,6 @@ export class WorkflowStore {
     this.zoom = zoom;
     this.panX = panX;
     this.panY = panY;
-    this.bump();
   }
 
   zoomBy(factor: number, viewX: number, viewY: number): void {
@@ -1087,13 +1256,11 @@ export class WorkflowStore {
     this.zoom = zoom;
     this.panX = panX;
     this.panY = panY;
-    this.bump();
   }
 
   resetZoom(): void {
     if (this.zoom === 1) return;
     this.zoom = 1;
-    this.bump();
   }
 
   setNodeIncluded(id: string, included: boolean): void {
@@ -1133,25 +1300,37 @@ export class WorkflowStore {
       this.connectionError = validation.message;
       return false;
     }
-    this.publishGraphMutation(domain, domain.addEdge({
+    const edge = domain.addEdge({
       source: endpoints.source,
       target: endpoints.target,
-    }));
+    });
+    if (targetPortId === 'scope') this.reconcileScopedInputAsset(domain, from, to);
+    this.publishGraphMutation(domain, edge, { label: 'Connect nodes' });
     this.connectionError = null;
     return true;
   }
 
   disconnectConnection(id: string): void {
-    if (!this.requireGraphDomain().edge(id)) return;
+    this.disconnectConnections([id]);
+  }
+
+  disconnectConnections(ids: readonly string[]): void {
+    const requestedIds = new Set(ids);
+    if (requestedIds.size === 0) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.removeEdge(id));
+    const existingIds = domain.graph.edges
+      .map((edge) => edge.id)
+      .filter((id) => requestedIds.has(id));
+    if (existingIds.length === 0) return;
+    for (const id of existingIds) domain.removeEdge(id);
+    this.publishGraphMutation(domain, undefined, { label: 'Disconnect links' });
   }
 
   disconnectNodes(from: string, to: string): void {
     const domain = this.requireGraphDomain();
     const edge = domain.outgoing(from).find((item) => item.target.nodeId === to);
     if (!edge) return;
-    this.publishGraphMutation(domain, domain.removeEdge(edge.id));
+    this.publishGraphMutation(domain, domain.removeEdge(edge.id), { label: 'Disconnect links' });
   }
 
   isConnected(from: string, to: string): boolean {
@@ -1229,7 +1408,11 @@ export class WorkflowStore {
     const node = this.requireGraphDomain().node(id);
     if (!node) return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, note }));
+    this.publishGraphMutation(
+      domain,
+      domain.configureNode(id, { ...node.config, note }),
+      { label: 'Edit node note', mergeKey: `node-note:${id}` },
+    );
   }
 
   assignAsset(id: string, asset: ProjectAsset | null): void {
@@ -1246,7 +1429,7 @@ export class WorkflowStore {
       relativePath: asset?.relativePath ?? null,
       oraRelativePath: null,
       hasAnnotations: false,
-    }));
+    }), { label: 'Assign input asset' });
   }
 
   assignOraDocument(id: string, file: ProjectFile, hasAnnotations: boolean): void {
@@ -1259,7 +1442,7 @@ export class WorkflowStore {
       relativePath: file.relativePath,
       oraRelativePath: file.relativePath,
       hasAnnotations,
-    }));
+    }), { label: 'Assign input document', mergeKey: `assign-ora:${id}` });
     const baseOutput = node.ports.outputs.find((port) => port.id === 'asset') ?? {
       id: 'asset', label: 'Asset reference', dataType: 'asset-reference' as const,
     };
@@ -1270,7 +1453,7 @@ export class WorkflowStore {
         ...(hasAnnotations ? [{ id: 'annotation', label: 'Annotation', dataType: 'asset-reference' as const }] : []),
       ],
     });
-    this.publishGraphMutation(domain, undefined);
+    this.publishGraphMutation(domain, undefined, { label: 'Assign input document', mergeKey: `assign-ora:${id}` });
   }
 
   configureCreatorNode(id: string, update: Record<string, unknown>): void {
@@ -1282,7 +1465,24 @@ export class WorkflowStore {
       throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
     }
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, config));
+    const configured = domain.configureNode(id, config);
+    if (node.type === 'extract-assets' && Object.prototype.hasOwnProperty.call(update, 'resultAssets')) {
+      for (const connection of domain.outgoing(id)) {
+        if (connection.source.portId === 'assets' && connection.target.portId === 'scope') {
+          this.reconcileScopedInputAsset(domain, id, connection.target.nodeId);
+        }
+      }
+    }
+    const recordsExecutionResult = Object.prototype.hasOwnProperty.call(update, 'resultAssets')
+      || Object.prototype.hasOwnProperty.call(update, 'extractionManifest');
+    this.publishGraphMutation(
+      domain,
+      configured,
+      recordsExecutionResult ? undefined : {
+        label: 'Configure node',
+        mergeKey: `configure:${id}:${Object.keys(update).sort().join(',')}`,
+      },
+    );
   }
 
   setNodeAiOverrides(id: string, value: WorkflowNodeAiOverridesV1 | null): void {
@@ -1300,14 +1500,18 @@ export class WorkflowStore {
       throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
     }
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, config));
+    this.publishGraphMutation(domain, domain.configureNode(id, config), { label: 'Change node AI options', mergeKey: `node-ai:${id}` });
   }
 
   setBriefObjective(id: string, objective: string): void {
     const node = this.requireGraphDomain().node(id);
     if (!node || node.type !== 'brief') return;
     const domain = this.requireGraphDomain();
-    this.publishGraphMutation(domain, domain.configureNode(id, { ...node.config, objective }));
+    this.publishGraphMutation(
+      domain,
+      domain.configureNode(id, { ...node.config, objective }),
+      { label: 'Edit creative brief', mergeKey: `brief:${id}` },
+    );
   }
 
   selectedLabel(): string {
@@ -1364,7 +1568,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.updateNode(nodeId, {
       title: displayName || fallback,
       config: { ...node.config, displayName },
-    }));
+    }), { label: 'Rename node', mergeKey: `node-label:${nodeId}` });
   }
 
   setSelectedColor(color: string): void {
@@ -1387,7 +1591,7 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.updateNode(nodeId, {
       color,
       ...(nodeId === 'output' ? { config: { ...node.config, legacyColor: color } } : {}),
-    }));
+    }), { label: 'Change node color', mergeKey: `node-color:${nodeId}` });
   }
 
   setOutput(asset: ProjectAsset | null, outputId = this.selectedOutputNode()?.id ?? 'output'): void {
@@ -1809,19 +2013,25 @@ export class WorkflowStore {
 
   transformExecution(nodeId: string): WorkflowTransformExecutionState {
     const transient = this.transformExecutions[nodeId];
-    if (transient) return transient;
+    if (transient && transient.state !== 'succeeded' && transient.state !== 'stale') return transient;
     const graph = this.requireGraphDomain().graph;
     const derived = deriveWorkflowNodeRunState(graph, nodeId);
     const latest = derived.latestRun;
     if (!latest) return { state: 'idle', message: '', assetId: null };
     const accepted = derived.acceptedOutputs.at(-1) ?? null;
-    if (latest.status === 'succeeded' && latest.workflowRevision !== createWorkflowRevision(graph)) {
+    const generationStale = (
+      latest.status === 'succeeded'
+      && latest.workflowRevision !== createWorkflowGenerationRevision(graph, latest.target.nodeId)
+    );
+    if (generationStale) {
+      if (transient?.state === 'stale') return transient;
       return {
         state: 'stale', message: 'Workflow inputs changed after this result was generated.',
         assetId: accepted?.assetId ?? null,
       };
     }
     if (latest.status === 'succeeded') {
+      if (transient?.state === 'succeeded') return transient;
       return { state: 'succeeded', message: 'Generated', assetId: accepted?.assetId ?? null };
     }
     if (latest.status === 'running') {
@@ -1839,6 +2049,48 @@ export class WorkflowStore {
   candidateBranchGroups(sourceNodeId?: string): WorkflowCandidateBranchGroup[] {
     const groups = deriveWorkflowCandidateBranchGroups(this.serialize());
     return sourceNodeId ? groups.filter((group) => group.sourceNodeId === sourceNodeId) : groups;
+  }
+
+  dismissedCandidateIds(sourceNodeId: string): string[] {
+    const node = this.requireGraphDomain().node(sourceNodeId);
+    if (!node || node.type !== 'transform' || !Array.isArray(node.config.dismissedCandidateIds)) return [];
+    return node.config.dismissedCandidateIds.filter((candidateId): candidateId is string => (
+      typeof candidateId === 'string' && candidateId.length > 0
+    ));
+  }
+
+  visibleCandidateBranchGroups(sourceNodeId: string): WorkflowCandidateBranchGroup[] {
+    const dismissed = new Set(this.dismissedCandidateIds(sourceNodeId));
+    return this.candidateBranchGroups(sourceNodeId)
+      .map((group) => ({
+        ...group,
+        candidates: group.candidates.filter((candidate) => !dismissed.has(candidate.candidateId)),
+      }))
+      .filter((group) => group.candidates.length > 0);
+  }
+
+  clearFailedCandidateBranches(sourceNodeId: string): number {
+    const domain = this.requireGraphDomain();
+    const node = domain.node(sourceNodeId);
+    if (!node || node.type !== 'transform') return 0;
+    const dismissed = new Set(this.dismissedCandidateIds(sourceNodeId));
+    const failedCandidateIds = this.candidateBranchGroups(sourceNodeId)
+      .flatMap((group) => group.candidates)
+      .filter((candidate) => candidate.status === 'failed' && !dismissed.has(candidate.candidateId))
+      .map((candidate) => candidate.candidateId);
+    if (failedCandidateIds.length === 0) return 0;
+    failedCandidateIds.forEach((candidateId) => dismissed.add(candidateId));
+    const config = { ...node.config, dismissedCandidateIds: [...dismissed] };
+    const issues = validateCreatorNodeConfig(node.type, config);
+    if (issues.length > 0) {
+      throw new Error(`Invalid creator node configuration: ${issues.map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
+    }
+    this.publishGraphMutation(
+      domain,
+      domain.configureNode(sourceNodeId, config),
+      { label: 'Clear failed candidates' },
+    );
+    return failedCandidateIds.length;
   }
 
   reviewCandidates(
@@ -1955,11 +2207,8 @@ export class WorkflowStore {
     const storeRevision = this.rev;
     const sessionIdentity = this.workflowSessionIdentity;
     const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
-    if (!topology.transformNodeId || !topology.outputNodeId) throw new Error('Review requires one unambiguous campaign path.');
-    const prepared = await prepareCampaignGenerateTransform(graph, topology.outputNodeId, {
-      ...options,
-      allowUnpromotedReview: true,
-    });
+    if (!topology.transformNodeId) throw new Error('Review requires one connected Concept Generator.');
+    const prepared = await prepareConceptGenerateTransform(graph, topology.transformNodeId, options);
     const verifiedOutputIds: string[] = [];
     for (const candidate of deriveWorkflowReviewCandidates(graph, reviewNodeId)) {
       if (!candidate.output) continue;
@@ -2061,14 +2310,11 @@ export class WorkflowStore {
     if (!candidate?.output || candidate.state !== 'eligible') {
       throw new Error('Only an available, current candidate can be promoted.');
     }
-    const path = resolveWorkflowCampaignPath(graph, { transformNodeId: candidate.sourceNodeId });
-    if (!path || path.reviewNodeId !== reviewNodeId) {
+    const topology = resolveWorkflowReviewTopology(graph, { reviewNodeId });
+    if (topology.transformNodeId !== candidate.sourceNodeId) {
       throw new Error('The candidate is no longer connected to this Review.');
     }
-    const prepared = await prepareCampaignGenerateTransform(graph, path.outputNodeId, {
-      ...options,
-      allowUnpromotedReview: true,
-    });
+    const prepared = await prepareConceptGenerateTransform(graph, candidate.sourceNodeId, options);
     if (prepared.materialKey !== candidate.materialKey) {
       throw new Error('The candidate is stale because its upstream creative material changed. Generate current branches first.');
     }
@@ -2106,7 +2352,7 @@ export class WorkflowStore {
   }
 
   async runCandidateBranches(
-    outputNodeId: string,
+    transformNodeId: string,
     options: WorkflowStoreRunOptions,
     branch: WorkflowCandidateBranchExecutionOptions,
   ): Promise<WorkflowCandidateBranchStoreOutcome> {
@@ -2114,7 +2360,7 @@ export class WorkflowStore {
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
-    const outcome = await executeWorkflowCandidateBranches(this.serialize(), outputNodeId, options, branch);
+    const outcome = await executeWorkflowCandidateBranches(this.serialize(), transformNodeId, options, branch);
     const commitMessage = this.workflowSessionIdentity !== sessionIdentity
       ? 'The workflow session changed while candidate branches were running.'
       : this.graphRevision !== graphRevision || this.rev !== storeRevision
@@ -2151,7 +2397,12 @@ export class WorkflowStore {
     this.projectedGraphRevision = this.graphDomain.revision;
     this.syncReactiveGraph(this.graphDomain);
     this.bump();
-    return { ...outcome, committed: true, commitMessage: 'Candidate retry preserved.' };
+    const outcomeMessage = outcome.candidate.status === 'succeeded'
+      ? 'Candidate retry completed.'
+      : outcome.candidate.status === 'cancelled'
+        ? 'Candidate retry was cancelled.'
+        : 'Candidate retry completed with another failure.';
+    return { ...outcome, committed: true, commitMessage: outcomeMessage };
   }
 
   async runCampaignGenerate(
@@ -2190,7 +2441,7 @@ export class WorkflowStore {
     }
     const graph = this.serialize();
     const sessionIdentity = this.workflowSessionIdentity;
-    const mutationIdentity = this.workflowMutationIdentity;
+    const generationContextKey = createWorkflowGenerationRevision(graph, outputNodeId);
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
@@ -2221,14 +2472,8 @@ export class WorkflowStore {
       if (this.workflowSessionIdentity !== sessionIdentity) {
         return 'The workflow session changed while Generate was running. The result was not applied.';
       }
-      if (this.workflowMutationIdentity !== mutationIdentity) {
-        return 'The workflow changed while Generate was running. The result was not applied.';
-      }
       if (this.activeTransformRuns.get(transformNodeId) !== activeRun) {
         return 'A newer Generate run replaced this result before it could be applied.';
-      }
-      if (this.graphRevision !== graphRevision || this.rev !== storeRevision) {
-        return 'The workflow changed while Generate was running. The result was not applied.';
       }
       if ((options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
         return 'The active project changed while Generate was running. The result was not applied.';
@@ -2301,15 +2546,99 @@ export class WorkflowStore {
         return { ...outcome, committed: false, commitMessage };
       }
       if (this.activeTransformRuns.get(transformNodeId) === activeRun) {
-        this.graphDomain = new WorkflowGraphDomain(outcome.graph, { idGenerator: this.graphIdGenerator });
+        const currentGraph = this.serialize();
+        const currentTransform = currentGraph.nodes.find((node) => node.id === outcome.transformNodeId);
+        const currentOutput = currentGraph.nodes.find((node) => node.id === outcome.outputNodeId);
+        const completedTransform = outcome.graph.nodes.find((node) => node.id === outcome.transformNodeId);
+        const completedRunId = completedTransform?.runRecordIds
+          .filter((runId) => !graph.runRecords.some((record) => record.id === runId))
+          .at(-1);
+        const completedRun = completedRunId
+          ? outcome.graph.runRecords.find((record) => record.id === completedRunId)
+          : null;
+        const completedOutput = completedRun && isFullWorkflowRunRecord(completedRun)
+          ? completedRun.outputs.at(-1)
+          : null;
+        const completedReference = completedOutput
+          ? outcome.graph.assetReferences.find((reference) => reference.id === completedOutput.assetReferenceId)
+          : null;
+        if (!currentTransform || !currentOutput || !completedRun || !completedOutput || !completedReference) {
+          commitMessage = `The Generate or Output node was removed while Generate was running. The result was not applied. The generated asset remains available at ${outcome.asset.relativePath}.`;
+          this.transformExecutions = {
+            ...this.transformExecutions,
+            [transformNodeId]: { state: 'failed', message: commitMessage, assetId: null },
+          };
+          return { ...outcome, committed: false, commitMessage };
+        }
+        const currentRunCollision = currentGraph.runRecords.some((record) => record.id === completedRun.id);
+        const currentReferenceCollision = currentGraph.assetReferences.some((reference) => (
+          reference.id === completedReference.id
+        ));
+        if (currentRunCollision || currentReferenceCollision) {
+          commitMessage = `The generated result could not be linked because its workflow history identity is already in use. The generated asset remains available at ${outcome.asset.relativePath}.`;
+          this.transformExecutions = {
+            ...this.transformExecutions,
+            [transformNodeId]: { state: 'failed', message: commitMessage, assetId: null },
+          };
+          return { ...outcome, committed: false, commitMessage };
+        }
+        const mergedGraph: WorkflowGraphV2 = {
+          ...currentGraph,
+          nodes: currentGraph.nodes.map((node) => {
+            if (node.id === outcome.transformNodeId) {
+              return {
+                ...node,
+                config: {
+                  ...node.config,
+                  resultAssetReferenceId: completedReference.id,
+                  resultAssetId: outcome.asset.id,
+                  resultRelativePath: outcome.asset.relativePath,
+                },
+                runRecordIds: [...node.runRecordIds, completedRun.id],
+              };
+            }
+            if (node.id === outcome.outputNodeId) {
+              return {
+                ...node,
+                config: {
+                  ...node.config,
+                  assetReferenceId: completedReference.id,
+                  outputAssetId: outcome.asset.id,
+                  outputRelativePath: outcome.asset.relativePath,
+                },
+              };
+            }
+            return node;
+          }),
+          assetReferences: [...currentGraph.assetReferences, completedReference],
+          runRecords: [...currentGraph.runRecords, completedRun],
+        };
+        const contextChanged = createWorkflowGenerationRevision(currentGraph, outcome.outputNodeId) !== generationContextKey;
+        const warning = contextChanged
+          ? 'The workflow settings changed while Generate was running, so this result may not reflect the current settings.'
+          : '';
+        this.graphDomain = new WorkflowGraphDomain(mergedGraph, {
+          idGenerator: this.graphIdGenerator,
+          initialRevision: this.graphRevision + 1,
+        });
         this.projectedGraphRevision = this.graphDomain.revision;
         this.syncReactiveGraph(this.graphDomain);
         this.bump();
         this.transformExecutions = {
           ...this.transformExecutions,
           [transformNodeId]: {
-            state: 'succeeded', message: 'Generated', assetId: outcome.asset.id,
+            state: warning ? 'stale' : 'succeeded',
+            message: warning || 'Generated',
+            assetId: outcome.asset.id,
           },
+        };
+        commitMessage = warning || 'Generated result applied.';
+        return {
+          ...outcome,
+          graph: this.graphDomain.graph,
+          committed: true,
+          commitMessage,
+          ...(warning ? { warning } : {}),
         };
       }
       return { ...outcome, committed: true, commitMessage: 'Generated result applied.' };
@@ -2322,7 +2651,12 @@ export class WorkflowStore {
           'Retry Generate',
         );
       const failureGraph = surfacedFailure.failureGraph;
-      if (failureGraph && !commitBlockReason()) {
+      if (
+        failureGraph
+        && !commitBlockReason()
+        && this.graphRevision === graphRevision
+        && this.rev === storeRevision
+      ) {
         this.graphDomain = new WorkflowGraphDomain(failureGraph, { idGenerator: this.graphIdGenerator });
         this.projectedGraphRevision = this.graphDomain.revision;
         this.syncReactiveGraph(this.graphDomain);
@@ -2396,9 +2730,9 @@ export class WorkflowStore {
     this.selection = result.graph.nodes.some((node) => node.id === 'composition') ? { kind: 'composition' } : null;
     this.storyboardEditing = false;
     this.storyboardTool = 'brush';
-    this.name = result.graph.metadata.name || cleanWorkflowName(fallbackName);
+    this.name = loadedWorkflowName(result.graph.metadata.name, fallbackName);
     this.aiDefaults = result.graph.metadata.ai ?? currentWorkflowAiDefaults();
-    this.savedPath = result.requiresExplicitSave ? null : savedPath;
+    this.savedPath = savedPath;
     this.migrationSourcePath = result.requiresExplicitSave ? savedPath : null;
     this.requiresExplicitSave = result.requiresExplicitSave;
     this.connectionError = null;
@@ -2416,20 +2750,35 @@ export class WorkflowStore {
 
   async save(): Promise<string | null> {
     if (!project.path) return null;
-    const name = `${this.name || 'workflow'}${this.requiresExplicitSave ? '-v2' : ''}.cxflow.json`;
     const savedPath = this.savedPath;
-    const submission = this.captureSaveSubmission(savedPath, savedPath === null);
-    const relativePath = savedPath
-      ? await project.saveDocumentToPath(savedPath, submission.bytes)
-      : await project.saveDocument(name, submission.bytes);
+    let submission: WorkflowSaveSubmission;
+    let relativePath: string | null;
+    if (savedPath) {
+      submission = this.captureSaveSubmission(savedPath, false);
+      relativePath = await project.saveDocumentToPath(savedPath, submission.bytes);
+    } else {
+      const defaultName = `${this.name || 'workflow'}.cxflow.json`;
+      const targetPath = await project.pickDocumentSavePath(defaultName, 'Save Workflow Board');
+      if (!targetPath) return null;
+      const previousName = this.name;
+      this.setName(workflowNameFromSavePath(targetPath));
+      const fileName = `${this.name || 'workflow'}.cxflow.json`;
+      submission = this.captureSaveSubmission(null, true);
+      const result = await project.saveDocumentAtPathAs({
+        targetPath,
+        name: fileName,
+        previousName,
+        bytes: submission.bytes,
+      });
+      relativePath = result.relativePath;
+    }
     this.reconcileSaveCompletion(submission, relativePath);
     return relativePath;
   }
 
   async saveAs(name: string): Promise<string | null> {
     if (!project.path) return null;
-    this.name = cleanWorkflowName(name);
-    this.bump();
+    this.setName(name);
     const submission = this.captureSaveSubmission(null, true);
     const relativePath = await project.saveDocument(`${this.name}.cxflow.json`, submission.bytes);
     this.reconcileSaveCompletion(submission, relativePath);
@@ -2443,7 +2792,36 @@ export class WorkflowStore {
     this.publishGraphMutation(domain, domain.configureNode('composition', {
       ...composition.config,
       ...update,
-    }));
+    }), {
+      label: 'Edit composition',
+      mergeKey: `composition:${Object.keys(update).sort().join(',')}`,
+    });
+  }
+
+  private reconcileScopedInputAsset(
+    domain: WorkflowGraphDomain,
+    extractionNodeId: string,
+    inputNodeId: string,
+  ): void {
+    const extraction = domain.node(extractionNodeId);
+    const input = domain.node(inputNodeId);
+    if (!extraction || extraction.type !== 'extract-assets' || !input || input.type !== 'input') return;
+    const selectedAssetId = typeof input.config.assetId === 'string' ? input.config.assetId : null;
+    const selectedOraPath = typeof input.config.oraRelativePath === 'string' ? input.config.oraRelativePath : null;
+    if (!selectedAssetId && !selectedOraPath) return;
+    const allowedIds = new Set(workflowExtractedAssetLinks(extraction.config).map((asset) => asset.id));
+    if (selectedAssetId && allowedIds.has(selectedAssetId) && !selectedOraPath) return;
+    domain.updateNodePorts(inputNodeId, {
+      inputs: input.ports.inputs,
+      outputs: input.ports.outputs.filter((port) => port.id !== 'annotation'),
+    });
+    domain.configureNode(inputNodeId, {
+      ...input.config,
+      assetId: null,
+      relativePath: null,
+      oraRelativePath: null,
+      hasAnnotations: false,
+    });
   }
 
   private nextGraphId(kind: 'node' | 'edge'): string {
@@ -2480,6 +2858,7 @@ export class WorkflowStore {
       idGenerator: this.graphIdGenerator,
     });
     this.projectedGraphRevision = this.graphDomain.revision;
+    this.projectedGraphSnapshot = this.graphDomain.graph;
   }
 
   private async buildSelectivePreflight(
@@ -2803,7 +3182,7 @@ export class WorkflowStore {
     }
     this.workflowSessionIdentity += 1;
     this.workflowMutationIdentity += 1;
-    this.savedWorkflowBytes = null;
+    this.savedWorkflowContentBytes = null;
     this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
     this.activeSavePathIntentTarget = null;
     this.transformExecutions = {};
@@ -2811,6 +3190,7 @@ export class WorkflowStore {
     this.activeTransformRuns.clear();
     this.pendingDirectorPatchReview = null;
     this.clearDirectorPatchHistory();
+    this.clearAuthoringHistory();
     this.transformStartQueues.clear();
     this.latestTransformRunSequences.clear();
     this.progressRouter.clear();
@@ -2833,11 +3213,29 @@ export class WorkflowStore {
     return this.graphDomain!;
   }
 
-  private publishGraphMutation<T>(domain: WorkflowGraphDomain, result: T): T {
+  private publishGraphMutation<T>(
+    domain: WorkflowGraphDomain,
+    result: T,
+    history?: WorkflowAuthoringHistoryOptions,
+  ): T {
     if (domain.revision !== this.projectedGraphRevision) {
+      const before = history ? this.captureAuthoringSnapshot() : null;
       this.syncReactiveGraph(domain);
-      this.bump();
       this.projectedGraphRevision = domain.revision;
+      this.bump(history !== undefined);
+      if (history && before) {
+        if (this.activeAuthoringTransaction) {
+          this.activeAuthoringTransaction.changed = true;
+          this.authoringRedoStack = [];
+        } else {
+          this.recordAuthoringTransaction(
+            history.label,
+            before,
+            this.captureAuthoringSnapshot(),
+            history.mergeKey ?? null,
+          );
+        }
+      }
     }
     return result;
   }
@@ -2865,6 +3263,7 @@ export class WorkflowStore {
     this.panX = domain.graph.viewport.panX;
     this.panY = domain.graph.viewport.panY;
     this.zoom = domain.graph.viewport.zoom;
+    this.aiDefaults = domain.graph.metadata.ai ?? this.aiDefaults;
     this.syncReactiveGraph(domain);
     this.graphDomain = domain;
     this.projectedGraphRevision = domain.revision;
@@ -2878,7 +3277,7 @@ export class WorkflowStore {
   }
 
   private captureCurrentSavedBaseline(): void {
-    this.savedWorkflowBytes = workflowGraphBytes(this.serialize());
+    this.savedWorkflowContentBytes = workflowContentBytes(this.serialize());
     this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
     this.activeSavePathIntentTarget = this.savedPath;
   }
@@ -2891,10 +3290,12 @@ export class WorkflowStore {
       this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
       this.activeSavePathIntentTarget = targetPath;
     }
-    const bytes = this.toBytes();
+    const graph = this.serialize();
+    const serializedBytes = workflowGraphBytes(graph);
+    const bytes = new TextEncoder().encode(serializedBytes);
     return {
       bytes,
-      serializedBytes: new TextDecoder().decode(bytes),
+      contentBytes: workflowContentBytes(graph),
       storeRevision: this.rev,
       sessionIdentity: this.workflowSessionIdentity,
       projectIdentity: project.identity,
@@ -2914,7 +3315,7 @@ export class WorkflowStore {
     this.activeSavePathIntentTarget = relativePath;
     this.savedPath = relativePath;
     this.savedRev = submission.storeRevision;
-    this.savedWorkflowBytes = submission.serializedBytes;
+    this.savedWorkflowContentBytes = submission.contentBytes;
     this.requiresExplicitSave = false;
     this.migrationSourcePath = null;
   }
@@ -2922,6 +3323,99 @@ export class WorkflowStore {
   private clearDirectorPatchHistory(): void {
     this.directorPatchUndoStack = [];
     this.directorPatchRedoStack = [];
+  }
+
+  private captureAuthoringSnapshot(
+    graph = this.projectedGraphSnapshot ?? this.requireGraphDomain().graph,
+    graphRevision = this.projectedGraphRevision,
+  ): WorkflowAuthoringSnapshot {
+    return {
+      graph,
+      graphRevision,
+      name: this.name,
+      aiDefaults: copyWorkflowAiDefaults(this.aiDefaults),
+    };
+  }
+
+  private authoringSnapshotContent(snapshot: WorkflowAuthoringSnapshot): string {
+    return JSON.stringify({
+      graph: workflowGraphBytes(snapshot.graph),
+      name: snapshot.name,
+      aiDefaults: snapshot.aiDefaults,
+    });
+  }
+
+  private matchesAuthoringSnapshot(snapshot: WorkflowAuthoringSnapshot): boolean {
+    return this.graphRevision === snapshot.graphRevision
+      && this.authoringSnapshotContent(this.captureAuthoringSnapshot()) === this.authoringSnapshotContent(snapshot);
+  }
+
+  private recordAuthoringTransaction(
+    label: string,
+    before: WorkflowAuthoringSnapshot,
+    after: WorkflowAuthoringSnapshot,
+    mergeKey: string | null = null,
+  ): void {
+    if (this.authoringSnapshotContent(before) === this.authoringSnapshotContent(after)) return;
+    if (immutableWorkflowHistoryBytes(before.graph) !== immutableWorkflowHistoryBytes(after.graph)) {
+      this.clearAuthoringHistory();
+      return;
+    }
+    const updatedAt = Date.now();
+    const previous = this.authoringUndoStack.at(-1);
+    if (mergeKey
+      && previous?.mergeKey === mergeKey
+      && previous.sessionIdentity === this.workflowSessionIdentity
+      && updatedAt - previous.updatedAt <= 1_000
+      && this.authoringSnapshotContent(previous.after) === this.authoringSnapshotContent(before)) {
+      previous.after = after;
+      previous.updatedAt = updatedAt;
+    } else {
+      this.authoringUndoStack.push({
+        label,
+        before,
+        after,
+        sessionIdentity: this.workflowSessionIdentity,
+        mergeKey,
+        updatedAt,
+      });
+      if (this.authoringUndoStack.length > 60) this.authoringUndoStack.shift();
+    }
+    this.authoringRedoStack = [];
+  }
+
+  private publishAuthoringSnapshot(snapshot: WorkflowAuthoringSnapshot): void {
+    const domain = new WorkflowGraphDomain(snapshot.graph, {
+      idGenerator: this.graphIdGenerator,
+      initialRevision: snapshot.graphRevision,
+    });
+    this.graphDomain = domain;
+    this.projectedGraphRevision = domain.revision;
+    this.syncReactiveGraph(domain);
+    this.name = snapshot.name;
+    this.aiDefaults = copyWorkflowAiDefaults(snapshot.aiDefaults);
+    this.pendingDirectorPatchReview = null;
+    this.reviewVerifications = {};
+    this.reconcileSelectionAfterAuthoringRestore();
+    this.bump(true);
+  }
+
+  private reconcileSelectionAfterAuthoringRestore(): void {
+    const selection = this.selection;
+    if (!selection) return;
+    if (selection.kind === 'composition') {
+      if (!this.requireGraphDomain().node('composition')) this.selection = null;
+      return;
+    }
+    if (!this.requireGraphDomain().node(selection.id)) {
+      this.selection = this.requireGraphDomain().node('composition') ? { kind: 'composition' } : null;
+    }
+  }
+
+  private clearAuthoringHistory(): void {
+    this.authoringUndoStack = [];
+    this.authoringRedoStack = [];
+    this.activeAuthoringTransaction = null;
   }
 
   private domainGraphFromReactiveState(): WorkflowGraphV2 {
@@ -2958,7 +3452,7 @@ export class WorkflowStore {
       size: { width: node.width, height: node.height },
       color: node.color,
       ports: {
-        inputs: [],
+        inputs: [{ id: 'scope', label: 'Extracted asset scope', dataType: 'asset-reference' }],
         outputs: [{ id: 'asset', label: 'Asset', dataType: 'asset-reference' }],
       },
       config: {
@@ -3018,7 +3512,6 @@ export class WorkflowStore {
   }
 
   private syncReactiveGraph(domain: WorkflowGraphDomain, roundLegacyGeometry = false): void {
-    this.aiDefaults = domain.graph.metadata.ai ?? this.aiDefaults;
     const composition = domain.node('composition');
     if (composition) {
       const storyboard = recordValue(composition.config.storyboard);
@@ -3188,10 +3681,12 @@ export class WorkflowStore {
       : firstOutput.y;
     this.outputAssetId = firstOutput.outputAssetId;
     this.outputRelativePath = firstOutput.outputRelativePath;
+    this.projectedGraphSnapshot = domain.graph;
   }
 
-  private bump(): void {
+  private bump(preserveAuthoringHistory = false): void {
     this.clearDirectorPatchHistory();
+    if (!preserveAuthoringHistory) this.clearAuthoringHistory();
     this.workflowMutationIdentity += 1;
     this.rev++;
   }

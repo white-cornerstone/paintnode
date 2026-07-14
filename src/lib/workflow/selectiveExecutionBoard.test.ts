@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import boardSource from '../components/WorkflowBoard.svelte?raw';
 import projectPanelSource from '../components/ProjectPanel.svelte?raw';
+import directorSource from '../components/WorkflowDirectorDialog.svelte?raw';
+import revisionDirectorSource from '../components/WorkflowDirectorRevisionDialog.svelte?raw';
+import taskLockSource from '../components/workflow/WorkflowNodeTaskLock.svelte?raw';
+import toolOptionsSource from '../components/ToolOptions.svelte?raw';
+import propertiesSource from '../components/workflow/WorkflowPropertiesPanel.svelte?raw';
 
 describe('Workflow Board selective execution UX contract', () => {
   it('exposes preview-first actions and visible per-node preflight without bypassing the store', () => {
@@ -38,14 +43,22 @@ describe('Workflow Board selective execution UX contract', () => {
   it('communicates provider-neutral candidate branch count, state, lineage, and retry', () => {
     expect(boardSource).toContain('Generate branches');
     expect(boardSource).toContain('workflow.runCandidateBranches');
+    expect(boardSource).toContain('Generate candidates: ${transformName}');
+    expect(boardSource).toContain('aiTasks.setRetry(task.id, () => generateCandidateBranches(nodeId, task.id))');
+    expect(boardSource).toContain('Retry ${retryLabel}: ${transformName}');
+    expect(boardSource).toContain('aiTasks.setRetry(task.id, () => retryCandidate(candidateId, task.id))');
+    expect(boardSource).toContain('createWorkflowExecutionContext(runId, workflowCandidateProgressLabel)');
     expect(boardSource).toContain("workflow.runReviewedOutput(targetOutput.id, context.options)");
     expect(boardSource).toContain("resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id })");
-    expect(boardSource).toContain("workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity)");
+    expect(boardSource).toContain('directReviewForOutput');
+    expect(boardSource).toContain('workflowConceptReviewNode');
     expect(boardSource).toContain("reviewedOutput ? 'Use promoted'");
     expect(boardSource).toContain('workflow.runCampaignGenerate(targetOutput.id, context.options)');
     expect(boardSource).toContain('aiTasks.setRetry(task.id, () => generate(targetOutput, true, task.id))');
     expect(boardSource).toContain('workflow.retryCandidateBranch');
-    expect(boardSource).toContain('workflow.candidateBranchGroups(node.id)');
+    expect(boardSource).toContain('workflow.visibleCandidateBranchGroups(node.id)');
+    expect(boardSource).toContain('workflow.clearFailedCandidateBranches(nodeId)');
+    expect(boardSource).toContain('Clear failed');
     expect(boardSource).toContain('workflowCandidateProgressLabel');
     expect(boardSource).toContain('workflowCandidateBranchResultSummary(outcome.group)');
     expect(boardSource).toContain('candidate-result-summary');
@@ -68,6 +81,13 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).toContain('role="tablist"');
     expect(boardSource).toContain("event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'");
     expect(boardSource).toContain('Promote this candidate');
+    expect(boardSource).toContain('Regenerate current candidates');
+    expect(boardSource).toContain('void regenerateReviewCandidates(node.id)');
+    expect(boardSource).toContain('selectedReviewCandidates[review.id] = firstSuccessful.candidateId');
+    expect(boardSource).toContain('<b>Target output</b>');
+    expect(boardSource).toContain('Dimensions are inherited from this Output.');
+    expect(boardSource).toContain('void focusTargetOutput(node.id)');
+    expect(boardSource).toContain('Use a separate Transform for each delivery format.');
     expect(boardSource).toContain('Keyboard: R focuses candidates; P promotes the selected eligible candidate.');
     expect(boardSource).toContain('aria-keyshortcuts="R F7 Alt+R"');
     expect(boardSource).toContain('Focus candidate review');
@@ -102,5 +122,25 @@ describe('Workflow Board selective execution UX contract', () => {
     expect(boardSource).not.toContain('aria-label="Refresh project"');
     expect(projectPanelSource).toContain('aria-label="Refresh project files and assets"');
     expect(projectPanelSource).toContain("window.dispatchEvent(new CustomEvent('paintnode:workflow-refresh'))");
+  });
+
+  it('registers every workflow AI entry point and locks its scoped nodes until terminal state', () => {
+    expect(boardSource).toContain('title: `Generate candidates: ${transformName}`');
+    expect(boardSource).toContain('title: `Retry ${retryLabel}: ${transformName}`');
+    expect(boardSource).toContain('detail: workflowTaskDetail');
+    expect(boardSource).toContain('workflowTaskUpstreamNodeIds');
+    expect(boardSource).toContain('aiTasks.runningForWorkflowNode');
+    expect(boardSource).toContain('inert={nodeTasks.length > 0}');
+    expect(boardSource).toContain('WorkflowNodeTaskLock');
+    expect(boardSource).toContain('connectionHasRunningTask');
+    expect(directorSource).toContain("title: 'AI Director: Draft workflow'");
+    expect(directorSource).toContain('aiTasks.create');
+    expect(revisionDirectorSource).toContain('AI Director: ${title}');
+    expect(revisionDirectorSource).toContain('taskNodeIds');
+    expect(taskLockSource).toContain('Node is read-only. Open task details.');
+    expect(taskLockSource).toContain('onOpen();');
+    expect(toolOptionsSource).toContain('selectedWorkflowNodeLocked');
+    expect(toolOptionsSource).toContain('AI task running · node read-only');
+    expect(propertiesSource).toContain('inert={nodeLocked}');
   });
 });

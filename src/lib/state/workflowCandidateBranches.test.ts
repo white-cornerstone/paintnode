@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ProjectAsset } from '../integrations/desktop';
 import {
   createWorkflowCompositionExecutor,
+  createWorkflowRevision,
   WorkflowReviewRefreshGate,
   workflowSha256Bytes,
 } from '../workflow';
@@ -83,9 +84,21 @@ describe('WorkflowStore candidate branches', () => {
     expect(selective.stateByNodeId['review-campaign-direction']).toMatchObject({
       state: 'blocked', reason: { code: 'NODE_DISABLED' },
     });
+    const materialRevision = createWorkflowRevision(workflow.serialize());
+    expect(workflow.clearFailedCandidateBranches('transform-generate-square')).toBe(1);
+    expect(workflow.visibleCandidateBranchGroups('transform-generate-square')[0].candidates)
+      .toHaveLength(2);
+    expect(workflow.visibleCandidateBranchGroups('transform-generate-square')[0].candidates
+      .every((candidate) => candidate.status === 'succeeded')).toBe(true);
+    expect(workflow.candidateBranchGroups('transform-generate-square')[0].candidates)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ status: 'failed' })]));
+    expect(workflow.clearFailedCandidateBranches('transform-generate-square')).toBe(0);
+    expect(createWorkflowRevision(workflow.serialize())).toBe(materialRevision);
     const reopened = new WorkflowStore();
     reopened.openFromBytes(workflow.toBytes(), null, 'Reopened candidates');
     expect(reopened.candidateBranchGroups()).toEqual(workflow.candidateBranchGroups());
+    expect(reopened.visibleCandidateBranchGroups('transform-generate-square'))
+      .toEqual(workflow.visibleCandidateBranchGroups('transform-generate-square'));
   });
 
   it('blocks the single merged commit after an external workflow change', async () => {
@@ -112,6 +125,32 @@ describe('WorkflowStore candidate branches', () => {
     expect(outcome).toMatchObject({ committed: false, commitMessage: expect.stringMatching(/workflow changed/i) });
     expect(runOptions.storeAsset).toHaveBeenCalledTimes(2);
     expect(workflow.candidateBranchGroups()).toEqual([]);
+  });
+
+  it('commits and exposes a second failed attempt when retry also fails', async () => {
+    const workflow = store();
+    const runOptions = options(async () => {
+      throw new Error('Candidate generation failed safely.');
+    });
+    const first = await workflow.runCandidateBranches('output-square', runOptions, {
+      branchGroupId: 'failed-retry-group', count: 2, maxConcurrency: 1,
+    });
+    const failed = first.group.candidates[0];
+
+    const retried = await workflow.retryCandidateBranch(failed.candidateId, runOptions);
+
+    expect(retried).toMatchObject({
+      committed: true,
+      commitMessage: 'Candidate retry completed with another failure.',
+      candidate: { status: 'failed', attemptCount: 2, latestRunId: expect.stringMatching(/attempt-2$/) },
+    });
+    expect(workflow.candidateBranchGroups('transform-generate-square')[0].candidates[0])
+      .toMatchObject({ status: 'failed', attemptCount: 2, latestRunId: expect.stringMatching(/attempt-2$/) });
+    expect(workflow.reviewCandidates('review-campaign-direction')).toEqual([]);
+    expect(workflow.clearFailedCandidateBranches('transform-generate-square')).toBe(2);
+    expect(workflow.visibleCandidateBranchGroups('transform-generate-square')).toEqual([]);
+    expect(workflow.candidateBranchGroups('transform-generate-square')[0].candidates)
+      .toHaveLength(2);
   });
 
   it('verifies candidate bytes before atomically appending and reopening a promotion', async () => {
@@ -148,6 +187,11 @@ describe('WorkflowStore candidate branches', () => {
     await workflow.refreshReviewState(reviewId, runOptions);
     expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('eligible');
     expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
+
+    workflow.setOutputFinalSize('output-square', 1000, 64);
+    expect(workflow.reviewCandidates(reviewId, runOptions.assets, true)[0].state).toBe('eligible');
+    expect(workflow.reviewResolution(reviewId, runOptions.assets, true).state).toBe('ready');
+    expect(workflow.outputNode('output-square')).toMatchObject({ finalWidth: 1000, finalHeight: 64 });
 
     let releaseUnreadyVerification!: () => void;
     let unreadyVerificationStarted!: () => void;

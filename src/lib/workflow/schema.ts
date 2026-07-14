@@ -355,6 +355,18 @@ function readString(
   return '';
 }
 
+function readText(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+  issues: WorkflowValidationIssue[],
+): string {
+  const value = record[key];
+  if (typeof value === 'string') return value;
+  issues.push({ path, message: `${path} must be a string`, severity: 'error' });
+  return '';
+}
+
 function readNumber(
   record: Record<string, unknown>,
   key: string,
@@ -796,9 +808,9 @@ function parseRunReference(value: unknown, index: number, issues: WorkflowValida
     materialKey: readString(value, 'materialKey', `${path}.materialKey`, issues),
     sourceAssets: sourceAssets.map((asset, sourceIndex) => parseRunSourceAsset(asset, `${path}.sourceAssets[${sourceIndex}]`, issues)),
     prompt: {
-      brief: readString(prompt, 'brief', `${path}.prompt.brief`, issues),
-      artDirection: readString(prompt, 'artDirection', `${path}.prompt.artDirection`, issues),
-      instructions: readString(prompt, 'instructions', `${path}.prompt.instructions`, issues),
+      brief: readText(prompt, 'brief', `${path}.prompt.brief`, issues),
+      artDirection: readText(prompt, 'artDirection', `${path}.prompt.artDirection`, issues),
+      instructions: readText(prompt, 'instructions', `${path}.prompt.instructions`, issues),
       constraints,
       effectivePromptHash: readString(prompt, 'effectivePromptHash', `${path}.prompt.effectivePromptHash`, issues),
     },

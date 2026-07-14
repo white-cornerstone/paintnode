@@ -31,7 +31,9 @@ describe('Creative Blueprint Foundation exit gate', () => {
       const second = planWorkflowExecution(graph, outputId, { maxConcurrency: 4 });
       expect(first).toEqual(second);
       const format = outputId.replace('output-', '');
-      const formatTransform = format === 'square' ? [] : [`transform-generate-${format}`];
+      const formatTransform = format === 'square'
+        ? ['transform-format-square']
+        : [`transform-generate-${format}`];
       const path = ['transform-generate-square', 'review-campaign-direction', ...formatTransform];
       expect(first).toEqual({
         targetNodeId: outputId,
@@ -57,8 +59,8 @@ describe('Creative Blueprint Foundation exit gate', () => {
         ['composition'],
         ['transform-generate-square'],
         ['review-campaign-direction'],
-        ['output-square', 'transform-generate-portrait', 'transform-generate-landscape'],
-        ['output-portrait', 'output-landscape'],
+        ['transform-format-square', 'transform-generate-portrait', 'transform-generate-landscape'],
+        ['output-square', 'output-portrait', 'output-landscape'],
       ];
       for (const batch of fullCampaignBatches) {
         for (const nodeId of batch) {
@@ -82,6 +84,7 @@ describe('Creative Blueprint Foundation exit gate', () => {
       'composition',
       'transform-generate-square',
       'review-campaign-direction',
+      'transform-format-square',
       'transform-generate-portrait',
       'transform-generate-landscape',
       'output-square',

@@ -80,7 +80,8 @@ Full release notes: [0.2.0](docs/release-notes/0.2.0.md) ·
 [0.2.1](docs/release-notes/0.2.1.md) ·
 [0.2.2](docs/release-notes/0.2.2.md) ·
 [0.2.3](docs/release-notes/0.2.3.md) ·
-[0.2.4](docs/release-notes/0.2.4.md).
+[0.2.4](docs/release-notes/0.2.4.md) ·
+[0.2.5](docs/release-notes/0.2.5.md).
 
 ## Providers
 
