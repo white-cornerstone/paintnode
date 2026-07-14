@@ -91,6 +91,7 @@ export interface AiTask {
   status: AiTaskStatus;
   progress: string;
   error: string;
+  warning: string;
   startedAt: number;
   completedAt: number | null;
   /**
@@ -160,6 +161,7 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
     status: normalizedStatus,
     progress: status === 'running' ? 'Interrupted when PaintNode closed' : progress,
     error: status === 'running' ? 'This task was still running when PaintNode closed.' : error,
+    warning: status === 'running' ? '' : typeof value.warning === 'string' ? value.warning : '',
     startedAt: typeof value.startedAt === 'number' ? value.startedAt : Date.now(),
     completedAt: typeof value.completedAt === 'number' ? value.completedAt : Date.now(),
     // Document ids are session-scoped; a restored task acts on the active document.
@@ -221,6 +223,7 @@ export class AiTaskStore {
       status: 'running',
       progress: draft.progress,
       error: '',
+      warning: '',
       startedAt: Date.now(),
       completedAt: null,
       documentId: draft.documentId ?? null,
@@ -309,11 +312,12 @@ export class AiTaskStore {
     await task.cancel?.();
   }
 
-  complete(id: string, progress = 'Completed'): void {
+  complete(id: string, progress = 'Completed', warning = ''): void {
     const task = this.find(id);
     if (!task) return;
     task.status = 'completed';
     task.progress = progress;
+    task.warning = warning;
     if (task.partProgress) task.partProgress = { ...task.partProgress, completed: task.partProgress.total };
     task.completedAt = Date.now();
     // Release the closure: Retry is only offered on error, and retry closures
@@ -329,6 +333,7 @@ export class AiTaskStore {
     task.status = 'cancelled';
     task.progress = progress;
     task.error = '';
+    task.warning = '';
     task.completedAt = Date.now();
     task.retry = null;
     task.cancel = null;
@@ -340,6 +345,7 @@ export class AiTaskStore {
     if (!task) return;
     task.status = 'error';
     task.error = error;
+    task.warning = '';
     task.progress = error.split('\n')[0] || 'Failed';
     task.completedAt = Date.now();
     task.cancel = null;
@@ -358,6 +364,7 @@ export class AiTaskStore {
     const executor = this.executors.get(task.kind);
     task.status = 'running';
     task.error = '';
+    task.warning = '';
     task.progress = 'Retrying...';
     task.startedAt = Date.now();
     task.completedAt = null;

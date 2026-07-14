@@ -33,7 +33,7 @@ import {
   type WorkflowDirectorPatchProposalResult,
   assertFreshWorkflowDirectorProposal,
   WorkflowTransformExecutionError,
-  createWorkflowRevision,
+  createWorkflowGenerationRevision,
   deriveWorkflowNodeRunState,
   resolveWorkflowCancellation,
   WorkflowRunProgressRouter,
@@ -121,7 +121,7 @@ function workflowEditorContextKey(graph: WorkflowGraphV2, nodeId: string): strin
     .filter((edge) => relevantIds.has(edge.source.nodeId) && relevantIds.has(edge.target.nodeId))
     .map((edge) => ({ source: edge.source, target: edge.target }))
     .toSorted((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-  return workflowSha256Text(JSON.stringify({ nodeId, nodes, edges }));
+  return workflowSha256Text(JSON.stringify({ nodeId, ai: graph.metadata.ai ?? null, nodes, edges }));
 }
 
 export interface WorkflowTransformExecutionState {
@@ -133,6 +133,7 @@ export interface WorkflowTransformExecutionState {
 export interface WorkflowTransformStoreOutcome extends WorkflowTransformExecutionOutcome {
   committed: boolean;
   commitMessage: string;
+  warning?: string;
 }
 
 export interface WorkflowCandidateBranchStoreOutcome extends WorkflowCandidateBranchExecutionOutcome {
@@ -1999,19 +2000,25 @@ export class WorkflowStore {
 
   transformExecution(nodeId: string): WorkflowTransformExecutionState {
     const transient = this.transformExecutions[nodeId];
-    if (transient) return transient;
+    if (transient && transient.state !== 'succeeded' && transient.state !== 'stale') return transient;
     const graph = this.requireGraphDomain().graph;
     const derived = deriveWorkflowNodeRunState(graph, nodeId);
     const latest = derived.latestRun;
     if (!latest) return { state: 'idle', message: '', assetId: null };
     const accepted = derived.acceptedOutputs.at(-1) ?? null;
-    if (latest.status === 'succeeded' && latest.workflowRevision !== createWorkflowRevision(graph)) {
+    const generationStale = (
+      latest.status === 'succeeded'
+      && latest.workflowRevision !== createWorkflowGenerationRevision(graph, latest.target.nodeId)
+    );
+    if (generationStale) {
+      if (transient?.state === 'stale') return transient;
       return {
         state: 'stale', message: 'Workflow inputs changed after this result was generated.',
         assetId: accepted?.assetId ?? null,
       };
     }
     if (latest.status === 'succeeded') {
+      if (transient?.state === 'succeeded') return transient;
       return { state: 'succeeded', message: 'Generated', assetId: accepted?.assetId ?? null };
     }
     if (latest.status === 'running') {
@@ -2421,7 +2428,7 @@ export class WorkflowStore {
     }
     const graph = this.serialize();
     const sessionIdentity = this.workflowSessionIdentity;
-    const mutationIdentity = this.workflowMutationIdentity;
+    const generationContextKey = createWorkflowGenerationRevision(graph, outputNodeId);
     const graphRevision = this.graphRevision;
     const storeRevision = this.rev;
     const projectIdentity = options.currentProjectIdentity?.() ?? options.projectPath;
@@ -2452,14 +2459,8 @@ export class WorkflowStore {
       if (this.workflowSessionIdentity !== sessionIdentity) {
         return 'The workflow session changed while Generate was running. The result was not applied.';
       }
-      if (this.workflowMutationIdentity !== mutationIdentity) {
-        return 'The workflow changed while Generate was running. The result was not applied.';
-      }
       if (this.activeTransformRuns.get(transformNodeId) !== activeRun) {
         return 'A newer Generate run replaced this result before it could be applied.';
-      }
-      if (this.graphRevision !== graphRevision || this.rev !== storeRevision) {
-        return 'The workflow changed while Generate was running. The result was not applied.';
       }
       if ((options.currentProjectIdentity?.() ?? options.projectPath) !== projectIdentity) {
         return 'The active project changed while Generate was running. The result was not applied.';
@@ -2532,15 +2533,99 @@ export class WorkflowStore {
         return { ...outcome, committed: false, commitMessage };
       }
       if (this.activeTransformRuns.get(transformNodeId) === activeRun) {
-        this.graphDomain = new WorkflowGraphDomain(outcome.graph, { idGenerator: this.graphIdGenerator });
+        const currentGraph = this.serialize();
+        const currentTransform = currentGraph.nodes.find((node) => node.id === outcome.transformNodeId);
+        const currentOutput = currentGraph.nodes.find((node) => node.id === outcome.outputNodeId);
+        const completedTransform = outcome.graph.nodes.find((node) => node.id === outcome.transformNodeId);
+        const completedRunId = completedTransform?.runRecordIds
+          .filter((runId) => !graph.runRecords.some((record) => record.id === runId))
+          .at(-1);
+        const completedRun = completedRunId
+          ? outcome.graph.runRecords.find((record) => record.id === completedRunId)
+          : null;
+        const completedOutput = completedRun && isFullWorkflowRunRecord(completedRun)
+          ? completedRun.outputs.at(-1)
+          : null;
+        const completedReference = completedOutput
+          ? outcome.graph.assetReferences.find((reference) => reference.id === completedOutput.assetReferenceId)
+          : null;
+        if (!currentTransform || !currentOutput || !completedRun || !completedOutput || !completedReference) {
+          commitMessage = `The Generate or Output node was removed while Generate was running. The result was not applied. The generated asset remains available at ${outcome.asset.relativePath}.`;
+          this.transformExecutions = {
+            ...this.transformExecutions,
+            [transformNodeId]: { state: 'failed', message: commitMessage, assetId: null },
+          };
+          return { ...outcome, committed: false, commitMessage };
+        }
+        const currentRunCollision = currentGraph.runRecords.some((record) => record.id === completedRun.id);
+        const currentReferenceCollision = currentGraph.assetReferences.some((reference) => (
+          reference.id === completedReference.id
+        ));
+        if (currentRunCollision || currentReferenceCollision) {
+          commitMessage = `The generated result could not be linked because its workflow history identity is already in use. The generated asset remains available at ${outcome.asset.relativePath}.`;
+          this.transformExecutions = {
+            ...this.transformExecutions,
+            [transformNodeId]: { state: 'failed', message: commitMessage, assetId: null },
+          };
+          return { ...outcome, committed: false, commitMessage };
+        }
+        const mergedGraph: WorkflowGraphV2 = {
+          ...currentGraph,
+          nodes: currentGraph.nodes.map((node) => {
+            if (node.id === outcome.transformNodeId) {
+              return {
+                ...node,
+                config: {
+                  ...node.config,
+                  resultAssetReferenceId: completedReference.id,
+                  resultAssetId: outcome.asset.id,
+                  resultRelativePath: outcome.asset.relativePath,
+                },
+                runRecordIds: [...node.runRecordIds, completedRun.id],
+              };
+            }
+            if (node.id === outcome.outputNodeId) {
+              return {
+                ...node,
+                config: {
+                  ...node.config,
+                  assetReferenceId: completedReference.id,
+                  outputAssetId: outcome.asset.id,
+                  outputRelativePath: outcome.asset.relativePath,
+                },
+              };
+            }
+            return node;
+          }),
+          assetReferences: [...currentGraph.assetReferences, completedReference],
+          runRecords: [...currentGraph.runRecords, completedRun],
+        };
+        const contextChanged = createWorkflowGenerationRevision(currentGraph, outcome.outputNodeId) !== generationContextKey;
+        const warning = contextChanged
+          ? 'The workflow settings changed while Generate was running, so this result may not reflect the current settings.'
+          : '';
+        this.graphDomain = new WorkflowGraphDomain(mergedGraph, {
+          idGenerator: this.graphIdGenerator,
+          initialRevision: this.graphRevision + 1,
+        });
         this.projectedGraphRevision = this.graphDomain.revision;
         this.syncReactiveGraph(this.graphDomain);
         this.bump();
         this.transformExecutions = {
           ...this.transformExecutions,
           [transformNodeId]: {
-            state: 'succeeded', message: 'Generated', assetId: outcome.asset.id,
+            state: warning ? 'stale' : 'succeeded',
+            message: warning || 'Generated',
+            assetId: outcome.asset.id,
           },
+        };
+        commitMessage = warning || 'Generated result applied.';
+        return {
+          ...outcome,
+          graph: this.graphDomain.graph,
+          committed: true,
+          commitMessage,
+          ...(warning ? { warning } : {}),
         };
       }
       return { ...outcome, committed: true, commitMessage: 'Generated result applied.' };
@@ -2553,7 +2638,12 @@ export class WorkflowStore {
           'Retry Generate',
         );
       const failureGraph = surfacedFailure.failureGraph;
-      if (failureGraph && !commitBlockReason()) {
+      if (
+        failureGraph
+        && !commitBlockReason()
+        && this.graphRevision === graphRevision
+        && this.rev === storeRevision
+      ) {
         this.graphDomain = new WorkflowGraphDomain(failureGraph, { idGenerator: this.graphIdGenerator });
         this.projectedGraphRevision = this.graphDomain.revision;
         this.syncReactiveGraph(this.graphDomain);

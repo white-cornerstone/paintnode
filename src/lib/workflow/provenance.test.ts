@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { instantiateWorkflowTemplate } from './templates';
 import {
   createWorkflowRunRecord,
+  createWorkflowGenerationRevision,
   canonicalWorkflowProvenanceJson,
   deriveWorkflowNodeRunState,
   type WorkflowRunRecordDraft,
@@ -108,6 +109,21 @@ describe('workflow run provenance', () => {
 
     expect(createWorkflowRunRecord(completed, canonicalHash).materialKey)
       .toBe(createWorkflowRunRecord(baseline, canonicalHash).materialKey);
+  });
+
+  it('scopes generation revisions to material settings on the selected output path', () => {
+    const baseline = draft().graph;
+    const layoutChange = structuredClone(baseline);
+    layoutChange.nodes.find((node) => node.id === 'brief')!.position = { x: 999, y: 777 };
+    const unrelatedChange = structuredClone(baseline);
+    unrelatedChange.nodes.find((node) => node.id === 'output-portrait')!.config.finalHeight = 1440;
+    const relevantChange = structuredClone(baseline);
+    relevantChange.nodes.find((node) => node.id === 'brief')!.config.objective = 'A changed campaign objective.';
+
+    const revision = createWorkflowGenerationRevision(baseline, 'output-square');
+    expect(createWorkflowGenerationRevision(layoutChange, 'output-square')).toBe(revision);
+    expect(createWorkflowGenerationRevision(unrelatedChange, 'output-square')).toBe(revision);
+    expect(createWorkflowGenerationRevision(relevantChange, 'output-square')).not.toBe(revision);
   });
 
   it.each([

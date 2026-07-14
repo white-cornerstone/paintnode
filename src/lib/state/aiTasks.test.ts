@@ -52,4 +52,25 @@ describe('workflow task details', () => {
       ui.close();
     }
   });
+
+  it('keeps a completed workflow warning separate from errors', () => {
+    const store = new AiTaskStore();
+    const task = store.create({
+      kind: 'workflow',
+      title: 'Workflow: Square',
+      subtitle: 'codex',
+      progress: 'Running',
+      detail: { kind: 'workflow', providerLabel: 'codex', outputName: 'Square' },
+    });
+
+    store.complete(task.id, 'Workflow generation completed with a warning', 'Settings changed during generation.');
+
+    expect(task).toMatchObject({
+      status: 'completed',
+      progress: 'Workflow generation completed with a warning',
+      warning: 'Settings changed during generation.',
+      error: '',
+    });
+    expect(store.canRetry(task)).toBe(false);
+  });
 });

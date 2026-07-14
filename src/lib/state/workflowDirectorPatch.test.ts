@@ -764,7 +764,7 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     expect(bytes(store)).toBe(laterBytes);
   });
 
-  it('does not resurrect an older in-flight Generate after accept then undo restores revisions', async () => {
+  it('applies an in-flight Generate after accept then undo restores its generation settings', async () => {
     const store = new WorkflowStore();
     store.newFromTemplate('campaign-composer');
     store.removeNode('review-campaign-direction');
@@ -808,13 +808,16 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     store.createDirectorPatchProposal(configureTransformPatch(store));
     store.acceptDirectorPatchProposal();
     expect(store.undoDirectorPatch()).toBe(true);
-    const restoredBytes = bytes(store);
+    const restoredInstructions = store.graphSnapshot().nodes
+      .find((node) => node.id === 'transform-generate-square')?.config.instructions;
 
     finish();
     const outcome = await run;
 
-    expect(outcome.committed).toBe(false);
-    expect(outcome.commitMessage).toMatch(/workflow changed/i);
-    expect(bytes(store)).toBe(restoredBytes);
+    expect(outcome).toMatchObject({ committed: true, commitMessage: 'Generated result applied.' });
+    expect(outcome.warning).toBeUndefined();
+    expect(store.graphSnapshot().nodes.find((node) => node.id === 'transform-generate-square')?.config.instructions)
+      .toBe(restoredInstructions);
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('late-result');
   });
 });

@@ -125,6 +125,37 @@ function graphRevisionMaterial(graph: WorkflowGraphV2): unknown {
   };
 }
 
+function generationRevisionMaterial(graph: WorkflowGraphV2, outputNodeId: string): unknown {
+  const relevantIds = new Set([outputNodeId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const edge of graph.edges) {
+      if (!relevantIds.has(edge.target.nodeId) || relevantIds.has(edge.source.nodeId)) continue;
+      relevantIds.add(edge.source.nodeId);
+      changed = true;
+    }
+  }
+  return {
+    id: graph.id,
+    ai: graph.metadata.ai ?? null,
+    outputNodeId,
+    nodes: graph.nodes
+      .filter((node) => relevantIds.has(node.id))
+      .map((node) => ({
+        id: node.id,
+        type: node.type,
+        ports: node.ports,
+        config: persistedMaterialConfig(node.config),
+      }))
+      .toSorted((left, right) => left.id.localeCompare(right.id)),
+    edges: graph.edges
+      .filter((edge) => relevantIds.has(edge.source.nodeId) && relevantIds.has(edge.target.nodeId))
+      .map((edge) => ({ source: edge.source, target: edge.target }))
+      .toSorted((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  };
+}
+
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -139,6 +170,14 @@ export function workflowSha256Text(value: string): string {
 
 export function createWorkflowRevision(graph: WorkflowGraphV2, hash: WorkflowCacheHash = workflowSha256Text): string {
   return digest(hash, 'paintnode-workflow-revision-v1', graphRevisionMaterial(graph));
+}
+
+export function createWorkflowGenerationRevision(
+  graph: WorkflowGraphV2,
+  outputNodeId: string,
+  hash: WorkflowCacheHash = workflowSha256Text,
+): string {
+  return digest(hash, 'paintnode-workflow-generation-revision-v1', generationRevisionMaterial(graph, outputNodeId));
 }
 
 export function createWorkflowRunRecord(
@@ -250,7 +289,7 @@ export function createWorkflowRunRecord(
   if (draft.debugArtifactReference) {
     requireProjectRelativeWorkflowReference(draft.debugArtifactReference, 'Debug artifact reference');
   }
-  const workflowRevision = createWorkflowRevision(draft.graph, hash);
+  const workflowRevision = createWorkflowGenerationRevision(draft.graph, draft.material.output.nodeId, hash);
   const nodeRevision = digest(hash, 'paintnode-workflow-node-revision-v1', {
     type: node.type,
     ports: node.ports,

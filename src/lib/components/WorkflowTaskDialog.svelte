@@ -71,6 +71,13 @@
         </section>
       {/if}
 
+      {#if task.warning}
+        <section class="warning-box">
+          <h3>Warning</h3>
+          <p>{task.warning}</p>
+        </section>
+      {/if}
+
       <div class="dlg-actions">
         <span class="dlg-action-spacer"></span>
         {#if aiTasks.canCancel(task)}
@@ -206,6 +213,18 @@
     overflow: auto;
     color: var(--danger);
     font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .warning-box {
+    padding: 9px 10px;
+    background: color-mix(in srgb, var(--warning, #d6a84b) 10%, var(--bg-input));
+    border: 1px solid color-mix(in srgb, var(--warning, #d6a84b) 55%, var(--border-soft));
+    border-radius: 4px;
+  }
+  .warning-box p {
+    margin: 0;
+    color: var(--warning, #d6a84b);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }

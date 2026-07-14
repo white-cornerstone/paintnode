@@ -2449,8 +2449,12 @@
         return;
       }
       await project.refresh();
-      aiTasks.complete(task.id, 'Workflow generation completed');
-      editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
+      aiTasks.complete(
+        task.id,
+        outcome.warning ? 'Workflow generation completed with a warning' : 'Workflow generation completed',
+        outcome.warning ?? '',
+      );
+      editor.flash(outcome.warning ?? `Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
       const cancelled = (e as { code?: unknown })?.code === 'CANCELLED';

@@ -875,19 +875,56 @@ describe('WorkflowStore graph adapter', () => {
     expect(service).toHaveBeenCalledOnce();
   });
 
-  it('does not overwrite workflow edits made while a Transform is running', async () => {
+  it('applies a completed result without warning after node layout changes', async () => {
+    const store = campaignStore();
+    const deferred = deferredCampaignRun(store);
+    store.moveNode('brief', 333, 222);
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome).toMatchObject({ committed: true, commitMessage: 'Generated result applied.' });
+    expect(outcome.warning).toBeUndefined();
+    expect(store.briefNodes[0]).toMatchObject({ x: 333, y: 222 });
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('deferred-result');
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded' });
+
+    const reopened = new WorkflowStore();
+    reopened.openFromBytes(store.toBytes(), null, 'Reopened');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('applies a completed result without warning after an unrelated node changes', async () => {
+    const store = campaignStore();
+    const deferred = deferredCampaignRun(store);
+    store.setOutputFinalSize('output-portrait', 1080, 1440);
+    deferred.finish();
+    const outcome = await deferred.run;
+
+    expect(outcome).toMatchObject({ committed: true, commitMessage: 'Generated result applied.' });
+    expect(outcome.warning).toBeUndefined();
+    expect(store.outputNode('output-portrait')).toMatchObject({ finalWidth: 1080, finalHeight: 1440 });
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('deferred-result');
+
+    const reopened = new WorkflowStore();
+    reopened.openFromBytes(store.toBytes(), null, 'Reopened');
+    expect(reopened.transformExecution('transform-generate-square')).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('preserves workflow edits, applies the completed result, and warns when generation settings changed', async () => {
     const store = campaignStore();
     const deferred = deferredCampaignRun(store);
     store.setBriefObjective('brief', 'Edited while the provider was running.');
     deferred.finish();
     const outcome = await deferred.run;
 
-    expect(outcome.committed).toBe(false);
-    expect(outcome.commitMessage).toMatch(/workflow changed/i);
-    expect(outcome.commitMessage).toContain('generated/Square.png');
+    expect(outcome.committed).toBe(true);
+    expect(outcome.warning).toMatch(/settings changed/i);
+    expect(outcome.commitMessage).toBe(outcome.warning);
     expect(store.briefNodes[0].objective).toBe('Edited while the provider was running.');
-    expect(store.outputNode('output-square')?.outputAssetId).toBeNull();
-    expect(store.transformExecution('transform-generate-square')).toMatchObject({ state: 'failed' });
+    expect(store.outputNode('output-square')?.outputAssetId).toBe('deferred-result');
+    expect(store.transformExecution('transform-generate-square')).toMatchObject({
+      state: 'stale', assetId: 'deferred-result', message: outcome.warning,
+    });
   });
 
   it.each(['new', 'open', 'close'] as const)('does not bind a late result after the workflow session is %s', async (action) => {
