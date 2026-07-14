@@ -376,6 +376,7 @@ export function createGrokWorkflowTransformExecutor(
     }, dependencies));
   }, {
     capabilities: ['generate', 'edit', 'remove-background', 'relight', 'upscale'],
+    maxInputImages: 3,
     executor: { id: 'paintnode-grok-workflow', version: '1', requestSchemaVersion: '1' },
     describeRun: (request) => {
       const effective = grokConfigForRequest(config, request);

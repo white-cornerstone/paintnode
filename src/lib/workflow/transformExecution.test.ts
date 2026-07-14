@@ -138,6 +138,69 @@ describe('Campaign Composer Generate Transform execution', () => {
     },
   );
 
+  it('limits provider inputs before prompt and provenance construction', async () => {
+    const graph = directTransformGraph('generate');
+    const extraAssets = [1, 2, 3].map((index) => ({
+      id: `asset-extra-${index}`,
+      name: `Extra ${index}.png`,
+      relativePath: `assets/extra-${index}.png`,
+      width: 1024,
+      height: 1024,
+      mime: 'image/png',
+    } satisfies WorkflowProjectAsset));
+    for (const [index, asset] of extraAssets.entries()) {
+      const input = createCreatorNode('input', {
+        id: `extra-reference-${index + 1}`,
+        title: `Extra reference ${index + 1}`,
+        config: {
+          assetId: asset.id,
+          relativePath: asset.relativePath,
+          role: `Additional context ${index + 1}`,
+        },
+      });
+      graph.nodes.push(input);
+      graph.edges.push({
+        id: `extra-reference-${index + 1}-transform`,
+        source: { nodeId: input.id, portId: 'asset' },
+        target: { nodeId: 'direct-transform', portId: 'assets' },
+      });
+    }
+    let request!: WorkflowTransformExecutionRequest;
+    const result = await executeCampaignGenerateTransform(graph, 'direct-output', {
+      projectPath: '/virtual/project',
+      provider: 'limited',
+      executors: [createWorkflowCompositionExecutor('limited', async (value) => {
+        request = value as WorkflowTransformExecutionRequest;
+        return {
+          kind: 'project-asset',
+          asset: {
+            id: 'limited-result', name: 'limited.png', relativePath: 'generated/limited.png',
+            width: 1024, height: 1024, mime: 'image/png',
+          },
+          bytes: new Uint8Array([7, 8, 9]),
+        };
+      }, { maxInputImages: 3 })],
+      assets: [productAsset, ...extraAssets],
+      resolveAsset: async (asset) => material(
+        new Uint8Array([asset.id.charCodeAt(asset.id.length - 1)]),
+        asset.id,
+        asset.relativePath,
+      ),
+      storeAsset: vi.fn(),
+    });
+
+    expect(request.sources.map((source) => source.nodeId)).toEqual([
+      'direct-reference', 'extra-reference-1', 'extra-reference-2',
+    ]);
+    expect(request.prompt).not.toContain('Extra reference 3');
+    const runRecord = result.graph.runRecords.at(-1);
+    expect(isFullWorkflowRunRecord(runRecord)).toBe(true);
+    if (!isFullWorkflowRunRecord(runRecord)) throw new Error('Expected a full workflow run record.');
+    expect(runRecord.sourceAssets.map((source) => source.nodeId)).toEqual([
+      'direct-reference', 'extra-reference-1', 'extra-reference-2',
+    ]);
+  });
+
   it('plans, materializes, executes, stores, binds, and reopens through injected provider-free contracts', async () => {
     const graph = boundCampaign();
     graph.nodes.find((node) => node.id === 'transform-generate-square')!.config.advanced = {
