@@ -72,6 +72,12 @@
     showDirector = true,
     showImage = true,
     directorRequired = false,
+    directorSectionLabel = 'AI Director',
+    directorOnRequest = false,
+    showDirectorInvolvement = true,
+    directorOffLabel = 'Skip',
+    directorOffSummary = 'Director: Off',
+    directorOffDetail = 'Director: Off.',
     imageRoleLabel = 'Image Generator',
     controlLabel = 'AI generation flow',
     compact = false,
@@ -88,6 +94,12 @@
     showDirector?: boolean;
     showImage?: boolean;
     directorRequired?: boolean;
+    directorSectionLabel?: string;
+    directorOnRequest?: boolean;
+    showDirectorInvolvement?: boolean;
+    directorOffLabel?: string;
+    directorOffSummary?: string;
+    directorOffDetail?: string;
     imageRoleLabel?: string;
     controlLabel?: string;
     compact?: boolean;
@@ -275,8 +287,12 @@
     const imageName = providerLabel(imageProvider);
     const imageSummary = `Image: ${imageName}${imageInherited ? ' ↳' : ''}`;
     if (!showDirector) return imageSummary;
-    if (!directorEnabled) return showImage ? `Director: Off${directorInherited ? ' ↳' : ''} · ${imageSummary}` : 'Director: Off';
+    if (!directorEnabled) return showImage ? `${directorOffSummary}${directorInherited ? ' ↳' : ''} · ${imageSummary}` : directorOffSummary;
     const directorName = directorProviderLabel(directorProvider);
+    if (directorOnRequest) {
+      const onRequestSummary = `AI assist: ${directorName} on request${directorInherited ? ' ↳' : ''}`;
+      return showImage ? `${onRequestSummary} · ${imageSummary}` : onRequestSummary;
+    }
     const directorSummary = `Director: ${directorModeShort}${directorProvider === imageProvider && showImage ? '' : ` ${directorName}`}, ${directorInvolvementShort}${directorInherited ? ' ↳' : ''}`;
     return showImage ? `${directorSummary} · ${imageSummary}` : directorSummary;
   });
@@ -287,7 +303,11 @@
         ? `Image: Grok, ${grokImageModelLabel}, ${grokImageResolutionLabel}`
         : `Image: Antigravity, ${antigravityImageSizeLabel}`;
     if (!showDirector) return imageDetail;
-    if (!directorEnabled) return showImage ? `Director: Off. ${imageDetail}` : 'Director: Off';
+    if (!directorEnabled) return showImage ? `${directorOffDetail} ${imageDetail}` : directorOffDetail;
+    if (directorOnRequest) {
+      const onRequestDetail = `AI assistance: ${directorProviderLabel(directorProvider)} runs only when requested.`;
+      return showImage ? `${onRequestDetail} ${imageDetail}` : onRequestDetail;
+    }
     const directorDetail = directorProvider === 'codex'
       ? `Director: ${directorModeShort}, ${directorInvolvementLabel}, Codex, ${reasoningShort} reasoning`
       : directorProvider === 'claude'
@@ -639,11 +659,11 @@
             </button>
           {/each}
         {/if}
-        <div class="separator"></div>
+        {#if showDirector || showImage}<div class="separator" data-between="profiles-roles"></div>{/if}
       {/if}
 
       {#if showDirector}
-        <div class="menu-title">AI Director</div>
+        <div class="menu-title">{directorSectionLabel}</div>
         {#if onInheritDirector}
           <button type="button" class:active={directorInherited} onclick={onInheritDirector}>
             <span>Workflow default</span>
@@ -658,12 +678,12 @@
         {/each}
         {#if !directorRequired}
           <button type="button" class:active={!directorEnabled && !directorInherited} onclick={skipDirector}>
-            <span>Skip</span>
+            <span>{directorOffLabel}</span>
             {#if !directorEnabled && !directorInherited}<Icon svg={Checkmark} size={15} />{/if}
           </button>
         {/if}
 
-        {#if directorEnabled}
+        {#if directorEnabled && showDirectorInvolvement}
           <button type="button" onclick={() => (submenu = submenu === 'directorInvolvement' ? null : 'directorInvolvement')}>
             <span>Involvement</span>
             <span class="value">{directorInvolvementLabel}</span>
@@ -681,7 +701,7 @@
           {/if}
         {/if}
 
-        <div class="separator"></div>
+        {#if showImage}<div class="separator" data-between="director-image"></div>{/if}
       {/if}
 
       {#if showImage}

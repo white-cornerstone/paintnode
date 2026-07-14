@@ -2,6 +2,7 @@
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow } from '../state/workflow.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import {
     openCommand,
     saveActiveCommand,
@@ -29,10 +30,20 @@
   const activeId = () => editor.activeLayer?.id;
   const hasDocument = () => !!editor.doc;
   const hasOpenTarget = () => hasDocument() || (ui.activeSurface === 'workflow' && workflow.active);
-  const canUndo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.canUndoAuthoring : editor.canUndo;
-  const canRedo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.canRedoAuthoring : editor.canRedo;
-  const undo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.undoAuthoring() : editor.undo();
-  const redo = () => ui.activeSurface === 'workflow' && workflow.active ? workflow.redoAuthoring() : editor.redo();
+  const workflowAuthoringLocked = () => workflow.active
+    && aiTasks.runningForWorkflow(workflow.graphSnapshot().id).length > 0;
+  const canUndo = () => ui.activeSurface === 'workflow' && workflow.active
+    ? !workflowAuthoringLocked() && workflow.canUndoAuthoring
+    : editor.canUndo;
+  const canRedo = () => ui.activeSurface === 'workflow' && workflow.active
+    ? !workflowAuthoringLocked() && workflow.canRedoAuthoring
+    : editor.canRedo;
+  const undo = () => ui.activeSurface === 'workflow' && workflow.active
+    ? !workflowAuthoringLocked() && workflow.undoAuthoring()
+    : editor.undo();
+  const redo = () => ui.activeSurface === 'workflow' && workflow.active
+    ? !workflowAuthoringLocked() && workflow.redoAuthoring()
+    : editor.redo();
   const activeLayer = () => editor.activeLayer;
   const hasActiveLayer = () => !!activeLayer();
   const hasEditableActiveLayer = () => {

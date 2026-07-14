@@ -1636,22 +1636,26 @@ describe('WorkflowStore graph adapter', () => {
     expect(after.assetReferences).toEqual(before.assetReferences);
   });
 
-  it('keeps presentation state outside graph revisions while persisting viewport dirty state', () => {
+  it('keeps viewport navigation outside workflow revisions and dirty state', () => {
+    const source = new WorkflowStore({ idGenerator: ids() });
+    source.newBoard();
     const store = new WorkflowStore({ idGenerator: ids() });
-    store.newBoard();
+    store.openFromBytes(source.toBytes(), 'workflows/existing.cxflow.json', 'Existing');
     const graphRevision = store.graphRevision;
+
+    expect(store.dirty).toBe(false);
     store.select({ kind: 'output', id: 'output' });
     store.setTool('zoom');
     expect(store.rev).toBe(0);
     expect(store.graphRevision).toBe(graphRevision);
-    store.zoomBy(1, 300, 200);
-    expect(store.rev).toBe(0);
 
+    store.zoomBy(1.25, 300, 200);
     store.panBy(20, 10);
-    store.setZoom(1.25);
-    expect(store.rev).toBe(2);
+
+    expect(store.rev).toBe(0);
     expect(store.graphRevision).toBe(graphRevision);
-    expect(store.serialize().viewport).toEqual({ panX: 20, panY: 10, zoom: 1.25 });
+    expect(store.dirty).toBe(false);
+    expect(store.serialize().viewport).toEqual({ panX: -55, panY: -40, zoom: 1.25 });
   });
 
   it('round-trips unusual valid v2 metadata names exactly until the user renames', () => {

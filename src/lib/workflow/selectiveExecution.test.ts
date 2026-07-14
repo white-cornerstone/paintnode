@@ -394,7 +394,7 @@ describe('selective workflow planning', () => {
 
   it('blocks a configured transform capability that the registry does not support', () => {
     const input = structuredClone(instantiateWorkflowTemplate('campaign-composer'));
-    input.nodes.find((candidate) => candidate.id === 'transform-generate-square')!.config.capability = 'relight';
+    input.nodes.find((candidate) => candidate.id === 'transform-generate-square')!.config.capability = 'animate';
 
     expect(() => createWorkflowExecutionRestrictions([{
       nodeId: 'transform-generate-square',

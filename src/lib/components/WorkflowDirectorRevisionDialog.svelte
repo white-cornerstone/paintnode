@@ -5,6 +5,8 @@
   import { ArrowSync, CheckmarkCircle, ErrorCircle } from '../icons';
   import { createProviderFreeWorkflowRevisionRequester } from '../integrations/providerFreeWorkflowRevision';
   import { workflow } from '../state/workflow.svelte';
+  import { project } from '../state/project.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import { createWorkflowDirectorRevisionHistoryState } from '../workflow/directorRevisionHistory.svelte';
   import {
     WorkflowDirectorRevisionCancelledError,
@@ -22,11 +24,13 @@
     requester = createProviderFreeWorkflowRevisionRequester(),
     initialInstruction = 'Refine this workflow while preserving accepted candidates and run history.',
     title = 'Revise current workflow',
+    taskNodeIds = [],
   }: {
     onClose: () => void;
     requester?: WorkflowDirectorRevisionRequester;
     initialInstruction?: string;
     title?: string;
+    taskNodeIds?: readonly string[];
   } = $props();
 
   let instruction = $state(untrack(() => initialInstruction));
@@ -36,6 +40,7 @@
   let historyStatus = $state('No revision has been accepted in this review session.');
   let controller: AbortController | null = null;
   let requestEpoch = 0;
+  let activeTaskId: string | null = null;
 
   const view = $derived(preview ? createWorkflowDirectorRevisionViewModel(preview.result) : null);
   const previewCurrent = $derived(preview
@@ -61,6 +66,10 @@
     controller?.abort();
     controller = null;
     requesting = false;
+    if (activeTaskId && aiTasks.find(activeTaskId)?.status === 'running') {
+      aiTasks.markCancelled(activeTaskId, 'Director revision cancelled');
+      activeTaskId = null;
+    }
     if (status) historyStatus = status;
   }
 
@@ -79,6 +88,23 @@
     historyStatus = requester.providerFree
       ? 'Preparing a provider-free revision preview…'
       : 'Preparing a configured Director revision preview…';
+    const graph = workflow.graphSnapshot();
+    const task = aiTasks.create({
+      projectPath: project.path,
+      kind: 'workflow',
+      title: `AI Director: ${title}`,
+      subtitle: requester.label,
+      progress: 'Preparing and validating a workflow revision…',
+      detail: {
+        kind: 'workflow',
+        providerLabel: requester.label,
+        outputName: title,
+        workflowId: graph.id,
+        nodeIds: graph.nodes.filter((node) => taskNodeIds.includes(node.id)).map((node) => node.id),
+      },
+    });
+    activeTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => currentController.abort());
     try {
       const result = await requestWorkflowDirectorRevisionPreview(
         requester,
@@ -91,11 +117,18 @@
       historyStatus = result.result.proposal
         ? 'Revision preview ready. Review every change before accepting.'
         : 'Revision response failed validation; the workflow was not changed.';
+      aiTasks.complete(task.id, result.result.proposal ? 'Revision preview ready' : 'Revision response validation completed');
     } catch (caught) {
-      if (epoch !== requestEpoch || caught instanceof WorkflowDirectorRevisionCancelledError) return;
+      if (epoch !== requestEpoch || caught instanceof WorkflowDirectorRevisionCancelledError) {
+        if (aiTasks.find(task.id)?.status === 'running') aiTasks.markCancelled(task.id, 'Director revision cancelled');
+        return;
+      }
       error = caught instanceof Error ? caught.message : String(caught);
       historyStatus = 'Revision request failed; the workflow was not changed.';
+      aiTasks.fail(task.id, error);
     } finally {
+      aiTasks.setCancel(task.id, null);
+      if (activeTaskId === task.id) activeTaskId = null;
       if (epoch === requestEpoch) {
         controller = null;
         requesting = false;
@@ -144,6 +177,9 @@
 
   onDestroy(() => {
     controller?.abort();
+    if (activeTaskId && aiTasks.find(activeTaskId)?.status === 'running') {
+      aiTasks.markCancelled(activeTaskId, 'Director revision cancelled');
+    }
     if (preview) rejectWorkflowDirectorRevisionPreview(preview, workflow);
   });
 </script>

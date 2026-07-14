@@ -40,7 +40,7 @@
   import { workflowBoardViewport } from '../state/workflowBoardViewport.svelte';
   import { directorModeFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
-  import { aiTasks } from '../state/aiTasks.svelte';
+  import { aiTasks, type AiTask, type WorkflowTaskDetail } from '../state/aiTasks.svelte';
   import {
     workflow,
     type WorkflowAssetNode,
@@ -89,6 +89,8 @@
     type WorkflowDisconnectLink,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
+    workflowTransformContext,
+    workflowTaskUpstreamNodeIds,
     type WorkflowNodeV2,
   } from '../workflow';
   import {
@@ -116,6 +118,7 @@
   import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
   import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
   import WorkflowNodeDisconnectButton from './workflow/WorkflowNodeDisconnectButton.svelte';
+  import WorkflowNodeTaskLock from './workflow/WorkflowNodeTaskLock.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
@@ -197,6 +200,7 @@
   let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
   let revisionDirectorInstruction = $state('Refine this workflow while preserving accepted candidates and run history.');
   let revisionDirectorTitle = $state('Revise current workflow');
+  let revisionDirectorTaskNodeIds = $state<string[]>([]);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -249,6 +253,28 @@
   );
   const graphConnections = $derived(workflow.connections);
   const selectedDisconnectCount = $derived(Object.values(disconnectSelections).filter(Boolean).length);
+
+  function workflowTaskDetail(
+    providerLabel: string,
+    outputName: string,
+    rootNodeIds: readonly string[],
+    includeUpstream = true,
+  ): WorkflowTaskDetail {
+    const graph = workflow.graphSnapshot();
+    const nodeIds = includeUpstream
+      ? workflowTaskUpstreamNodeIds(graph, rootNodeIds)
+      : graph.nodes.filter((node) => rootNodeIds.includes(node.id)).map((node) => node.id);
+    return { kind: 'workflow', providerLabel, outputName, workflowId: graph.id, nodeIds };
+  }
+
+  function workflowNodeTasks(nodeId: string): AiTask[] {
+    workflow.rev;
+    return aiTasks.runningForWorkflowNode(workflow.graphSnapshot().id, nodeId);
+  }
+
+  function connectionHasRunningTask(connection: WorkflowConnection): boolean {
+    return workflowNodeTasks(connection.from).length > 0 || workflowNodeTasks(connection.to).length > 0;
+  }
   const hasCompositionNode = $derived.by(() => {
     workflow.rev;
     return workflow.graphSnapshot().nodes.some((node) => node.id === 'composition');
@@ -587,6 +613,7 @@
   }
 
   async function assignWorkflowAsset(nodeId: string, value: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     if (value.startsWith('asset:')) {
       workflow.assignAsset(nodeId, assets.find((item) => item.id === value.slice(6)) ?? null);
       return;
@@ -618,6 +645,7 @@
   }
 
   function showAssetPreviewMenu(nodeId: string, clientX: number, clientY: number): void {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     workflow.select({ kind: 'asset', id: nodeId });
     assetPreviewMenu = {
       nodeId,
@@ -628,6 +656,7 @@
 
   async function pasteClipboardImage(nodeId: string): Promise<void> {
     assetPreviewMenu = null;
+    if (workflowNodeTasks(nodeId).length > 0) return;
     if (clipboardImporting) return;
     if (!desktop) {
       error = 'Clipboard image import is available only in the PaintNode desktop app.';
@@ -714,6 +743,7 @@
   }
 
   async function runAssetExtraction(nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
     if (!node) return;
     const graphNode = workflow.graphSnapshot().nodes.find((item) => item.id === nodeId);
@@ -758,7 +788,7 @@
       title: `Extract assets: ${node.name}`,
       subtitle: `${extractionRunOptions.directorProvider} → ${extractionProvider}`,
       progress: initialProgress,
-      detail: { kind: 'workflow', providerLabel: extractionProvider, outputName: node.name },
+      detail: workflowTaskDetail(extractionProvider, node.name, [nodeId]),
     });
     aiTasks.setCancel(extractionTask.id, async () => {
       extractionController.abort();
@@ -1031,6 +1061,7 @@
       : createConfiguredWorkflowRevisionRequester(runOptions);
     revisionDirectorInstruction = 'Refine this workflow while preserving accepted candidates and run history.';
     revisionDirectorTitle = 'Revise current workflow';
+    revisionDirectorTaskNodeIds = workflow.graphSnapshot().nodes.map((node) => node.id);
     revisionDirectorOpen = true;
   }
 
@@ -1053,7 +1084,7 @@
   }
 
   async function runAiReview(node: WorkflowNodeV2): Promise<void> {
-    if (node.type !== 'review' || node.config.mode !== 'ai' || busy) return;
+    if (node.type !== 'review' || node.config.mode !== 'ai' || busy || workflowNodeTasks(node.id).length > 0) return;
     const candidates = workflow.reviewCandidates(node.id, assets, true, project.identity);
     if (candidates.length === 0 || candidates.some((candidate) => candidate.state !== 'eligible' || !candidate.output)) {
       aiReviewMessages[node.id] = {
@@ -1073,7 +1104,7 @@
       title: `AI Review: ${node.title}`,
       subtitle: options.directorProvider,
       progress: 'Preparing candidate previews…',
-      detail: { kind: 'workflow', providerLabel: options.directorProvider, outputName: 'Candidate recommendation' },
+      detail: workflowTaskDetail(options.directorProvider, 'Candidate recommendation', [node.id]),
     });
     busy = true;
     aiReviewMessages[node.id] = { running: true, message: 'Preparing candidate previews…', error: '' };
@@ -1138,6 +1169,7 @@
   }
 
   function openNodeDirectorAction(node: WorkflowNodeV2): void {
+    if (workflowNodeTasks(node.id).length > 0) return;
     if (node.type === 'review') {
       void runAiReview(node);
       return;
@@ -1152,10 +1184,11 @@
         ? `Develop only Art Direction node "${node.id}". Improve its textual prompt using connected briefs and visual inputs. Do not generate a storyboard image and do not change any other node or connection.`
         : '';
     revisionDirectorTitle = node.type === 'brief'
-      ? 'Enhance Brief'
+      ? 'Enhance Brief with AI'
       : node.type === 'art-direction'
         ? 'Develop Art Direction'
         : 'Revise node';
+    revisionDirectorTaskNodeIds = [node.id];
     revisionDirectorOpen = true;
   }
 
@@ -1181,6 +1214,27 @@
 
   function creatorConfigString(config: Record<string, unknown>, key: string): string {
     return typeof config[key] === 'string' ? config[key] : '';
+  }
+
+  function transformContextSummary(nodeId: string): {
+    inherited: string;
+    direct: string;
+  } {
+    const context = workflowTransformContext(workflow.graphSnapshot(), nodeId);
+    const inheritedParts = [
+      context.inheritedVisuals.length > 0
+        ? `${context.inheritedVisuals.length} visual ${context.inheritedVisuals.length === 1 ? 'reference' : 'references'}`
+        : '',
+      context.brief ? 'Brief' : '',
+      context.artDirection ? 'Art Direction' : '',
+    ].filter(Boolean);
+    const directCount = context.visualInputs.filter((connection) => connection.origin === 'direct').length;
+    return {
+      inherited: inheritedParts.join(' · ') || 'none',
+      direct: directCount > 0
+        ? `${directCount} additional visual ${directCount === 1 ? 'reference' : 'references'}`
+        : 'none',
+    };
   }
 
   async function placeOutput(node: WorkflowOutputNode): Promise<void> {
@@ -1218,6 +1272,8 @@
   ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
     const output = type === 'output' && node ? workflow.outputNode(node.id) : null;
+    const taskNodeId = type === 'prompt' ? 'composition' : type === 'output' ? output?.id ?? 'output' : node?.id ?? null;
+    if (taskNodeId && workflowNodeTasks(taskNodeId).length > 0) return;
     const x = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
     const y = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
     if (type === 'asset' && node) workflow.select({ kind: 'asset', id: node.id });
@@ -1478,7 +1534,7 @@
   }
 
   function startConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
-    if (!(event.currentTarget instanceof HTMLElement)) return;
+    if (!(event.currentTarget instanceof HTMLElement) || workflowNodeTasks(nodeId).length > 0) return;
     const point = boardPoint(event);
     workflow.connectionError = null;
     connecting = { from: { nodeId, portId }, x: point.x, y: point.y };
@@ -1487,6 +1543,10 @@
 
   function finishConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
     if (!connecting) return;
+    if (workflowNodeTasks(nodeId).length > 0 || workflowNodeTasks(connecting.from.nodeId).length > 0) {
+      connecting = null;
+      return;
+    }
     workflow.connectPorts(connecting.from.nodeId, connecting.from.portId, nodeId, portId);
     connecting = null;
     event.stopPropagation();
@@ -1497,6 +1557,7 @@
   }
 
   function requestNodeDisconnect(nodeId: WorkflowNodeId): void {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     const graph = workflow.graphSnapshot();
     const links = workflowNodeDisconnectLinks(graph, nodeId);
     const mode = workflowDisconnectMode(links);
@@ -1515,6 +1576,8 @@
   }
 
   function disconnectWorkflowConnection(connectionId: string): void {
+    const connection = graphConnections.find((item) => item.id === connectionId);
+    if (!connection || connectionHasRunningTask(connection)) return;
     workflow.disconnectConnection(connectionId);
     showDisconnectUndo(1);
   }
@@ -1526,6 +1589,10 @@
 
   function confirmNodeDisconnect(): void {
     if (!disconnectDialog) return;
+    if (workflowNodeTasks(disconnectDialog.nodeId).length > 0) {
+      closeDisconnectDialog();
+      return;
+    }
     const selectedLinks = disconnectDialog.links
       .filter((link) => disconnectSelections[link.id])
       .map((link) => link.id);
@@ -1545,7 +1612,8 @@
   }
 
   function undoDisconnect(): void {
-    if (workflow.authoringUndoLabel === 'Disconnect links') workflow.undoAuthoring();
+    if (aiTasks.runningForWorkflow(workflow.graphSnapshot().id).length === 0
+      && workflow.authoringUndoLabel === 'Disconnect links') workflow.undoAuthoring();
     disconnectUndoNotice = null;
     if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
     disconnectUndoTimer = 0;
@@ -2241,6 +2309,7 @@
   }
 
   async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     invalidateSelectivePreview();
     selectiveTargetNodeId = nodeId;
     selectiveMode = mode;
@@ -2292,6 +2361,8 @@
       progress,
       detail: {
         kind: 'workflow', providerLabel: options.provider, outputName: 'Selective execution',
+        workflowId: workflow.graphSnapshot().id,
+        nodeIds: [...new Set([...preflight.plan.requiredNodeIds, ...preflight.plan.affectedNodeIds])],
       },
     });
     activeWorkflowTaskId = task.id;
@@ -2339,6 +2410,7 @@
     if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
     if (storyboardCanvas) persistStoryboard();
     const targetOutput = targetOutputForGenerate(node);
+    if (workflowNodeTasks(targetOutput.id).length > 0) return;
     error = '';
     const preflight = outputReadiness(targetOutput.id);
     if (!preflight.ready) {
@@ -2376,9 +2448,7 @@
           subtitle: runProvider,
           progress,
           runId,
-          detail: {
-            kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
-          },
+          detail: workflowTaskDetail(runProvider, targetOutput.name || 'Output', [targetOutput.id]),
         });
       if (!task) return;
       aiTasks.setRunId(task.id, runId);
@@ -2516,6 +2586,7 @@
   }
 
   async function promoteReviewCandidate(nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     const candidate = selectedReviewCandidate(nodeId);
     if (!candidate || candidate.state !== 'eligible') return;
     busy = true;
@@ -2535,6 +2606,7 @@
   }
 
   async function generateCandidateBranches(nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     const output = outputForTransform(nodeId);
     if (!output) {
       error = 'Connect this Transform to an Output before generating candidate branches.';
@@ -2550,6 +2622,16 @@
     const controller = new AbortController();
     activeCandidateController = controller;
     const context = createWorkflowExecutionContext(createRunId());
+    const task = aiTasks.create({
+      projectPath: context.runProjectPath,
+      kind: 'workflow',
+      title: `Workflow: Generate ${candidateCount} concept branches`,
+      subtitle: context.runProvider,
+      progress,
+      detail: workflowTaskDetail(context.runProvider, `${output.name || 'Output'} concept branches`, [output.id]),
+    });
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => controller.abort());
     try {
       const outcome = await workflow.runCandidateBranches(output.id, {
         ...context.options,
@@ -2562,28 +2644,49 @@
       if (!outcome.committed) {
         if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
         error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
         candidateResultMessages[nodeId] = workflowCandidateBranchResultSummary(outcome.group);
+        aiTasks.complete(task.id, candidateResultMessages[nodeId]);
         editor.flash(outcome.commitMessage);
       }
     } catch (cause) {
       error = (cause as Error)?.message ?? String(cause);
+      if (controller.signal.aborted || (cause as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(task.id);
+      else aiTasks.fail(task.id, error);
     } finally {
+      aiTasks.setCancel(task.id, null);
+      if (activeWorkflowTaskId === task.id) activeWorkflowTaskId = null;
       if (activeCandidateController === controller) activeCandidateController = null;
       busy = false;
       progress = '';
     }
   }
 
-  async function retryCandidate(candidateId: string): Promise<void> {
-    if (!providerSelection.ready || !providerSelection.provider) return;
+  async function retryCandidate(nodeId: string, candidateId: string): Promise<void> {
+    if (!providerSelection.ready || !providerSelection.provider || workflowNodeTasks(nodeId).length > 0) return;
+    const output = outputForTransform(nodeId);
+    if (!output) {
+      error = 'Reconnect this Transform to an Output before retrying the candidate.';
+      return;
+    }
     busy = true;
     error = '';
     progress = 'Retrying one candidate while preserving its siblings…';
     const controller = new AbortController();
     activeCandidateController = controller;
     const context = createWorkflowExecutionContext(createRunId());
+    const task = aiTasks.create({
+      projectPath: context.runProjectPath,
+      kind: 'workflow',
+      title: 'Workflow: Retry concept candidate',
+      subtitle: context.runProvider,
+      progress,
+      detail: workflowTaskDetail(context.runProvider, `${output.name || 'Output'} candidate`, [output.id]),
+    });
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => controller.abort());
     try {
       const outcome = await workflow.retryCandidateBranch(candidateId, {
         ...context.options,
@@ -2592,13 +2695,19 @@
       if (!outcome.committed) {
         if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
         error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
+        aiTasks.complete(task.id, outcome.commitMessage);
         editor.flash(outcome.commitMessage);
       }
     } catch (cause) {
       error = (cause as Error)?.message ?? String(cause);
+      if (controller.signal.aborted || (cause as { code?: unknown })?.code === 'CANCELLED') aiTasks.markCancelled(task.id);
+      else aiTasks.fail(task.id, error);
     } finally {
+      aiTasks.setCancel(task.id, null);
+      if (activeWorkflowTaskId === task.id) activeWorkflowTaskId = null;
       if (activeCandidateController === controller) activeCandidateController = null;
       busy = false;
       progress = '';
@@ -2665,17 +2774,22 @@
         <svg class="links" aria-label="Workflow connections">
           {#each graphConnections as connection (connection.id)}
             {@const path = connectionPath(connection)}
+            {@const connectionLocked = connectionHasRunningTask(connection)}
             {#if path}
               <path
                 d={path}
                 role="button"
-                tabindex="0"
+                tabindex={connectionLocked ? -1 : 0}
                 aria-label="Disconnect workflow connection"
+                aria-disabled={connectionLocked}
+                class:task-locked={connectionLocked}
                 onpointerdown={(event) => {
+                  if (connectionLocked) return;
                   disconnectWorkflowConnection(connection.id);
                   event.stopPropagation();
                 }}
                 onkeydown={(event) => {
+                  if (connectionLocked) return;
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
                   disconnectWorkflowConnection(connection.id);
@@ -2695,13 +2809,17 @@
           {@const ports = workflowNodePorts(node.id)}
           {@const extractionScope = extractionScopeFor(node.id)}
           {@const scopedExtractionLinks = extractionScope ? availableExtractedAssetLinks(extractionScope.assets) : []}
+          {@const nodeTasks = workflowNodeTasks(node.id)}
           <article
             class="asset-node"
+            class:task-locked={nodeTasks.length > 0}
             class:included={node.included}
             class:selected={workflow.selection?.kind === 'asset' && workflow.selection.id === node.id}
             tabindex="-1"
             data-workflow-node={node.id}
             data-creator-node-type="input"
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'asset', id: node.id })}
             onpointerdown={(event) => {
@@ -2831,17 +2949,22 @@
               ></textarea>
             </div>
           </article>
+          <WorkflowNodeTaskLock x={node.x} y={node.y} width={node.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#each workflow.briefNodes as brief (brief.id)}
           {@const ports = workflowNodePorts(brief.id)}
           {@const briefGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === brief.id)}
+          {@const nodeTasks = workflowNodeTasks(brief.id)}
           <article
             class="brief-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === brief.id}
             tabindex="-1"
             data-workflow-node={brief.id}
             data-creator-node-type="brief"
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'creator', id: brief.id })}
             onpointerdown={(event) => {
@@ -2891,6 +3014,7 @@
               ></textarea>
             </div>
           </article>
+          <WorkflowNodeTaskLock x={brief.x} y={brief.y} width={brief.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#each workflow.creatorNodes as node (node.id)}
@@ -2900,13 +3024,17 @@
           {@const extractionResults = workflowExtractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
           {@const creatorGraphNode = workflow.graphSnapshot().nodes.find((item) => item.id === node.id)}
+          {@const nodeTasks = workflowNodeTasks(node.id)}
           <article
             class="creator-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
             tabindex="-1"
             id={node.type === 'review' ? `review-node-${node.id}` : undefined}
             data-workflow-node={node.id}
             data-creator-node-type={node.type}
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'creator', id: node.id })}
             onpointerdown={(event) => {
@@ -3023,6 +3151,7 @@
                   </div>
                 {/if}
               {:else if node.type === 'transform'}
+                {@const contextSummary = transformContextSummary(node.id)}
                 <label class="creator-config-field">
                   Capability
                   <select
@@ -3038,13 +3167,20 @@
                   </select>
                 </label>
                 <label class="creator-config-field">
-                  Instructions
+                  Additional guidance (optional)
                   <textarea
                     aria-label={`${node.name} instructions`}
                     value={creatorConfigString(node.config, 'instructions')}
                     oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
                   ></textarea>
                 </label>
+                <div class="transform-context-summary" aria-label={`${node.name} connected context`}>
+                  <Icon svg={ImageMultiple} size={16} />
+                  <span>
+                    <b>Inherited context</b> {contextSummary.inherited}
+                    <small><b>Direct references</b> {contextSummary.direct}</small>
+                  </span>
+                </div>
               {:else if node.type === 'review'}
                 <label class="creator-config-field">
                   Review mode
@@ -3288,7 +3424,7 @@
                             </small>
                             {#if candidate.failure}<small>{candidate.failure.message}</small>{/if}
                             {#if candidate.status === 'failed' || candidate.status === 'cancelled'}
-                              <button type="button" disabled={busy} onclick={() => void retryCandidate(candidate.candidateId)}>
+                              <button type="button" disabled={busy} onclick={() => void retryCandidate(node.id, candidate.candidateId)}>
                                 Retry candidate
                               </button>
                             {/if}
@@ -3305,15 +3441,20 @@
               {/if}
             </div>
           </article>
+          <WorkflowNodeTaskLock x={node.x} y={node.y} width={node.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#each workflow.unsupportedNodes as node (node.id)}
+          {@const nodeTasks = workflowNodeTasks(node.id)}
           <article
             class="unsupported-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'unsupported' && workflow.selection.id === node.id}
             tabindex="-1"
             data-workflow-node={node.id}
             data-unsupported-node-type={node.unsupportedType}
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}`}
             onfocus={() => workflow.select({ kind: 'unsupported', id: node.id })}
             onpointerdown={(event) => {
@@ -3348,16 +3489,21 @@
               <button type="button" class="draft-run" disabled aria-describedby={`unsupported-reason-${node.id}`}>Run unavailable</button>
             </div>
           </article>
+          <WorkflowNodeTaskLock x={node.x} y={node.y} width={node.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#if hasCompositionNode}
         {@const compositionGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === 'composition')}
+        {@const nodeTasks = workflowNodeTasks('composition')}
         <article
           class="prompt-node"
+          class:task-locked={nodeTasks.length > 0}
           class:selected={workflow.selection?.kind === 'composition'}
           tabindex="-1"
           data-workflow-node="composition"
           data-creator-node-type="art-direction"
+          aria-busy={nodeTasks.length > 0}
+          inert={nodeTasks.length > 0}
           style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; height:${workflow.compositionHeight}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
           onfocus={() => workflow.select({ kind: 'composition' })}
           onpointerdown={(event) => {
@@ -3578,6 +3724,7 @@
           {#if error}<p class="err">{error}</p>{/if}
           </div>
         </article>
+        <WorkflowNodeTaskLock x={workflow.promptX} y={workflow.promptY} width={workflow.compositionWidth} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/if}
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
@@ -3585,12 +3732,16 @@
           {@const ports = workflowNodePorts(outputNode.id)}
           {@const targetReadiness = outputReadiness(outputNode.id)}
           {@const reviewedOutput = Boolean(resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: outputNode.id })?.reviewNodeId)}
+          {@const nodeTasks = workflowNodeTasks(outputNode.id)}
           <article
             class="output-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
             tabindex="-1"
             data-workflow-node={outputNode.id}
             data-creator-node-type="output"
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; height:${outputNode.height}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'output', id: outputNode.id })}
             onpointerdown={(event) => {
@@ -3675,6 +3826,7 @@
               {/if}
             </div>
           </article>
+          <WorkflowNodeTaskLock x={outputNode.x} y={outputNode.y} width={outputNode.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
       </div>
     </div>
@@ -3762,9 +3914,11 @@
     requester={revisionDirectorRequester}
     initialInstruction={revisionDirectorInstruction}
     title={revisionDirectorTitle}
+    taskNodeIds={revisionDirectorTaskNodeIds}
     onClose={() => {
       revisionDirectorOpen = false;
       revisionDirectorRequester = null;
+      revisionDirectorTaskNodeIds = [];
     }}
   />
 {/if}
@@ -3900,6 +4054,11 @@
   .links path.pending {
     opacity: 0.58;
   }
+  .links path.task-locked {
+    stroke: #c88829;
+    opacity: 0.48;
+    pointer-events: none;
+  }
   .links path:focus-visible {
     outline: none;
     stroke-width: 4;
@@ -3943,6 +4102,19 @@
   .asset-node.included {
     border-color: color-mix(in srgb, var(--accent) 65%, #4b4d52);
     opacity: 1;
+  }
+  .asset-node.task-locked,
+  .brief-node.task-locked,
+  .creator-node.task-locked,
+  .unsupported-node.task-locked,
+  .prompt-node.task-locked,
+  .output-node.task-locked {
+    border-color: #c88829;
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, #c88829 72%, transparent),
+      0 12px 30px rgba(0, 0, 0, 0.28);
+    opacity: 0.76;
+    cursor: wait;
   }
   .prompt-node {
     width: 340px;
@@ -4221,6 +4393,8 @@
   .creator-node-body {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: max-content;
+    align-content: start;
     flex: 1 1 auto;
     gap: 8px;
     min-height: 0;
@@ -4296,6 +4470,26 @@
     align-items: center;
     gap: 6px;
     color: var(--text-bright);
+  }
+  .transform-context-summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    color: var(--text-bright);
+    line-height: 1.35;
+  }
+  .transform-context-summary > span,
+  .transform-context-summary small {
+    display: block;
+    min-width: 0;
+  }
+  .transform-context-summary small {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 9px;
   }
   .extract-run {
     min-width: 0;

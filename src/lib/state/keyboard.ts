@@ -3,6 +3,7 @@ import { openCommand, saveActiveCopyCommand, saveActiveCommand } from './command
 import { isTypingTarget } from './editing';
 import { ui } from './ui.svelte';
 import { workflow } from './workflow.svelte';
+import { aiTasks } from './aiTasks.svelte';
 import { nextAiRetouchTool } from '../engine/aiRetouch';
 
 const TOOL_KEYS: Record<string, string> = {
@@ -26,6 +27,11 @@ const TOOL_KEYS: Record<string, string> = {
 
 function modalKeyboardScopeActive(): boolean {
   return document.querySelector('[aria-modal="true"]') !== null;
+}
+
+function workflowAuthoringLocked(): boolean {
+  return workflow.active
+    && aiTasks.runningForWorkflow(workflow.graphSnapshot().id).length > 0;
 }
 
 /** Install global keyboard shortcuts. Returns a cleanup function. */
@@ -67,14 +73,18 @@ export function installKeyboard(): () => void {
         case 'z':
           e.preventDefault();
           if (ui.activeSurface === 'workflow' && workflow.active) {
-            if (e.shiftKey) workflow.redoAuthoring();
-            else workflow.undoAuthoring();
+            if (!workflowAuthoringLocked()) {
+              if (e.shiftKey) workflow.redoAuthoring();
+              else workflow.undoAuthoring();
+            }
           } else if (e.shiftKey) editor.redo();
           else editor.undo();
           return;
         case 'y':
           e.preventDefault();
-          if (ui.activeSurface === 'workflow' && workflow.active) workflow.redoAuthoring();
+          if (ui.activeSurface === 'workflow' && workflow.active) {
+            if (!workflowAuthoringLocked()) workflow.redoAuthoring();
+          }
           else editor.redo();
           return;
         case 'a':

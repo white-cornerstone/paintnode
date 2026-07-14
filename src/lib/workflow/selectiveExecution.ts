@@ -205,7 +205,10 @@ export function registryExecutionDisposition(node: Readonly<WorkflowNodeV2>): Wo
     };
   }
   const configuredCapability = node.config.capability;
-  if (typeof configuredCapability !== 'string' || configuredCapability !== executor.capability) {
+  const supportedCapabilities = node.type === 'transform'
+    ? ['generate', 'edit', 'remove-background', 'relight', 'upscale']
+    : [executor.capability];
+  if (typeof configuredCapability !== 'string' || !supportedCapabilities.includes(configuredCapability)) {
     return {
       kind: 'unavailable',
       reason: 'The configured Transform capability is not available for execution.',

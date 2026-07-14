@@ -4,6 +4,7 @@ import { project } from './project.svelte';
 import {
   createWorkflowCompositionExecutor,
   deriveWorkflowNodeRunState,
+  WorkflowGraphDomain,
   workflowSha256Bytes,
   type WorkflowDirectorPatchV1,
   type WorkflowGraphV2,
@@ -550,8 +551,10 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     expect(store.savedPath).toBe('workflows/campaign-with-history.cxflow.json');
     expect(store.name).toBe('Same Path Rename');
     expect(store.dirty).toBe(true);
-    expect((store as unknown as { savedWorkflowBytes: string }).savedWorkflowBytes)
-      .toBe(originalBytes);
+    const originalContent = JSON.parse(originalBytes) as WorkflowGraphV2;
+    originalContent.viewport = { panX: 0, panY: 0, zoom: 1 };
+    expect((store as unknown as { savedWorkflowContentBytes: string }).savedWorkflowContentBytes)
+      .toBe(new WorkflowGraphDomain(originalContent).serialize());
   });
 
   it.each(['older-first', 'newer-first'] as const)(

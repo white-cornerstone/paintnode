@@ -21,4 +21,18 @@ describe('AI run options control', () => {
     expect(controlSource).toContain("provider === 'grok'\n            ? 'grokModel'");
     expect(controlSource).toContain("provider === 'grok' ? 'grokImageModel'");
   });
+
+  it('allows a caller to describe an off Director as manual authoring', () => {
+    expect(controlSource).toContain("directorOffLabel = 'Skip'");
+    expect(controlSource).toContain("directorOffSummary = 'Director: Off'");
+    expect(controlSource).toContain('<span>{directorOffLabel}</span>');
+    expect(controlSource).toContain('AI assist: ${directorName} on request');
+    expect(controlSource).toContain('{directorSectionLabel}');
+  });
+
+  it('separates the Director selector from another role, not from its own advanced options', () => {
+    expect(controlSource).toContain(
+      '{#if showImage}<div class="separator" data-between="director-image"></div>{/if}',
+    );
+  });
 });

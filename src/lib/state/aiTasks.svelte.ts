@@ -72,6 +72,9 @@ export interface WorkflowTaskDetail {
   kind: 'workflow';
   providerLabel: string;
   outputName: string;
+  /** Workflow graph and node scope used to lock active nodes while this task runs. */
+  workflowId?: string;
+  nodeIds?: string[];
 }
 
 export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail | AutoAdjustTaskDetail | WorkflowTaskDetail;
@@ -248,6 +251,24 @@ export class AiTaskStore {
   find(id: string | null | undefined): AiTask | null {
     if (!id) return null;
     return this.allTasks.find((task) => task.id === id) ?? null;
+  }
+
+  runningForWorkflowNode(workflowId: string, nodeId: string): AiTask[] {
+    if (!workflowId || !nodeId) return [];
+    return this.runningForWorkflow(workflowId).filter((task) => (
+      task.detail.kind === 'workflow'
+      && Array.isArray(task.detail.nodeIds)
+      && task.detail.nodeIds.includes(nodeId)
+    ));
+  }
+
+  runningForWorkflow(workflowId: string): AiTask[] {
+    if (!workflowId) return [];
+    return this.tasks.filter((task) => (
+      task.status === 'running'
+      && task.detail.kind === 'workflow'
+      && task.detail.workflowId === workflowId
+    ));
   }
 
   setProgress(id: string, progress: string): void {

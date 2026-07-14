@@ -38,7 +38,7 @@ describe('creator node registry', () => {
     ]))).toEqual({
       input: 240,
       brief: 220,
-      'art-direction': 408,
+      'art-direction': 320,
       'extract-assets': 400,
       transform: 480,
       review: 536,
@@ -95,6 +95,12 @@ describe('creator node registry', () => {
       capability: 'generate',
       advanced: { provider: null, model: null },
     });
+    expect(creatorNodeDefinition('transform').ports.inputs).toEqual([
+      { id: 'source', label: 'Directed composition', dataType: 'layout' },
+      { id: 'assets', label: 'Visual references', dataType: 'asset-reference', multiple: true },
+      { id: 'prompt', label: 'Additional guidance', dataType: 'prompt' },
+    ]);
+    expect(creatorNodeDefinition('brief').defaultConfig).toMatchObject({ aiAssistMode: 'manual' });
     expect(creatorNodeDefinition('transform').executor).toMatchObject({
       status: 'available',
       capability: 'generate',

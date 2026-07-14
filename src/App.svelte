@@ -499,6 +499,11 @@
     };
   }
 
+  function workflowAuthoringLocked(): boolean {
+    return workflow.active
+      && aiTasks.runningForWorkflow(workflow.graphSnapshot().id).length > 0;
+  }
+
   $effect(() => {
     if (!desktop) return;
     const enabled = nativeMenuEnabledStates();
@@ -539,11 +544,15 @@
         void closeActiveDocument();
         break;
       case 'app:undo':
-        if (ui.activeSurface === 'workflow' && workflow.active) workflow.undoAuthoring();
+        if (ui.activeSurface === 'workflow' && workflow.active) {
+          if (!workflowAuthoringLocked()) workflow.undoAuthoring();
+        }
         else editor.undo();
         break;
       case 'app:redo':
-        if (ui.activeSurface === 'workflow' && workflow.active) workflow.redoAuthoring();
+        if (ui.activeSurface === 'workflow' && workflow.active) {
+          if (!workflowAuthoringLocked()) workflow.redoAuthoring();
+        }
         else editor.redo();
         break;
       case 'app:cut':

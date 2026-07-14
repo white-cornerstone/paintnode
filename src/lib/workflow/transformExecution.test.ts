@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseWorkflowGraphV2, serializeWorkflowGraphV2 } from './schema';
+import { parseWorkflowGraphV2, serializeWorkflowGraphV2, WORKFLOW_GRAPH_VERSION, type WorkflowGraphV2 } from './schema';
 import { instantiateWorkflowTemplate } from './templates';
+import { createCreatorNode } from './registry';
 import {
   createWorkflowCompositionExecutor,
   executeCampaignGenerateTransform,
@@ -53,7 +54,89 @@ function boundCampaign() {
   return graph;
 }
 
+function directTransformGraph(capability: 'generate' | 'edit'): WorkflowGraphV2 {
+  const input = createCreatorNode('input', {
+    id: 'direct-reference',
+    title: 'Product reference',
+    config: {
+      assetId: productAsset.id,
+      relativePath: productAsset.relativePath,
+      role: 'Product identity reference',
+    },
+  });
+  const transform = createCreatorNode('transform', {
+    id: 'direct-transform',
+    title: capability === 'generate' ? 'Generate' : 'Edit',
+    config: { capability, instructions: 'Place the supplied product in a clean studio scene.' },
+  });
+  const output = createCreatorNode('output', { id: 'direct-output', title: 'Studio result' });
+  return {
+    version: WORKFLOW_GRAPH_VERSION,
+    id: `direct-${capability}`,
+    metadata: { name: `Direct ${capability}`, sourceVersion: null, migrations: [] },
+    viewport: { panX: 0, panY: 0, zoom: 1 },
+    nodes: [input, transform, output],
+    edges: [
+      {
+        id: 'reference-transform',
+        source: { nodeId: input.id, portId: 'asset' },
+        target: { nodeId: transform.id, portId: 'assets' },
+      },
+      {
+        id: 'transform-output',
+        source: { nodeId: transform.id, portId: 'result' },
+        target: { nodeId: output.id, portId: 'source' },
+      },
+    ],
+    assetReferences: [],
+    runRecords: [],
+  };
+}
+
 describe('Campaign Composer Generate Transform execution', () => {
+  it.each(['generate', 'edit'] as const)(
+    'executes a direct Visual Input → %s Transform → Output workflow without Brief or Art Direction',
+    async (capability) => {
+      let request!: WorkflowTransformExecutionRequest;
+      const result = await executeCampaignGenerateTransform(directTransformGraph(capability), 'direct-output', {
+        projectPath: '/virtual/project',
+        provider: 'fake',
+        executors: [createWorkflowCompositionExecutor('fake', async (value) => {
+          request = value as WorkflowTransformExecutionRequest;
+          return {
+            kind: 'project-asset',
+            asset: {
+              id: `direct-${capability}-result`,
+              name: `${capability}.png`,
+              relativePath: `generated/${capability}.png`,
+              width: 1024,
+              height: 1024,
+              mime: 'image/png',
+            },
+            bytes: new Uint8Array([4, 5, 6]),
+          };
+        }, { capabilities: [capability] })],
+        assets: [productAsset],
+        resolveAsset: async () => material(new Uint8Array([1, 2, 3])),
+        storeAsset: vi.fn(),
+      });
+
+      expect(request).toMatchObject({
+        capability,
+        brief: '',
+        artDirection: '',
+        transform: { instructions: 'Place the supplied product in a clean studio scene.' },
+        sources: [{ nodeId: 'direct-reference', assetId: productAsset.id }],
+      });
+      expect(request.prompt).toContain('Transform instructions:');
+      expect(request.prompt).not.toContain('Creative brief:');
+      expect(request.prompt).not.toContain('Art direction:');
+      expect(result.graph.runRecords.at(-1)).toMatchObject({
+        sourceAssets: [expect.objectContaining({ nodeId: 'direct-reference', assetId: productAsset.id })],
+      });
+    },
+  );
+
   it('plans, materializes, executes, stores, binds, and reopens through injected provider-free contracts', async () => {
     const graph = boundCampaign();
     graph.nodes.find((node) => node.id === 'transform-generate-square')!.config.advanced = {

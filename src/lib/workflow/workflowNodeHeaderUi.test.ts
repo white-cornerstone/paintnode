@@ -39,7 +39,16 @@ describe('workflow node header UI contract', () => {
     expect(boardSource).toContain('<div class="prompt-node-body">');
     expect(boardSource).toMatch(/\.prompt-node-body\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s);
     expect(boardSource).toMatch(/\.creator-node-body\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);[^}]*overflow-x:\s*hidden;/s);
+    expect(boardSource).toMatch(/\.creator-node-body\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/s);
     expect(boardSource).toMatch(/\.candidate-branch-controls\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/s);
+  });
+
+  it('shows inherited and direct reference context on Transform nodes', () => {
+    expect(boardSource).toContain('workflowTransformContext(workflow.graphSnapshot(), nodeId)');
+    expect(boardSource).toContain('<b>Inherited context</b> {contextSummary.inherited}');
+    expect(boardSource).toContain('<b>Direct references</b> {contextSummary.direct}');
+    expect(boardSource).toContain('Additional guidance (optional)');
+    expect(boardSource).toMatch(/\.transform-context-summary\s*\{[^}]*display:\s*flex;/s);
   });
 
   it('offers consistent removable-node actions and accessible control sizing', () => {

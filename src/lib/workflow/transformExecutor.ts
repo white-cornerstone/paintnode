@@ -32,6 +32,7 @@ import {
   type WorkflowRunIdentity,
   type WorkflowRunProgressEvent,
 } from './runControl';
+import { workflowTransformContext, type WorkflowTransformVisualConnection } from './transformContext';
 
 export interface WorkflowProjectAsset {
   id: string;
@@ -246,8 +247,8 @@ function validAsset(asset: WorkflowProjectAsset, output: WorkflowNodeV2): boolea
   );
 }
 
-function textConfig(node: WorkflowNodeV2, key: string): string {
-  return typeof node.config[key] === 'string' ? node.config[key].trim() : '';
+function textConfig(node: WorkflowNodeV2 | null | undefined, key: string): string {
+  return typeof node?.config[key] === 'string' ? node.config[key].trim() : '';
 }
 
 function numberConfig(node: WorkflowNodeV2, key: string): number {
@@ -274,7 +275,8 @@ function unknownArray(value: unknown): unknown[] {
   return Array.isArray(value) ? cloneValue(value) : [];
 }
 
-function storyboardDescriptor(node: WorkflowNodeV2): WorkflowStoryboardDescriptor | null {
+function storyboardDescriptor(node: WorkflowNodeV2 | null | undefined): WorkflowStoryboardDescriptor | null {
+  if (!node) return null;
   const nested = recordConfig(node, 'storyboard');
   const dataUrl = optionalText(node.config.storyboardDataUrl ?? nested.dataUrl);
   const oraPath = optionalText(node.config.storyboardOraPath ?? nested.oraPath);
@@ -318,45 +320,39 @@ function annotationItemConstraints(
 function requireTransformPath(graph: WorkflowGraphV2, outputNodeId: string): {
   output: WorkflowNodeV2;
   transform: WorkflowNodeV2;
-  artDirection: WorkflowNodeV2;
+  artDirection: WorkflowNodeV2 | null;
+  brief: WorkflowNodeV2 | null;
+  visualConnections: readonly WorkflowTransformVisualConnection[];
   candidateReviewNodeId: string | null;
   sourceReviewNodeId: string | null;
 } {
   const output = graph.nodes.find((node) => node.id === outputNodeId && node.type === 'output');
   const path = resolveWorkflowCampaignPath(graph, { outputNodeId });
   const transform = graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform');
-  const sourceEdge = transform && graph.edges.find((edge) => edge.target.nodeId === transform.id && edge.target.portId === 'source');
-  const directArtDirection = graph.nodes.find((node) => node.id === sourceEdge?.source.nodeId && node.type === 'art-direction');
-  const sourceReview = graph.nodes.find((node) => node.id === sourceEdge?.source.nodeId && node.type === 'review');
-  const conceptEdge = sourceReview && graph.edges.find((edge) => (
-    edge.target.nodeId === sourceReview.id && edge.target.portId === 'candidates'
-  ));
-  const conceptTransform = graph.nodes.find((node) => node.id === conceptEdge?.source.nodeId && node.type === 'transform');
-  const conceptSourceEdge = conceptTransform && graph.edges.find((edge) => (
-    edge.target.nodeId === conceptTransform.id && edge.target.portId === 'source'
-  ));
-  const tracedArtDirection = graph.nodes.find((node) => (
-    node.id === conceptSourceEdge?.source.nodeId && node.type === 'art-direction'
-  ));
-  const artDirection = directArtDirection ?? tracedArtDirection;
-  const validSourcePort = directArtDirection
-    ? sourceEdge?.source.portId === 'layout'
-    : sourceReview
-      ? sourceEdge?.source.portId === 'selected'
-      : false;
-  if (!output || !path || !transform || !artDirection || !validSourcePort) {
+  const context = transform ? workflowTransformContext(graph, transform.id) : null;
+  const hasDirectedComposition = context?.artDirection
+    && context.sourceEdge?.source.nodeId === context.artDirection.id
+    && context.sourceEdge.source.portId === 'layout';
+  const hasAcceptedReview = context?.sourceReview
+    && context.sourceEdge?.source.nodeId === context.sourceReview.id
+    && context.sourceEdge.source.portId === 'selected';
+  const hasStandaloneVisualReferences = !context?.sourceEdge && (context?.directVisuals.length ?? 0) > 0;
+  if (!output || !path || !transform || !context
+    || (!hasDirectedComposition && !hasAcceptedReview && !hasStandaloneVisualReferences)) {
     throw new WorkflowTransformExecutionError(
       'INVALID_TRANSFORM_PATH',
-      'Square Output must be connected through a Generate Transform from Art Direction.',
-      'Reconnect Art Direction to Generate, then Generate to Square Output',
+      `${output?.title ?? 'Output'} must connect through a Transform with Directed composition or direct visual references.`,
+      'Connect Art Direction or visual references to the Transform, then connect the Transform to Output',
     );
   }
   return {
     output,
     transform,
-    artDirection,
+    artDirection: context.artDirection,
+    brief: context.brief,
+    visualConnections: context.visualInputs,
     candidateReviewNodeId: path.reviewNodeId,
-    sourceReviewNodeId: sourceReview?.id ?? null,
+    sourceReviewNodeId: context.sourceReview?.id ?? null,
   };
 }
 
@@ -486,7 +482,7 @@ async function campaignGenerateTransform(
     );
   }
   const {
-    output, transform, artDirection, candidateReviewNodeId, sourceReviewNodeId,
+    output, transform, artDirection, brief, visualConnections, candidateReviewNodeId, sourceReviewNodeId,
   } = requireTransformPath(graph, outputNodeId);
   if (candidateReviewNodeId && !options.allowUnpromotedReview && !options.candidateLineage) {
     throw new WorkflowTransformExecutionError(
@@ -546,8 +542,7 @@ async function campaignGenerateTransform(
     throw new WorkflowTransformExecutionError('NOT_READY', plan.blocked[0].message, 'Reconnect the blocked workflow inputs');
   }
 
-  const brief = graph.nodes.find((node) => node.type === 'brief');
-  const briefText = textConfig(brief ?? artDirection, brief ? 'objective' : 'prompt');
+  const briefText = textConfig(brief, 'objective');
   const artDirectionText = textConfig(artDirection, 'prompt');
   const transformInstructions = textConfig(transform, 'instructions');
   const storyboard = storyboardDescriptor(artDirection);
@@ -685,7 +680,6 @@ async function campaignGenerateTransform(
       throw error;
     }
   };
-  const inputEdges = graph.edges.filter((edge) => edge.target.nodeId === artDirection.id && edge.target.portId === 'assets');
   const sources: WorkflowTransformSource[] = [];
   if (sourceReviewNodeId) {
     const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: sourceReviewNodeId });
@@ -744,9 +738,10 @@ async function campaignGenerateTransform(
       bytes: executor.materialization === 'metadata-only' ? new Uint8Array() : bytes!,
     });
   }
-  for (const edge of inputEdges) {
-    const input = graph.nodes.find((node) => node.id === edge.source.nodeId && node.type === 'input');
-    if (!input) continue;
+  const requestedAssetKeys = new Set<string>();
+  const materializedAssetKeys = new Set<string>();
+  for (const connection of visualConnections) {
+    const { edge, node: input } = connection;
     const asset = boundAsset(input, options.assets);
     if (!asset) {
       if (input.config.required !== true) continue;
@@ -756,6 +751,9 @@ async function campaignGenerateTransform(
         `Replace the asset in ${input.title}`,
       );
     }
+    const requestedAssetKey = `${asset.id}\u0000${asset.relativePath}`;
+    if (requestedAssetKeys.has(requestedAssetKey)) continue;
+    requestedAssetKeys.add(requestedAssetKey);
     const material = await awaitMaterialization(() => options.resolveAsset(asset));
     let canonicalAssetId: string;
     let canonicalRelativePath: string;
@@ -799,6 +797,9 @@ async function campaignGenerateTransform(
       );
     }
     const contentHash = computedHash ?? claimedHash;
+    const materialKey = `${canonicalAssetId}\u0000${canonicalRelativePath}\u0000${contentHash}`;
+    if (materializedAssetKeys.has(materialKey)) continue;
+    materializedAssetKeys.add(materialKey);
     const sourceName = input.title.trim() || textConfig(input, 'slotId') || 'Connected visual input';
     const sourceRole = textConfig(input, 'role') || textConfig(input, 'note') || textConfig(input, 'slotId') || 'Connected visual input';
     sources.push({
@@ -834,7 +835,7 @@ async function campaignGenerateTransform(
   } : null;
   const prompt = [
     briefText ? `Creative brief:\n${briefText}` : '',
-    `Art direction:\n${artDirectionText}`,
+    artDirectionText ? `Art direction:\n${artDirectionText}` : '',
     transformInstructions ? `Transform instructions:\n${transformInstructions}` : '',
     sources.length > 0
       ? `Mandatory connected visual inputs:\n${sources.map((source, index) => `${index + 1}. ${source.name}${source.role ? ` - ${source.role}` : ''}`).join('\n')}`
@@ -866,7 +867,7 @@ async function campaignGenerateTransform(
     name: source.name,
     role: source.role,
   }));
-  if (storyboardBytes && storyboardBytes.length > 0 && storyboard) {
+  if (storyboardBytes && storyboardBytes.length > 0 && storyboard && artDirection) {
     provenanceSources.push({
       nodeId: artDirection.id,
       assetId: `storyboard-${artDirection.id}`,
