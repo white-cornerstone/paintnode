@@ -396,7 +396,7 @@ interface ActiveWorkflowAuthoringTransaction {
 
 interface WorkflowSaveSubmission {
   bytes: Uint8Array;
-  serializedBytes: string;
+  contentBytes: string;
   storeRevision: number;
   sessionIdentity: number;
   projectIdentity: string;
@@ -405,6 +405,18 @@ interface WorkflowSaveSubmission {
 
 function workflowGraphBytes(graph: WorkflowGraphV2): string {
   return new WorkflowGraphDomain(graph).serialize();
+}
+
+/**
+ * Viewport navigation is presentation state, not authored workflow content.
+ * Keep it in the file so a workflow can reopen at the last explicitly saved
+ * view, but exclude it from dirty-state reconciliation.
+ */
+function workflowContentBytes(graph: WorkflowGraphV2): string {
+  return workflowGraphBytes({
+    ...graph,
+    viewport: { panX: 0, panY: 0, zoom: 1 },
+  });
 }
 
 function immutableWorkflowHistoryBytes(graph: WorkflowGraphV2): string {
@@ -498,7 +510,7 @@ export class WorkflowStore {
   private authoringRedoStack: WorkflowAuthoringTransaction[] = [];
   private activeAuthoringTransaction: ActiveWorkflowAuthoringTransaction | null = null;
   private projectedGraphSnapshot: WorkflowGraphV2 | null = null;
-  private savedWorkflowBytes = $state<string | null>(null);
+  private savedWorkflowContentBytes = $state<string | null>(null);
   private savePathIntentSequence = 0;
   private activeSavePathIntentIdentity = 0;
   private activeSavePathIntentTarget: string | null = null;
@@ -517,9 +529,9 @@ export class WorkflowStore {
 
   get dirty(): boolean {
     this.rev;
-    return this.savedWorkflowBytes === null
+    return this.savedWorkflowContentBytes === null
       ? this.rev !== this.savedRev
-      : workflowGraphBytes(this.serialize()) !== this.savedWorkflowBytes;
+      : workflowContentBytes(this.serialize()) !== this.savedWorkflowContentBytes;
   }
 
   get graphRevision(): number {
@@ -1184,14 +1196,12 @@ export class WorkflowStore {
     if (panX === this.panX && panY === this.panY) return;
     this.panX = panX;
     this.panY = panY;
-    this.bump(true);
   }
 
   setZoom(nextZoom: number): void {
     const zoom = Math.min(4, Math.max(0.2, Number(nextZoom.toFixed(3))));
     if (zoom === this.zoom) return;
     this.zoom = zoom;
-    this.bump(true);
   }
 
   zoomAt(viewX: number, viewY: number, direction: WorkflowZoomMode): void {
@@ -1206,7 +1216,6 @@ export class WorkflowStore {
     this.zoom = zoom;
     this.panX = panX;
     this.panY = panY;
-    this.bump(true);
   }
 
   zoomBy(factor: number, viewX: number, viewY: number): void {
@@ -1221,13 +1230,11 @@ export class WorkflowStore {
     this.zoom = zoom;
     this.panX = panX;
     this.panY = panY;
-    this.bump(true);
   }
 
   resetZoom(): void {
     if (this.zoom === 1) return;
     this.zoom = 1;
-    this.bump(true);
   }
 
   setNodeIncluded(id: string, included: boolean): void {
@@ -3003,7 +3010,7 @@ export class WorkflowStore {
     }
     this.workflowSessionIdentity += 1;
     this.workflowMutationIdentity += 1;
-    this.savedWorkflowBytes = null;
+    this.savedWorkflowContentBytes = null;
     this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
     this.activeSavePathIntentTarget = null;
     this.transformExecutions = {};
@@ -3098,7 +3105,7 @@ export class WorkflowStore {
   }
 
   private captureCurrentSavedBaseline(): void {
-    this.savedWorkflowBytes = workflowGraphBytes(this.serialize());
+    this.savedWorkflowContentBytes = workflowContentBytes(this.serialize());
     this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
     this.activeSavePathIntentTarget = this.savedPath;
   }
@@ -3111,10 +3118,12 @@ export class WorkflowStore {
       this.activeSavePathIntentIdentity = ++this.savePathIntentSequence;
       this.activeSavePathIntentTarget = targetPath;
     }
-    const bytes = this.toBytes();
+    const graph = this.serialize();
+    const serializedBytes = workflowGraphBytes(graph);
+    const bytes = new TextEncoder().encode(serializedBytes);
     return {
       bytes,
-      serializedBytes: new TextDecoder().decode(bytes),
+      contentBytes: workflowContentBytes(graph),
       storeRevision: this.rev,
       sessionIdentity: this.workflowSessionIdentity,
       projectIdentity: project.identity,
@@ -3134,7 +3143,7 @@ export class WorkflowStore {
     this.activeSavePathIntentTarget = relativePath;
     this.savedPath = relativePath;
     this.savedRev = submission.storeRevision;
-    this.savedWorkflowBytes = submission.serializedBytes;
+    this.savedWorkflowContentBytes = submission.contentBytes;
     this.requiresExplicitSave = false;
     this.migrationSourcePath = null;
   }
