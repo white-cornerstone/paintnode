@@ -362,12 +362,20 @@ fn grok_edit_request_json(
         object.insert("resolution".into(), json!(resolution));
     }
     if let [single] = spec.image_paths.as_slice() {
-        object.insert("image".into(), json!({ "url": grok_png_data_uri(single)? }));
+        object.insert(
+            "image".into(),
+            json!({ "type": "image_url", "url": grok_png_data_uri(single)? }),
+        );
     } else {
         let images = spec
             .image_paths
             .iter()
-            .map(|path| Ok(json!({ "url": grok_png_data_uri(path)? })))
+            .map(|path| {
+                Ok(json!({
+                    "type": "image_url",
+                    "url": grok_png_data_uri(path)?,
+                }))
+            })
             .collect::<Result<Vec<_>, String>>()?;
         object.insert("images".into(), json!(images));
     }
@@ -3320,6 +3328,7 @@ mod tests {
         assert_eq!(body["response_format"], "b64_json");
         assert_eq!(body["aspect_ratio"], "16:9");
         assert_eq!(body["resolution"], "1k");
+        assert_eq!(body["image"]["type"], "image_url");
         let url = body["image"]["url"].as_str().expect("image url");
         assert!(url.starts_with("data:image/png;base64,"));
         assert!(body.get("images").is_none());
@@ -3352,6 +3361,7 @@ mod tests {
         let images = body["images"].as_array().expect("images array");
         assert_eq!(images.len(), 3);
         for image in images {
+            assert_eq!(image["type"], "image_url");
             let url = image["url"].as_str().expect("image url");
             assert!(url.starts_with("data:image/png;base64,"));
         }

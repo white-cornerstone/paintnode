@@ -139,6 +139,13 @@ export interface WorkflowNodeExecutor {
   provider: string;
   capabilities: readonly string[];
   materialization?: 'visual-bytes' | 'metadata-only';
+  /**
+   * Maximum image attachments accepted by the provider for one execution.
+   * This includes a materialized storyboard, when present. The workflow
+   * keeps higher-priority sources first (for example, an accepted Review
+   * result), so provider-specific limits can be applied deterministically.
+   */
+  maxInputImages?: number;
   executor: WorkflowRunExecutor;
   describeRun(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunProvider;
   describeRoles?(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunRecordV1['roles'];
@@ -416,6 +423,7 @@ export function createWorkflowCompositionExecutor(
   service: WorkflowCompositionService,
   options: {
     materialization?: 'visual-bytes' | 'metadata-only';
+    maxInputImages?: number;
     capabilities?: readonly string[];
     executor?: WorkflowRunExecutor;
     describeRun?: (request: Readonly<WorkflowTransformExecutionRequest>) => WorkflowRunProvider;
@@ -426,6 +434,9 @@ export function createWorkflowCompositionExecutor(
     provider,
     capabilities: Object.freeze([...(options.capabilities ?? ['generate'])]),
     materialization: options.materialization ?? 'visual-bytes',
+    ...(Number.isSafeInteger(options.maxInputImages) && options.maxInputImages! >= 0
+      ? { maxInputImages: options.maxInputImages }
+      : {}),
     executor: Object.freeze(options.executor ?? {
       id: 'campaign-generate', version: '1', requestSchemaVersion: '1',
     }),
@@ -833,12 +844,16 @@ async function campaignGenerateTransform(
       bytes: new Uint8Array(storyboardBytes),
     } : null,
   } : null;
+  const providerSourceCapacity = executor.maxInputImages === undefined
+    ? sources.length
+    : Math.max(0, executor.maxInputImages - (materializedStoryboard?.source ? 1 : 0));
+  const executionSources = sources.slice(0, providerSourceCapacity);
   const prompt = [
     briefText ? `Creative brief:\n${briefText}` : '',
     artDirectionText ? `Art direction:\n${artDirectionText}` : '',
     transformInstructions ? `Transform instructions:\n${transformInstructions}` : '',
-    sources.length > 0
-      ? `Mandatory connected visual inputs:\n${sources.map((source, index) => `${index + 1}. ${source.name}${source.role ? ` - ${source.role}` : ''}`).join('\n')}`
+    executionSources.length > 0
+      ? `Mandatory connected visual inputs:\n${executionSources.map((source, index) => `${index + 1}. ${source.name}${source.role ? ` - ${source.role}` : ''}`).join('\n')}`
       : '',
     placementConstraints.length > 0
       ? `Storyboard placement constraints:\n${placementConstraints.map((item, index) => `${index + 1}. ${item}`).join('\n')}`
@@ -855,11 +870,11 @@ async function campaignGenerateTransform(
     artDirection: artDirectionText,
     transform: { capability, instructions: transformInstructions, advanced, ai: nodeAi },
     prompt,
-    sources,
+    sources: executionSources,
     storyboard: materializedStoryboard,
     output: outputRequest,
   };
-  const provenanceSources = sources.map((source) => ({
+  const provenanceSources = executionSources.map((source) => ({
     nodeId: source.nodeId,
     assetId: source.assetId,
     relativePath: source.relativePath,

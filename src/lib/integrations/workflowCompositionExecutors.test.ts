@@ -175,6 +175,7 @@ describe('desktop workflow composition adapters', () => {
     expect(executor.executor).toEqual({
       id: 'paintnode-grok-workflow', version: '1', requestSchemaVersion: '1',
     });
+    expect(executor.maxInputImages).toBe(3);
     expect(executor.describeRun(runRequest)).toEqual({
       id: 'grok', model: 'grok-imagine-image-quality',
       effectiveOptions: { imageResolution: '2k', editChecksLevel: 2 },
