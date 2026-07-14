@@ -309,10 +309,8 @@ pub fn run() {
             }
 
             #[cfg(target_os = "macos")]
-            if matches!(event, RunEvent::Ready) {
-                if app.get_webview_window("splash").is_none() {
-                    focus_main_window(app);
-                }
+            if matches!(event, RunEvent::Ready) && app.get_webview_window("splash").is_none() {
+                focus_main_window(app);
             }
 
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]

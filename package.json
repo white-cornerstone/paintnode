@@ -1,6 +1,6 @@
 {
   "name": "paintnode",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "Use managed Codex and Claude runtimes plus Antigravity to plan, generate, and edit image layers.",
   "homepage": "https://paintnode.com",
