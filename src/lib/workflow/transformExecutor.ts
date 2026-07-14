@@ -32,6 +32,8 @@ import {
   type WorkflowRunIdentity,
   type WorkflowRunProgressEvent,
 } from './runControl';
+import { workflowTransformContext, type WorkflowTransformVisualConnection } from './transformContext';
+import { workflowConceptPreviewTarget, workflowConceptReviewNode } from './transformRole';
 
 export interface WorkflowProjectAsset {
   id: string;
@@ -138,6 +140,13 @@ export interface WorkflowNodeExecutor {
   provider: string;
   capabilities: readonly string[];
   materialization?: 'visual-bytes' | 'metadata-only';
+  /**
+   * Maximum image attachments accepted by the provider for one execution.
+   * This includes a materialized storyboard, when present. The workflow
+   * keeps higher-priority sources first (for example, an accepted Review
+   * result), so provider-specific limits can be applied deterministically.
+   */
+  maxInputImages?: number;
   executor: WorkflowRunExecutor;
   describeRun(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunProvider;
   describeRoles?(request: Readonly<WorkflowTransformExecutionRequest>): WorkflowRunRecordV1['roles'];
@@ -246,8 +255,8 @@ function validAsset(asset: WorkflowProjectAsset, output: WorkflowNodeV2): boolea
   );
 }
 
-function textConfig(node: WorkflowNodeV2, key: string): string {
-  return typeof node.config[key] === 'string' ? node.config[key].trim() : '';
+function textConfig(node: WorkflowNodeV2 | null | undefined, key: string): string {
+  return typeof node?.config[key] === 'string' ? node.config[key].trim() : '';
 }
 
 function numberConfig(node: WorkflowNodeV2, key: string): number {
@@ -274,7 +283,8 @@ function unknownArray(value: unknown): unknown[] {
   return Array.isArray(value) ? cloneValue(value) : [];
 }
 
-function storyboardDescriptor(node: WorkflowNodeV2): WorkflowStoryboardDescriptor | null {
+function storyboardDescriptor(node: WorkflowNodeV2 | null | undefined): WorkflowStoryboardDescriptor | null {
+  if (!node) return null;
   const nested = recordConfig(node, 'storyboard');
   const dataUrl = optionalText(node.config.storyboardDataUrl ?? nested.dataUrl);
   const oraPath = optionalText(node.config.storyboardOraPath ?? nested.oraPath);
@@ -318,45 +328,105 @@ function annotationItemConstraints(
 function requireTransformPath(graph: WorkflowGraphV2, outputNodeId: string): {
   output: WorkflowNodeV2;
   transform: WorkflowNodeV2;
-  artDirection: WorkflowNodeV2;
+  artDirection: WorkflowNodeV2 | null;
+  brief: WorkflowNodeV2 | null;
+  visualConnections: readonly WorkflowTransformVisualConnection[];
   candidateReviewNodeId: string | null;
   sourceReviewNodeId: string | null;
 } {
   const output = graph.nodes.find((node) => node.id === outputNodeId && node.type === 'output');
   const path = resolveWorkflowCampaignPath(graph, { outputNodeId });
   const transform = graph.nodes.find((node) => node.id === path?.transformNodeId && node.type === 'transform');
-  const sourceEdge = transform && graph.edges.find((edge) => edge.target.nodeId === transform.id && edge.target.portId === 'source');
-  const directArtDirection = graph.nodes.find((node) => node.id === sourceEdge?.source.nodeId && node.type === 'art-direction');
-  const sourceReview = graph.nodes.find((node) => node.id === sourceEdge?.source.nodeId && node.type === 'review');
-  const conceptEdge = sourceReview && graph.edges.find((edge) => (
-    edge.target.nodeId === sourceReview.id && edge.target.portId === 'candidates'
-  ));
-  const conceptTransform = graph.nodes.find((node) => node.id === conceptEdge?.source.nodeId && node.type === 'transform');
-  const conceptSourceEdge = conceptTransform && graph.edges.find((edge) => (
-    edge.target.nodeId === conceptTransform.id && edge.target.portId === 'source'
-  ));
-  const tracedArtDirection = graph.nodes.find((node) => (
-    node.id === conceptSourceEdge?.source.nodeId && node.type === 'art-direction'
-  ));
-  const artDirection = directArtDirection ?? tracedArtDirection;
-  const validSourcePort = directArtDirection
-    ? sourceEdge?.source.portId === 'layout'
-    : sourceReview
-      ? sourceEdge?.source.portId === 'selected'
-      : false;
-  if (!output || !path || !transform || !artDirection || !validSourcePort) {
+  const context = transform ? workflowTransformContext(graph, transform.id) : null;
+  const hasDirectedComposition = context?.artDirection
+    && context.sourceEdge?.source.nodeId === context.artDirection.id
+    && context.sourceEdge.source.portId === 'layout';
+  const hasAcceptedReview = context?.sourceReview
+    && context.sourceEdge?.source.nodeId === context.sourceReview.id
+    && context.sourceEdge.source.portId === 'selected';
+  const hasStandaloneVisualReferences = !context?.sourceEdge && (context?.directVisuals.length ?? 0) > 0;
+  if (!output || !path || !transform || !context
+    || (!hasDirectedComposition && !hasAcceptedReview && !hasStandaloneVisualReferences)) {
     throw new WorkflowTransformExecutionError(
       'INVALID_TRANSFORM_PATH',
-      'Square Output must be connected through a Generate Transform from Art Direction.',
-      'Reconnect Art Direction to Generate, then Generate to Square Output',
+      `${output?.title ?? 'Output'} must connect through a Transform with Directed composition or direct visual references.`,
+      'Connect Art Direction or visual references to the Transform, then connect the Transform to Output',
     );
   }
   return {
     output,
     transform,
-    artDirection,
-    candidateReviewNodeId: path.reviewNodeId,
-    sourceReviewNodeId: sourceReview?.id ?? null,
+    artDirection: context.artDirection,
+    brief: context.brief,
+    visualConnections: context.visualInputs,
+    candidateReviewNodeId: workflowConceptReviewNode(graph, transform.id)?.id ?? null,
+    sourceReviewNodeId: context.sourceReview?.id ?? null,
+  };
+}
+
+function withConceptPreviewOutput(
+  inputGraph: WorkflowGraphV2,
+  transformNodeId: string,
+): { graph: WorkflowGraphV2; outputNodeId: string } {
+  const target = workflowConceptPreviewTarget(inputGraph, transformNodeId);
+  if (!target) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_TRANSFORM_PATH',
+      'Concept branches require a Transform connected to Review.',
+      'Connect the Concept Generator to a Review node',
+    );
+  }
+  if (inputGraph.nodes.some((node) => node.id === target.nodeId)) {
+    throw new WorkflowTransformExecutionError(
+      'INVALID_TRANSFORM_PATH',
+      'The concept preview target conflicts with an existing workflow node.',
+      'Rename or reconnect the Concept Generator',
+    );
+  }
+  const transform = inputGraph.nodes.find((node) => node.id === transformNodeId)!;
+  const output: WorkflowNodeV2 = {
+    id: target.nodeId,
+    type: 'output',
+    title: target.title,
+    position: { x: transform.position.x + transform.size.width + 24, y: transform.position.y },
+    size: { width: 220, height: 280 },
+    color: '#3a3c42',
+    ports: {
+      inputs: [{ id: 'source', label: 'Concept preview', dataType: 'layout', required: true }],
+      outputs: [],
+    },
+    config: {
+      creatorRole: 'concept-preview-output',
+      displayName: target.title,
+      finalWidth: target.width,
+      finalHeight: target.height,
+      outputAssetId: null,
+      outputRelativePath: null,
+    },
+    runRecordIds: [],
+  };
+  const graph: WorkflowGraphV2 = {
+    ...inputGraph,
+    nodes: [...inputGraph.nodes, output],
+    edges: [...inputGraph.edges, {
+      id: `edge-${transformNodeId}-${target.nodeId}`,
+      source: { nodeId: transformNodeId, portId: 'result' },
+      target: { nodeId: target.nodeId, portId: 'source' },
+    }],
+  };
+  return { graph: new WorkflowGraphDomain(graph).graph, outputNodeId: target.nodeId };
+}
+
+function withoutConceptPreviewOutput(
+  graph: WorkflowGraphV2,
+  outputNodeId: string,
+): WorkflowGraphV2 {
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((node) => node.id !== outputNodeId),
+    edges: graph.edges.filter((edge) => (
+      edge.source.nodeId !== outputNodeId && edge.target.nodeId !== outputNodeId
+    )),
   };
 }
 
@@ -420,6 +490,7 @@ export function createWorkflowCompositionExecutor(
   service: WorkflowCompositionService,
   options: {
     materialization?: 'visual-bytes' | 'metadata-only';
+    maxInputImages?: number;
     capabilities?: readonly string[];
     executor?: WorkflowRunExecutor;
     describeRun?: (request: Readonly<WorkflowTransformExecutionRequest>) => WorkflowRunProvider;
@@ -430,6 +501,9 @@ export function createWorkflowCompositionExecutor(
     provider,
     capabilities: Object.freeze([...(options.capabilities ?? ['generate'])]),
     materialization: options.materialization ?? 'visual-bytes',
+    ...(Number.isSafeInteger(options.maxInputImages) && options.maxInputImages! >= 0
+      ? { maxInputImages: options.maxInputImages }
+      : {}),
     executor: Object.freeze(options.executor ?? {
       id: 'campaign-generate', version: '1', requestSchemaVersion: '1',
     }),
@@ -486,7 +560,7 @@ async function campaignGenerateTransform(
     );
   }
   const {
-    output, transform, artDirection, candidateReviewNodeId, sourceReviewNodeId,
+    output, transform, artDirection, brief, visualConnections, candidateReviewNodeId, sourceReviewNodeId,
   } = requireTransformPath(graph, outputNodeId);
   if (candidateReviewNodeId && !options.allowUnpromotedReview && !options.candidateLineage) {
     throw new WorkflowTransformExecutionError(
@@ -546,8 +620,7 @@ async function campaignGenerateTransform(
     throw new WorkflowTransformExecutionError('NOT_READY', plan.blocked[0].message, 'Reconnect the blocked workflow inputs');
   }
 
-  const brief = graph.nodes.find((node) => node.type === 'brief');
-  const briefText = textConfig(brief ?? artDirection, brief ? 'objective' : 'prompt');
+  const briefText = textConfig(brief, 'objective');
   const artDirectionText = textConfig(artDirection, 'prompt');
   const transformInstructions = textConfig(transform, 'instructions');
   const storyboard = storyboardDescriptor(artDirection);
@@ -685,7 +758,6 @@ async function campaignGenerateTransform(
       throw error;
     }
   };
-  const inputEdges = graph.edges.filter((edge) => edge.target.nodeId === artDirection.id && edge.target.portId === 'assets');
   const sources: WorkflowTransformSource[] = [];
   if (sourceReviewNodeId) {
     const resolution = resolveWorkflowReviewTopology(graph, { reviewNodeId: sourceReviewNodeId });
@@ -744,9 +816,10 @@ async function campaignGenerateTransform(
       bytes: executor.materialization === 'metadata-only' ? new Uint8Array() : bytes!,
     });
   }
-  for (const edge of inputEdges) {
-    const input = graph.nodes.find((node) => node.id === edge.source.nodeId && node.type === 'input');
-    if (!input) continue;
+  const requestedAssetKeys = new Set<string>();
+  const materializedAssetKeys = new Set<string>();
+  for (const connection of visualConnections) {
+    const { edge, node: input } = connection;
     const asset = boundAsset(input, options.assets);
     if (!asset) {
       if (input.config.required !== true) continue;
@@ -756,6 +829,9 @@ async function campaignGenerateTransform(
         `Replace the asset in ${input.title}`,
       );
     }
+    const requestedAssetKey = `${asset.id}\u0000${asset.relativePath}`;
+    if (requestedAssetKeys.has(requestedAssetKey)) continue;
+    requestedAssetKeys.add(requestedAssetKey);
     const material = await awaitMaterialization(() => options.resolveAsset(asset));
     let canonicalAssetId: string;
     let canonicalRelativePath: string;
@@ -799,6 +875,9 @@ async function campaignGenerateTransform(
       );
     }
     const contentHash = computedHash ?? claimedHash;
+    const materialKey = `${canonicalAssetId}\u0000${canonicalRelativePath}\u0000${contentHash}`;
+    if (materializedAssetKeys.has(materialKey)) continue;
+    materializedAssetKeys.add(materialKey);
     const sourceName = input.title.trim() || textConfig(input, 'slotId') || 'Connected visual input';
     const sourceRole = textConfig(input, 'role') || textConfig(input, 'note') || textConfig(input, 'slotId') || 'Connected visual input';
     sources.push({
@@ -832,12 +911,16 @@ async function campaignGenerateTransform(
       bytes: new Uint8Array(storyboardBytes),
     } : null,
   } : null;
+  const providerSourceCapacity = executor.maxInputImages === undefined
+    ? sources.length
+    : Math.max(0, executor.maxInputImages - (materializedStoryboard?.source ? 1 : 0));
+  const executionSources = sources.slice(0, providerSourceCapacity);
   const prompt = [
     briefText ? `Creative brief:\n${briefText}` : '',
-    `Art direction:\n${artDirectionText}`,
+    artDirectionText ? `Art direction:\n${artDirectionText}` : '',
     transformInstructions ? `Transform instructions:\n${transformInstructions}` : '',
-    sources.length > 0
-      ? `Mandatory connected visual inputs:\n${sources.map((source, index) => `${index + 1}. ${source.name}${source.role ? ` - ${source.role}` : ''}`).join('\n')}`
+    executionSources.length > 0
+      ? `Mandatory connected visual inputs:\n${executionSources.map((source, index) => `${index + 1}. ${source.name}${source.role ? ` - ${source.role}` : ''}`).join('\n')}`
       : '',
     placementConstraints.length > 0
       ? `Storyboard placement constraints:\n${placementConstraints.map((item, index) => `${index + 1}. ${item}`).join('\n')}`
@@ -854,11 +937,11 @@ async function campaignGenerateTransform(
     artDirection: artDirectionText,
     transform: { capability, instructions: transformInstructions, advanced, ai: nodeAi },
     prompt,
-    sources,
+    sources: executionSources,
     storyboard: materializedStoryboard,
     output: outputRequest,
   };
-  const provenanceSources = sources.map((source) => ({
+  const provenanceSources = executionSources.map((source) => ({
     nodeId: source.nodeId,
     assetId: source.assetId,
     relativePath: source.relativePath,
@@ -866,7 +949,7 @@ async function campaignGenerateTransform(
     name: source.name,
     role: source.role,
   }));
-  if (storyboardBytes && storyboardBytes.length > 0 && storyboard) {
+  if (storyboardBytes && storyboardBytes.length > 0 && storyboard && artDirection) {
     provenanceSources.push({
       nodeId: artDirection.id,
       assetId: `storyboard-${artDirection.id}`,
@@ -1144,4 +1227,44 @@ export async function executeCampaignGenerateTransform(
   const result = await campaignGenerateTransform(inputGraph, outputNodeId, options, false);
   if (!('graph' in result)) throw new Error('Campaign Generate execution returned a preflight outcome.');
   return result;
+}
+
+export async function prepareConceptGenerateTransform(
+  inputGraph: WorkflowGraphV2,
+  transformNodeId: string,
+  options: ExecuteCampaignGenerateOptions,
+): Promise<WorkflowPreparedCampaignGenerateTransform> {
+  const target = withConceptPreviewOutput(inputGraph, transformNodeId);
+  return prepareCampaignGenerateTransform(target.graph, target.outputNodeId, {
+    ...options,
+    allowUnpromotedReview: true,
+  });
+}
+
+export async function executeConceptGenerateTransform(
+  inputGraph: WorkflowGraphV2,
+  transformNodeId: string,
+  options: ExecuteCampaignGenerateOptions,
+): Promise<WorkflowTransformExecutionOutcome> {
+  const target = withConceptPreviewOutput(inputGraph, transformNodeId);
+  try {
+    const outcome = await executeCampaignGenerateTransform(target.graph, target.outputNodeId, {
+      ...options,
+      allowUnpromotedReview: true,
+    });
+    return {
+      ...outcome,
+      graph: withoutConceptPreviewOutput(outcome.graph, target.outputNodeId),
+    };
+  } catch (error) {
+    if (error instanceof WorkflowTransformExecutionError && error.failureGraph) {
+      throw new WorkflowTransformExecutionError(
+        error.code,
+        error.message,
+        error.nextAction,
+        withoutConceptPreviewOutput(error.failureGraph, target.outputNodeId),
+      );
+    }
+    throw error;
+  }
 }

@@ -10,9 +10,7 @@
     cancelAiRun,
     decoupleAntigravityImage,
     decoupleCodexImage,
-    generateAntigravityRetouchImage,
-    generateCodexRetouchImage,
-    generateGrokRetouchImage,
+    extractGrokAsset,
     isDesktop,
     providerQaMode,
     readProjectAsset,
@@ -21,6 +19,7 @@
     storeProjectAssetBytes,
     type ProjectAsset,
     type ProjectFile,
+    type WorkflowSourceImage,
   } from '../integrations/desktop';
   import { bytesToBitmap, canvasToPngBytes } from '../io';
   import { PaintDocument } from '../engine/Document.svelte';
@@ -28,6 +27,7 @@
   import { modelToPlainText } from '../engine/text/model';
   import { Viewport } from '../engine/Viewport';
   import type { PointerInfo } from '../engine/tools/Tool';
+  import { canConsumeWheel, wheelDeltaPixels } from '../engine/wheelScrollChain';
   import { wheelZoomFactor } from '../engine/zoomGesture';
   import { clampWorkflowPan as clampWorkflowPanGeometry } from '../workflow/viewportGeometry';
   import { compositeToCanvas } from '../engine/compositor';
@@ -40,7 +40,7 @@
   import { workflowBoardViewport } from '../state/workflowBoardViewport.svelte';
   import { directorModeFromRunOptions, imageProviderFromRunOptions } from '../ai/taskSupport';
   import { ui } from '../state/ui.svelte';
-  import { aiTasks } from '../state/aiTasks.svelte';
+  import { aiTasks, type AiTask, type WorkflowTaskDetail } from '../state/aiTasks.svelte';
   import {
     workflow,
     type WorkflowAssetNode,
@@ -71,6 +71,11 @@
     workflowReadiness,
     workflowCandidateBranchResultSummary,
     workflowCandidateProgressLabel,
+    workflowExtractionQuickLinks,
+    workflowExtractedAssetLinks,
+    workflowInputAssetScope,
+    workflowDisconnectMode,
+    workflowNodeDisconnectLinks,
     resolveWorkflowCampaignPath,
     shouldRetryReviewVerificationAfterRefresh,
     type CreatorNodeType,
@@ -79,29 +84,44 @@
     type WorkflowSelectiveRunMode,
     type WorkflowStoryboardDescriptor,
     type WorkflowReviewVerificationState,
+    type WorkflowInputAssetScope,
+    type WorkflowExtractedAssetLink,
+    type WorkflowDisconnectLink,
     WorkflowReviewVerificationCoordinator,
     resolveWorkflowNodeAiRunOptions,
+    workflowTransformContext,
+    workflowConceptReviewNode,
+    workflowConceptPreviewTarget,
+    workflowTransformRole,
+    workflowTaskUpstreamNodeIds,
     type WorkflowNodeV2,
   } from '../workflow';
   import {
     canvasPngBlob,
-    assetSheetGuidelineDataUrl,
+    assetExtractionImageModelSources,
     composeAssetExtractionSources,
     cropAssetIndexSheet,
     decoupledLayerCanvas,
+    validateExtractedAssetCanvas,
     workflowAssetExtractionPrompt,
+    workflowAssetExtractionExecution,
+    workflowPlannedAssetSheetPrompt,
+    type AssetExtractionSource,
     type AssetSheetCount,
   } from '../workflow/assetExtraction';
   import { restoreExternalDialogTrigger, workflowInitialFocusSelector } from '../state/workflowFocus';
   import { isTypingTarget } from '../state/editing';
   import { openWorkflowResultInEditor, type OpenWorkflowResultRequest } from '../state/workflowEditorCommands';
-  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Link, Open, PaintBrush, SlideSize } from '../icons';
+  import { ArrowSync, CheckmarkCircle, CommentNote, Delete, Dismiss, DocumentSave, Edit, ErrorCircle, Image, ImageMultiple, Open, PaintBrush, SlideSize } from '../icons';
+  import Modal from './Modal.svelte';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import WorkflowNodePorts from './workflow/WorkflowNodePorts.svelte';
   import WorkflowNodePreflight from './workflow/WorkflowNodePreflight.svelte';
   import WorkflowNodeAiOptions from './workflow/WorkflowNodeAiOptions.svelte';
   import WorkflowNodeTitle from './workflow/WorkflowNodeTitle.svelte';
+  import WorkflowNodeDisconnectButton from './workflow/WorkflowNodeDisconnectButton.svelte';
+  import WorkflowNodeTaskLock from './workflow/WorkflowNodeTaskLock.svelte';
   import { annotationFromDrag, renderAnnotatedCanvas, visibleAnnotations, type AnnotationItem } from '../engine/annotations';
   import {
     createAntigravityWorkflowTransformExecutor,
@@ -136,7 +156,9 @@
   };
 
   const desktop = isDesktop();
+  const inputCreatorDefinition = creatorNodeDefinition('input');
   const briefCreatorDefinition = creatorNodeDefinition('brief');
+  const artDirectionCreatorDefinition = creatorNodeDefinition('art-direction');
   const runOptions = $derived(resolveWorkflowNodeAiRunOptions(
     aiRunOptionsFromSettings(settings.value),
     workflow.aiDefaults,
@@ -153,6 +175,7 @@
   let qaScenario = $state<ProviderFreeQaScenario>('success');
   let candidateCount = $state(3);
   let candidateConcurrency = $state(2);
+  let retryingCandidateId = $state<string | null>(null);
   let selectedReviewCandidates = $state<Record<string, string>>({});
   let aiReviewMessages = $state<Record<string, { running: boolean; message: string; error: string }>>({});
   let reviewVerificationState = $state<WorkflowReviewVerificationState>({
@@ -173,7 +196,6 @@
   let dragging: { type: 'asset' | 'prompt' | 'creator' | 'output' | 'unsupported'; id?: string; dx: number; dy: number } | null = null;
   let panning: { x: number; y: number } | null = null;
   let connecting = $state<{ from: { nodeId: WorkflowNodeId; portId: string }; x: number; y: number } | null>(null);
-  let drawing = $state<{ type: 'asset' | 'composition' | 'output'; x: number; y: number; width: number; height: number } | null>(null);
   let sketching = false;
   let altDown = $state(false);
   let boardEl = $state<HTMLDivElement>();
@@ -182,6 +204,7 @@
   let revisionDirectorRequester = $state<WorkflowDirectorRevisionRequester | null>(null);
   let revisionDirectorInstruction = $state('Refine this workflow while preserving accepted candidates and run history.');
   let revisionDirectorTitle = $state('Revise current workflow');
+  let revisionDirectorTaskNodeIds = $state<string[]>([]);
   let boardWidth = $state(1);
   let boardHeight = $state(1);
   let storyboardCanvas = $state<HTMLCanvasElement>();
@@ -217,8 +240,10 @@
   let handledPasteRequest = 0;
   let clipboardImporting = $state(false);
   let assetPreviewMenu = $state<AssetPreviewMenu | null>(null);
-
-  const ASSET_NODE_W = 205;
+  let disconnectDialog = $state<{ nodeId: string; nodeTitle: string; links: WorkflowDisconnectLink[] } | null>(null);
+  let disconnectSelections = $state<Record<string, boolean>>({});
+  let disconnectUndoNotice = $state<{ count: number } | null>(null);
+  let disconnectUndoTimer = 0;
 
   const assets = $derived(project.current?.assets.filter((asset) => asset.exists) ?? []);
   const oraDocuments = $derived(project.current?.files.filter((file) => file.exists && /\.ora$/i.test(file.name)) ?? []);
@@ -231,6 +256,29 @@
       : workflow.zoomMode,
   );
   const graphConnections = $derived(workflow.connections);
+  const selectedDisconnectCount = $derived(Object.values(disconnectSelections).filter(Boolean).length);
+
+  function workflowTaskDetail(
+    providerLabel: string,
+    outputName: string,
+    rootNodeIds: readonly string[],
+    includeUpstream = true,
+  ): WorkflowTaskDetail {
+    const graph = workflow.graphSnapshot();
+    const nodeIds = includeUpstream
+      ? workflowTaskUpstreamNodeIds(graph, rootNodeIds)
+      : graph.nodes.filter((node) => rootNodeIds.includes(node.id)).map((node) => node.id);
+    return { kind: 'workflow', providerLabel, outputName, workflowId: graph.id, nodeIds };
+  }
+
+  function workflowNodeTasks(nodeId: string): AiTask[] {
+    workflow.rev;
+    return aiTasks.runningForWorkflowNode(workflow.graphSnapshot().id, nodeId);
+  }
+
+  function connectionHasRunningTask(connection: WorkflowConnection): boolean {
+    return workflowNodeTasks(connection.from).length > 0 || workflowNodeTasks(connection.to).length > 0;
+  }
   const hasCompositionNode = $derived.by(() => {
     workflow.rev;
     return workflow.graphSnapshot().nodes.some((node) => node.id === 'composition');
@@ -334,6 +382,7 @@
 
   onDestroy(() => {
     boardDestroyed = true;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
     reviewVerificationCoordinator.reset();
     endStoryboardEditSession();
   });
@@ -475,6 +524,10 @@
     const observer = new ResizeObserver(scheduleResize);
     observer.observe(board);
     const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey && scrollNodeUnderPointer(event, board)) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       if (event.ctrlKey || event.metaKey) {
         const rect = board.getBoundingClientRect();
@@ -491,6 +544,44 @@
       board.removeEventListener('wheel', onWheel);
     };
   });
+
+  function scrollNodeUnderPointer(event: WheelEvent, board: HTMLElement): boolean {
+    if (!(event.target instanceof Element)) return false;
+    const node = event.target.closest<HTMLElement>('article[data-workflow-node]');
+    if (!node || !board.contains(node)) return false;
+    const body = node.querySelector<HTMLElement>(
+      ':scope > .creator-node-body, :scope > .specialized-node-body, :scope > .prompt-node-body',
+    );
+    if (!body) return false;
+
+    const candidates: HTMLElement[] = [];
+    let current: Element | null = event.target;
+    while (current && current !== node) {
+      if (current instanceof HTMLElement && body.contains(current) && isUserScrollable(current)) {
+        candidates.push(current);
+      }
+      current = current.parentElement;
+    }
+    if (!candidates.includes(body)) candidates.push(body);
+
+    for (const candidate of candidates) {
+      const deltaX = wheelDeltaPixels(event.deltaX, event.deltaMode, candidate.clientWidth);
+      const deltaY = wheelDeltaPixels(event.deltaY, event.deltaMode, candidate.clientHeight);
+      if (!canConsumeWheel(candidate, deltaX, deltaY)) continue;
+      candidate.scrollLeft += deltaX;
+      candidate.scrollTop += deltaY;
+      return true;
+    }
+    return false;
+  }
+
+  function isUserScrollable(element: HTMLElement): boolean {
+    const style = getComputedStyle(element);
+    return style.overflowX === 'auto'
+      || style.overflowX === 'scroll'
+      || style.overflowY === 'auto'
+      || style.overflowY === 'scroll';
+  }
 
   function assetFor(node: WorkflowAssetNode): ProjectAsset | null {
     return assets.find((asset) => asset.id === node.assetId || asset.relativePath === node.relativePath) ?? null;
@@ -526,6 +617,7 @@
   }
 
   async function assignWorkflowAsset(nodeId: string, value: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     if (value.startsWith('asset:')) {
       workflow.assignAsset(nodeId, assets.find((item) => item.id === value.slice(6)) ?? null);
       return;
@@ -557,6 +649,7 @@
   }
 
   function showAssetPreviewMenu(nodeId: string, clientX: number, clientY: number): void {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     workflow.select({ kind: 'asset', id: nodeId });
     assetPreviewMenu = {
       nodeId,
@@ -567,6 +660,7 @@
 
   async function pasteClipboardImage(nodeId: string): Promise<void> {
     assetPreviewMenu = null;
+    if (workflowNodeTasks(nodeId).length > 0) return;
     if (clipboardImporting) return;
     if (!desktop) {
       error = 'Clipboard image import is available only in the PaintNode desktop app.';
@@ -633,47 +727,27 @@
     }));
   });
 
-  type ExtractedAssetLink = { id: string; name: string; relativePath: string };
-
-  function extractedAssetLinks(config: Record<string, unknown>): ExtractedAssetLink[] {
-    const value = config.resultAssets;
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
-      const record = item as Record<string, unknown>;
-      return typeof record.id === 'string' && typeof record.name === 'string' && typeof record.relativePath === 'string'
-        ? [{ id: record.id, name: record.name, relativePath: record.relativePath }]
-        : [];
-    });
+  function extractionQuickLinks() {
+    workflow.rev;
+    return workflowExtractionQuickLinks(workflow.graphSnapshot());
   }
 
-  function extractionQuickLinks(): Array<ExtractedAssetLink & { nodeName: string }> {
-    return workflow.creatorNodes.flatMap((node) => node.type === 'extract-assets'
-      ? extractedAssetLinks(node.config).map((asset) => ({ ...asset, nodeName: node.name }))
-      : []);
+  function extractionScopeFor(nodeId: string): WorkflowInputAssetScope | null {
+    workflow.rev;
+    return workflowInputAssetScope(workflow.graphSnapshot(), nodeId);
+  }
+
+  function availableExtractedAssetLinks<T extends { id: string }>(links: T[]): T[] {
+    const availableIds = new Set(assets.map((asset) => asset.id));
+    return links.filter((link) => availableIds.has(link.id));
   }
 
   function extractionConnectedCount(nodeId: string, portId: 'sources' | 'support'): number {
     return workflow.incoming(nodeId).filter((connection) => connection.targetPortId === portId).length;
   }
 
-  async function extractionMaskPng(sourcePng: Uint8Array): Promise<Uint8Array> {
-    const bitmap = await bytesToBitmap(sourcePng);
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Could not prepare the extraction mask.');
-      context.fillStyle = '#fff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      return canvasToPngBytes(canvas);
-    } finally {
-      bitmap.close();
-    }
-  }
-
   async function runAssetExtraction(nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     const node = workflow.creatorNodes.find((item) => item.id === nodeId && item.type === 'extract-assets');
     if (!node) return;
     const graphNode = workflow.graphSnapshot().nodes.find((item) => item.id === nodeId);
@@ -711,21 +785,26 @@
     }
     const extractionController = new AbortController();
     let activeExtractionRunId: string | null = null;
+    const initialProgress = 'Preparing source and support images…';
     const extractionTask = aiTasks.create({
       projectPath: taskProjectPath,
       kind: 'workflow',
       title: `Extract assets: ${node.name}`,
       subtitle: `${extractionRunOptions.directorProvider} → ${extractionProvider}`,
-      progress: 'Preparing source and support images…',
-      detail: { kind: 'workflow', providerLabel: extractionProvider, outputName: node.name },
+      progress: initialProgress,
+      detail: workflowTaskDetail(extractionProvider, node.name, [nodeId]),
     });
     aiTasks.setCancel(extractionTask.id, async () => {
       extractionController.abort();
       if (activeExtractionRunId) await cancelAiRun(activeExtractionRunId);
     });
-    assetExtractionStates[nodeId] = { running: true, message: 'Preparing source and support images…', error: '' };
+    const setExtractionProgress = (message: string): void => {
+      assetExtractionStates[nodeId] = { running: true, message, error: '' };
+      aiTasks.setProgress(extractionTask.id, message);
+    };
+    setExtractionProgress(initialProgress);
     try {
-      const combined: Array<{ name: string; dataUrl: string; role: 'source' | 'support' }> = [];
+      const combined: AssetExtractionSource[] = [];
       for (const connection of incoming.filter((item) => item.targetPortId === 'sources' || item.targetPortId === 'support')) {
         const inputNode = workflow.nodes.find((item) => item.id === connection.from);
         if (!inputNode) continue;
@@ -751,92 +830,170 @@
       if (!combined.some((item) => item.role === 'source')) {
         throw new Error('Connect at least one source image to the Source images input.');
       }
-      if (mode === 'fast') {
-        combined.push({
-          name: `INDEX SHEET GUIDELINE · ${assetsPerSheet} cells`,
-          dataUrl: assetSheetGuidelineDataUrl(assetsPerSheet),
-          role: 'support',
-        });
+      const grokExtractionSources: WorkflowSourceImage[] = extractionProvider === 'grok'
+        ? await Promise.all(assetExtractionImageModelSources(combined).map(async (item) => ({
+            name: item.name,
+            role: item.role === 'source' ? 'Extraction source' : 'Annotated support',
+            bytes: new Uint8Array(await (await fetch(item.dataUrl)).arrayBuffer()),
+          })))
+        : [];
+      if (mode !== 'fast' && grokExtractionSources.length > 3) {
+        throw new Error('Grok asset extraction supports up to 3 connected source or support images. Remove extra inputs or switch the image provider.');
       }
-      const inputPng = await composeAssetExtractionSources(combined);
+      const planningInputPng = await composeAssetExtractionSources(combined);
+      const inputPng = mode === 'fast'
+        ? await composeAssetExtractionSources(combined, false)
+        : planningInputPng;
       const runId = createRunId();
       activeExtractionRunId = runId;
       const prompt = workflowAssetExtractionPrompt(creatorConfigString(node.config, 'prompt'), mode, assetsPerSheet);
-      assetExtractionStates[nodeId] = { running: true, message: mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…', error: '' };
+      const directorEnabled = directorModeFromRunOptions(extractionRunOptions) !== 'skip';
+      const execution = workflowAssetExtractionExecution(mode, directorEnabled);
+      setExtractionProgress(mode === 'fast' ? 'Generating index sheet…' : 'Extracting individual assets…');
       let extractionNotes = '';
-      let prepared: Array<{ canvas: HTMLCanvasElement; name: string }>;
-      let plannedStored: ExtractedAssetLink[] | null = null;
+      let plan: Awaited<ReturnType<typeof planWorkflowAssetExtraction>> | null = null;
+      let prepared: Array<{ canvas: HTMLCanvasElement; name: string; prompt: string; itemId?: string }> = [];
+      const failures: Array<{ itemId: string; message: string }> = [];
       let extractionManifest: ReturnType<typeof createWorkflowAssetExtractionManifest> | null = null;
-      if (directorModeFromRunOptions(extractionRunOptions) === 'skip') {
-        const result = extractionProvider === 'antigravity'
-          ? await decoupleAntigravityImage(
-              antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
-              inputPng, prompt, false,
+      if (!directorEnabled) {
+        if (extractionProvider === 'grok' && execution !== 'single-index-sheet') {
+          throw new Error('Grok quality extraction requires an AI Director to name each asset. Enable an AI Director or use Fast index-sheet mode.');
+        }
+        const indexSheet = execution === 'single-index-sheet';
+        const result = extractionProvider === 'grok'
+          ? await extractGrokAsset(
+              grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+              prompt,
+              'asset-index-sheet',
+              [{ name: 'extraction-source-montage.png', role: 'Extraction sources', bytes: inputPng }],
+              indexSheet,
+              indexSheet ? assetsPerSheet : null,
             )
-          : await decoupleCodexImage(
-              codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, false, settings.value.workspace.keepAiDebugArtifacts),
-              inputPng, prompt, false,
-            );
+          : extractionProvider === 'antigravity'
+            ? await decoupleAntigravityImage(
+                antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+                inputPng, prompt, false, indexSheet,
+              )
+            : await decoupleCodexImage(
+                codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, runId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+                inputPng, prompt, false, indexSheet,
+              );
         if (result.layers.length === 0) throw new Error('The image model did not return any extracted assets.');
         extractionNotes = result.notes ?? '';
         prepared = mode === 'fast'
-          ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0]), assetsPerSheet).map((canvas, index) => ({
-              canvas, name: `${node.name} ${String(index + 1).padStart(2, '0')}`,
+          ? cropAssetIndexSheet(await decoupledLayerCanvas(result.layers[0], 30, true), assetsPerSheet).map((canvas, index) => ({
+              canvas, name: `${node.name} ${String(index + 1).padStart(2, '0')}`, prompt,
             }))
           : await Promise.all(result.layers.map(async (layer, index) => ({
               canvas: await decoupledLayerCanvas(layer),
               name: layer.name.trim() || `${node.name} ${String(index + 1).padStart(2, '0')}`,
+              prompt,
             })));
       } else {
-        assetExtractionStates[nodeId] = { running: true, message: 'AI Director is planning the asset inventory…', error: '' };
-        const plan = await planWorkflowAssetExtraction(extractionRunOptions, {
-          sourcePng: inputPng,
+        setExtractionProgress('AI Director is planning the asset inventory…');
+        plan = await planWorkflowAssetExtraction(extractionRunOptions, {
+          sourcePng: planningInputPng,
           guidance: creatorConfigString(node.config, 'prompt'),
           mode,
           maximumAssets: mode === 'fast' ? assetsPerSheet : 16,
         }, { signal: extractionController.signal, runId: () => runId });
         extractionNotes = plan.notes;
-        const maskPng = await extractionMaskPng(inputPng);
-        const successes: Array<ExtractedAssetLink & { itemId: string }> = [];
-        const failures: Array<{ itemId: string; message: string }> = [];
-        for (const [index, item] of plan.items.entries()) {
-          if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
-          if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
-          assetExtractionStates[nodeId] = {
-            running: true,
-            message: `Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`,
-            error: '',
-          };
-          const itemPrompt = `Isolate only "${item.name}" from the attached source. ${item.instruction} Return one clean standalone asset, preserve its visual identity and complete edges, and make everything outside the asset transparent.`;
-          const itemRunId = `${runId}-${index + 1}`;
-          activeExtractionRunId = itemRunId;
-          try {
-            const generated = extractionProvider === 'antigravity'
-              ? await generateAntigravityRetouchImage(
-                  { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
-                  inputPng, inputPng, maskPng, null, null, itemPrompt,
+        const generatePlannedCanvas = async (
+          operationPrompt: string,
+          assetName: string,
+          operationRunId: string,
+          indexSheet: boolean,
+        ): Promise<HTMLCanvasElement> => {
+          activeExtractionRunId = operationRunId;
+          const result = extractionProvider === 'grok'
+            ? await extractGrokAsset(
+                grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, operationRunId, indexSheet, settings.value.workspace.keepAiDebugArtifacts),
+                operationPrompt,
+                assetName,
+                indexSheet
+                  ? [{ name: 'extraction-source-montage.png', role: 'Extraction sources', bytes: inputPng }]
+                  : grokExtractionSources,
+                indexSheet,
+                indexSheet ? assetsPerSheet : null,
+              )
+            : extractionProvider === 'antigravity'
+              ? await decoupleAntigravityImage(
+                  { ...antigravityConfigFromRunOptions(extractionRunOptions, taskProjectPath, operationRunId, indexSheet, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                  inputPng, operationPrompt, false, indexSheet,
                 )
-              : extractionProvider === 'grok'
-                ? await generateGrokRetouchImage(
-                    { ...grokConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
-                    inputPng, inputPng, maskPng, null, null, itemPrompt,
-                  )
-                : await generateCodexRetouchImage(
-                    { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, itemRunId, false, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
-                    inputPng, inputPng, maskPng, null, null, itemPrompt,
-                  );
-            if (!generated.asset) throw new Error('The image provider did not save the extracted asset.');
-            successes.push({ itemId: item.id, id: generated.asset.id, name: item.name, relativePath: generated.asset.relativePath });
-          } catch (cause) {
-            failures.push({ itemId: item.id, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+              : await decoupleCodexImage(
+                  { ...codexConfigFromRunOptions(extractionRunOptions, taskProjectPath, operationRunId, indexSheet, settings.value.workspace.keepAiDebugArtifacts), directorMode: 'skip' },
+                  inputPng, operationPrompt, false, indexSheet,
+                );
+          const layer = result.layers[0];
+          if (!layer) throw new Error('The image provider did not return the requested extracted asset.');
+          return decoupledLayerCanvas(layer, 30, indexSheet);
+        };
+
+        if (execution === 'single-index-sheet') {
+          const sheetPrompt = workflowPlannedAssetSheetPrompt(
+            creatorConfigString(node.config, 'prompt'), plan.items, assetsPerSheet,
+          );
+          setExtractionProgress(`Generating one index sheet for ${plan.items.length} planned assets…`);
+          const sheet = await generatePlannedCanvas(sheetPrompt, 'asset-index-sheet', `${runId}-sheet`, true);
+          const plannedItems = plan.items;
+          prepared = cropAssetIndexSheet(sheet, assetsPerSheet).slice(0, plannedItems.length).map((canvas, index) => {
+            const item = plannedItems[index];
+            if (!item) throw new Error('The AI Director asset inventory changed while preparing the index sheet.');
+            return { canvas, name: item.name, prompt: sheetPrompt, itemId: item.id };
+          });
+        } else {
+          for (const [index, item] of plan.items.entries()) {
+            if (extractionController.signal.aborted) throw new Error('Asset extraction was cancelled.');
+            if (project.identity !== taskProjectIdentity) throw new Error('The active project changed while asset extraction was running.');
+            setExtractionProgress(`Extracting ${index + 1} of ${plan.items.length}: ${item.name}…`);
+            const itemPrompt = `This component was selected by PaintNode's AI Director. Reconstruct a fresh, clean, complete standalone catalog-style asset of "${item.name}" using the attached source only as visual evidence. ${item.instruction} Do not crop, paste, clone, or preserve source-photo pixels, original occlusion boundaries, background patches, adjacent scenery, reflections of the environment, or environmental lighting spill. Rebuild hidden edges and sides while preserving the component's identity, design, materials, and characteristic details. Make everything outside the reconstructed asset transparent.`;
+            try {
+              prepared.push({
+                canvas: await generatePlannedCanvas(itemPrompt, item.name, `${runId}-${index + 1}`, false),
+                name: item.name,
+                prompt: itemPrompt,
+                itemId: item.id,
+              });
+            } catch (cause) {
+              failures.push({ itemId: item.id, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+            }
           }
         }
-        if (successes.length === 0) throw new Error(`The image model could not extract any planned assets. ${failures.map((failure) => failure.message).join(' ')}`);
+      }
+      setExtractionProgress('Saving labelled assets to the project…');
+      if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
+        throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
+      }
+      const stored: WorkflowExtractedAssetLink[] = [];
+      const outputs: Array<{ itemId: string; name: string; assetId: string; relativePath: string }> = [];
+      for (const item of prepared) {
+        try {
+          validateExtractedAssetCanvas(item.canvas, item.name);
+          const asset = await project.storeGeneratedBlobAt(
+            taskProjectPath,
+            await canvasPngBlob(item.canvas),
+            `${item.name}.png`,
+            item.prompt,
+            item.canvas.width,
+            item.canvas.height,
+          );
+          if (!asset) throw new Error('PaintNode could not save the prepared extracted asset.');
+          stored.push({ id: asset.id, name: item.name, relativePath: asset.relativePath });
+          if (item.itemId) outputs.push({ itemId: item.itemId, name: item.name, assetId: asset.id, relativePath: asset.relativePath });
+        } catch (cause) {
+          if (!item.itemId) throw cause;
+          failures.push({ itemId: item.itemId, message: `${item.name}: ${(cause as Error)?.message ?? String(cause)}` });
+        }
+      }
+      if (stored.length === 0) {
+        throw new Error(`The image model could not extract any valid assets. ${failures.map((failure) => failure.message).join(' ')}`.trim());
+      }
+      if (plan) {
         if (failures.length > 0) extractionNotes = [
           extractionNotes,
           `Partial result: ${failures.length} of ${plan.items.length} planned assets could not be produced.`,
         ].filter(Boolean).join('\n');
-        plannedStored = successes.map(({ id, name, relativePath }) => ({ id, name, relativePath }));
         const directorRole = workflowAiReviewProvider(extractionRunOptions);
         const imageModel = extractionProvider === 'antigravity'
           ? extractionRunOptions.antigravityImageModel
@@ -844,41 +1001,20 @@
             ? extractionRunOptions.grokImageModel
             : null;
         extractionManifest = createWorkflowAssetExtractionManifest(plan, {
-          outputs: successes.map((success) => ({
-            itemId: success.itemId, name: success.name, assetId: success.id, relativePath: success.relativePath,
-          })),
+          outputs,
           failedItemIds: failures.map((failure) => failure.itemId),
           director: { provider: directorRole.id, model: directorRole.model },
           image: { provider: extractionProvider, model: imageModel },
           completedAt: Date.now(),
         });
-        prepared = [];
       }
-      assetExtractionStates[nodeId] = { running: true, message: 'Saving labelled assets to the project…', error: '' };
-      if (project.identity !== taskProjectIdentity || !workflow.creatorNodes.some((item) => item.id === nodeId)) {
-        throw new Error('The workflow or active project changed while asset extraction was running. No result links were added.');
-      }
-      const stored: ExtractedAssetLink[] = plannedStored ?? [];
-      if (!plannedStored) {
-        for (const item of prepared) {
-          const asset = await project.storeGeneratedBlobAt(
-            taskProjectPath,
-            await canvasPngBlob(item.canvas),
-            `${item.name}.png`,
-            prompt,
-            item.canvas.width,
-            item.canvas.height,
-          );
-          if (asset) stored.push({ id: asset.id, name: asset.name, relativePath: asset.relativePath });
-        }
-      }
-      if (plannedStored) await project.refresh(taskProjectPath);
       if (project.identity !== taskProjectIdentity) {
         throw new Error('The active project changed while asset extraction was running. The saved assets were not linked to this workflow.');
       }
       workflow.configureCreatorNode(nodeId, { resultAssets: stored, notes: extractionNotes, extractionManifest });
-      assetExtractionStates[nodeId] = { running: false, message: `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`, error: '' };
-      aiTasks.complete(extractionTask.id, `Extracted ${stored.length} assets`);
+      const completionMessage = `Extracted ${stored.length} labelled asset${stored.length === 1 ? '' : 's'}.`;
+      assetExtractionStates[nodeId] = { running: false, message: completionMessage, error: '' };
+      aiTasks.complete(extractionTask.id, completionMessage);
       editor.flash(`Extracted ${stored.length} assets`);
     } catch (e) {
       const cancelled = extractionController.signal.aborted;
@@ -929,6 +1065,7 @@
       : createConfiguredWorkflowRevisionRequester(runOptions);
     revisionDirectorInstruction = 'Refine this workflow while preserving accepted candidates and run history.';
     revisionDirectorTitle = 'Revise current workflow';
+    revisionDirectorTaskNodeIds = workflow.graphSnapshot().nodes.map((node) => node.id);
     revisionDirectorOpen = true;
   }
 
@@ -951,7 +1088,7 @@
   }
 
   async function runAiReview(node: WorkflowNodeV2): Promise<void> {
-    if (node.type !== 'review' || node.config.mode !== 'ai' || busy) return;
+    if (node.type !== 'review' || node.config.mode !== 'ai' || busy || workflowNodeTasks(node.id).length > 0) return;
     const candidates = workflow.reviewCandidates(node.id, assets, true, project.identity);
     if (candidates.length === 0 || candidates.some((candidate) => candidate.state !== 'eligible' || !candidate.output)) {
       aiReviewMessages[node.id] = {
@@ -971,7 +1108,7 @@
       title: `AI Review: ${node.title}`,
       subtitle: options.directorProvider,
       progress: 'Preparing candidate previews…',
-      detail: { kind: 'workflow', providerLabel: options.directorProvider, outputName: 'Candidate recommendation' },
+      detail: workflowTaskDetail(options.directorProvider, 'Candidate recommendation', [node.id]),
     });
     busy = true;
     aiReviewMessages[node.id] = { running: true, message: 'Preparing candidate previews…', error: '' };
@@ -1036,6 +1173,7 @@
   }
 
   function openNodeDirectorAction(node: WorkflowNodeV2): void {
+    if (workflowNodeTasks(node.id).length > 0) return;
     if (node.type === 'review') {
       void runAiReview(node);
       return;
@@ -1050,17 +1188,19 @@
         ? `Develop only Art Direction node "${node.id}". Improve its textual prompt using connected briefs and visual inputs. Do not generate a storyboard image and do not change any other node or connection.`
         : '';
     revisionDirectorTitle = node.type === 'brief'
-      ? 'Enhance Brief'
+      ? 'Enhance Brief with AI'
       : node.type === 'art-direction'
         ? 'Develop Art Direction'
         : 'Revise node';
+    revisionDirectorTaskNodeIds = [node.id];
     revisionDirectorOpen = true;
   }
 
   function outputAssetFor(node: WorkflowOutputNode): ProjectAsset | null {
     const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: node.id });
-    if (path?.reviewNodeId) {
-      const resolution = workflow.reviewResolution(path.reviewNodeId, assets, true, project.identity);
+    const directReviewNodeId = directReviewForOutput(node.id);
+    if (directReviewNodeId) {
+      const resolution = workflow.reviewResolution(directReviewNodeId, assets, true, project.identity);
       if (resolution.state !== 'ready') return null;
       return assets.find((asset) => (
         asset.id === resolution.output.assetId && asset.relativePath === resolution.output.relativePath
@@ -1077,8 +1217,36 @@
     return assets.find((asset) => asset.id === node.outputAssetId || asset.relativePath === node.outputRelativePath) ?? null;
   }
 
+  function directReviewForOutput(outputNodeId: string): string | null {
+    const graph = workflow.serialize();
+    const edge = graph.edges.find((candidate) => candidate.target.nodeId === outputNodeId
+      && candidate.target.portId === 'source');
+    return graph.nodes.find((node) => node.id === edge?.source.nodeId && node.type === 'review')?.id ?? null;
+  }
+
   function creatorConfigString(config: Record<string, unknown>, key: string): string {
     return typeof config[key] === 'string' ? config[key] : '';
+  }
+
+  function transformContextSummary(nodeId: string): {
+    inherited: string;
+    direct: string;
+  } {
+    const context = workflowTransformContext(workflow.graphSnapshot(), nodeId);
+    const inheritedParts = [
+      context.inheritedVisuals.length > 0
+        ? `${context.inheritedVisuals.length} visual ${context.inheritedVisuals.length === 1 ? 'reference' : 'references'}`
+        : '',
+      context.brief ? 'Brief' : '',
+      context.artDirection ? 'Art Direction' : '',
+    ].filter(Boolean);
+    const directCount = context.visualInputs.filter((connection) => connection.origin === 'direct').length;
+    return {
+      inherited: inheritedParts.join(' · ') || 'none',
+      direct: directCount > 0
+        ? `${directCount} additional visual ${directCount === 1 ? 'reference' : 'references'}`
+        : 'none',
+    };
   }
 
   async function placeOutput(node: WorkflowOutputNode): Promise<void> {
@@ -1116,6 +1284,8 @@
   ): void {
     if (!(event.currentTarget instanceof HTMLElement) || !boardEl) return;
     const output = type === 'output' && node ? workflow.outputNode(node.id) : null;
+    const taskNodeId = type === 'prompt' ? 'composition' : type === 'output' ? output?.id ?? 'output' : node?.id ?? null;
+    if (taskNodeId && workflowNodeTasks(taskNodeId).length > 0) return;
     const x = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.x ?? 0) : type === 'prompt' ? workflow.promptX : (output?.x ?? workflow.outputX);
     const y = type === 'asset' || type === 'creator' || type === 'unsupported' ? (node?.y ?? 0) : type === 'prompt' ? workflow.promptY : (output?.y ?? workflow.outputY);
     if (type === 'asset' && node) workflow.select({ kind: 'asset', id: node.id });
@@ -1128,6 +1298,8 @@
       dx: boardPoint(event).x - x,
       dy: boardPoint(event).y - y,
     };
+    const historyNodeId = type === 'prompt' ? 'composition' : type === 'output' ? output?.id ?? 'output' : node?.id ?? type;
+    workflow.beginAuthoringTransaction('Move node', `move:${historyNodeId}`);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.stopPropagation();
   }
@@ -1160,15 +1332,6 @@
       panning = { x: event.clientX, y: event.clientY };
       return;
     }
-    if (drawing) {
-      const point = boardPoint(event);
-      drawing = {
-        ...drawing,
-        width: point.x - drawing.x,
-        height: point.y - drawing.y,
-      };
-      return;
-    }
     if (dragging) {
       const point = boardPoint(event);
       const x = point.x - dragging.dx;
@@ -1182,9 +1345,7 @@
   }
 
   function stopDrag(): void {
-    if (drawing) {
-      commitDrawing();
-    }
+    if (dragging) workflow.endAuthoringTransaction();
     connecting = null;
     dragging = null;
     panning = null;
@@ -1385,7 +1546,7 @@
   }
 
   function startConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
-    if (!(event.currentTarget instanceof HTMLElement)) return;
+    if (!(event.currentTarget instanceof HTMLElement) || workflowNodeTasks(nodeId).length > 0) return;
     const point = boardPoint(event);
     workflow.connectionError = null;
     connecting = { from: { nodeId, portId }, x: point.x, y: point.y };
@@ -1394,25 +1555,80 @@
 
   function finishConnection(event: PointerEvent, nodeId: WorkflowNodeId, portId: string): void {
     if (!connecting) return;
+    if (workflowNodeTasks(nodeId).length > 0 || workflowNodeTasks(connecting.from.nodeId).length > 0) {
+      connecting = null;
+      return;
+    }
     workflow.connectPorts(connecting.from.nodeId, connecting.from.portId, nodeId, portId);
     connecting = null;
     event.stopPropagation();
   }
 
-  function normalizeRect(rect: { x: number; y: number; width: number; height: number }): {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } {
-    const x = rect.width < 0 ? rect.x + rect.width : rect.x;
-    const y = rect.height < 0 ? rect.y + rect.height : rect.y;
-    return {
-      x,
-      y,
-      width: Math.abs(rect.width),
-      height: Math.abs(rect.height),
+  function nodeConnectionCount(nodeId: WorkflowNodeId): number {
+    return graphConnections.filter((connection) => connection.from === nodeId || connection.to === nodeId).length;
+  }
+
+  function requestNodeDisconnect(nodeId: WorkflowNodeId): void {
+    if (workflowNodeTasks(nodeId).length > 0) return;
+    const graph = workflow.graphSnapshot();
+    const links = workflowNodeDisconnectLinks(graph, nodeId);
+    const mode = workflowDisconnectMode(links);
+    if (mode === 'none') return;
+    if (mode === 'immediate') {
+      workflow.disconnectConnection(links[0].id);
+      showDisconnectUndo(1);
+      return;
+    }
+    disconnectSelections = Object.fromEntries(links.map((link) => [link.id, true]));
+    disconnectDialog = {
+      nodeId,
+      nodeTitle: graph.nodes.find((node) => node.id === nodeId)?.title || 'node',
+      links,
     };
+  }
+
+  function disconnectWorkflowConnection(connectionId: string): void {
+    const connection = graphConnections.find((item) => item.id === connectionId);
+    if (!connection || connectionHasRunningTask(connection)) return;
+    workflow.disconnectConnection(connectionId);
+    showDisconnectUndo(1);
+  }
+
+  function closeDisconnectDialog(): void {
+    disconnectDialog = null;
+    disconnectSelections = {};
+  }
+
+  function confirmNodeDisconnect(): void {
+    if (!disconnectDialog) return;
+    if (workflowNodeTasks(disconnectDialog.nodeId).length > 0) {
+      closeDisconnectDialog();
+      return;
+    }
+    const selectedLinks = disconnectDialog.links
+      .filter((link) => disconnectSelections[link.id])
+      .map((link) => link.id);
+    workflow.disconnectConnections(selectedLinks);
+    closeDisconnectDialog();
+    showDisconnectUndo(selectedLinks.length);
+  }
+
+  function showDisconnectUndo(count: number): void {
+    if (count <= 0) return;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
+    disconnectUndoNotice = { count };
+    disconnectUndoTimer = window.setTimeout(() => {
+      disconnectUndoNotice = null;
+      disconnectUndoTimer = 0;
+    }, 5_000);
+  }
+
+  function undoDisconnect(): void {
+    if (aiTasks.runningForWorkflow(workflow.graphSnapshot().id).length === 0
+      && workflow.authoringUndoLabel === 'Disconnect links') workflow.undoAuthoring();
+    disconnectUndoNotice = null;
+    if (disconnectUndoTimer) window.clearTimeout(disconnectUndoTimer);
+    disconnectUndoTimer = 0;
   }
 
   function onBoardPointerDown(event: PointerEvent): void {
@@ -1432,29 +1648,7 @@
     if (workflow.tool === 'hand') {
       panning = { x: event.clientX, y: event.clientY };
       event.currentTarget.setPointerCapture(event.pointerId);
-      return;
     }
-    const point = boardPoint(event);
-    drawing = { type: workflow.tool, x: point.x, y: point.y, width: 0, height: 0 };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function commitDrawing(): void {
-    if (!drawing) return;
-    const rect = normalizeRect(drawing);
-    const width = rect.width < 12 ? (drawing.type === 'composition' ? workflow.compositionWidth : drawing.type === 'output' ? workflow.outputWidth : ASSET_NODE_W) : rect.width;
-    const height = rect.height < 12 ? (drawing.type === 'composition' ? workflow.compositionHeight : drawing.type === 'output' ? workflow.outputHeight : 190) : rect.height;
-    if (drawing.type === 'asset') workflow.addBlankAsset(rect.x, rect.y, width, height);
-    else if (drawing.type === 'composition') {
-      workflow.movePrompt(rect.x, rect.y);
-      workflow.resizePrompt(width, height);
-      workflow.select({ kind: 'composition' });
-      workflow.setTool('hand');
-    } else {
-      const node = workflow.addOutputNode(rect.x, rect.y, width, height);
-      workflow.select({ kind: 'output', id: node.id });
-    }
-    drawing = null;
   }
 
   function compositionTitle(): string {
@@ -2127,6 +2321,7 @@
   }
 
   async function previewSelectiveExecution(mode: WorkflowSelectiveRunMode, nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     invalidateSelectivePreview();
     selectiveTargetNodeId = nodeId;
     selectiveMode = mode;
@@ -2178,6 +2373,8 @@
       progress,
       detail: {
         kind: 'workflow', providerLabel: options.provider, outputName: 'Selective execution',
+        workflowId: workflow.graphSnapshot().id,
+        nodeIds: [...new Set([...preflight.plan.requiredNodeIds, ...preflight.plan.affectedNodeIds])],
       },
     });
     activeWorkflowTaskId = task.id;
@@ -2225,6 +2422,7 @@
     if (workflow.storyboardEditing && editor.textEdit) editor.commitActiveText();
     if (storyboardCanvas) persistStoryboard();
     const targetOutput = targetOutputForGenerate(node);
+    if (workflowNodeTasks(targetOutput.id).length > 0) return;
     error = '';
     const preflight = outputReadiness(targetOutput.id);
     if (!preflight.ready) {
@@ -2238,7 +2436,7 @@
       return;
     }
     const path = resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: targetOutput.id });
-    const reviewedOutput = Boolean(path?.reviewNodeId);
+    const reviewedOutput = Boolean(directReviewForOutput(targetOutput.id));
     busy = true;
     progress = reviewedOutput
       ? 'Verifying promoted Review output…'
@@ -2262,9 +2460,7 @@
           subtitle: runProvider,
           progress,
           runId,
-          detail: {
-            kind: 'workflow', providerLabel: runProvider, outputName: targetOutput.name || 'Output',
-          },
+          detail: workflowTaskDetail(runProvider, targetOutput.name || 'Output', [targetOutput.id]),
         });
       if (!task) return;
       aiTasks.setRunId(task.id, runId);
@@ -2301,8 +2497,12 @@
         return;
       }
       await project.refresh();
-      aiTasks.complete(task.id, 'Workflow generation completed');
-      editor.flash(`Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
+      aiTasks.complete(
+        task.id,
+        outcome.warning ? 'Workflow generation completed with a warning' : 'Workflow generation completed',
+        outcome.warning ?? '',
+      );
+      editor.flash(outcome.warning ?? `Generated ${targetOutput.finalWidth} x ${targetOutput.finalHeight}`);
     } catch (e) {
       error = (e as Error)?.message ?? String(e);
       const cancelled = (e as { code?: unknown })?.code === 'CANCELLED';
@@ -2323,6 +2523,28 @@
   function outputForTransform(nodeId: string): WorkflowOutputNode | null {
     const outputId = resolveWorkflowCampaignPath(workflow.serialize(), { transformNodeId: nodeId })?.outputNodeId ?? null;
     return outputId ? workflow.outputNode(outputId) ?? null : null;
+  }
+
+  async function focusTargetOutput(nodeId: string): Promise<void> {
+    const output = outputForTransform(nodeId);
+    if (!output) return;
+    workflow.select({ kind: 'output', id: output.id });
+    centerBoardAt(output.x + output.width / 2, output.y + output.height / 2);
+    await tick();
+    document.querySelector<HTMLElement>(`[data-workflow-node="${output.id}"]`)?.focus();
+  }
+
+  function setConceptPreviewAspect(nodeId: string, aspectRatio: string): void {
+    const dimensions = aspectRatio === '4:5'
+      ? { width: 1024, height: 1280 }
+      : aspectRatio === '16:9'
+        ? { width: 1792, height: 1024 }
+        : { width: 1024, height: 1024 };
+    workflow.configureCreatorNode(nodeId, {
+      conceptPreviewAspectRatio: aspectRatio,
+      conceptPreviewWidth: dimensions.width,
+      conceptPreviewHeight: dimensions.height,
+    });
   }
 
   function selectedReviewCandidate(nodeId: string) {
@@ -2402,6 +2624,7 @@
   }
 
   async function promoteReviewCandidate(nodeId: string): Promise<void> {
+    if (workflowNodeTasks(nodeId).length > 0) return;
     const candidate = selectedReviewCandidate(nodeId);
     if (!candidate || candidate.state !== 'eligible') return;
     busy = true;
@@ -2420,10 +2643,27 @@
     }
   }
 
-  async function generateCandidateBranches(nodeId: string): Promise<void> {
-    const output = outputForTransform(nodeId);
-    if (!output) {
-      error = 'Connect this Transform to an Output before generating candidate branches.';
+  async function regenerateReviewCandidates(nodeId: string): Promise<void> {
+    const sourceNodeId = workflow.incoming(nodeId)
+      .find((connection) => connection.targetPortId === 'candidates')?.from ?? null;
+    const source = sourceNodeId
+      ? workflow.creatorNodes.find((candidate) => candidate.id === sourceNodeId && candidate.type === 'transform')
+      : null;
+    if (!source) {
+      error = 'Reconnect a Transform to this Review before regenerating candidates.';
+      return;
+    }
+    await generateCandidateBranches(source.id);
+  }
+
+  async function generateCandidateBranches(
+    nodeId: string,
+    existingTaskId: string | null = null,
+  ): Promise<void> {
+    if (!existingTaskId && workflowNodeTasks(nodeId).length > 0) return;
+    const conceptReview = workflowConceptReviewNode(workflow.serialize(), nodeId);
+    if (!conceptReview) {
+      error = 'Connect this Concept Generator to a Review before generating candidate branches.';
       return;
     }
     if (!providerSelection.ready || !providerSelection.provider) {
@@ -2435,9 +2675,38 @@
     progress = `Generating ${candidateCount} independent candidates…`;
     const controller = new AbortController();
     activeCandidateController = controller;
-    const context = createWorkflowExecutionContext(createRunId());
+    const runId = createRunId();
+    const context = createWorkflowExecutionContext(runId, workflowCandidateProgressLabel);
+    const transformName = workflow.creatorNodes.find((node) => node.id === nodeId)?.name ?? 'Transform';
+    const task = existingTaskId
+      ? aiTasks.find(existingTaskId)
+      : aiTasks.create({
+          projectPath: context.runProjectPath,
+          kind: 'workflow',
+          title: `Generate candidates: ${transformName}`,
+          subtitle: context.runProvider,
+          progress,
+          runId,
+          detail: {
+            ...workflowTaskDetail(
+              context.runProvider,
+              `${candidateCount} concept candidates`,
+              [conceptReview.id],
+            ),
+          },
+        });
+    if (!task) {
+      activeCandidateController = null;
+      busy = false;
+      progress = '';
+      return;
+    }
+    aiTasks.setRunId(task.id, runId);
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => controller.abort());
+    aiTasks.setRetry(task.id, () => generateCandidateBranches(nodeId, task.id));
     try {
-      const outcome = await workflow.runCandidateBranches(output.id, {
+      const outcome = await workflow.runCandidateBranches(nodeId, {
         ...context.options,
         signal: controller.signal,
       }, {
@@ -2448,28 +2717,98 @@
       if (!outcome.committed) {
         if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
         error = outcome.commitMessage;
+        aiTasks.fail(task.id, error);
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
-        candidateResultMessages[nodeId] = workflowCandidateBranchResultSummary(outcome.group);
+        const review = workflowConceptReviewNode(workflow.serialize(), nodeId);
+        const firstSuccessful = outcome.group.candidates.find((candidate) => candidate.status === 'succeeded');
+        if (review && firstSuccessful) {
+          selectedReviewCandidates[review.id] = firstSuccessful.candidateId;
+        }
+        const summary = workflowCandidateBranchResultSummary(outcome.group);
+        candidateResultMessages[nodeId] = summary;
+        const succeeded = outcome.group.candidates.filter((candidate) => candidate.status === 'succeeded').length;
+        const cancelled = outcome.group.candidates.filter((candidate) => candidate.status === 'cancelled').length;
+        if (succeeded > 0) aiTasks.complete(task.id, summary);
+        else if (cancelled === outcome.group.candidates.length) aiTasks.markCancelled(task.id, summary);
+        else aiTasks.fail(task.id, summary);
         editor.flash(outcome.commitMessage);
       }
     } catch (cause) {
       error = (cause as Error)?.message ?? String(cause);
+      if (controller.signal.aborted || (cause as { code?: unknown })?.code === 'CANCELLED') {
+        aiTasks.markCancelled(task.id, 'Candidate generation cancelled');
+      } else {
+        aiTasks.fail(task.id, error);
+      }
     } finally {
+      aiTasks.setCancel(task.id, null);
       if (activeCandidateController === controller) activeCandidateController = null;
+      if (activeWorkflowTaskId === task.id) activeWorkflowTaskId = null;
       busy = false;
       progress = '';
     }
   }
 
-  async function retryCandidate(candidateId: string): Promise<void> {
-    if (!providerSelection.ready || !providerSelection.provider) return;
+  async function retryCandidate(
+    candidateId: string,
+    existingTaskId: string | null = null,
+  ): Promise<void> {
+    const candidateGroup = workflow.candidateBranchGroups()
+      .find((group) => group.candidates.some((candidate) => candidate.candidateId === candidateId));
+    const candidateBeforeRetry = candidateGroup?.candidates.find((candidate) => candidate.candidateId === candidateId);
+    if (!candidateGroup || !candidateBeforeRetry) {
+      error = 'This candidate is no longer available to retry.';
+      if (existingTaskId) aiTasks.fail(existingTaskId, error);
+      editor.flash(error);
+      return;
+    }
+    if (!existingTaskId && workflowNodeTasks(candidateGroup.sourceNodeId).length > 0) return;
+    if (!providerSelection.ready || !providerSelection.provider) {
+      error = providerSelection.label;
+      candidateResultMessages[candidateGroup.sourceNodeId] = error;
+      if (existingTaskId) aiTasks.fail(existingTaskId, error);
+      editor.flash(error);
+      return;
+    }
     busy = true;
+    retryingCandidateId = candidateId;
     error = '';
-    progress = 'Retrying one candidate while preserving its siblings…';
+    const retryLabel = `Candidate ${candidateBeforeRetry.ordinal}`;
+    progress = `Retrying ${retryLabel} while preserving its siblings…`;
+    candidateResultMessages[candidateGroup.sourceNodeId] = `${progress}`;
     const controller = new AbortController();
     activeCandidateController = controller;
-    const context = createWorkflowExecutionContext(createRunId());
+    const runId = createRunId();
+    const context = createWorkflowExecutionContext(runId, workflowCandidateProgressLabel);
+    const transformName = workflow.creatorNodes
+      .find((node) => node.id === candidateGroup.sourceNodeId)?.name ?? 'Transform';
+    const task = existingTaskId
+      ? aiTasks.find(existingTaskId)
+      : aiTasks.create({
+          projectPath: context.runProjectPath,
+          kind: 'workflow',
+          title: `Retry ${retryLabel}: ${transformName}`,
+          subtitle: context.runProvider,
+          progress,
+          runId,
+          detail: workflowTaskDetail(
+            context.runProvider,
+            retryLabel,
+            [workflowConceptReviewNode(workflow.serialize(), candidateGroup.sourceNodeId)?.id ?? candidateGroup.sourceNodeId],
+          ),
+        });
+    if (!task) {
+      activeCandidateController = null;
+      retryingCandidateId = null;
+      busy = false;
+      progress = '';
+      return;
+    }
+    aiTasks.setRunId(task.id, runId);
+    activeWorkflowTaskId = task.id;
+    aiTasks.setCancel(task.id, async () => controller.abort());
+    aiTasks.setRetry(task.id, () => retryCandidate(candidateId, task.id));
     try {
       const outcome = await workflow.retryCandidateBranch(candidateId, {
         ...context.options,
@@ -2478,17 +2817,53 @@
       if (!outcome.committed) {
         if (context.runProjectPath && project.path === context.runProjectPath) await project.refresh(context.runProjectPath);
         error = outcome.commitMessage;
+        candidateResultMessages[candidateGroup.sourceNodeId] = outcome.commitMessage;
+        aiTasks.fail(task.id, outcome.commitMessage);
       } else {
         if (context.runProjectPath) await project.refresh(context.runProjectPath);
-        editor.flash(outcome.commitMessage);
+        const status = outcome.candidate.status === 'succeeded'
+          ? 'ready for Review'
+          : outcome.candidate.status === 'cancelled'
+            ? 'cancelled'
+            : 'failed again';
+        const message = `${retryLabel} attempt ${outcome.candidate.attemptCount} ${status}.`;
+        candidateResultMessages[candidateGroup.sourceNodeId] = message;
+        if (outcome.candidate.status === 'succeeded') {
+          const review = workflowConceptReviewNode(workflow.serialize(), candidateGroup.sourceNodeId);
+          if (review) selectedReviewCandidates[review.id] = outcome.candidate.candidateId;
+          aiTasks.complete(task.id, message);
+        } else if (outcome.candidate.status === 'cancelled') {
+          aiTasks.markCancelled(task.id, message);
+        } else {
+          aiTasks.fail(task.id, outcome.candidate.failure?.message ?? message);
+        }
+        editor.flash(message);
       }
     } catch (cause) {
       error = (cause as Error)?.message ?? String(cause);
+      candidateResultMessages[candidateGroup.sourceNodeId] = `${retryLabel} could not be retried: ${error}`;
+      if (controller.signal.aborted || (cause as { code?: unknown })?.code === 'CANCELLED') {
+        aiTasks.markCancelled(task.id, `${retryLabel} retry cancelled`);
+      } else {
+        aiTasks.fail(task.id, error);
+      }
+      editor.flash(`Candidate retry failed: ${error}`);
     } finally {
+      aiTasks.setCancel(task.id, null);
       if (activeCandidateController === controller) activeCandidateController = null;
+      if (activeWorkflowTaskId === task.id) activeWorkflowTaskId = null;
+      retryingCandidateId = null;
       busy = false;
       progress = '';
     }
+  }
+
+  function clearFailedCandidates(nodeId: string): void {
+    const cleared = workflow.clearFailedCandidateBranches(nodeId);
+    if (cleared === 0) return;
+    const message = `Cleared ${cleared} failed candidate${cleared === 1 ? '' : 's'} from this Transform.`;
+    candidateResultMessages[nodeId] = message;
+    editor.flash(message);
   }
 
   async function cancelGenerate(): Promise<void> {
@@ -2528,7 +2903,6 @@
   <div class="workflow-main">
     <div
       class="board"
-      class:adding={workflow.tool !== 'hand' && workflow.tool !== 'zoom'}
       class:panning={workflow.tool === 'hand'}
       class:zooming={workflow.tool === 'zoom'}
       class:zoom-in={workflow.tool === 'zoom' && effectiveZoomMode === 'in'}
@@ -2552,20 +2926,25 @@
         <svg class="links" aria-label="Workflow connections">
           {#each graphConnections as connection (connection.id)}
             {@const path = connectionPath(connection)}
+            {@const connectionLocked = connectionHasRunningTask(connection)}
             {#if path}
               <path
                 d={path}
                 role="button"
-                tabindex="0"
+                tabindex={connectionLocked ? -1 : 0}
                 aria-label="Disconnect workflow connection"
+                aria-disabled={connectionLocked}
+                class:task-locked={connectionLocked}
                 onpointerdown={(event) => {
-                  workflow.disconnectConnection(connection.id);
+                  if (connectionLocked) return;
+                  disconnectWorkflowConnection(connection.id);
                   event.stopPropagation();
                 }}
                 onkeydown={(event) => {
+                  if (connectionLocked) return;
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
-                  workflow.disconnectConnection(connection.id);
+                  disconnectWorkflowConnection(connection.id);
                 }}
               />
             {/if}
@@ -2576,25 +2955,23 @@
           {/if}
         </svg>
 
-        {#if drawing}
-          {@const rect = normalizeRect(drawing)}
-          <div
-            class="draw-preview"
-            style={`transform:translate(${rect.x}px, ${rect.y}px); width:${Math.max(12, rect.width)}px; height:${Math.max(12, rect.height)}px`}
-          ></div>
-        {/if}
-
         {#each workflow.nodes as node (node.id)}
           {@const asset = assetFor(node)}
           {@const oraDocument = oraFor(node)}
           {@const ports = workflowNodePorts(node.id)}
+          {@const extractionScope = extractionScopeFor(node.id)}
+          {@const scopedExtractionLinks = extractionScope ? availableExtractedAssetLinks(extractionScope.assets) : []}
+          {@const nodeTasks = workflowNodeTasks(node.id)}
           <article
             class="asset-node"
+            class:task-locked={nodeTasks.length > 0}
             class:included={node.included}
             class:selected={workflow.selection?.kind === 'asset' && workflow.selection.id === node.id}
             tabindex="-1"
             data-workflow-node={node.id}
             data-creator-node-type="input"
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'asset', id: node.id })}
             onpointerdown={(event) => {
@@ -2614,25 +2991,17 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'asset', node }}>
                 <WorkflowNodeTitle
                   name={node.name}
-                  typeLabel="Asset"
+                  typeLabel={inputCreatorDefinition.label}
                   fallback="Untitled"
                 />
                 {#if node.slotId}<small class:required={node.required}>{node.required ? 'Required' : 'Optional'}</small>{/if}
               </span>
               <div class="node-tools">
-                <button
-                  type="button"
-                  class:active={workflow.isConnected(node.id, 'composition')}
-                  aria-label={`${workflow.isConnected(node.id, 'composition') ? 'Disconnect' : 'Connect'} ${node.name} to composition`}
-                  use:tooltip={{ text: workflow.isConnected(node.id, 'composition') ? 'Connected to composition' : 'Connect to composition', placement: 'top' }}
-                  onpointerdown={(event) => event.stopPropagation()}
-                  onclick={(event) => {
-                    event.stopPropagation();
-                    workflow.setNodeIncluded(node.id, !workflow.isConnected(node.id, 'composition'));
-                  }}
-                >
-                  <Icon svg={Link} size={13} />
-                </button>
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${node.name}`}
@@ -2652,7 +3021,6 @@
               <div
                 class="node-preview"
                 class:can-paste={!asset && !oraDocument}
-                style={`height:${Math.max(64, node.height - 150)}px`}
                 role="button"
                 tabindex="0"
                 aria-haspopup="menu"
@@ -2672,33 +3040,51 @@
                 {/if}
               </div>
               <label class="slot-picker" onpointerdown={(event) => event.stopPropagation()}>
-                <span>{node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}</span>
+                <span>
+                  {node.slotId ? (node.required ? 'Required asset' : 'Optional asset') : 'Project asset'}
+                  {extractionScope ? ` · ${extractionScope.nodeName}` : ''}
+                </span>
                 <select
                   aria-label={`Asset for ${node.name}`}
                   data-workflow-required-slot={node.required ? '' : undefined}
                   value={asset ? `asset:${asset.id}` : oraDocument ? `ora:${oraDocument.relativePath}` : ''}
                   onchange={(event) => void assignWorkflowAsset(node.id, event.currentTarget.value)}
                 >
-                  <option value="">Choose from project…</option>
-                  {#if extractionQuickLinks().some((link) => assets.some((item) => item.id === link.id))}
-                    <optgroup label="Extract Assets results">
-                      {#each extractionQuickLinks().filter((link) => assets.some((item) => item.id === link.id)) as option (option.id)}
-                        <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
-                      {/each}
+                  <option value="">{extractionScope ? `Choose from ${extractionScope.nodeName}…` : 'Choose from project…'}</option>
+                  {#if extractionScope}
+                    {#if scopedExtractionLinks.length > 0}
+                      <optgroup label={`${extractionScope.nodeName} results`}>
+                        {#each scopedExtractionLinks as option (option.id)}
+                          <option value={`asset:${option.id}`}>{option.name}</option>
+                        {/each}
+                      </optgroup>
+                    {/if}
+                  {:else}
+                    {@const quickLinks = availableExtractedAssetLinks(extractionQuickLinks())}
+                    {#if quickLinks.length > 0}
+                      <optgroup label="Extract Assets results">
+                        {#each quickLinks as option (`${option.nodeId}:${option.id}`)}
+                          <option value={`asset:${option.id}`}>{option.nodeName} → {option.name}</option>
+                        {/each}
+                      </optgroup>
+                    {/if}
+                    <optgroup label="Project assets">
+                    {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
                     </optgroup>
-                  {/if}
-                  <optgroup label="Project assets">
-                  {#each assets as option (option.id)}<option value={`asset:${option.id}`}>{option.name}</option>{/each}
-                  </optgroup>
-                  {#if oraDocuments.length > 0}
-                    <optgroup label="OpenRaster documents">
-                      {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
-                    </optgroup>
+                    {#if oraDocuments.length > 0}
+                      <optgroup label="OpenRaster documents">
+                        {#each oraDocuments as option (option.relativePath)}<option value={`ora:${option.relativePath}`}>{option.name}</option>{/each}
+                      </optgroup>
+                    {/if}
                   {/if}
                 </select>
                 <small aria-live="polite">
                   {asset
                     ? `Selected ${asset.name}`
+                    : extractionScope
+                      ? scopedExtractionLinks.length > 0
+                        ? `Scoped to ${extractionScope.nodeName}`
+                        : `No available results from ${extractionScope.nodeName}`
                     : oraDocument
                       ? `${oraDocument.name}${node.oraRelativePath && workflowNodePorts(node.id).outputs.some((port) => port.id === 'annotation') ? ' · annotation output available' : ''}`
                       : 'No asset selected'}
@@ -2715,17 +3101,22 @@
               ></textarea>
             </div>
           </article>
+          <WorkflowNodeTaskLock x={node.x} y={node.y} width={node.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#each workflow.briefNodes as brief (brief.id)}
           {@const ports = workflowNodePorts(brief.id)}
           {@const briefGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === brief.id)}
+          {@const nodeTasks = workflowNodeTasks(brief.id)}
           <article
             class="brief-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === brief.id}
             tabindex="-1"
             data-workflow-node={brief.id}
             data-creator-node-type="brief"
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${brief.x}px, ${brief.y}px); width:${brief.width}px; height:${brief.height}px; --node-color:${brief.color}; --port-y:${brief.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'creator', id: brief.id })}
             onpointerdown={(event) => {
@@ -2745,6 +3136,23 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'creator', node: brief }}>
                 <WorkflowNodeTitle name={brief.name} typeLabel={briefCreatorDefinition.label} />
               </span>
+              <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(brief.id)}
+                  nodeName={brief.name}
+                  onDisconnect={() => requestNodeDisconnect(brief.id)}
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove ${brief.name}`}
+                  use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    workflow.removeNode(brief.id);
+                  }}
+                ><Icon svg={Delete} size={13} /></button>
+              </div>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(brief.id)} />
             <div class="specialized-node-body brief-node-body">
@@ -2758,22 +3166,27 @@
               ></textarea>
             </div>
           </article>
+          <WorkflowNodeTaskLock x={brief.x} y={brief.y} width={brief.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#each workflow.creatorNodes as node (node.id)}
           {@const definition = creatorNodeDefinition(node.type)}
           {@const transformRunState = workflow.transformExecution(node.id)}
           {@const acceptedEditorResult = workflow.acceptedEditorResult(node.id)}
-          {@const extractionResults = extractedAssetLinks(node.config)}
+          {@const extractionResults = workflowExtractedAssetLinks(node.config)}
           {@const extractionState = assetExtractionStates[node.id]}
           {@const creatorGraphNode = workflow.graphSnapshot().nodes.find((item) => item.id === node.id)}
+          {@const nodeTasks = workflowNodeTasks(node.id)}
           <article
             class="creator-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'creator' && workflow.selection.id === node.id}
             tabindex="-1"
             id={node.type === 'review' ? `review-node-${node.id}` : undefined}
             data-workflow-node={node.id}
             data-creator-node-type={node.type}
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}; --port-y:${node.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'creator', id: node.id })}
             onpointerdown={(event) => {
@@ -2794,6 +3207,11 @@
                 <WorkflowNodeTitle name={node.name} typeLabel={definition.label} />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${node.name}`}
@@ -2885,6 +3303,10 @@
                   </div>
                 {/if}
               {:else if node.type === 'transform'}
+                {@const contextSummary = transformContextSummary(node.id)}
+                {@const transformRole = workflowTransformRole(workflow.serialize(), node.id)}
+                {@const conceptPreview = workflowConceptPreviewTarget(workflow.serialize(), node.id)}
+                {@const targetOutput = outputForTransform(node.id)}
                 <label class="creator-config-field">
                   Capability
                   <select
@@ -2900,13 +3322,63 @@
                   </select>
                 </label>
                 <label class="creator-config-field">
-                  Instructions
+                  Additional guidance (optional)
                   <textarea
                     aria-label={`${node.name} instructions`}
                     value={creatorConfigString(node.config, 'instructions')}
                     oninput={(event) => workflow.configureCreatorNode(node.id, { instructions: event.currentTarget.value })}
                   ></textarea>
                 </label>
+                <div class="transform-context-summary" aria-label={`${node.name} connected context`}>
+                  <Icon svg={ImageMultiple} size={16} />
+                  <span>
+                    <b>Inherited context</b> {contextSummary.inherited}
+                    <small><b>Direct references</b> {contextSummary.direct}</small>
+                  </span>
+                </div>
+                {#if transformRole === 'concept-generator' && conceptPreview}
+                  <div class="transform-target-summary transform-preview-summary" aria-label={`${node.name} concept preview format`}>
+                    <Icon svg={Image} size={16} />
+                    <span>
+                      <b>Concept preview</b>
+                      {conceptPreview.width} × {conceptPreview.height}
+                      <small>Review-only canvas. Delivery Outputs are independent.</small>
+                    </span>
+                    <select
+                      aria-label={`${node.name} concept preview aspect ratio`}
+                      value={conceptPreview.aspectRatio}
+                      onchange={(event) => setConceptPreviewAspect(node.id, event.currentTarget.value)}
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="1:1">1:1</option>
+                      <option value="4:5">4:5</option>
+                      <option value="16:9">16:9</option>
+                      {#if conceptPreview.aspectRatio === 'custom'}<option value="custom">Custom</option>{/if}
+                    </select>
+                  </div>
+                {:else}
+                  <div
+                    class:missing={!targetOutput}
+                    class="transform-target-summary"
+                    aria-label={`${node.name} target output`}
+                  >
+                    <Icon svg={targetOutput ? Image : ErrorCircle} size={16} />
+                    <span>
+                      <b>Target output</b>
+                      {targetOutput
+                        ? `${outputTitle(targetOutput)} · ${targetOutput.finalWidth} × ${targetOutput.finalHeight}`
+                        : 'No single target Output'}
+                      <small>
+                        {targetOutput
+                          ? 'Dimensions are inherited from this Output.'
+                          : 'Connect one Output path. Use a separate Transform for each delivery format.'}
+                      </small>
+                    </span>
+                    {#if targetOutput}
+                      <button type="button" onclick={() => void focusTargetOutput(node.id)}>Show Output</button>
+                    {/if}
+                  </div>
+                {/if}
               {:else if node.type === 'review'}
                 <label class="creator-config-field">
                   Review mode
@@ -2931,6 +3403,12 @@
                 {@const reviewCandidate = selectedReviewCandidate(node.id)}
                 {@const reviewResolution = workflow.reviewResolution(node.id, assets, true, project.identity)}
                 {@const aiRecommendation = workflow.reviewRecommendation(node.id)}
+                {@const reviewSourceNodeId = workflow.incoming(node.id)
+                  .find((connection) => connection.targetPortId === 'candidates')?.from ?? null}
+                {@const upstreamCandidateCount = reviewSourceNodeId
+                  ? workflow.candidateBranchGroups(reviewSourceNodeId)
+                    .reduce((total, group) => total + group.candidates.length, 0)
+                  : 0}
                 <section class="review-compare" aria-label={`${node.name} candidate comparison`}>
                   <p class="review-keyboard-hint">Keyboard: R focuses candidates; P promotes the selected eligible candidate. F7/F8 and Alt+R/Ctrl+Enter are also available.</p>
                   <button
@@ -3016,19 +3494,31 @@
                         Provenance: {reviewCandidate.providerId}{reviewCandidate.model ? ` / ${reviewCandidate.model}` : ''}
                         · {reviewCandidate.sourceAssetIds.length} sources · run {reviewCandidate.latestRunId}
                       </small>
-                      {#if reviewCandidate.failure}<p>{reviewCandidate.failure.message}</p>{/if}
-                      <button
-                        type="button"
-                        aria-keyshortcuts="P F8 Control+Enter"
-                        disabled={busy || reviewCandidate.state !== 'eligible'}
-                        onclick={() => void promoteReviewCandidate(node.id)}
-                      >Promote this candidate</button>
-                      {#if reviewCandidate.state !== 'eligible'}
-                        <small>Resolve this candidate’s {reviewCandidate.state} state before promotion.</small>
+                      {#if reviewCandidate.state === 'stale'}
+                        <button
+                          type="button"
+                          disabled={busy || !providerSelection.ready}
+                          onclick={() => void regenerateReviewCandidates(node.id)}
+                        >Regenerate current candidates</button>
+                        <small>This candidate no longer matches the current workflow or output settings. Generate a new set before promotion.</small>
+                      {:else}
+                        <button
+                          type="button"
+                          aria-keyshortcuts="P F8 Control+Enter"
+                          disabled={busy || reviewCandidate.state !== 'eligible'}
+                          onclick={() => void promoteReviewCandidate(node.id)}
+                        >Promote this candidate</button>
+                        {#if reviewCandidate.state !== 'eligible'}
+                          <small>Resolve this candidate’s {reviewCandidate.state} state before promotion.</small>
+                        {/if}
                       {/if}
                     </div>
                   {:else}
-                    <p class="draft-reason">Generate concept branches upstream to compare and promote them here.</p>
+                    <p class="draft-reason">
+                      {upstreamCandidateCount > 0
+                        ? 'No successful candidates are available for Review. Retry failed branches upstream.'
+                        : 'Generate concept branches upstream to compare and promote them here.'}
+                    </p>
                   {/if}
                 </section>
               {/if}
@@ -3056,7 +3546,10 @@
                     onclick={() => void openResultInEditor(acceptedEditorResult)}
                   >Open accepted result in Editor</button>
                 {/if}
-                {@const branchGroups = workflow.candidateBranchGroups(node.id)}
+                {@const branchGroups = workflow.visibleCandidateBranchGroups(node.id)}
+                {@const failedCandidateCount = branchGroups.reduce((total, group) => (
+                  total + group.candidates.filter((candidate) => candidate.status === 'failed').length
+                ), 0)}
                 {#if selectiveRunning && ['queued', 'running', 'cancelling'].includes(transformRunState.state)}
                   <p
                     class="selective-running-state"
@@ -3110,7 +3603,16 @@
                 <section class="candidate-branches" aria-label={`${node.name} concept branches`} aria-live="polite">
                   <div class="candidate-branch-head">
                     <strong>Concept branches</strong>
-                    <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
+                    <div class="candidate-branch-summary">
+                      <span>{branchGroups.reduce((total, group) => total + group.candidates.length, 0)} candidates</span>
+                      {#if failedCandidateCount > 0}
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onclick={() => clearFailedCandidates(node.id)}
+                        >Clear failed</button>
+                      {/if}
+                    </div>
                   </div>
                   {#if candidateResultMessages[node.id]}
                     <p class="candidate-result-summary" aria-live="polite">{candidateResultMessages[node.id]}</p>
@@ -3134,7 +3636,7 @@
                     </label>
                     <button
                       type="button"
-                      disabled={busy || !providerSelection.ready || !outputForTransform(node.id)}
+                      disabled={busy || !providerSelection.ready || !workflowConceptReviewNode(workflow.serialize(), node.id)}
                       onclick={() => void generateCandidateBranches(node.id)}
                     >Generate branches</button>
                   </div>
@@ -3150,8 +3652,13 @@
                             </small>
                             {#if candidate.failure}<small>{candidate.failure.message}</small>{/if}
                             {#if candidate.status === 'failed' || candidate.status === 'cancelled'}
-                              <button type="button" disabled={busy} onclick={() => void retryCandidate(candidate.candidateId)}>
-                                Retry candidate
+                              <button
+                                type="button"
+                                disabled={busy}
+                                aria-busy={retryingCandidateId === candidate.candidateId}
+                                onclick={() => void retryCandidate(candidate.candidateId)}
+                              >
+                                {retryingCandidateId === candidate.candidateId ? 'Retrying…' : 'Retry candidate'}
                               </button>
                             {/if}
                           </li>
@@ -3167,15 +3674,20 @@
               {/if}
             </div>
           </article>
+          <WorkflowNodeTaskLock x={node.x} y={node.y} width={node.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#each workflow.unsupportedNodes as node (node.id)}
+          {@const nodeTasks = workflowNodeTasks(node.id)}
           <article
             class="unsupported-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'unsupported' && workflow.selection.id === node.id}
             tabindex="-1"
             data-workflow-node={node.id}
             data-unsupported-node-type={node.unsupportedType}
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${node.x}px, ${node.y}px); width:${node.width}px; height:${node.height}px; --node-color:${node.color}`}
             onfocus={() => workflow.select({ kind: 'unsupported', id: node.id })}
             onpointerdown={(event) => {
@@ -3187,6 +3699,13 @@
               <span class="node-drag-region" use:dragHandle={{ type: 'unsupported', node }}>
                 <WorkflowNodeTitle name={node.name} typeLabel="Unsupported" />
               </span>
+              <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(node.id)}
+                  nodeName={node.name}
+                  onDisconnect={() => requestNodeDisconnect(node.id)}
+                />
+              </div>
             </div>
             <WorkflowNodePreflight entry={preflightForNode(node.id)} />
             <div class="creator-node-body">
@@ -3203,17 +3722,22 @@
               <button type="button" class="draft-run" disabled aria-describedby={`unsupported-reason-${node.id}`}>Run unavailable</button>
             </div>
           </article>
+          <WorkflowNodeTaskLock x={node.x} y={node.y} width={node.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
 
         {#if hasCompositionNode}
         {@const compositionGraphNode = workflow.graphSnapshot().nodes.find((node) => node.id === 'composition')}
+        {@const nodeTasks = workflowNodeTasks('composition')}
         <article
           class="prompt-node"
+          class:task-locked={nodeTasks.length > 0}
           class:selected={workflow.selection?.kind === 'composition'}
           tabindex="-1"
           data-workflow-node="composition"
           data-creator-node-type="art-direction"
-          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
+          aria-busy={nodeTasks.length > 0}
+          inert={nodeTasks.length > 0}
+          style={`transform:translate(${workflow.promptX}px, ${workflow.promptY}px); width:${workflow.compositionWidth}px; height:${workflow.compositionHeight}px; --node-color:${workflow.compositionColor}; --port-y:${workflow.compositionHeight / 2}px`}
           onfocus={() => workflow.select({ kind: 'composition' })}
           onpointerdown={(event) => {
             workflow.select({ kind: 'composition' });
@@ -3232,15 +3756,31 @@
             <span class="node-drag-region" use:dragHandle={{ type: 'prompt' }}>
               <WorkflowNodeTitle
                 name={workflow.compositionName || 'Composition'}
-                typeLabel="Composition"
-                fallback="Composition"
+                typeLabel={artDirectionCreatorDefinition.label}
+                fallback={artDirectionCreatorDefinition.defaultTitle}
               />
             </span>
             <div class="node-tools">
               <span class="connected-count">{workflow.incoming('composition').length} in / {workflow.outgoing('composition').length} out</span>
+              <WorkflowNodeDisconnectButton
+                count={nodeConnectionCount('composition')}
+                nodeName="Composition"
+                onDisconnect={() => requestNodeDisconnect('composition')}
+              />
+              <button
+                type="button"
+                aria-label={`Remove ${workflow.compositionName || artDirectionCreatorDefinition.defaultTitle}`}
+                use:tooltip={{ text: 'Remove node', placement: 'top' }}
+                onpointerdown={(event) => event.stopPropagation()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  workflow.removeNode('composition');
+                }}
+              ><Icon svg={Delete} size={13} /></button>
             </div>
           </div>
           <WorkflowNodePreflight entry={preflightForNode('composition')} />
+          <div class="prompt-node-body">
           {#if compositionGraphNode}<div class="composition-summary"><WorkflowNodeAiOptions node={compositionGraphNode} /></div>{/if}
           <div
             class="storyboard"
@@ -3356,6 +3896,7 @@
           </div>
           <textarea
             class="composition-text"
+            aria-label={`${workflow.compositionName || artDirectionCreatorDefinition.defaultTitle} direction prompt`}
             placeholder="A girl on the beach standing in front of an ice cream truck, holding an ice cream..."
             value={workflow.prompt}
             onpointerdown={(event) => event.stopPropagation()}
@@ -3414,20 +3955,26 @@
             </p>
           {/if}
           {#if error}<p class="err">{error}</p>{/if}
+          </div>
         </article>
+        <WorkflowNodeTaskLock x={workflow.promptX} y={workflow.promptY} width={workflow.compositionWidth} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/if}
 
         {#each workflow.outputNodes as outputNode (outputNode.id)}
           {@const outputAsset = outputAssetFor(outputNode)}
           {@const ports = workflowNodePorts(outputNode.id)}
           {@const targetReadiness = outputReadiness(outputNode.id)}
-          {@const reviewedOutput = Boolean(resolveWorkflowCampaignPath(workflow.serialize(), { outputNodeId: outputNode.id })?.reviewNodeId)}
+          {@const reviewedOutput = Boolean(directReviewForOutput(outputNode.id))}
+          {@const nodeTasks = workflowNodeTasks(outputNode.id)}
           <article
             class="output-node"
+            class:task-locked={nodeTasks.length > 0}
             class:selected={workflow.selection?.kind === 'output' && workflow.selection.id === outputNode.id}
             tabindex="-1"
             data-workflow-node={outputNode.id}
             data-creator-node-type="output"
+            aria-busy={nodeTasks.length > 0}
+            inert={nodeTasks.length > 0}
             style={`transform:translate(${outputNode.x}px, ${outputNode.y}px); width:${outputNode.width}px; height:${outputNode.height}px; --node-color:${outputNode.color}; --port-y:${outputNode.height / 2}px`}
             onfocus={() => workflow.select({ kind: 'output', id: outputNode.id })}
             onpointerdown={(event) => {
@@ -3452,6 +3999,11 @@
                 />
               </span>
               <div class="node-tools">
+                <WorkflowNodeDisconnectButton
+                  count={nodeConnectionCount(outputNode.id)}
+                  nodeName={outputTitle(outputNode)}
+                  onDisconnect={() => requestNodeDisconnect(outputNode.id)}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${outputTitle(outputNode)}`}
@@ -3467,7 +4019,7 @@
             </div>
             <WorkflowNodePreflight entry={preflightForNode(outputNode.id)} />
             <div class="specialized-node-body output-node-body">
-              <div class="output-preview" style={`height:${Math.max(76, outputNode.height - 154)}px`}>
+              <div class="output-preview">
                 {#if outputAsset?.previewDataUrl}<img class="preview-image" src={outputAsset.previewDataUrl} alt="" />{:else}<Icon svg={Image} size={32} />{/if}
               </div>
               <div class="output-props" role="presentation" onpointerdown={(event) => event.stopPropagation()}>
@@ -3507,11 +4059,75 @@
               {/if}
             </div>
           </article>
+          <WorkflowNodeTaskLock x={outputNode.x} y={outputNode.y} width={outputNode.width} taskCount={nodeTasks.length} onOpen={() => aiTasks.open(nodeTasks[0].id)} />
         {/each}
       </div>
     </div>
   </div>
 </section>
+
+{#if disconnectUndoNotice}
+  <div class="workflow-history-toast" role="region" aria-label="Workflow history" aria-live="polite">
+    <span>Disconnected {disconnectUndoNotice.count} {disconnectUndoNotice.count === 1 ? 'link' : 'links'}.</span>
+    <button
+      type="button"
+      disabled={!workflow.canUndoAuthoring || workflow.authoringUndoLabel !== 'Disconnect links'}
+      onclick={undoDisconnect}
+    >Undo</button>
+  </div>
+{/if}
+
+{#if disconnectDialog}
+  {@const inputLinks = disconnectDialog.links.filter((link) => link.direction === 'input')}
+  {@const outputLinks = disconnectDialog.links.filter((link) => link.direction === 'output')}
+  <Modal title="Disconnect links" onClose={closeDisconnectDialog} width={460}>
+    <div class="disconnect-dialog">
+      <p>
+        Choose which links to break for <strong>{disconnectDialog.nodeTitle}</strong>.
+        All links are selected by default.
+      </p>
+      {#if inputLinks.length > 0}
+        <fieldset>
+          <legend>Input links</legend>
+          {#each inputLinks as link (link.id)}
+            <label>
+              <input
+                type="checkbox"
+                checked={disconnectSelections[link.id]}
+                onchange={(event) => (disconnectSelections[link.id] = event.currentTarget.checked)}
+              />
+              <span><strong>{link.peerNodeTitle}</strong><small>{link.peerPortLabel} to {link.localPortLabel}</small></span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      {#if outputLinks.length > 0}
+        <fieldset>
+          <legend>Output links</legend>
+          {#each outputLinks as link (link.id)}
+            <label>
+              <input
+                type="checkbox"
+                checked={disconnectSelections[link.id]}
+                onchange={(event) => (disconnectSelections[link.id] = event.currentTarget.checked)}
+              />
+              <span><strong>{link.peerNodeTitle}</strong><small>{link.localPortLabel} to {link.peerPortLabel}</small></span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      <div class="disconnect-actions">
+        <button type="button" onclick={closeDisconnectDialog}>Cancel</button>
+        <button
+          type="button"
+          class="dlg-primary"
+          disabled={selectedDisconnectCount === 0}
+          onclick={confirmNodeDisconnect}
+        >Break {selectedDisconnectCount} {selectedDisconnectCount === 1 ? 'link' : 'links'}</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
 
 {#if directorOpen}
   <WorkflowDirectorDialog
@@ -3531,9 +4147,11 @@
     requester={revisionDirectorRequester}
     initialInstruction={revisionDirectorInstruction}
     title={revisionDirectorTitle}
+    taskNodeIds={revisionDirectorTaskNodeIds}
     onClose={() => {
       revisionDirectorOpen = false;
       revisionDirectorRequester = null;
+      revisionDirectorTaskNodeIds = [];
     }}
   />
 {/if}
@@ -3567,6 +4185,28 @@
     min-height: 0;
     background: #242526;
     color: var(--text);
+  }
+  .workflow-history-toast {
+    position: fixed;
+    bottom: 36px;
+    left: 50%;
+    z-index: 1600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px 7px 11px;
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    background: var(--bg-elevated);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
+    color: var(--text-bright);
+    font-size: 12px;
+    transform: translateX(-50%);
+  }
+  .workflow-history-toast button {
+    padding: 3px 8px;
+    color: var(--accent);
+    font-weight: 600;
   }
   .node-head,
   .output-actions {
@@ -3615,9 +4255,6 @@
   .board.panning:active {
     cursor: grabbing;
   }
-  .board.adding {
-    cursor: copy;
-  }
   .board.zooming.zoom-in {
     cursor: zoom-in;
   }
@@ -3650,6 +4287,11 @@
   .links path.pending {
     opacity: 0.58;
   }
+  .links path.task-locked {
+    stroke: #c88829;
+    opacity: 0.48;
+    pointer-events: none;
+  }
   .links path:focus-visible {
     outline: none;
     stroke-width: 4;
@@ -3681,6 +4323,7 @@
   .brief-node,
   .creator-node,
   .unsupported-node,
+  .prompt-node,
   .output-node {
     display: flex;
     flex-direction: column;
@@ -3692,6 +4335,19 @@
   .asset-node.included {
     border-color: color-mix(in srgb, var(--accent) 65%, #4b4d52);
     opacity: 1;
+  }
+  .asset-node.task-locked,
+  .brief-node.task-locked,
+  .creator-node.task-locked,
+  .unsupported-node.task-locked,
+  .prompt-node.task-locked,
+  .output-node.task-locked {
+    border-color: #c88829;
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, #c88829 72%, transparent),
+      0 12px 30px rgba(0, 0, 0, 0.28);
+    opacity: 0.76;
+    cursor: wait;
   }
   .prompt-node {
     width: 340px;
@@ -3764,15 +4420,82 @@
     align-items: center;
     gap: 4px;
   }
+  .disconnect-dialog {
+    display: grid;
+    gap: 12px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .disconnect-dialog > p {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .disconnect-dialog > p strong {
+    color: var(--text-bright);
+  }
+  .disconnect-dialog fieldset {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    margin: 0;
+    padding: 8px;
+    border: 1px solid var(--border-soft);
+    border-radius: 4px;
+  }
+  .disconnect-dialog legend {
+    padding: 0 4px;
+    color: var(--text-bright);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .disconnect-dialog label {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    padding: 6px;
+    border-radius: 3px;
+  }
+  .disconnect-dialog label:hover {
+    background: var(--bg-elevated);
+  }
+  .disconnect-dialog input {
+    margin: 2px 0 0;
+  }
+  .disconnect-dialog label span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .disconnect-dialog label strong {
+    overflow: hidden;
+    color: var(--text-bright);
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .disconnect-dialog label small {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .disconnect-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .disconnect-actions button {
+    min-width: 92px;
+  }
   .node-head button,
   .storyboard-head button {
     display: grid;
     place-items: center;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     padding: 0;
   }
-  .node-head button.active,
   .storyboard-head button.active {
     color: var(--accent);
   }
@@ -3856,14 +4579,18 @@
   }
   .asset-node textarea,
   .brief-node textarea,
-  .prompt-node textarea {
+  .prompt-node textarea,
+  .creator-node textarea {
     width: 100%;
     min-height: 52px;
-    border: none;
-    border-top: 1px solid #4b4d52;
-    border-radius: 0;
-    resize: vertical;
+    padding: 6px 8px;
+    border: 1px solid #4b4d52;
+    border-radius: 4px;
+    resize: none;
     background: #242528;
+    color: var(--text);
+    font: inherit;
+    line-height: 1.35;
   }
   .slot-picker {
     display: grid;
@@ -3882,17 +4609,30 @@
   }
   .brief-node p {
     margin: 0;
-    padding: 9px 9px 5px;
+    padding: 0;
     color: var(--text-dim);
     font-size: 10px;
     line-height: 1.35;
   }
+  .brief-node-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px;
+  }
+  .brief-node-body textarea {
+    flex: 1 1 auto;
+  }
   .creator-node-body {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: max-content;
+    align-content: start;
     flex: 1 1 auto;
     gap: 8px;
     min-height: 0;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: 9px;
     color: var(--text-dim);
     font-size: 10px;
@@ -3901,7 +4641,38 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
-    overscroll-behavior: contain;
+  }
+  .prompt-node-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .asset-node-body,
+  .output-node-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .asset-node-body .node-preview,
+  .output-node-body .output-preview {
+    flex: 1 1 auto;
+  }
+  .asset-node-body .node-preview {
+    min-height: 64px;
+  }
+  .output-node-body .output-preview {
+    min-height: 76px;
+  }
+  .asset-node-body .slot-picker,
+  .asset-node-body textarea,
+  .output-node-body .output-props,
+  .output-node-body .output-actions,
+  .output-node-body .generate-block {
+    flex: none;
+  }
+  .asset-node-body textarea {
+    width: calc(100% - 16px);
+    margin: 8px;
   }
   .creator-node-body > p {
     margin: 0;
@@ -3932,6 +4703,63 @@
     align-items: center;
     gap: 6px;
     color: var(--text-bright);
+  }
+  .transform-context-summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    color: var(--text-bright);
+    line-height: 1.35;
+  }
+  .transform-context-summary > span,
+  .transform-context-summary small {
+    display: block;
+    min-width: 0;
+  }
+  .transform-context-summary small {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .transform-target-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--text-bright);
+    line-height: 1.35;
+  }
+  .transform-target-summary.missing {
+    border-color: color-mix(in srgb, var(--warning, #d6a84b) 38%, transparent);
+    background: color-mix(in srgb, var(--warning, #d6a84b) 8%, transparent);
+  }
+  .transform-target-summary > span,
+  .transform-target-summary small {
+    display: block;
+    min-width: 0;
+  }
+  .transform-target-summary small {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 9px;
+  }
+  .transform-target-summary button {
+    min-width: 0;
+    padding: 3px 6px;
+    white-space: nowrap;
+    font-size: 9px;
+  }
+  .transform-preview-summary select {
+    min-width: 58px;
+    padding: 3px 4px;
+    font-size: 9px;
   }
   .extract-run {
     min-width: 0;
@@ -3991,10 +4819,6 @@
     flex: none;
     border-radius: 3px;
     object-fit: cover;
-  }
-  .asset-node textarea,
-  .brief-node textarea {
-    resize: none;
   }
   .creator-port-list {
     display: grid;
@@ -4131,7 +4955,6 @@
     margin: 0;
   }
   .candidate-branch-head,
-  .candidate-branch-controls,
   .candidate-branch-controls label,
   .candidate-group li {
     display: flex;
@@ -4142,14 +4965,27 @@
     color: var(--text-bright);
     font-size: 10px;
   }
+  .candidate-branch-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .candidate-branch-summary button {
+    min-width: 0;
+    padding: 2px 5px;
+    font-size: 9px;
+  }
   .candidate-branch-head span,
   .candidate-group small {
     color: var(--text-dim);
   }
   .candidate-branch-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 5px;
   }
   .candidate-branch-controls label {
+    min-width: 0;
     gap: 3px;
     color: var(--text-dim);
     font-size: 9px;
@@ -4166,6 +5002,10 @@
     min-width: 0;
     padding: 4px 6px;
     font-size: 10px;
+  }
+  .candidate-branch-controls button {
+    grid-column: 1 / -1;
+    width: 100%;
   }
   .candidate-group {
     display: grid;
@@ -4305,8 +5145,10 @@
   .storyboard.editing canvas {
     cursor: crosshair;
   }
-  .composition-text {
+  .prompt-node .composition-text {
+    width: calc(100% - 16px);
     min-height: 86px;
+    margin: 8px;
   }
   .prompt-node label {
     display: grid;
@@ -4459,11 +5301,5 @@
     min-width: 0;
     padding: 3px 5px;
     font-size: 11px;
-  }
-  .draw-preview {
-    position: absolute;
-    border: 1px dashed var(--accent);
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    pointer-events: none;
   }
 </style>

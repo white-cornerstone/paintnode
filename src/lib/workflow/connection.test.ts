@@ -305,6 +305,35 @@ describe('typed workflow connections', () => {
     })).toEqual({ ok: true });
   });
 
+  it('requires a separate Transform for every downstream output path', () => {
+    const input = graph('layout');
+    input.nodes[0] = {
+      ...input.nodes[0],
+      type: 'transform',
+      ports: { inputs: [], outputs: [port('result', 'layout')] },
+    };
+    const first = {
+      source: { nodeId: 'source', portId: 'result' },
+      target: { nodeId: 'target', portId: 'target-input' },
+    };
+    const second = {
+      source: { nodeId: 'source', portId: 'result' },
+      target: { nodeId: 'third', portId: 'third-input' },
+    };
+    const domain = new WorkflowGraphDomain(input);
+
+    domain.addEdge({ id: 'first-transform-path', ...first });
+    expectRejected(domain, second, 'UNSUPPORTED_CONNECTION', /separate Transform for each Output format/i);
+
+    const legacy = graph('layout');
+    legacy.nodes[0] = structuredClone(input.nodes[0]);
+    legacy.edges.push(
+      { id: 'legacy-first-path', ...first },
+      { id: 'legacy-second-path', ...second },
+    );
+    expect(new WorkflowGraphDomain(legacy).graph.edges).toHaveLength(2);
+  });
+
   it('rejects invalid existing graphs through the same strict validation contract', () => {
     const cases: Array<[string, (input: WorkflowGraphV2) => void, WorkflowConnectionRejectionCode]> = [
       ['missing source port', (input) => { input.edges = [{ id: 'bad', source: { nodeId: 'source', portId: 'missing' }, target }]; }, 'SOURCE_PORT_NOT_FOUND'],

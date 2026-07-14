@@ -160,6 +160,20 @@ pub(crate) fn set_app_menu_enabled(
 }
 
 #[tauri::command]
+pub(crate) fn finish_launch(app: AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window is unavailable".to_string())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())?;
+
+    if let Some(splash) = app.get_webview_window("splash") {
+        splash.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub(crate) async fn read_dropped_file(path: String) -> Result<NativeDroppedFile, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<NativeDroppedFile, String> {
         let trimmed = path.trim();

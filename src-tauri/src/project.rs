@@ -24,7 +24,7 @@ use tauri::AppHandle;
 use tauri::Manager;
 
 use crate::ai::{ensure_agent_run_dirs, now_id, TempJobDir, PAINTNODE_WORK_DIR};
-use crate::png::{encode_rgba_png, is_png, png_data_url_from_bytes};
+use crate::png::{encode_rgba_png, is_png, png_data_url_from_bytes, png_dimensions_from_bytes};
 
 const PROJECT_MANIFEST: &str = "paintnode.project.json";
 
@@ -594,9 +594,27 @@ fn path_size(path: &Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-fn asset_view(project_path: &Path, asset: ProjectAsset) -> ProjectAssetView {
+fn hydrate_png_dimensions(path: &Path, asset: &mut ProjectAsset) {
+    if asset.width.is_some() && asset.height.is_some() || asset.mime.as_deref() != Some("image/png")
+    {
+        return;
+    }
+    let Some((width, height)) = fs::read(path)
+        .ok()
+        .and_then(|bytes| png_dimensions_from_bytes(&bytes))
+    else {
+        return;
+    };
+    asset.width = Some(width);
+    asset.height = Some(height);
+}
+
+fn asset_view(project_path: &Path, mut asset: ProjectAsset) -> ProjectAssetView {
     let path = project_path.join(&asset.relative_path);
     let exists = path.exists();
+    if exists {
+        hydrate_png_dimensions(&path, &mut asset);
+    }
     let preview_data_url = exists
         .then(|| thumbnail_data_url_for_file(project_path, &path, asset.mime.as_deref()))
         .flatten();
@@ -1082,9 +1100,10 @@ pub(crate) fn add_asset(
 
 fn add_asset_with_transaction_observer(
     project_path: &Path,
-    asset: ProjectAsset,
+    mut asset: ProjectAsset,
     on_contention: impl FnOnce(),
 ) -> Result<ProjectAssetView, String> {
+    hydrate_png_dimensions(&project_path.join(&asset.relative_path), &mut asset);
     with_project_transaction_observed(project_path, on_contention, || {
         let mut manifest = load_manifest_unlocked(project_path)?;
         manifest.assets.retain(|existing| existing.id != asset.id);
@@ -2022,6 +2041,26 @@ mod tests {
         assert_eq!(decoded.into_raw(), vec![255, 0, 0, 255, 0, 128, 255, 64]);
         assert!(clipboard_rgba_png(2, 1, vec![0; 4]).is_err());
         assert!(clipboard_rgba_png(0, 1, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn generated_png_assets_hydrate_actual_dimensions() {
+        let project = TempJobDir::new("paintnode-generated-png-dimensions").expect("project dir");
+        ensure_project_dirs(project.path()).expect("project dirs");
+        let relative_path = "assets/generated/generated-concept.png";
+        fs::write(project.path().join(relative_path), ONE_PIXEL_PNG).expect("generated PNG");
+        let mut asset = ProjectAsset::generated_png(
+            "generated-concept".into(),
+            relative_path.into(),
+            "Generated concept".into(),
+            Some("Generate a concept".into()),
+            Some("result.png".into()),
+        );
+
+        hydrate_png_dimensions(&project.path().join(relative_path), &mut asset);
+
+        assert_eq!(asset.width, Some(1));
+        assert_eq!(asset.height, Some(1));
     }
 
     fn workflow_editor_ora_bytes() -> Vec<u8> {

@@ -17,7 +17,8 @@ function legacyCampaignGraph(): WorkflowGraphV2 {
     graphId: 'campaign-revision-source',
   }));
   graph.nodes = graph.nodes.filter((node) => ![
-    'review-campaign-direction', 'transform-generate-portrait', 'transform-generate-landscape',
+    'review-campaign-direction', 'transform-format-square',
+    'transform-generate-portrait', 'transform-generate-landscape',
   ].includes(node.id));
   graph.edges = graph.edges.filter((edge) => (
     graph.nodes.some((node) => node.id === edge.source.nodeId)
@@ -69,7 +70,11 @@ function campaignWithAcceptedHistory(): WorkflowGraphV2 {
 
 function campaignWithPromotedReview(): WorkflowGraphV2 {
   const graph = legacyCampaignGraph();
-  graph.nodes.push(createCreatorNode('review', { id: 'review-concepts' }));
+  const review = createCreatorNode('review', { id: 'review-concepts' });
+  review.ports.outputs = review.ports.outputs.map((port) => port.id === 'selected'
+    ? { ...port, label: 'Selected direction', dataType: 'layout' }
+    : port);
+  graph.nodes.push(review);
   graph.edges = graph.edges.filter((edge) => edge.id !== 'edge-transform-generate-square-output-square');
   graph.edges.push(
     {
@@ -381,7 +386,7 @@ describe('Workflow Director patch proposal', () => {
         edge: {
           id: 'cycle-review-transform',
           source: { nodeId: 'review-cycle', portId: 'selected' },
-          target: { nodeId: 'transform-generate-square', portId: 'source' },
+          target: { nodeId: 'transform-generate-square', portId: 'decision' },
         },
       },
       {

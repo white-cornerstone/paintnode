@@ -7,6 +7,12 @@ import {
   type WorkflowGraphV2,
   type WorkflowValidationIssue,
 } from './schema';
+import { withInputAssetScopePorts } from './inputAssetScope';
+import { withTransformVisualReferencePorts } from './transformPorts';
+import { withReviewDecisionContracts } from './reviewDecisionContracts';
+
+const LEGACY_GENERIC_ART_DIRECTION_SIZE = { width: 340, height: 408 } as const;
+const COMPACT_GENERIC_ART_DIRECTION_HEIGHT = 320;
 
 export interface WorkflowReadResult {
   ok: boolean;
@@ -50,6 +56,26 @@ function domainIssue(error: WorkflowDomainError, graph: WorkflowGraphV2): Workfl
   return { path: '', message: `${error.code}: ${error.message}`, severity: 'error' };
 }
 
+function normalizeLegacyCreatorLayout(graph: WorkflowGraphV2): {
+  graph: WorkflowGraphV2;
+  normalized: boolean;
+} {
+  let normalized = false;
+  const nodes = graph.nodes.map((node) => {
+    const legacyGenericArtDirection = node.type === 'art-direction'
+      && node.id !== 'composition'
+      && node.size.width === LEGACY_GENERIC_ART_DIRECTION_SIZE.width
+      && node.size.height === LEGACY_GENERIC_ART_DIRECTION_SIZE.height;
+    if (!legacyGenericArtDirection) return node;
+    normalized = true;
+    return {
+      ...node,
+      size: { ...node.size, height: COMPACT_GENERIC_ART_DIRECTION_HEIGHT },
+    };
+  });
+  return normalized ? { graph: { ...graph, nodes }, normalized } : { graph, normalized };
+}
+
 function validateLoadedGraph(
   graph: WorkflowGraphV2,
   sourceVersion: number,
@@ -57,14 +83,23 @@ function validateLoadedGraph(
   issues: WorkflowValidationIssue[] = [],
 ): WorkflowReadResult {
   try {
-    const normalizedGraph = normalizeInterruptedWorkflowRuns(graph);
-    const normalizedInterruptedRuns = normalizedGraph !== graph;
+    const runNormalizedGraph = normalizeInterruptedWorkflowRuns(graph);
+    const normalizedInterruptedRuns = runNormalizedGraph !== graph;
+    const layoutNormalization = normalizeLegacyCreatorLayout(runNormalizedGraph);
+    const inputPortGraph = withInputAssetScopePorts(layoutNormalization.graph);
+    const transformPortNormalization = withTransformVisualReferencePorts(inputPortGraph);
+    const reviewDecisionNormalization = withReviewDecisionContracts(transformPortNormalization.graph);
+    const normalizedGraph = reviewDecisionNormalization.graph;
     const domain = new WorkflowGraphDomain(normalizedGraph);
     return {
       ok: true,
       graph: domain.graph,
       sourceVersion,
-      requiresExplicitSave: requiresExplicitSave || normalizedInterruptedRuns,
+      requiresExplicitSave: requiresExplicitSave
+        || normalizedInterruptedRuns
+        || layoutNormalization.normalized
+        || transformPortNormalization.normalized
+        || reviewDecisionNormalization.normalized,
       normalizedInterruptedRuns,
       issues,
     };

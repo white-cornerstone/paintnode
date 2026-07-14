@@ -2,6 +2,7 @@
   import { editor } from '../state/editor.svelte';
   import { ui } from '../state/ui.svelte';
   import { workflow, type WorkflowTool } from '../state/workflow.svelte';
+  import { aiTasks } from '../state/aiTasks.svelte';
   import type { SelectionMode } from '../engine/selection';
   import { effectiveAiRetouchMaskMode } from '../engine/aiRetouch';
   import { isDesktop } from '../integrations/desktop';
@@ -12,13 +13,10 @@
   import {
     Add,
     ArrowSync,
-    Board,
     Dismiss,
     Hand,
-    ImageAdd,
     Info,
     MarqueeRect,
-    Open,
     Search,
     Sparkle,
     SquareMultiple,
@@ -53,13 +51,22 @@
   );
   const workflowTools: Array<{ id: WorkflowTool; label: string; icon: string }> = [
     { id: 'hand', label: 'Hand tool', icon: Hand },
-    { id: 'asset', label: 'Draw asset node', icon: ImageAdd },
-    { id: 'composition', label: 'Place composition node', icon: Board },
-    { id: 'output', label: 'Place output node', icon: Open },
     { id: 'zoom', label: 'Zoom workflow canvas', icon: Search },
   ];
   const nodePalettes = ['#3a3c42', '#3e4f7a', '#3e6b57', '#74583c', '#70435f', '#5b4f7a'];
   const selectedOutput = $derived(workflow.selectedOutputNode());
+  const selectedWorkflowNodeLocked = $derived.by(() => {
+    workflow.rev;
+    const selection = workflow.selection;
+    const nodeId = selection?.kind === 'composition'
+      ? 'composition'
+      : selection?.kind === 'asset' || selection?.kind === 'creator' || selection?.kind === 'output' || selection?.kind === 'unsupported'
+        ? selection.id
+        : null;
+    return nodeId
+      ? aiTasks.runningForWorkflowNode(workflow.graphSnapshot().id, nodeId).length > 0
+      : false;
+  });
   const selectionModes: { id: SelectionMode; label: string; icon: string }[] = [
     { id: 'new', label: 'New', icon: MarqueeRect },
     { id: 'add', label: 'Add', icon: Add },
@@ -255,23 +262,23 @@
         class="node-name"
         value={workflow.selectedLabel()}
         placeholder="node name"
-        disabled={!workflow.selection}
+        disabled={!workflow.selection || selectedWorkflowNodeLocked}
         oninput={(event) => workflow.setSelectedLabel(event.currentTarget.value)}
       />
     </label>
     {#if workflow.selection?.kind === 'composition'}
       <label class="opt">
         Storyboard
-        <input type="number" min="64" class="num wide" value={workflow.storyboardWidth} oninput={(event) => workflow.setStoryboardSize(event.currentTarget.valueAsNumber, workflow.storyboardHeight)} />
+        <input type="number" min="64" class="num wide" value={workflow.storyboardWidth} disabled={selectedWorkflowNodeLocked} oninput={(event) => workflow.setStoryboardSize(event.currentTarget.valueAsNumber, workflow.storyboardHeight)} />
         <span class="unit">x</span>
-        <input type="number" min="64" class="num wide" value={workflow.storyboardHeight} oninput={(event) => workflow.setStoryboardSize(workflow.storyboardWidth, event.currentTarget.valueAsNumber)} />
+        <input type="number" min="64" class="num wide" value={workflow.storyboardHeight} disabled={selectedWorkflowNodeLocked} oninput={(event) => workflow.setStoryboardSize(workflow.storyboardWidth, event.currentTarget.valueAsNumber)} />
       </label>
     {:else if workflow.selection?.kind === 'output' && selectedOutput}
       <label class="opt">
         Final
-        <input type="number" min="64" class="num wide" value={selectedOutput.finalWidth} oninput={(event) => workflow.setOutputFinalSize(selectedOutput.id, event.currentTarget.valueAsNumber, selectedOutput.finalHeight)} />
+        <input type="number" min="64" class="num wide" value={selectedOutput.finalWidth} disabled={selectedWorkflowNodeLocked} oninput={(event) => workflow.setOutputFinalSize(selectedOutput.id, event.currentTarget.valueAsNumber, selectedOutput.finalHeight)} />
         <span class="unit">x</span>
-        <input type="number" min="64" class="num wide" value={selectedOutput.finalHeight} oninput={(event) => workflow.setOutputFinalSize(selectedOutput.id, selectedOutput.finalWidth, event.currentTarget.valueAsNumber)} />
+        <input type="number" min="64" class="num wide" value={selectedOutput.finalHeight} disabled={selectedWorkflowNodeLocked} oninput={(event) => workflow.setOutputFinalSize(selectedOutput.id, selectedOutput.finalWidth, event.currentTarget.valueAsNumber)} />
       </label>
     {/if}
     <div class="palette" aria-label="Node color palette">
@@ -280,11 +287,12 @@
           class:active={workflow.selectedColor() === color}
           style={`background:${color}`}
           aria-label={`Set node color ${color}`}
-          disabled={!workflow.selection}
+          disabled={!workflow.selection || selectedWorkflowNodeLocked}
           onclick={() => workflow.setSelectedColor(color)}
         ></button>
       {/each}
     </div>
+    {#if selectedWorkflowNodeLocked}<span class="workflow-node-locked" role="status">AI task running · node read-only</span>{/if}
   {:else if hasDrawingSurface}
     {#if editor.freeTransform}
       <span class="tool-name">Free Transform</span>
@@ -685,6 +693,17 @@
   .palette button.active {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);
+  }
+  .workflow-node-locked {
+    flex: none;
+    padding: 4px 7px;
+    color: #f0c987;
+    background: #3b3123;
+    border: 1px solid #765b32;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
   }
   .seg {
     display: inline-flex;

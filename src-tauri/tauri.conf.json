@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "PaintNode",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "identifier": "com.paintnode.editor",
   "build": {
     "frontendDist": "../dist",
@@ -19,6 +19,7 @@
         "minHeight": 560,
         "resizable": true,
         "fullscreen": false,
+        "visible": false,
         "devtools": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { Component } from 'svelte';
   import MenuBar from './lib/components/MenuBar.svelte';
   import Toolbar from './lib/components/Toolbar.svelte';
@@ -67,6 +67,7 @@
   import { editor, type DocumentSession } from './lib/state/editor.svelte';
   import { persistWorkflowAfterReturnForClose } from './lib/state/workflowReturnClose';
   import {
+    finishDesktopLaunch,
     isDesktop,
     providerQaMode,
     quitApplication,
@@ -109,6 +110,7 @@
   const loadAiDecoupleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiDecoupleDialog.svelte');
   const loadAiUpscaleDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiUpscaleDialog.svelte');
   const loadAiAutoAdjustDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/AiAutoAdjustDialog.svelte');
+  const loadWorkflowTaskDialog: LazyComponentLoader<AiDialogProps> = () => import('./lib/components/WorkflowTaskDialog.svelte');
   const loadAiSetupWizard: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/AiSetupWizard.svelte');
   const loadStockImagesDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/StockImagesDialog.svelte');
   const loadSettingsDialog: LazyComponentLoader<CloseableDialogProps> = () => import('./lib/components/SettingsDialog.svelte');
@@ -443,13 +445,14 @@
       'app:export-png': hasDoc,
       'app:export-psd': hasDoc,
       'app:close-document': hasDoc,
-      // Keep native Edit shortcuts enabled so focused text controls in dialogs
-      // can receive Cmd+Z/X/C/V even when no document/layer action is available.
+      // Keep native Edit shortcuts enabled so focused text controls can receive
+      // Cmd+Z/X/C/V/A even when no document/layer action is available.
       'app:undo': true,
       'app:redo': true,
       'app:cut': true,
       'app:copy': true,
       'app:paste': true,
+      'app:select-all': true,
       'app:fill-foreground': hasEditableLayer,
       'app:fill-background': hasEditableLayer,
       'app:clear': hasEditableLayer,
@@ -483,7 +486,6 @@
       'app:rasterize-type': canRasterizeType,
       'app:merge-down': canMergeDown,
       'app:flatten': canFlatten,
-      'app:select-all': hasDoc,
       'app:deselect': hasDoc && hasSelection,
       'app:inverse-selection': hasDoc && hasSelection,
       'app:gaussian-blur': hasEditableLayer,
@@ -495,6 +497,11 @@
       'app:fit-screen': hasViewport,
       'app:actual-pixels': hasViewport,
     };
+  }
+
+  function workflowAuthoringLocked(): boolean {
+    return workflow.active
+      && aiTasks.runningForWorkflow(workflow.graphSnapshot().id).length > 0;
   }
 
   $effect(() => {
@@ -537,10 +544,16 @@
         void closeActiveDocument();
         break;
       case 'app:undo':
-        editor.undo();
+        if (ui.activeSurface === 'workflow' && workflow.active) {
+          if (!workflowAuthoringLocked()) workflow.undoAuthoring();
+        }
+        else editor.undo();
         break;
       case 'app:redo':
-        editor.redo();
+        if (ui.activeSurface === 'workflow' && workflow.active) {
+          if (!workflowAuthoringLocked()) workflow.redoAuthoring();
+        }
+        else editor.redo();
         break;
       case 'app:cut':
         editor.cut();
@@ -800,6 +813,7 @@
     let disposed = false;
     const unlistenNativeDrops: UnlistenFn[] = [];
     if (desktop) {
+      void tick().then(finishDesktopLaunch);
       updateCheckTimer = window.setTimeout(
         () => void appUpdater.checkForUpdates({ background: true }),
         2500,
@@ -1198,6 +1212,8 @@
   {@render lazyAiDialog(loadAiUpscaleDialog)}
 {:else if ui.dialog === 'aiAutoAdjust'}
   {@render lazyAiDialog(loadAiAutoAdjustDialog)}
+{:else if ui.dialog === 'workflowTask'}
+  {@render lazyAiDialog(loadWorkflowTaskDialog)}
 {:else if ui.dialog === 'aiSetup'}
   {@render lazyDialog(loadAiSetupWizard)}
 {:else if ui.dialog === 'stockImages'}

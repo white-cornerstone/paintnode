@@ -72,6 +72,9 @@ export interface WorkflowTaskDetail {
   kind: 'workflow';
   providerLabel: string;
   outputName: string;
+  /** Workflow graph and node scope used to lock active nodes while this task runs. */
+  workflowId?: string;
+  nodeIds?: string[];
 }
 
 export type AiTaskDetail = GenerateTaskDetail | RetouchTaskDetail | UpscaleTaskDetail | DecoupleTaskDetail | AutoAdjustTaskDetail | WorkflowTaskDetail;
@@ -91,6 +94,7 @@ export interface AiTask {
   status: AiTaskStatus;
   progress: string;
   error: string;
+  warning: string;
   startedAt: number;
   completedAt: number | null;
   /**
@@ -160,6 +164,7 @@ function storedTaskFrom(value: unknown, projectPath: string): StoredAiTask | nul
     status: normalizedStatus,
     progress: status === 'running' ? 'Interrupted when PaintNode closed' : progress,
     error: status === 'running' ? 'This task was still running when PaintNode closed.' : error,
+    warning: status === 'running' ? '' : typeof value.warning === 'string' ? value.warning : '',
     startedAt: typeof value.startedAt === 'number' ? value.startedAt : Date.now(),
     completedAt: typeof value.completedAt === 'number' ? value.completedAt : Date.now(),
     // Document ids are session-scoped; a restored task acts on the active document.
@@ -221,6 +226,7 @@ export class AiTaskStore {
       status: 'running',
       progress: draft.progress,
       error: '',
+      warning: '',
       startedAt: Date.now(),
       completedAt: null,
       documentId: draft.documentId ?? null,
@@ -248,6 +254,24 @@ export class AiTaskStore {
   find(id: string | null | undefined): AiTask | null {
     if (!id) return null;
     return this.allTasks.find((task) => task.id === id) ?? null;
+  }
+
+  runningForWorkflowNode(workflowId: string, nodeId: string): AiTask[] {
+    if (!workflowId || !nodeId) return [];
+    return this.runningForWorkflow(workflowId).filter((task) => (
+      task.detail.kind === 'workflow'
+      && Array.isArray(task.detail.nodeIds)
+      && task.detail.nodeIds.includes(nodeId)
+    ));
+  }
+
+  runningForWorkflow(workflowId: string): AiTask[] {
+    if (!workflowId) return [];
+    return this.tasks.filter((task) => (
+      task.status === 'running'
+      && task.detail.kind === 'workflow'
+      && task.detail.workflowId === workflowId
+    ));
   }
 
   setProgress(id: string, progress: string): void {
@@ -309,11 +333,12 @@ export class AiTaskStore {
     await task.cancel?.();
   }
 
-  complete(id: string, progress = 'Completed'): void {
+  complete(id: string, progress = 'Completed', warning = ''): void {
     const task = this.find(id);
     if (!task) return;
     task.status = 'completed';
     task.progress = progress;
+    task.warning = warning;
     if (task.partProgress) task.partProgress = { ...task.partProgress, completed: task.partProgress.total };
     task.completedAt = Date.now();
     // Release the closure: Retry is only offered on error, and retry closures
@@ -329,6 +354,7 @@ export class AiTaskStore {
     task.status = 'cancelled';
     task.progress = progress;
     task.error = '';
+    task.warning = '';
     task.completedAt = Date.now();
     task.retry = null;
     task.cancel = null;
@@ -340,6 +366,7 @@ export class AiTaskStore {
     if (!task) return;
     task.status = 'error';
     task.error = error;
+    task.warning = '';
     task.progress = error.split('\n')[0] || 'Failed';
     task.completedAt = Date.now();
     task.cancel = null;
@@ -358,6 +385,7 @@ export class AiTaskStore {
     const executor = this.executors.get(task.kind);
     task.status = 'running';
     task.error = '';
+    task.warning = '';
     task.progress = 'Retrying...';
     task.startedAt = Date.now();
     task.completedAt = null;
@@ -369,7 +397,7 @@ export class AiTaskStore {
 
   open(id: string): void {
     const task = this.find(id);
-    if (!task || task.kind === 'workflow') return;
+    if (!task) return;
     ui.openAiTask(task.kind, id);
   }
 
