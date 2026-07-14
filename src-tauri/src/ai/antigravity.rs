@@ -25,8 +25,9 @@ use crate::ai::canvas::{
     ai_antigravity_image_capability, ai_candidate_rejection, ai_edit_checks_level,
     ai_retouch_editable_mask_png, antigravity_output_target,
     read_png_bytes_cropped_to_ai_working_canvas, remove_rejected_ai_candidate,
-    validate_optional_target_dimensions, AiWorkingCanvas, AI_PROTECTED_DRIFT_MAX_ATTEMPTS,
-    AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS, AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
+    validate_optional_target_dimensions, AiWorkingCanvas, AI_CHROMA_KEY_HEX,
+    AI_PROTECTED_DRIFT_MAX_ATTEMPTS, AI_RETOUCH_OUTPUT_MASK_FEATHER_RADIUS,
+    AI_RETOUCH_OUTPUT_MASK_GROW_RADIUS, AI_SEAM_RETRY_NOTE,
 };
 use crate::ai::claude::{
     build_director_claude_command, claude_command_failure, claude_command_label,
@@ -2384,6 +2385,7 @@ fn antigravity_decouple_director_prompt(
     director_provider: AiDirectorProvider,
     director_mode: AiDirectorMode,
     director_involvement: AiDirectorInvolvement,
+    index_sheet: bool,
 ) -> String {
     let director_contract = ai_director_workflow_contract(
         director_provider,
@@ -2391,6 +2393,33 @@ fn antigravity_decouple_director_prompt(
         director_involvement,
         "asset decoupling",
     );
+    if index_sheet {
+        return format!(
+            r#"Create exactly one PaintNode asset index sheet from `{job_dir}/source.png`.
+
+User guidance and optional AI Director inventory:
+{prompt}
+
+{director_contract}
+
+Required output:
+- When the user guidance contains an AI Director inventory, treat it as final and do not re-plan it. Otherwise identify the requested objects before the single image-generation call. Never split the sheet into separate image jobs.
+- Use the image-generation capability exactly once to create `{job_dir}/asset-index-sheet.png` containing every requested object in the specified grid and order.
+- The index sheet is the only image deliverable. Do not generate one PNG per object, alternate candidates, or multiple variations.
+- Semantically reconstruct every inventory component as a fresh, clean, complete, catalog-style standalone asset. This is not segmentation, background removal, or cutting visible pixels from the source.
+- Use the source only as evidence for identity, design, proportions, materials, labels, style, and characteristic detail. Do not crop, paste, clone, trace, or preserve source-photo pixels, background patches, original occlusion silhouettes, adjacent objects, environmental reflections, color cast, or lighting spill.
+- Rebuild hidden edges, sides, and canonical component geometry. Keep every complete asset centered and scaled inside its assigned equal-size cell; never span cells, change the requested grid, or add rows or columns.
+- Do not add cell borders, numbers, captions, shadows, scenery, or UI chrome.
+- Prefer real transparent pixels everywhere outside the objects, including soft alpha for hair, lace, rope, glass, shadows, antialiasing, and semi-transparent material.
+- If real alpha is not practical, create one same-size grayscale alpha mask and record it in `alphaMask`.
+- Only when neither real alpha nor an alpha mask is practical, use the perfectly flat PaintNode chroma-key matte {AI_CHROMA_KEY_HEX} and record `keyColor` as `{AI_CHROMA_KEY_HEX}`. Never render a checkerboard transparency preview.
+- Create `{job_dir}/manifest.json` with a top-level `layers` array containing exactly one entry for `asset-index-sheet.png`. The entry may also contain `alphaMask` or `keyColor` as described above.
+- Use file names relative to `{job_dir}`, not absolute paths.
+- Work only inside `{job_dir}` and do not ask follow-up questions.
+
+Final response should be one short sentence confirming the single asset index sheet and `manifest.json` were created."#
+        );
+    }
     format!(
         r#"Extract reusable visual assets from `{job_dir}/source.png` for PaintNode.
 
@@ -2401,6 +2430,8 @@ User guidance:
 
 Required output:
 - Work only inside `{job_dir}`.
+- Semantically reconstruct fresh, clean, complete standalone assets; do not segment, crop, paste, clone, or preserve source-photo pixels or environment patches.
+- Use the source as evidence for identity, design, materials, and useful constituent components. Split independently reusable components, rebuild hidden geometry, and remove original occlusions, adjacent scenery, environmental reflections, color cast, and lighting spill.
 - Create `{job_dir}/manifest.json`.
 - Create one PNG file per extracted layer/asset inside `{job_dir}`.
 - If useful, create PNG alpha masks inside `{job_dir}`.
@@ -4527,6 +4558,7 @@ pub(crate) async fn decouple_antigravity_image(
     source_png: Vec<u8>,
     run_id: String,
     store_assets: Option<bool>,
+    index_sheet: Option<bool>,
     keep_job_dir: Option<bool>,
     keep_debug_artifacts: Option<bool>,
     model: Option<String>,
@@ -4548,6 +4580,7 @@ pub(crate) async fn decouple_antigravity_image(
         let director_mode = ai_director_mode(director_mode);
         let director_provider = ai_director_provider(director_provider);
         let director_involvement = ai_director_involvement(director_involvement);
+        let index_sheet = index_sheet.unwrap_or(false);
         let run_id = if run_id.trim().is_empty() {
             format!("antigravity-decouple-{}", now_id())
         } else {
@@ -4585,6 +4618,7 @@ pub(crate) async fn decouple_antigravity_image(
             director_provider,
             director_mode,
             director_involvement,
+            index_sheet,
         );
         write_ai_job_prompt(&job_path, &prompt_text, "Antigravity asset extraction")?;
         emit_kept_job_dir(&app, &run_id, &job_path, keep_job_dir);
@@ -5718,6 +5752,38 @@ mod tests {
         assert!(plan_only.contains("AI Director participation: Plan only"));
         assert!(plan_only.contains("Save the final image as"));
         assert!(!plan_only.contains(PAINTNODE_DIRECTOR_ACTION_FILE));
+    }
+
+    #[test]
+    fn antigravity_index_sheet_prompt_requires_one_image_and_real_transparency() {
+        let prompt = antigravity_decouple_director_prompt(
+            "Create Bottle then Glass in the first two grid cells.",
+            "paintnode/antigravity-runs/sheet-1",
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Skip,
+            AiDirectorInvolvement::PlanOnly,
+            true,
+        );
+        assert!(prompt.contains("AI Director inventory"));
+        assert!(prompt.contains("exactly once"));
+        assert!(prompt.contains("exactly one entry"));
+        assert!(prompt.contains("asset-index-sheet.png"));
+        assert!(prompt.contains("Never render a checkerboard"));
+        assert!(prompt.contains("#00ff00"));
+        assert!(prompt.contains("Semantically reconstruct"));
+        assert!(prompt.contains("Do not crop, paste, clone, trace"));
+        assert!(!prompt.contains("one PNG file per extracted layer"));
+
+        let maximum_operation_prompt = "x".repeat(3_200);
+        let bounded = antigravity_decouple_director_prompt(
+            &maximum_operation_prompt,
+            "paintnode/antigravity-runs/sheet-1",
+            AiDirectorProvider::Antigravity,
+            AiDirectorMode::Skip,
+            AiDirectorInvolvement::PlanOnly,
+            true,
+        );
+        assert!(bounded.chars().count() <= 8_000);
     }
 
     #[test]

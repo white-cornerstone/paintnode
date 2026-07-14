@@ -884,6 +884,7 @@ export async function decoupleCodexImage(
   sourcePng: Uint8Array,
   prompt: string,
   storeAssets = true,
+  indexSheet = false,
 ): Promise<DecoupleImageResult> {
   if (!isDesktop()) {
     throw new Error('Codex image decoupling is only available in the desktop app.');
@@ -899,6 +900,7 @@ export async function decoupleCodexImage(
     sourcePng: Array.from(sourcePng),
     runId,
     storeAssets,
+    indexSheet,
   });
 }
 
@@ -1005,12 +1007,14 @@ export async function generateGrokImage(
   });
 }
 
-/** Generate one Director-planned Grok asset on PaintNode's fixed chroma matte. */
+/** Generate one Director-planned Grok asset or index sheet on PaintNode's fixed chroma matte. */
 export async function extractGrokAsset(
   config: GrokGeneratorConfig,
   prompt: string,
   assetName: string,
   sources: WorkflowSourceImage[],
+  indexSheet = false,
+  sheetCount: number | null = null,
 ): Promise<DecoupleImageResult> {
   if (!isDesktop()) {
     throw new Error('Grok asset extraction is only available in the desktop app.');
@@ -1032,6 +1036,8 @@ export async function extractGrokAsset(
       bytes: Array.from(source.bytes),
     })),
     runId,
+    indexSheet,
+    sheetCount,
   });
 }
 
@@ -1235,6 +1241,7 @@ export async function decoupleAntigravityImage(
   sourcePng: Uint8Array,
   prompt: string,
   storeAssets = true,
+  indexSheet = false,
 ): Promise<DecoupleImageResult> {
   if (!isDesktop()) {
     throw new Error('Antigravity image decoupling is only available in the desktop app.');
@@ -1246,6 +1253,7 @@ export async function decoupleAntigravityImage(
     sourcePng: Array.from(sourcePng),
     runId,
     storeAssets,
+    indexSheet,
   });
 }
 
