@@ -609,7 +609,7 @@ describe('WorkflowStore Director patch review lifecycle', () => {
     const store = new WorkflowStore();
     store.newBoard();
     const pickPath = vi.spyOn(project, 'pickDocumentSavePath')
-      .mockResolvedValue('/virtual/project/documents/Named Campaign');
+      .mockResolvedValue('/virtual/project/documents/Named Campaign.cxflow');
     const saveAtPath = vi.spyOn(project, 'saveDocumentAtPathAs')
       .mockResolvedValue({
         relativePath: 'documents/Named Campaign.cxflow.json',
@@ -620,11 +620,43 @@ describe('WorkflowStore Director patch review lifecycle', () => {
 
     expect(pickPath).toHaveBeenCalledWith('Untitled Workflow.cxflow.json', 'Save Workflow Board');
     expect(saveAtPath).toHaveBeenCalledWith(expect.objectContaining({
-      targetPath: '/virtual/project/documents/Named Campaign',
+      targetPath: '/virtual/project/documents/Named Campaign.cxflow',
       name: 'Named Campaign.cxflow.json',
     }));
     expect(store.name).toBe('Named Campaign');
     expect(store.savedPath).toBe('documents/Named Campaign.cxflow.json');
+    expect(store.dirty).toBe(false);
+  });
+
+  it('overwrites an opened workflow after load normalization without opening Save As', async () => {
+    const source = new WorkflowStore();
+    source.newFromTemplate('campaign-composer', 'Existing Campaign');
+    const graph = structuredClone(source.serialize());
+    const transform = graph.nodes.find((node) => node.type === 'transform')!;
+    transform.ports.inputs = transform.ports.inputs.filter((port) => port.id !== 'assets');
+
+    const store = new WorkflowStore();
+    store.openFromBytes(
+      new TextEncoder().encode(JSON.stringify(graph)),
+      'documents/existing-campaign.cxflow.json',
+      'existing-campaign',
+    );
+    const pickPath = vi.spyOn(project, 'pickDocumentSavePath');
+    const saveToPath = vi.spyOn(project, 'saveDocumentToPath')
+      .mockResolvedValue('documents/existing-campaign.cxflow.json');
+
+    expect(store.requiresExplicitSave).toBe(true);
+    expect(store.savedPath).toBe('documents/existing-campaign.cxflow.json');
+
+    await expect(store.save()).resolves.toBe('documents/existing-campaign.cxflow.json');
+
+    expect(pickPath).not.toHaveBeenCalled();
+    expect(saveToPath).toHaveBeenCalledWith(
+      'documents/existing-campaign.cxflow.json',
+      expect.any(Uint8Array),
+    );
+    expect(store.requiresExplicitSave).toBe(false);
+    expect(store.savedPath).toBe('documents/existing-campaign.cxflow.json');
     expect(store.dirty).toBe(false);
   });
 
