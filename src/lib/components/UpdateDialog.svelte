@@ -4,6 +4,7 @@
   import { formatRuntimeBytes } from '../ai/managedRuntime';
   import {
     appUpdater,
+    hasRuntimeCheckErrors,
     managedRuntimeLabel,
     MANAGED_RUNTIME_PROVIDERS,
   } from '../state/updater.svelte';
@@ -14,7 +15,7 @@
   const appPercent = $derived(appUpdater.progress === null ? null : Math.round(appUpdater.progress * 100));
   const runtimePercent = $derived(appUpdater.managedRuntimeProgressPercent);
   const updateCount = $derived((appUpdater.appAvailable ? 1 : 0) + appUpdater.runtimeUpdates.length);
-  const hasRuntimeCheckErrors = $derived(Object.keys(appUpdater.runtimeErrors).length > 0);
+  const runtimeCheckFailed = $derived(hasRuntimeCheckErrors(appUpdater.runtimeErrors));
   const installLabel = $derived(
     appUpdater.appAvailable
       ? appUpdater.runtimeUpdates.length
@@ -125,11 +126,11 @@
           <p>This browser preview cannot install updates.</p>
         </div>
       </div>
-    {:else if appUpdater.status === 'error' || hasRuntimeCheckErrors}
+    {:else if appUpdater.status === 'error' || runtimeCheckFailed}
       <div class="status error">
         <Icon svg={ErrorCircle} size={22} />
         <div>
-          <h2>{hasRuntimeCheckErrors ? 'Some update checks failed' : 'Update check failed'}</h2>
+          <h2>{runtimeCheckFailed ? 'Some update checks failed' : 'Update check failed'}</h2>
           <p>Installed components remain available and can continue working.</p>
         </div>
       </div>
