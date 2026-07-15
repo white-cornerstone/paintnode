@@ -15,7 +15,7 @@ import { planUpdateCheck, type UpdateCheckPlan } from './updatePolicy';
 
 type UpdateStatus = 'idle' | 'checking' | 'available' | 'current' | 'downloading' | 'ready' | 'error' | 'unsupported';
 type RuntimeStatusMap = Partial<Record<ManagedRuntimeProvider, ManagedRuntimeStatus>>;
-type RuntimeErrorMap = Partial<Record<ManagedRuntimeProvider, string>>;
+export type RuntimeErrorMap = Partial<Record<ManagedRuntimeProvider, string>>;
 
 export const RUNTIME_UPDATE_CHECK_STORAGE_KEY = 'paintnode.runtimeUpdates.lastCheckedAt';
 export const RUNTIME_UPDATE_AVAILABLE_STORAGE_KEY = 'paintnode.runtimeUpdates.previouslyAvailable';
@@ -25,7 +25,11 @@ export function managedRuntimeLabel(provider: ManagedRuntimeProvider): string {
   return provider === 'codex' ? 'Codex' : 'Claude';
 }
 
-class AppUpdaterStore {
+export function hasRuntimeCheckErrors(errors: RuntimeErrorMap): boolean {
+  return Object.values(errors).some((message) => typeof message === 'string' && message.trim().length > 0);
+}
+
+export class AppUpdaterStore {
   status = $state<UpdateStatus>('idle');
   update = $state<Update | null>(null);
   version = $state<string | null>(null);
@@ -118,7 +122,7 @@ class AppUpdaterStore {
     ]);
     if (plan.checkManagedRuntimes) {
       this.runtimeChecking = false;
-      if (Object.keys(this.runtimeErrors).length === 0) {
+      if (!hasRuntimeCheckErrors(this.runtimeErrors)) {
         localStorage.setItem(RUNTIME_UPDATE_CHECK_STORAGE_KEY, String(Date.now()));
         localStorage.setItem(RUNTIME_UPDATE_AVAILABLE_STORAGE_KEY, String(this.runtimeUpdates.length > 0));
       }
@@ -187,7 +191,8 @@ class AppUpdaterStore {
       try {
         const status = await installManagedRuntime(provider);
         this.runtimeStatuses = { ...this.runtimeStatuses, [provider]: status };
-        this.runtimeErrors = { ...this.runtimeErrors, [provider]: undefined };
+        const { [provider]: _clearedError, ...remainingErrors } = this.runtimeErrors;
+        this.runtimeErrors = remainingErrors;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.runtimeInstallError = `${managedRuntimeLabel(provider)} update failed: ${message}`;
