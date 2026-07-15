@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "PaintNode",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "identifier": "com.paintnode.editor",
   "build": {
     "frontendDist": "../dist",

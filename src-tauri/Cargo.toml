@@ -1,6 +1,6 @@
 [package]
 name = "paintnode"
-version = "0.2.5"
+version = "0.2.6"
 description = "Use managed Codex and Claude runtimes plus Antigravity to plan, generate, and edit image layers."
 authors = ["White Cornerstone Pty Ltd"]
 license = "GPL-3.0-or-later"
